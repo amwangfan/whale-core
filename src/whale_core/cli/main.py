@@ -123,7 +123,7 @@ def _build_manager(config_dir: Path) -> PluginManager:
     """默认装配：SqliteMemoryStore + PluginRegistry + 显式清单目录加载。"""
     _ensure_layout(config_dir)
     store = _open_store(config_dir)
-    manager = PluginManager(PluginRegistry(), store)
+    manager = PluginManager(PluginRegistry(), store, secret_dir=config_dir / 'secrets')
     manager.load_dir(config_dir / MANIFESTS_DIRNAME)
     return manager
 
