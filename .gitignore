@@ -1,0 +1,59 @@
+# ---------- secrets & credentials (never commit) ----------
+**/secrets/*
+!**/secrets/.gitkeep
+!**/secrets/README.md
+*.env
+.env
+.env.*
+!.env.example
+*.token
+*.pem
+*.key
+*.p12
+*.keystore
+*.jks
+
+# ---------- python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.coverage
+htmlcov/
+build/
+dist/
+
+# lockfile holds 64-hex sha256 hashes; kept out per repo scan policy (uv sync regenerates it)
+uv.lock
+
+# ---------- runtime / state / logs ----------
+*.log
+*.log.*
+*.pid
+*.pcm
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+.state/
+.tmp/
+tmp/
+
+# ---------- OS / editor ----------
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/
+*.iml
+
+# ---------- local private notes ----------
+LOCAL.md
+NOTES.private.md
