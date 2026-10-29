@@ -50,11 +50,11 @@
 | **PR-2** IntentPlan + Runtime 骨架 | 结构化意图 + 统一对话编排 | **已落地（2438ae8）**：`core/intent_plan.py` + `core/runtime.py` + `core/memory_commands.py`（指令共享化）+ `examples/runtime_demo.py` | 76 例新增；全量 395 绿；模型自批字段丢弃有专测 |
 | **PR-3** PluginManager | 清单文件加载 + 生命周期 | **已落地（998b14c）**：清单 JSON 目录加载、api_version 校验、生命周期+kv 回放、健康检查五态、config 校验+脱敏、工厂接线、故障隔离 | 33 例；全量 453 绿 |
 | **PR-4** 模型 provider 化 | DeepSeek 注册为 model 插件（provides `llm.chat`） | **已落地（fce42b3）**：`plugins/model_provider.py` + deepseek ModelError 六分类/重试/回环 http 放行/info() | 18+13 例；全量绿 |
-| **PR-5** 搜索工具 | `web.search` + `web.fetch` 官方插件 | **fetch 已落地（ea8b1cb，32 例）**；search 进行中：调研发现 DDG 免 key 端点 202 反爬（2026-10 实测）→ 默认 Tavily/Brave（env key）+ DDG 仅降级回退；Bing 已退役 | SSRF is_global 肯定式 + 逐跳重校验；免 key 方案诚实降级 |
+| **PR-5** 搜索工具 | `web.search` + `web.fetch` 官方插件 | **已落地（4381011 + ea8b1cb，47 例）**：web_search（Tavily/Brave/DDG 回退链，DDG 202 反爬诚实降级；Bing 已退役不收）+ web_fetch（SSRF is_global 肯定式+逐跳重校验） | SSRF 负向表（含 CGNAT/云元数据）；key 不进异常 |
 | **PR-6** CLI | `whale setup/doctor/run/plugins` + `api` | **已落地（f0c407c + 3adb678）**：`cli/main.py`（30 例）——setup 三档/doctor 诊断/demo REPL/plugins 管理/memory 导出导入/api 入口（token 三源解析） | config.json 只存 env 引用名；mock 带 [mock] 前缀 |
 | **PR-7** API 层 | REST + SSE，token 鉴权 | **已落地（1062a0e + 9fc9868 + 5446ea1）**：`api/server.py`（22 例回环测试）——§5.3 路由 + 静态 SPA 托管（防穿越）+ /tasks + 插件配置端点；stop() 死锁修复 | token 必填/常量时间比较/脱敏视图/64KB body 上限 |
 | **PR-8** 控制台 MVP | 总览/插件/记忆/审批/对话/事件 | **已落地（44dd57c）**：`web/`（Vite+React18+TS strict，vitest 7 例，CI web-build.yml）；10 项端到端冒烟（真 API + SPA + SSE） | 任务页签与插件配置表单在 PR-13 增强 |
-| **PR-9** 配置档 | demo/cloud/local | **进行中**：`profiles.py` 已落地（assemble_runtime 三档 + RuntimeBundle；demo 罐装/cloud env 装配/local 回环免 key）；待 web_search 落地后收尾 | 8 例就绪（1 例等 PR-5a） |
+| **PR-9** 配置档 | demo/cloud/local | **已落地（07955eb）**：`profiles.py` assemble_runtime 三档（demo 罐装/cloud env 装配/local 回环免 key）+ RuntimeBundle.notes 诚实标注；CLI `whale api` 接 profiles | 9 例；全量绿 |
 
 ### P1/P2 已落地（2026-10-30 同日并行推进）
 
@@ -63,14 +63,14 @@
 | PR-10 | ASR/TTS 契约 + OpenAI 兼容 provider + Mock（`plugins/speech.py`） | 已落地（2c16256，39 例；真实服务未联调缺 key） |
 | PR-11 | Shell 受控执行器（`cloud/shell_executor.py`：超时强杀/输出截断/env 擦洗/cwd 白名单/降权） | 已落地（6e6b1f3，14 例） |
 | PR-12 | media.image.generate 契约 + provider + Mock | 已落地（f4d6b01，44 例；未联调） |
-| PR-13 | 控制台增强：API 侧 /tasks + 插件配置端点（5446ea1）；前端任务页签+配置表单进行中 | 服务侧已落地 |
+| PR-13 | 控制台增强：/tasks + 配置端点（5446ea1）+ 前端任务页签/配置表单（65dae8f）+ /plugins/{id}/test（5bacbe6） | 已落地（vitest 10 例 + 端到端冒烟） |
 | PR-14 | 混合召回 HybridCurator（词项+嵌入融合；嵌入为可选 provider） | 已落地（30c1c58，20 例） |
-| PR-16 | media.video.generate 异步任务契约 + 生命周期管理器 | 进行中 |
+| PR-16 | media.video.generate 异步任务契约 + 生命周期管理器 | 已落地（f20efe5，19 例；未联调） |
 | PR-17 | 自主探索管理器（兴趣台账/探索窗口/反馈调权/退避/日记） | 已落地（07ac6b3，27 例） |
-| PR-18 | Skill 工作流（Markdown 驱动工具组合） | 进行中 |
+| PR-18 | Skill 工作流（Markdown 驱动工具组合） | 已落地（2275807，30 例） |
 | PR-19 | 桌面打包方案（Tauri sidecar） | 规划稿已落地（docs/packaging-desktop.md，3e7c847） |
 
-**P0 端到端主线**（roadmap §13.5）：PR-1→2→4→5 完成后即具备「多轮对话 → 记忆召回 → 搜索工具 → 带来源总结」；PR-7/8 让控制台可见可管。
+**P0 端到端主线**（roadmap §13.5）：✅ 已由 `tests/test_e2e_p0.py` 离线验收（a90c8f4）——多轮对话 → 记忆召回 → 搜索工具 → 带来源总结 → 任务轨迹审计，全链路断言。
 
 ## 4. 安全限制现状评估与放宽边界（owner 已定方向 2026-10-30：「合理放宽，不过于严格」）
 
