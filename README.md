@@ -22,7 +22,7 @@
 | 子系统 | 提供什么 | 关键点 |
 |--------|----------|--------|
 | `core` | `perceive → decide → act` 主循环（`WhaleAgent`）；文字陪伴（`WhaleCompanion`）；DeepSeek 客户端；实时通话转写录制器 | 电话不等文本模型：转写有界队列异步入库，过载丢弃不阻塞音频 |
-| `memory` | 三类记忆（episode / preference / persona_continuity）+ SQLite 持久化 + 可信提炼（显式确认、带证据、可删除） | 人格快照随库备份；混合召回（嵌入+词项）为规划项 |
+| `memory` | 三类记忆（episode / preference / persona_continuity）+ 多轮会话历史 + SQLite 持久化 + 可信提炼（显式确认、带证据、可删除）+ JSONL 导出/导入 | 人格快照随库备份；混合召回（嵌入+词项）为规划项 |
 | `perception` | 8 种感知事件类型 + 适配器协议 + 规则情境推理（非 LLM） | 环境语音只存元数据，**原始音频永不入库** |
 | `initiative` | 打扰策略：静默时段、前台忙碌、主动呼叫门控、规划器 | 被动回复与主动行为是**两套独立预算** |
 | `actions` | 9 种行动意图 + 网关协议（dashboard / bridge / phone / mock HTTP） | 网关默认 stub，不真连任何设备 |

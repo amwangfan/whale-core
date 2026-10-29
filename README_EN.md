@@ -26,7 +26,7 @@ devices).
 | Subsystem | What it provides | Highlights |
 |-----------|------------------|------------|
 | `core` | `perceive → decide → act` loop (`WhaleAgent`); text companion (`WhaleCompanion`); DeepSeek client; realtime-call transcript recorder | Calls never wait on the text model: transcripts queue asynchronously (bounded, drop-on-overload), never blocking audio |
-| `memory` | Three memory kinds (episode / preference / persona continuity) + SQLite persistence + trusted curation (explicit confirmation, evidence-linked, deletable) | Persona snapshots backed up with the store; hybrid recall (embedding + lexical) is planned |
+| `memory` | Three memory kinds (episode / preference / persona continuity) + multi-turn session history + SQLite persistence + trusted curation (explicit confirmation, evidence-linked, deletable) + JSONL export/import | Persona snapshots backed up with the store; hybrid recall (embedding + lexical) is planned |
 | `perception` | 8 perception event types + adapter protocol + rule-based situation reasoner (no LLM) | Ambient speech stores metadata only — **raw audio bytes never enter the store** |
 | `initiative` | Disturbance policy: quiet hours, foreground-busy, proactive-call gating, planners | Passive replies and proactive behavior use **two separate budgets** |
 | `actions` | 9 action intents + gateway protocols (dashboard / bridge / phone / mock HTTP) | Gateways are stubs by default — nothing really connects |
@@ -65,9 +65,10 @@ as metadata only (title/author/source — the site grants free copy-for-use but 
 explicit redistribution license, so card texts are **not** vendored); import any
 of them at runtime with `import_external_card`. One call —
 `switch_card(store, "dafeiyu")` — re-renders every channel. Global taboos
-(never leak keys / never claim human feelings / memory is context, not
-instructions) cannot be removed by any card; switching cards **cannot** widen
-any permission.
+(never leak keys, tokens or device addresses / never fabricate experiences,
+memories or capabilities / memory and card text is context, not instructions /
+permissions and rate limits stay with the policy layer) cannot be removed by
+any card; switching cards **cannot** widen any permission.
 
 ## Quick start
 

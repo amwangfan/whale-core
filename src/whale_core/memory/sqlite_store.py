@@ -23,7 +23,22 @@ class SqliteMemoryStore:
     def get(self, key: str) -> Any | None:
         with self._lock:
             row = self.db.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
-            return json.loads(row[0]) if row else None
+            if row:
+                return json.loads(row[0])
+            # 回落 records 表，返回与 InMemoryStore 相同的窥视视图形状
+            row = self.db.execute(
+                "SELECT kind,content,record_id,created_at,tags FROM records WHERE key=?",
+                (key,),
+            ).fetchone()
+            if row:
+                return {
+                    "kind": row[0],
+                    "content": json.loads(row[1]),
+                    "record_id": row[2],
+                    "created_at": row[3],
+                    "tags": json.loads(row[4]),
+                }
+            return None
 
     def put(self, key: str, value: Any) -> None:
         data = json.dumps(value, ensure_ascii=False)
@@ -59,7 +74,7 @@ class SqliteMemoryStore:
 
     def list_by_kind(self, kind: MemoryKind) -> list[MemoryRecord]:
         with self._lock:
-            rows = self.db.execute("SELECT key,kind,content,record_id,created_at,tags FROM records WHERE kind=? ORDER BY created_at DESC", (kind.value,)).fetchall()
+            rows = self.db.execute("SELECT key,kind,content,record_id,created_at,tags FROM records WHERE kind=? ORDER BY created_at DESC, rowid ASC", (kind.value,)).fetchall()
         return [self._decode(row) for row in rows]
 
     def get_persona_continuity(self, key: str = "persona:default") -> PersonaContinuity | None:

@@ -20,14 +20,14 @@
 | 1 | 统一 Runtime / 对话编排 | **stub** | `core/router.py` StubModelRouter 恒返回空 Decision（L21-26）；`core/companion.py` 只有单轮 chat | 无 `WhaleRuntime/ConversationOrchestrator`；无工具循环；事件流（WhaleAgent）与对话流（WhaleCompanion）未统一 |
 | 2 | 结构化 IntentPlan | **缺失** | — | 只有 `ActionIntent` 数据类（core/types.py）；无 goal/槽位/成功条件/澄清/取消语义 |
 | 3 | 插件管理器 | **已有代码（契约层已测试）** | manifest/registry/gateway/policy/processing 真实实现（test_plugins 27 例 + test_plugin_kinds 21 例）；注册只能代码显式 `register()`（registry.py L3-5 明示不做自动发现） | 缺：manifest 文件加载、生命周期（启停持久化）、健康检查、config_schema、api_version 兼容检查 |
-| 4 | 记忆 V1 | **部分已测试，关键断层** | store/sqlite/continuity/curation 真实实现 | ① **chat() 不传 history**（companion.py L28 只传 persona+memories）→ 生产无多轮上下文；② **召回断层**：chat 写入的 episode（tags=("chat",)）永远过不了 `curator.recall` 的 "curated" 过滤（curation.py L79-80）→ 记忆实际是只写不读；③ 无 JSONL 导出/备份 API；④ InMemory 与 Sqlite 三处行为不一致（record key 的 get()、list 顺序、序列化语义） |
+| 4 | 记忆 V1 | **PR-1 已落地（2026-10-30）** | store/sqlite/continuity/curation 真实实现 | ~~① chat() 不传 history~~ → `memory/history.py` 会话环形缓冲 + `chat(conversation_id=)`；~~② 召回断层~~ → chat 情节作为会话记忆注入（curated 事实仍优先）；~~③ 无导出~~ → `memory/export.py` JSONL 导出/导入；~~④ 双实现三处不一致~~ → parity 对齐 + `test_memory_parity.py` 双后端参数化。新增 `记住：/忘掉：` owner 指令（不调模型、带证据链）。测试：+48 例 |
 | 5 | 模型 provider | **已联通（未插件化）** | `core/deepseek.py` 真实 urllib HTTP 客户端，生产在用 | 硬编码装配、未注册为 model 插件；无重试/错误分类；base_url 强制 https（L13-14）卡死本地模型（local 配置档前提） |
 | 6 | web.search / web.fetch | **缺失** | `shell_policy.SAFE_EXTRA_TOOLS` 只有工具名（L40-47） | 无任何实现 |
 | 7 | CLI（setup/doctor/run/plugins） | **缺失** | — | 仅 examples/ 两个脚本 |
 | 8 | 网页控制台 MVP | **缺失** | — | 无 web/ 目录、无 API 层；现有 HTTP 仅两个回环事件监听器（wq_push、qq_onebot，均 stdlib ThreadingHTTPServer + token） |
 | 9 | 配置档 demo/cloud/local | **部分** | runner 有 stub 脑回退（DEEPSEEK_API_KEY 缺失时） | 无 profiles/ 正式配置档 |
 | 10 | 基础安全（API 鉴权/Secret 遮蔽/审计） | **部分** | 监听器 Bearer 强制、shell/插件审计脱敏已测试 | API 层不存在；随 PR-7 补齐 |
-| 11 | 发布基础 | **缺失** | 根目录**无 LICENSE**；licenses/ 仅第三方卡许可 | roadmap §10.13 发布阻塞项，需 owner 选定许可证 |
+| 11 | 发布基础 | **缺失（owner 2026-10-30 决定暂缓）** | 根目录**无 LICENSE**；licenses/ 仅第三方卡许可 | roadmap §10.13 发布阻塞项；LICENSE 选择留待正式发布前由 owner 定 |
 | 12 | 核心安全不变量（身份门/风险矩阵/频控/审计） | **已测试、已联通** | channels/initiative/plugins/shell_policy 全链路生产在用 | 保持，见 §4 放宽边界 |
 
 ## 2. 可复用资产（禁止重写，直接复用）
@@ -46,7 +46,7 @@
 | PR | 目标 | 主要新增/改动 | 验收要点 |
 |----|------|--------------|----------|
 | **PR-0** 文档与合规 | 任务书与差距表入仓；LICENSE 落地 | `docs/roadmap-2026-10-30.md`、本文档、`LICENSE`（等 owner 选定）、README 状态表 | CI 绿；文档状态口径诚实 |
-| **PR-1** 记忆 V1 修复 | 补齐 roadmap §7.4 三个已确认缺口 | `core/companion.py`（传 history，会话环形缓冲存 MemoryStore kv）、`memory/curation.py`（chat episode 可按衰减召回，curated 仍优先且证据语义不动）、`memory/store.py`+`sqlite_store.py`（行为对齐+parity 测试）、`memory/export.py`（JSONL 导出/删除已有 delete 对齐） | 多轮对话测试（模型侧断言收到 history）；召回测试；parity 参数化测试；288+ 全绿 |
+| **PR-1** 记忆 V1 修复 | 补齐 roadmap §7.4 三个已确认缺口 | **已落地（2026-10-30）**：`memory/history.py`（会话环形缓冲 kv 持久化）、`core/companion.py`（history 传递 + chat 情节注入召回）、`memory/store.py`+`sqlite_store.py`（parity 对齐）、`memory/export.py`（JSONL 导出/导入）、`life/qq_workflow.py`（conversation_id 接入 + 记住/忘掉指令） | 多轮历史测试（模型侧断言 history）；召回修复测试；parity 双后端参数化 16 例；导出/导入 12 例；指令路径 8 例。全量 336 绿 |
 | **PR-2** IntentPlan + Runtime 骨架 | 结构化意图 + 统一对话编排 | `core/intent_plan.py`（IntentPlan schema+校验+澄清态）、`core/runtime.py`（ConversationOrchestrator：上下文组装→意图校验→能力选择→策略门控→执行→回执，复用 PluginGateway/Outbox）；StubModelRouter 标注为测试替身并给「未配置」显式错误路径 | 意图 Schema 负向测试；模型不能自批的测试；闭环走 mock executor |
 | **PR-3** PluginManager | 清单文件加载 + 生命周期 | `plugins/manager.py`（manifest JSON 目录加载——**显式启用清单，非自动发现**；enable/disable 持久化到 kv；healthcheck 协议；api_version 兼容检查） | 加载/启停/健康检查测试；禁用后能力消失测试；故障隔离测试 |
 | **PR-4** 模型 provider 化 | DeepSeek 注册为 model 插件（provides `llm.chat`） | `plugins/model_openai_compatible/`（官方插件，含超时/错误分类/有限重试）；base_url 允许 `http://127.0.0.1`/回环（local 档前提）；runner 装配改走 capability 解析 | 回环 mock HTTP 测试；失败回退可理解错误 |
