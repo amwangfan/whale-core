@@ -11,7 +11,7 @@ Whale Core 是独立的 Python 智能层及初步可运行的管理服务，核�
 - 当前核心使用 Python 3.11+；网页前端使用 React + TypeScript + Vite。
 - 管理 API 当前基于 Python 标准库 HTTP server 与 SSE，并非 FastAPI。
 - Demo 模式使用 mock 模型和模拟搜索数据；不能描述成实际 AI 服务已经接通。
-- 真实模型在 cloud/local 档可配置，但当前默认对话编排并未自动接入意图识别模型。因此「已实现搜索工具」不等于在普通聊天中自然语言必然自动调用搜索。
+- 真实模型在 cloud/local 档可配置；`whale run` 使用当前配置档。默认 `SearchIntentRouter` 对明确搜索指令进行只读路由；更复杂的 LLM 意图识别仅在 `WHALE_INTENT_MODEL_ENABLED=1` 时启用。
 - QQ/WeQ 相关适配代码、主动行为策略、音频桥契约已经存在，但具体生产部署与设备联调状态应另行核实。
 - ASR/TTS、图像/视频生成提供契约、部分 provider 或 mock；对未接实际凭据的服务，不得称为真实联调完成。
 - 项目根目录在本次审阅时尚无项目 LICENSE；`licenses/` 中第三方人设许可不是整个 whale-core 的许可。对外发行或复用代码前须由维护者确定许可证。
@@ -47,7 +47,7 @@ python -m pytest tests -q
 
 whale setup --profile demo
 whale doctor
-whale run                  # 注意：当前命令固定使用 mock demo REPL
+whale run                  # 遵循当前配置档：demo mock / cloud/local 模型端点
 
 # 网页控制台
 pnpm -C web install
@@ -74,11 +74,11 @@ API 首次启动生成或从环境变量读取 token；`~/.whale/api_token` 为�
 
 以下是进一步实现时应优先复查的具体风险，属于**代码层面的发现或限制**，不是对已发生事故的判断：
 
-1. **`whale run` 与当前配置档不一致。** 在 `cli/main.py` 中，`_cmd_run()` 当前直接实例化 `MockChatModel`，没有使用 `assemble_runtime(profile)`。即使 `setup --profile cloud`，调用 `whale run` 仍进入 mock REPL。应在文档中说明并考虑统一运行入口。
-2. **自然语言工具路由尚未完成默认接线。** `profiles.py` 构造 `ConversationOrchestrator` 时未设置 `intent_model`；`runtime.py` 在无意图模型时直接走普通聊天。因此注册网页搜索工具不意味着用户在默认聊天中说“帮我搜索”就会调用它。端到端测试里的意图模型注入与实际用户体验需区分。
-3. **插件配置的“脱敏”不等于加密存储。** `plugins/manager.py` 将配置字典保存在 MemoryStore 的 kv 中，`config_view()` 仅在返回控制台时遮蔽字段。用户不应通过网页表单填写长期敏感凭据，除非已有单独 Secret Store 或环境变量引用。前端 `Plugins.tsx` 里对已掩码字段采用空编辑值，保存时整体替换配置，可能意外清空旧凭据；需要 PATCH/保留未修改 Secret 的语义和相应测试。
-4. **审批页面的持久化回执与实际执行链路需核对。** `api/server.py` 的 `/approvals/{id}/decision` 当前写入 `life:decision:{id}`；应验证该记录是否被实际的 `ProactiveOutbox` 或发送流程读取、执行和确认，避免出现“网页显示批准但动作没有发生”的错觉。
-5. **SSE 当前更接近一次事件回放。** `api/server.py` 的 `_events_sse()` 发送近期事件与一次 ping 后结束 handler；如果产品需要实时持续订阅，应增加真正的长连接循环、取消机制及断线恢复，或在前端明确采用定时刷新。
+1. **已修复：`whale run` 与当前配置档不一致。** CLI 现在通过 `assemble_runtime(profile)` 装配；真实模型联调仍需独立验证。
+2. **部分修复：默认搜索意图接线。** 明确搜索请求被规则路由至 `web.search`；更复杂的意图识别可显式启用 LLM。不要将规则识别等同于完整意图模型。
+3. **已改善，但没有加密：敏感配置。** 凭据从普通 SQLite/kv 配置分离到权限受限的私有文件（或仅进程内存），Web 采用 PATCH 保留未修改的遮蔽值。私有文件仍是明文，生产可接系统密钥库。
+4. **部分修复：审批与派发分离。** Web 审批记录会由 `ProactiveOutbox.inspect/dispatch` 消费，拒绝阻止派发；API 返回 `execution_status=not_dispatched`。尚需有运行中的 worker 负责后续派发。
+5. **已修复持续 SSE。** API 长连接推送事件与心跳，但事件内存环并非持久化台账；长期离线可能丢失历史事件。
 6. **Shell 不是完整沙箱。** `shell_executor.py` 有超时、输出截断、环境过滤和可选降权，但不自带完整的 OS 容器/系统资源隔离；`ShellPolicy` 字符串黑名单不能当作不可绕过的安全边界。
 7. **发行许可仍未确定。** 未明确项目级 LICENSE 前，不能向下载者承诺某个开源许可证或自由再分发权限。
 
