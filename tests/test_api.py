@@ -282,3 +282,47 @@ def test_plugin_config_set_and_masked_view(api):
     status, _ = _req(api, "POST", "/api/v1/plugins/nope/config",
                      body={"config": {}})
     assert status == 404
+
+
+class _PingProvider:
+    def __init__(self, fail=False):
+        self.fail = fail
+
+    def reply(self, text, *, persona="", memories=(), history=()):
+        if self.fail:
+            from whale_core.core.deepseek import ModelError
+            raise ModelError("auth", "bad key")
+        return "pong"
+
+
+def test_plugin_test_endpoint_ping(api):
+    registry = api.ctx.manager.registry
+    registry.register(
+        PluginManifest(plugin_id="llm", name="模型", version="1",
+                       kind="model", provides=("llm.chat",)),
+        provider=_PingProvider(),
+    )
+    status, raw = _req(api, "POST", "/api/v1/plugins/llm/test")
+    assert status == 200
+    result = _json(raw)["result"]
+    assert result["ok"] is True and result["via"] == "ping"
+    assert isinstance(result["latency_ms"], int)
+
+
+def test_plugin_test_endpoint_failure_classification(api):
+    registry = api.ctx.manager.registry
+    registry.register(
+        PluginManifest(plugin_id="badllm", name="坏模型", version="1",
+                       kind="model", provides=("llm.chat",)),
+        provider=_PingProvider(fail=True),
+    )
+    status, raw = _req(api, "POST", "/api/v1/plugins/badllm/test")
+    result = _json(raw)["result"]
+    assert result["ok"] is False and result["error_kind"] == "auth"
+    assert "bad key" not in raw.decode()  # 异常原文不外泄
+
+
+def test_plugin_test_fallback_healthcheck(api):
+    status, raw = _req(api, "POST", "/api/v1/plugins/web_search/test")
+    result = _json(raw)["result"]
+    assert result["via"] == "healthcheck"

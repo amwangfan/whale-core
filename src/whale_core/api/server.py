@@ -218,6 +218,9 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if len(parts) == 3:
             pid, action = parts[1], parts[2]
+            if action == "test" and method == "POST":
+                self._plugin_test(pid)
+                return
             if action == "config" and method == "POST":
                 body = self._body_json()
                 if body is None or not isinstance(body.get("config"), dict):
@@ -321,6 +324,40 @@ class _Handler(BaseHTTPRequestHandler):
             "reply": result.reply, "status": result.status,
             "receipts": list(result.receipts), "task_id": result.task_id,
         }}))
+
+    def _plugin_test(self, pid: str) -> None:
+        """POST /plugins/{id}/test：用户点击=同意的一次最小真实连通性测试。
+
+        - provider 有 ``reply()``（llm.chat 类）→ 最小 ping（短超时）；
+        - 否则回落 manager.healthcheck（不触网）。
+        结果只含 ok/latency/错误分类名，**绝不含密钥与异常原文**。
+        """
+        mgr = self.ctx.manager
+        if mgr is None:
+            self._send(503, _error("unavailable", "plugin manager not wired"))
+            return
+        registry = getattr(mgr, "registry", None)
+        provider = registry.provider_of(pid) if registry is not None else None
+        if provider is None or not hasattr(provider, "reply"):
+            health = mgr.healthcheck(pid)
+            self._send(200, _json_bytes({"result": {
+                "plugin_id": pid, "ok": health.get("status") == "healthy",
+                "latency_ms": None, "via": "healthcheck",
+                "detail": health.get("status", "")}}))
+            return
+        started = time.monotonic()
+        try:
+            reply = provider.reply("ping")  # 最小调用；成本=一次短请求
+            latency = int((time.monotonic() - started) * 1000)
+            ok = isinstance(reply, str) and bool(reply)
+            self._send(200, _json_bytes({"result": {
+                "plugin_id": pid, "ok": ok, "latency_ms": latency, "via": "ping"}}))
+        except Exception as exc:
+            latency = int((time.monotonic() - started) * 1000)
+            kind = getattr(exc, "kind", type(exc).__name__)
+            self._send(200, _json_bytes({"result": {
+                "plugin_id": pid, "ok": False, "latency_ms": latency,
+                "via": "ping", "error_kind": str(kind)[:40]}}))
 
     def _tasks(self, method: str, parts: list[str]) -> None:
         store = self.ctx.store

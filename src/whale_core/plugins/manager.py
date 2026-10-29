@@ -94,6 +94,11 @@ class PluginManager:
         self._schemas: dict[str, Mapping[str, Any]] = {}
         self.errors: list[dict[str, str]] = []
 
+    @property
+    def registry(self) -> PluginRegistry:
+        """只读访问底层注册表（供宿主/API 层查询 provider）。"""
+        return self._registry
+
     # ------------------------------------------------------------------
     # kv 键
     # ------------------------------------------------------------------
