@@ -466,7 +466,7 @@ class _Handler(BaseHTTPRequestHandler):
                     last = max(last, int(event.get("seq", 0)))
                 now = time.monotonic()
                 if now - last_heartbeat >= 15.0 or (last_heartbeat == 0 and not batch):
-                    self.wfile.write(b": ping\\n\\n")
+                    self.wfile.write(b": ping\n\n")
                     last_heartbeat = now
                 if batch or last_heartbeat == now:
                     self.wfile.flush()
