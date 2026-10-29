@@ -212,6 +212,19 @@ def build_send_port(*, live_ok: bool):
                               allowed_hosts=allowed)
         # Do not log the configured URL (it may contain sensitive query parameters) or UID.
         print("[出站] WeQ Web 真实发送已启用（地址校验通过；目标固定为已配置 owner）")
+        # 按需完整模式窗口（full-mode window）：QQ_FULLMODE_ONDEMAND=1 时包装——
+        # 开窗=发送时自动，关窗=空闲超时；跨进程协调只靠 state_file。
+        if os.environ.get("QQ_FULLMODE_ONDEMAND", "").strip() == "1":
+            from whale_core.life.full_mode_window import (
+                STATE_FILE_DEFAULT, FullModeWindow, WindowedSendPort)
+            window = FullModeWindow(
+                url, os.environ.get("WEQ_WEB_TOKEN", "").strip(),
+                state_file=STATE_FILE_DEFAULT,
+                ready_timeout_s=float(os.environ.get("QQ_FULLMODE_READY_TIMEOUT_S", "25")),
+                grace_s=float(os.environ.get("QQ_FULLMODE_GRACE_S", "4")))
+            port = WindowedSendPort(
+                port, window,
+                idle_min=float(os.environ.get("QQ_FULLMODE_IDLE_MIN", "10")))
         return port
     print("[出站] [!] console stub（不真实发送；真实端=配齐 WEQ_WEB_* 后走 approve "
           "或 --live-auto-send 双开关）")
@@ -293,6 +306,19 @@ def cmd_run(args) -> int:
         print("[审批] --auto-approve = dry-run 演示：影子账本走流程，不触网、不占额度；"
               "真实发送用 approve 子命令（人工逐条）。")
     send_port = build_send_port(live_ok=live_auto)
+
+    # 按需完整模式窗口：启动即关窗定基线（幂等）；closer 只在 runner 主进程起——
+    # approve 子进程是独立短命进程，只开窗/续期，关窗由本 closer 跨进程兜底。
+    if os.environ.get("QQ_FULLMODE_ONDEMAND", "").strip() == "1":
+        from whale_core.life.full_mode_window import FullModeWindowError, WindowedSendPort
+        if isinstance(send_port, WindowedSendPort):
+            try:
+                send_port.window.close()
+                print("[完整模式] 启动基线：窗口已关闭（attach 离线，收消息不受影响）")
+            except FullModeWindowError as exc:
+                print(f"[完整模式] 启动基线关窗失败（closer 将兜底重试）：{exc}")
+            send_port.start_closer()
+            print(f"[完整模式] 按需窗口 idle={send_port.idle_min:g}min")
 
     inbox = build_inbox(args.inbox)
     workflow = QqInboundWorkflow(store, build_brain(), prefs=prefs)
