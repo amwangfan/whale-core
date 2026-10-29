@@ -21,12 +21,6 @@ channel identity, plugin extensibility — ships as composable, testable
 components that all run offline by default (stubs / mocks; no network, no
 devices).
 
-> The epigraph is from *To the Girl Next Door* by Yu Xuanji (Tang dynasty).
-> Priceless treasures are easy to find; a devoted companion is rare. That is
-> the ambition of whale-core: an AI companion with **memory, persona, and
-> restraint** — it remembers you without pestering you; it can act on its own,
-> but every step leaves a ledger entry.
-
 ## Feature overview
 
 | Subsystem | What it provides | Highlights |
