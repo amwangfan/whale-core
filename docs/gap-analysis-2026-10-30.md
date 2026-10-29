@@ -19,12 +19,12 @@
 |---|-----------|------|------|-------------|
 | 1 | 统一 Runtime / 对话编排 | **PR-2 已落地** | `core/runtime.py` ConversationOrchestrator（记忆指令捷径/意图分流/有界工具执行/结果回流）；`core/router.py` StubModelRouter 保持测试替身定位 | 多轮/记忆/人格复用 WhaleCompanion；事件流 WhaleAgent 并存（roadmap §3.1） |
 | 2 | 结构化 IntentPlan | **PR-2 已落地** | `core/intent_plan.py`：校验+模型文本提取（35 例测试） | 「模型提议、核心裁决」：approved 等字段丢弃、risk_hint 仅参考、intent_id 核心生成 |
-| 3 | 插件管理器 | **已有代码（契约层已测试）** | manifest/registry/gateway/policy/processing 真实实现（test_plugins 27 例 + test_plugin_kinds 21 例）；注册只能代码显式 `register()`（registry.py L3-5 明示不做自动发现） | 缺：manifest 文件加载、生命周期（启停持久化）、健康检查、config_schema、api_version 兼容检查 |
+| 3 | 插件管理器 | **PR-3 已落地** | `plugins/manager.py`（403 行，33 例测试）：清单 JSON 目录加载（显式、非自动发现）、api_version 兼容校验、enable/disable 生命周期 + kv 持久化回放、健康检查五态、config_schema 校验 + 脱敏视图、工厂接线、故障隔离 | 卸载不删记忆（disable 只摘注册）；entrypoint 外部进程启动方式留待首个真实外置插件 |
 | 4 | 记忆 V1 | **PR-1 已落地（2026-10-30）** | store/sqlite/continuity/curation 真实实现 | ~~① chat() 不传 history~~ → `memory/history.py` 会话环形缓冲 + `chat(conversation_id=)`；~~② 召回断层~~ → chat 情节作为会话记忆注入（curated 事实仍优先）；~~③ 无导出~~ → `memory/export.py` JSONL 导出/导入；~~④ 双实现三处不一致~~ → parity 对齐 + `test_memory_parity.py` 双后端参数化。新增 `记住：/忘掉：` owner 指令（不调模型、带证据链）。测试：+48 例 |
 | 5 | 模型 provider | **PR-4 已落地** | `plugins/model_provider.py`：`register_openai_compatible`（kind=model，provides `llm.chat`）+ `resolve/require_chat_model` 能力解析；`core/deepseek.py`：ModelError 六类分类（config/auth/rate_limited/server/network/bad_response）+ 瞬时错误重试一次 + http 回环/私网放行（公网 http 仍拒，R3）+ `info()` 状态视图（不含 key） | 内置系统提示删除「不声称具有人类情感」一句（与 PR-0 回合入的禁忌 5→4 对齐，roadmap §7.4 一致性）；runner 切换到能力解析留待 PR-9 配置档统一接线 |
 | 6 | web.search / web.fetch | **缺失** | `shell_policy.SAFE_EXTRA_TOOLS` 只有工具名（L40-47） | 无任何实现 |
 | 7 | CLI（setup/doctor/run/plugins） | **缺失** | — | 仅 examples/ 两个脚本 |
-| 8 | 网页控制台 MVP | **缺失** | — | 无 web/ 目录、无 API 层；现有 HTTP 仅两个回环事件监听器（wq_push、qq_onebot，均 stdlib ThreadingHTTPServer + token） |
+| 8 | 网页控制台 MVP | **PR-7 API 层已落地** | `api/server.py`（stdlib，16 例回环测试）：§5.3 路由轮廓主体已就位（status/health/plugins/memory/chat/approvals/events-SSE）；token 必填+脱敏 | 前端 web/（React+Vite）在 PR-8；WebSocket 未做（SSE 够 MVP） |
 | 9 | 配置档 demo/cloud/local | **部分** | runner 有 stub 脑回退（DEEPSEEK_API_KEY 缺失时） | 无 profiles/ 正式配置档 |
 | 10 | 基础安全（API 鉴权/Secret 遮蔽/审计） | **部分** | 监听器 Bearer 强制、shell/插件审计脱敏已测试 | API 层不存在；随 PR-7 补齐 |
 | 11 | 发布基础 | **缺失（owner 2026-10-30 决定暂缓）** | 根目录**无 LICENSE**；licenses/ 仅第三方卡许可 | roadmap §10.13 发布阻塞项；LICENSE 选择留待正式发布前由 owner 定 |
@@ -47,10 +47,10 @@
 |----|------|--------------|----------|
 | **PR-0** 文档与合规 | 任务书与差距表入仓；LICENSE 落地 | `docs/roadmap-2026-10-30.md`、本文档、`LICENSE`（等 owner 选定）、README 状态表 | CI 绿；文档状态口径诚实 |
 | **PR-1** 记忆 V1 修复 | 补齐 roadmap §7.4 三个已确认缺口 | **已落地（2026-10-30）**：`memory/history.py`（会话环形缓冲 kv 持久化）、`core/companion.py`（history 传递 + chat 情节注入召回）、`memory/store.py`+`sqlite_store.py`（parity 对齐）、`memory/export.py`（JSONL 导出/导入）、`life/qq_workflow.py`（conversation_id 接入 + 记住/忘掉指令） | 多轮历史测试（模型侧断言 history）；召回修复测试；parity 双后端参数化 16 例；导出/导入 12 例；指令路径 8 例。全量 336 绿 |
-| **PR-2** IntentPlan + Runtime 骨架 | 结构化意图 + 统一对话编排 | `core/intent_plan.py`（IntentPlan schema+校验+澄清态）、`core/runtime.py`（ConversationOrchestrator：上下文组装→意图校验→能力选择→策略门控→执行→回执，复用 PluginGateway/Outbox）；StubModelRouter 标注为测试替身并给「未配置」显式错误路径 | 意图 Schema 负向测试；模型不能自批的测试；闭环走 mock executor |
-| **PR-3** PluginManager | 清单文件加载 + 生命周期 | `plugins/manager.py`（manifest JSON 目录加载——**显式启用清单，非自动发现**；enable/disable 持久化到 kv；healthcheck 协议；api_version 兼容检查） | 加载/启停/健康检查测试；禁用后能力消失测试；故障隔离测试 |
-| **PR-4** 模型 provider 化 | DeepSeek 注册为 model 插件（provides `llm.chat`） | `plugins/model_openai_compatible/`（官方插件，含超时/错误分类/有限重试）；base_url 允许 `http://127.0.0.1`/回环（local 档前提）；runner 装配改走 capability 解析 | 回环 mock HTTP 测试；失败回退可理解错误 |
-| **PR-5** 搜索工具 | `web.search` + `web.fetch` 官方插件 | `plugins/search_web/`（可插拔 provider，默认免 key 实现）+ `plugins/web_fetch/`（stdlib 抓取+正文提取；SSRF：拦回环/私网/元数据地址、限大小限超时——可配置白名单） | 离线 mock 测试；SSRF 负向测试；回答带来源链接 |
+| **PR-2** IntentPlan + Runtime 骨架 | 结构化意图 + 统一对话编排 | **已落地（2438ae8）**：`core/intent_plan.py` + `core/runtime.py` + `core/memory_commands.py`（指令共享化）+ `examples/runtime_demo.py` | 76 例新增；全量 395 绿；模型自批字段丢弃有专测 |
+| **PR-3** PluginManager | 清单文件加载 + 生命周期 | **已落地（998b14c）**：清单 JSON 目录加载、api_version 校验、生命周期+kv 回放、健康检查五态、config 校验+脱敏、工厂接线、故障隔离 | 33 例；全量 453 绿 |
+| **PR-4** 模型 provider 化 | DeepSeek 注册为 model 插件（provides `llm.chat`） | **已落地（fce42b3）**：`plugins/model_provider.py` + deepseek ModelError 六分类/重试/回环 http 放行/info() | 18+13 例；全量绿 |
+| **PR-5** 搜索工具 | `web.search` + `web.fetch` 官方插件 | **fetch 已落地（ea8b1cb，32 例）**；search 进行中：调研发现 DDG 免 key 端点 202 反爬（2026-10 实测）→ 默认 Tavily/Brave（env key）+ DDG 仅降级回退；Bing 已退役 | SSRF is_global 肯定式 + 逐跳重校验；免 key 方案诚实降级 |
 | **PR-6** CLI | `whale setup/doctor/run/plugins` | `cli/`（argparse stdlib）；pyproject entry point | 各子命令冒烟测试 |
 | **PR-7** API 层 | REST + SSE，token 鉴权 | `api/`（stdlib ThreadingHTTPServer，沿用 wq_push 模式；路由按 roadmap §5.3 轮廓；统一错误格式；默认 127.0.0.1） | 未授权拒绝测试；Secret 不回显测试；离线回环测试 |
 | **PR-8** 控制台 MVP | 总览/Providers/插件/记忆/审批/日志 | `web/`（TS+React+Vite；前端只调 API） | 构建进 CI；页面对齐 roadmap §5.2 验收 |
