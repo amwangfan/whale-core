@@ -404,10 +404,20 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 def _cmd_run(args: argparse.Namespace) -> int:
     config_dir = _config_dir(args)
     _ensure_layout(config_dir)
-    store = _open_store(config_dir)
-    companion = WhaleCompanion(store, MockChatModel())
-    orchestrator = ConversationOrchestrator(store, companion)  # 无意图模型：纯对话
-    print("whale demo REPL —— 内置 mock 模型（回复带 [mock] 前缀），输入 /quit 退出")
+    from whale_core.profiles import assemble_runtime
+    config = _load_config(config_dir) or {}
+    profile = str(config.get("profile") or "demo")
+    try:
+        bundle = assemble_runtime(profile, config_dir=str(config_dir))
+    except ValueError as exc:
+        print(f"配置错误：{exc}", file=sys.stderr)
+        return 2
+    store = bundle.store
+    orchestrator = bundle.orchestrator
+    print(f"whale {profile} REPL —— 输入 /quit 退出" +
+          ("（mock 模型，输出带 [mock]）" if profile == "demo" else "（真实模型端点）"))
+    for note in bundle.notes:
+        print(f"  [profile] {note}")
     try:
         while True:
             try:
@@ -421,10 +431,15 @@ def _cmd_run(args: argparse.Namespace) -> int:
             if text in ("/quit", "/exit"):
                 print("bye")
                 return 0
-            result = orchestrator.handle_message(
-                RUN_CONVERSATION_ID, text, source="cli"
-            )
-            print(f"whale> {result.reply}")
+            try:
+                result = orchestrator.handle_message(
+                    RUN_CONVERSATION_ID, text, source="cli"
+                )
+                print(f"whale> {result.reply}")
+            except Exception as exc:
+                # 不泄露供应商原始错误文本（可能包含敏感配置）。
+                kind = getattr(exc, "kind", type(exc).__name__)
+                print(f"whale> [error] 模型/工具调用失败：{kind}")
     finally:
         store.close()
     return 0
