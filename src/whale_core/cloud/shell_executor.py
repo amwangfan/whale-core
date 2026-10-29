@@ -58,12 +58,18 @@ def _scrub_env(env: dict[str, str] | None) -> dict[str, str]:
 
 
 def _demote_fn(user: str):
-    """preexec_fn：降权到指定用户（仅宿主为 root 时有效；其它情况调用前自查）。"""
+    """preexec_fn：降权到指定用户（清附加组 + setgid + setuid）。
+
+    仅宿主为 root 时有效；preexec_fn 在多线程进程里有固有限制
+    （执行器应在工作线程启动前完成构造——本执行器每次 run 新建子进程，
+    受影响窗口可控）。
+    """
     import pwd
 
     pw = pwd.getpwnam(user)  # KeyError 由调用方转译
 
     def _demote() -> None:
+        os.setgroups([])  # 清 root 附加组（docker/disk 等）——安全审查修正
         os.setgid(pw.pw_gid)
         os.setuid(pw.pw_uid)
 
@@ -118,6 +124,7 @@ class ShellExecutor:
                 cwd=cwd_resolved,
                 env=_scrub_env(self.env),
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                errors="replace",  # 非法字节替换——解码异常不得逃逸 run() 契约
                 start_new_session=True,  # 独立进程组，超时整组强杀
                 preexec_fn=preexec,
             )

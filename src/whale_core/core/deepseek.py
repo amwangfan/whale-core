@@ -28,7 +28,12 @@ class ModelError(RuntimeError):
 
 
 def _is_local_or_private_http(url: str) -> bool:
-    """http:// 仅放行回环与私网地址（本地模型/local 配置档；公网 http 仍拒绝）。"""
+    """http:// 仅放行回环与私网地址（本地模型/local 配置档；公网 http 仍拒绝）。
+
+    host 必须解析为字面 IP 且属回环/私网段，或是 "localhost"——
+    ``127.evil.com`` 类词法前缀不算私网（安全审查修正）。
+    """
+    import ipaddress
     try:
         parts = urllib.parse.urlsplit(url)
         if parts.scheme.lower() != "http":
@@ -36,18 +41,13 @@ def _is_local_or_private_http(url: str) -> bool:
         host = (parts.hostname or "").strip().lower()
     except ValueError:
         return False
-    if host in ("localhost", "::1"):
+    if host == "localhost":
         return True
-    if host.startswith("127."):
-        return True
-    if host.startswith("192.168.") or host.startswith("10."):
-        return True
-    if host.startswith("172."):
-        try:
-            return 16 <= int(host.split(".")[1]) <= 31
-        except (IndexError, ValueError):
-            return False
-    return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False  # 主机名一律不算私网：先解析成字面 IP 才谈归属
+    return ip.is_loopback or ip.is_private
 
 
 class DeepSeekCompanion:

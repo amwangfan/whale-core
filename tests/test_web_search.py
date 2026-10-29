@@ -21,7 +21,8 @@ from whale_core.plugins.web_search import (
 
 
 def _fake_urlopen(monkeypatch, *, status=200, payload=None, text=None):
-    """伪造 urlopen：payload（dict→JSON）或 text（HTML）。返回请求捕获器。"""
+    """伪造 HTTP 层：同时覆盖 urlopen（DDG 路径）与 _no_redirect_opener().open
+    （Tavily/Brave 路径）。payload（dict→JSON）或 text（HTML）。返回请求捕获器。"""
     captured = {}
 
     class FakeResp:
@@ -48,7 +49,13 @@ def _fake_urlopen(monkeypatch, *, status=200, payload=None, text=None):
             raise urllib.error.HTTPError(req.full_url, status, "m", {}, None)
         return FakeResp()
 
+    class FakeOpener:
+        def open(self, req, *, timeout=None):
+            return fake(req, timeout=timeout)
+
     monkeypatch.setattr("urllib.request.urlopen", fake)
+    import whale_core.plugins.web_search as ws
+    monkeypatch.setattr(ws, "_no_redirect_opener", lambda: FakeOpener())
     return captured
 
 
@@ -210,3 +217,11 @@ def test_query_truncation_and_limit_clamp(monkeypatch):
 def test_empty_query_rejected():
     with pytest.raises(SearchError):
         TavilyProvider(api_key="k").search("   ")
+
+
+def test_redirect_refused_as_bad_response(monkeypatch):
+    """安全审查回归：API 端点 3xx 一律拒绝（防跨主机认证头泄漏）。"""
+    _fake_urlopen(monkeypatch, status=302)
+    with pytest.raises(SearchError) as ei:
+        TavilyProvider(api_key="k").search("x")
+    assert ei.value.kind == "bad_response"

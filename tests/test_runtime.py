@@ -137,7 +137,7 @@ def test_task_with_read_only_tool_executes_and_summarizes():
     assert result.status == "answered"
     assert result.receipts[0].startswith("tool:search_web:ok:")
     # 工具结果作为数据回流陪伴模型
-    assert "工具执行结果" in brain.calls[-1]["text"]
+    assert "不可信工具输出开始" in brain.calls[-1]["text"]
     assert "上海明天晴" in brain.calls[-1]["text"]
 
 

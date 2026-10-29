@@ -221,8 +221,8 @@ class VideoTaskManager:
         except VideoError:
             raise
         except Exception as exc:
-            raise VideoError(
-                "network", f"video submit failed: {type(exc).__name__}: {exc}",
+            raise VideoError(  # 不回显异常原文（脱敏纪律）
+                "network", f"video submit failed: {type(exc).__name__}",
                 retryable=True,
             ) from exc
         task_id = str(task_id or "").strip()

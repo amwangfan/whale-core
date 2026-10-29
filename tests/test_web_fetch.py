@@ -423,3 +423,86 @@ def test_register_duplicate_plugin_id_raises():
     register_web_fetch(registry, fetcher=make_fetcher(FakeOpener([])))
     with pytest.raises(ValueError, match="already registered"):
         register_web_fetch(registry, fetcher=make_fetcher(FakeOpener([])))
+
+
+# ---------- 安全审查回归：NAT64 / peer 复核 / 总时限 ----------
+
+def test_nat64_addresses_blocked():
+    """64:ff9b::/96 的 is_global 在 Python 3.13 误判为 True——显式拒绝。"""
+    import ipaddress
+    from whale_core.plugins.web_fetch import _ip_allowed
+    assert not _ip_allowed(ipaddress.ip_address("64:ff9b::a9fe:a9fe"))  # =169.254.169.254
+    assert not _ip_allowed(ipaddress.ip_address("64:ff9b::7f00:1"))    # =127.0.0.1
+    assert not _ip_allowed(ipaddress.ip_address("64:ff9b:1::1"))       # local-use 段
+    assert _ip_allowed(ipaddress.ip_address("2606:4700:4700::1111"))   # 真公网 v6 放行
+    assert _ip_allowed(ipaddress.ip_address("93.184.216.34"))
+
+
+def test_peer_checked_connection_blocks_loopback():
+    """TOCTOU/rebinding 防线：连接后对端非公网即断（真实回环服务实证）。"""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import threading
+    from whale_core.plugins.web_fetch import FetchError, _PeerCheckedHTTP
+
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+        def log_message(self, *a):
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        conn = _PeerCheckedHTTP("127.0.0.1", srv.server_address[1], timeout=3)
+        try:
+            conn.request("GET", "/")
+            conn.getresponse()
+        except FetchError as exc:
+            assert "rebinding" in str(exc) or "non-global" in str(exc)
+        else:
+            raise AssertionError("loopback peer must be blocked by peer check")
+        finally:
+            conn.close()
+    finally:
+        srv.shutdown()
+
+
+def test_peer_check_positive_path(monkeypatch):
+    """peer 复核放行时请求正常完成（_ip_allowed 打桩为放行）。"""
+    import whale_core.plugins.web_fetch as wf
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import threading
+
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+        def log_message(self, *a):
+            pass
+
+    monkeypatch.setattr(wf, "_ip_allowed", lambda ip: True)
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        conn = wf._PeerCheckedHTTP("127.0.0.1", srv.server_address[1], timeout=3)
+        conn.request("GET", "/")
+        resp = conn.getresponse()
+        assert resp.status == 200 and resp.read() == b"ok"
+        conn.close()
+    finally:
+        srv.shutdown()
+
+
+def test_read_limited_deadline():
+    from whale_core.plugins.web_fetch import FetchError, _read_limited
+    import time
+
+    class Trickle:
+        def read(self, n):
+            return b"x" * n  # 永远有数据
+
+    with pytest.raises(FetchError):
+        _read_limited(Trickle(), 10 * 1024 * 1024, deadline=time.monotonic() - 1)

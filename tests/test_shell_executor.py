@@ -120,3 +120,10 @@ def test_drop_to_unknown_user_errors():
     result = _executor(drop_to_user="no_such_user_xyz").run("id", is_owner=True)
     assert result.status == "error"
     assert "unknown drop user" in result.verdict_reason
+
+
+def test_invalid_bytes_in_output_do_not_escape():
+    """安全审查回归：非法字节输出经 errors=replace 不抛 UnicodeDecodeError。"""
+    result = _executor().run("printf '\\377\\376abc'", is_owner=True)
+    assert result.status == "success"
+    assert "abc" in result.stdout

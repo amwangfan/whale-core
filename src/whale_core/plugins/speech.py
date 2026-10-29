@@ -59,18 +59,14 @@ def _is_local_or_private_http(url: str) -> bool:
         host = (parts.hostname or "").strip().lower()
     except ValueError:
         return False
-    if host in ("localhost", "::1"):
+    if host == "localhost":
         return True
-    if host.startswith("127."):
-        return True
-    if host.startswith("192.168.") or host.startswith("10."):
-        return True
-    if host.startswith("172."):
-        try:
-            return 16 <= int(host.split(".")[1]) <= 31
-        except (IndexError, ValueError):
-            return False
-    return False
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False  # 主机名一律不算私网：先解析成字面 IP 才谈归属（安全审查修正）
+    return ip.is_loopback or ip.is_private
 
 
 class ASRProvider(Protocol):
@@ -102,14 +98,25 @@ def _classify_http_error(exc: urllib.error.HTTPError) -> SpeechError:
 def _multipart_form_data(fields: dict[str, str],
                          file_field: str, filename: str, data: bytes,
                          boundary: str) -> bytes:
-    """手搓 multipart/form-data 请求体（stdlib 无现成构造器）。"""
+    """手搓 multipart/form-data 请求体（stdlib 无现成构造器）。
+
+    安全审查修正：字段值做 CR/LF/引号白名单过滤（防表单部件注入）。
+    """
+    import re as _re
+    _safe = _re.compile(r"^[A-Za-z0-9._\-]+$")
     crlf = b"\r\n"
     out = bytearray()
     for name, value in fields.items():
+        if not _safe.fullmatch(str(value)):
+            raise ValueError(f"multipart field {name!r} contains unsafe characters")
+        if not _safe.fullmatch(str(name)):
+            raise ValueError("multipart field name contains unsafe characters")
         out += b"--" + boundary.encode() + crlf
         out += f'Content-Disposition: form-data; name="{name}"'.encode() + crlf + crlf
         out += value.encode("utf-8") + crlf
     out += b"--" + boundary.encode() + crlf
+    if not _re.compile(r"^[A-Za-z0-9._\-]+$").fullmatch(str(filename)):
+        raise ValueError("multipart filename contains unsafe characters")
     out += (f'Content-Disposition: form-data; name="{file_field}"; '
             f'filename="{filename}"').encode() + crlf
     out += b"Content-Type: application/octet-stream" + crlf + crlf

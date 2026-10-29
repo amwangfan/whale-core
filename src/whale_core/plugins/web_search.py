@@ -63,11 +63,30 @@ def _clamp(query: str, limit: int) -> tuple[str, int]:
     return q, max(1, min(int(limit), MAX_LIMIT))
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """API 客户端不应被重定向（跨主机跳转会把 Authorization 带给目标——安全审查实证）。
+    3xx 一律按 bad_response 处理，如需迁移端点应改配置而不是跟跳转。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_NO_REDIRECT_OPENER = None
+_MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+
+
+def _no_redirect_opener():
+    global _NO_REDIRECT_OPENER
+    if _NO_REDIRECT_OPENER is None:
+        _NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirect())
+    return _NO_REDIRECT_OPENER
+
+
 def _http_json(req: urllib.request.Request, *, timeout: float, kind_map_auth: bool = True) -> Any:
     """共享 HTTP+JSON 调用与错误分类；响应体/异常文本永不回显 Authorization 内容。"""
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8", errors="replace"))
+        with _no_redirect_opener().open(req, timeout=timeout) as resp:
+            return json.loads(resp.read(_MAX_RESPONSE_BYTES).decode("utf-8", errors="replace"))
     except urllib.error.HTTPError as exc:
         status = exc.code
         if status in (401, 403) and kind_map_auth:
@@ -76,6 +95,8 @@ def _http_json(req: urllib.request.Request, *, timeout: float, kind_map_auth: bo
             raise SearchError("blocked", "search rate limited (429)") from exc
         if 500 <= status < 600:
             raise SearchError("network", f"search server error ({status})") from exc
+        if 300 <= status < 400:
+            raise SearchError("bad_response", f"search endpoint redirect refused ({status})") from exc
         raise SearchError("bad_response", f"search HTTP error ({status})") from exc
     except (urllib.error.URLError, TimeoutError) as exc:
         raise SearchError("network", f"search network error: {type(exc).__name__}") from exc

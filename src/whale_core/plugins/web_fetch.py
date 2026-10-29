@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import codecs
+import http.client
 import ipaddress
 import re
 import socket
@@ -54,7 +55,64 @@ _READ_CHUNK = 65536
 _SNIFF_BYTES = 4096
 _REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
 _LINK_LOCAL_V4 = ipaddress.ip_network("169.254.0.0/16")
+_NAT64_WK = ipaddress.ip_network("64:ff9b::/96")       # NAT64 well-known（安全审查：is_global 误判）
+_NAT64_LOCAL = ipaddress.ip_network("64:ff9b:1::/48")  # NAT64 local-use
 _META_CHARSET_RE = re.compile(rb"<meta[^>]+charset=[\"']?\s*([A-Za-z0-9._-]+)", re.IGNORECASE)
+
+
+def _ip_allowed(ip) -> bool:
+    """SSRF 肯定式门控（_check_host 与连接层 peer 复核共用同一判定）。
+
+    - 必须 ``is_global``（回环/私网/CGNAT/保留段一并拦下）；
+    - 显式拒绝 169.254.0.0/16（链路本地/云元数据）与 NAT64 段
+      （64:ff9b::/96、64:ff9b:1::/48——其 is_global 在 Python 3.13 误判为 True，
+      可绕过到链路本地 v4 地址）。
+    """
+    if ip.version == 4 and ip in _LINK_LOCAL_V4:
+        return False
+    if ip.version == 6 and (ip in _NAT64_WK or ip in _NAT64_LOCAL):
+        return False
+    return bool(ip.is_global)
+
+
+class _PeerCheckedHTTPConnection:  # 见下：两个子类共用
+    """``connect()`` 后、发请求前复核实际对端 IP（TOCTOU/DNS rebinding 防线）。
+
+    校验与连接分离时，攻击者控权威 DNS（TTL=0）可让「已验证」的域名在实际连接时
+    解析到内网地址；本类以 getpeername() 拿到**真实对端**再过 ``_ip_allowed``
+    门控，不过即断开抛错（fail-closed）。
+    """
+
+    def connect(self) -> None:  # noqa: D102
+        super().connect()
+        peer = self.sock.getpeername()[0]
+        try:
+            ip = ipaddress.ip_address(peer)
+        except ValueError:
+            ip = None
+        if ip is None or not _ip_allowed(ip):
+            try:
+                self.close()
+            finally:
+                raise FetchError("blocked non-global peer after connect (rebinding guard)")
+
+
+class _PeerCheckedHTTP(_PeerCheckedHTTPConnection, http.client.HTTPConnection):
+    pass
+
+
+class _PeerCheckedHTTPS(_PeerCheckedHTTPConnection, http.client.HTTPSConnection):
+    pass
+
+
+class _PeerCheckedHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):  # noqa: D102
+        return self.do_open(_PeerCheckedHTTP, req)
+
+
+class _PeerCheckedHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):  # noqa: D102
+        return self.do_open(_PeerCheckedHTTPS, req)
 
 
 @dataclass(frozen=True)
@@ -181,11 +239,15 @@ def _sniff_meta_charset(body: bytes) -> str:
     return candidate if _valid_charset(candidate) else ""
 
 
-def _read_limited(response: Any, max_bytes: int) -> bytes:
-    """流式读取，至多 max_bytes 即停（绝不先 read() 全部）。"""
+def _read_limited(response: Any, max_bytes: int, deadline: float | None = None) -> bytes:
+    """流式读取，至多 max_bytes 即停（绝不先 read() 全部）；可选总时限
+    （防 trickle 响应挂死——每块读后检查 deadline，超时抛 FetchError）。"""
+    import time as _time
     chunks: list[bytes] = []
     remaining = max_bytes
     while remaining > 0:
+        if deadline is not None and _time.monotonic() > deadline:
+            raise FetchError("total deadline exceeded while reading body")
         chunk = response.read(min(_READ_CHUNK, remaining))
         if not chunk:
             break
@@ -226,17 +288,29 @@ class WebFetcher:
         self._max_bytes = int(max_bytes)
         self._max_chars = int(max_chars)
         self._allow_private = bool(allow_private)
-        self._opener = opener if opener is not None else urllib.request.build_opener(
-            _NoRedirectHandler()
-        )
+        if opener is not None:
+            self._opener = opener
+        elif self._allow_private:
+            self._opener = urllib.request.build_opener(_NoRedirectHandler())
+        else:
+            # 默认 opener：不跟跳转 + 连接层 peer 复核（TOCTOU/rebinding 防线）
+            self._opener = urllib.request.build_opener(
+                _NoRedirectHandler(), _PeerCheckedHTTPHandler(), _PeerCheckedHTTPSHandler()
+            )
         self._resolver = resolver if resolver is not None else _default_resolver
 
     def fetch(self, url: str) -> FetchResult:
         """抓取 ``url`` 并提取正文。失败一律 FetchError。"""
+        import time as _time
         original = (url or "").strip()
         current = original
         redirects = 0
+        # 跨跳总时限：单跳 timeout × (重定向上限+1) + 5s 余量——防逐跳叠加与
+        # trickle 读挂死（安全审查低 #9）。
+        deadline = _time.monotonic() + self._timeout * (MAX_REDIRECTS + 1) + 5.0
         while True:
+            if _time.monotonic() > deadline:
+                raise FetchError("total deadline exceeded")
             self._check_url(current)  # 每一跳（含重定向目标）都重新校验
             request = urllib.request.Request(
                 current,
@@ -272,7 +346,7 @@ class WebFetcher:
             except OSError as exc:
                 raise FetchError(f"request failed: {type(exc).__name__}") from exc
             try:
-                body = _read_limited(response, self._max_bytes)
+                body = _read_limited(response, self._max_bytes, deadline)
             finally:
                 close = getattr(response, "close", None)
                 if callable(close):
@@ -325,9 +399,7 @@ class WebFetcher:
         if not addresses:
             raise FetchError("DNS resolution failed: no addresses")
         for ip in addresses:
-            if ip.version == 4 and ip in _LINK_LOCAL_V4:
-                raise FetchError("blocked link-local address (cloud metadata range)")
-            if not ip.is_global:
+            if not _ip_allowed(ip):
                 raise FetchError("blocked non-global address (SSRF guard)")
 
     def _build_result(

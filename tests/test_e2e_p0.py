@@ -24,7 +24,7 @@ class StoryBrain:
     def reply(self, text, *, persona="", memories=(), history=()):
         self.calls.append({"text": text, "persona": persona,
                            "memories": list(memories), "history": list(history)})
-        if "[工具执行结果" in text:
+        if "不可信工具输出开始" in text:
             # 模拟「带来源的总结」：从工具结果块里抽来源行
             src_line = [l for l in text.splitlines() if "（http" in l]
             return f"查好了：{src_line[0] if src_line else '无来源'}"

@@ -45,7 +45,8 @@ _MANIFEST_KEYS = (
     "api_version",
 )
 _WIRING_KEYS = ("executor", "input_adapter", "provider")  # 对齐 PluginRegistry.register
-_SECRET_HINTS = ("token", "key", "secret", "password")
+_SECRET_HINTS = ("token", "key", "secret", "password", "passwd",
+                 "credential", "auth", "session", "cookie", "private")
 
 # config_schema 最小子集的 type → Python 类型
 _CONFIG_TYPES: dict[str, tuple[type, ...]] = {
@@ -379,13 +380,14 @@ class PluginManager:
     def config_view(self, plugin_id: str) -> dict[str, Any]:
         """配置脱敏视图：secret 字段值替换为 "***"（存在）或 ""（未配置）。
 
-        脱敏范围：schema properties 中 ``format: "secret"`` 的字段，以及键名
-        含 token/key/secret/password（大小写不敏感）的字段；其余原样。
+        脱敏范围（**尽力而为**，非证明）：schema properties 中 ``format: "secret"``
+        的字段，以及键名含 token/key/secret/password/credential/passwd/auth/
+        session/cookie/private（大小写不敏感）的字段；**递归**下钻嵌套
+        dict/list（安全审查修正：嵌套值此前原样外泄）。
         """
         if plugin_id not in self._states:
             raise KeyError(f"unknown plugin: {plugin_id!r}")
         stored = self._store.get(self._config_key(plugin_id)) or {}
-        view: dict[str, Any] = dict(stored)
         schema = self._schemas.get(plugin_id) or {}
         properties = schema.get("properties") or {}
         schema_secrets = {
@@ -393,16 +395,20 @@ class PluginManager:
             for name, spec in properties.items()
             if isinstance(spec, Mapping) and spec.get("format") == "secret"
         }
-
-        def _mask(name: str) -> None:
-            value = view.get(name)
-            view[name] = "***" if value not in (None, "") else ""
-
+        # schema secret 字段即使未配置也以 "" 出现在视图中
+        base: dict[str, Any] = dict(stored)
         for name in schema_secrets:
-            _mask(name)  # 未配置的 secret 字段也以 "" 出现在视图中
-        for name in list(view):
-            if name not in schema_secrets and any(
-                hint in name.lower() for hint in _SECRET_HINTS
-            ):
-                _mask(name)
-        return view
+            base.setdefault(name, "")
+        return {k: self._mask_value(k, v, schema_secrets) for k, v in base.items()}
+
+    @classmethod
+    def _mask_value(cls, key: str, value: Any, schema_secrets: frozenset | set) -> Any:
+        lowered = key.lower()
+        if key in schema_secrets or any(hint in lowered for hint in _SECRET_HINTS):
+            return "***" if value not in (None, "") else ""
+        if isinstance(value, Mapping):
+            return {k: cls._mask_value(str(k), v, schema_secrets) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [cls._mask_value(key, item, schema_secrets) if isinstance(item, (Mapping, list, tuple)) else item
+                    for item in value]
+        return value

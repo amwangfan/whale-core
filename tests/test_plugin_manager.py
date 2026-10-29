@@ -434,3 +434,38 @@ def test_disable_removes_provider_capabilities(tmp_path):
     assert registry.providers_for("summarize") == []
     assert registry.executor("summarizer") is None
     assert registry.manifest("summarizer") is None
+
+
+# ---------- 安全审查回归：递归脱敏 + 扩展 hints ----------
+
+def test_config_view_masks_nested_and_extended_hints(tmp_path):
+    from whale_core.memory.store import InMemoryStore
+    from whale_core.plugins.manager import PluginManager
+    from whale_core.plugins.manifest import PluginManifest
+    from whale_core.plugins.registry import PluginRegistry
+
+    store = InMemoryStore()
+    manager = PluginManager(PluginRegistry(), store)
+    manager.load_manifest(PluginManifest(
+        plugin_id="nest", name="n", version="1.0.0",
+        actions=("ping",), action_risk={"ping": "read_only"},
+    ))
+    manager.set_config("nest", {
+        "region": "us",
+        "nested": {"api_key": "sk-NESTED"},
+        "credentials": "sk-CREDS",
+        "passwd": "hunter2",
+        "auth_header": "Bearer x",
+        "listy": [{"session_token": "abc"}, "plain"],
+    })
+    view = manager.config_view("nest")
+    assert view["region"] == "us"
+    assert view["nested"]["api_key"] == "***"
+    assert view["credentials"] == "***"
+    assert view["passwd"] == "***"
+    assert view["auth_header"] == "***"
+    assert view["listy"][0]["session_token"] == "***"
+    assert view["listy"][1] == "plain"
+    import json as _json
+    assert "sk-NESTED" not in _json.dumps(view)
+    assert "hunter2" not in _json.dumps(view)
