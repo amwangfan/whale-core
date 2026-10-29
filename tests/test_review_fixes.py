@@ -77,7 +77,7 @@ def test_cloud_profile_uses_passed_env_and_search_tool(monkeypatch):
     monkeypatch.setattr(TavilyProvider, "search",
                         lambda self, query, **kwargs: [
                             SearchResult(title="Evidence", url="https://example.com",
-                                         snippet=query)
+                                         snippet=query, source="tavily")
                         ])
     bundle = assemble_runtime("cloud", env={"DEEPSEEK_API_KEY": "test",
                                             "TAVILY_API_KEY": "test"})
