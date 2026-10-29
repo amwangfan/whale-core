@@ -80,8 +80,8 @@
 
 | # | 现状 | 改法 |
 |---|------|------|
-| R1 | communicate 动作一律逐笔人审；生产靠 `--live-auto-send`+env 双开关旁路 | 审批策略按风险级可配置：`read_only` 恒自动；`communicate` 对 owner 绑定渠道可配 `auto`（默认仍 `ask`）；双开关语义并入正式配置，保留启动横幅公示 |
-| R2 | 主动行为 `daily_limit=2`、被动回复静默豁免核心默认 False | 默认值放宽：主动默认 10/日；被动豁免静默默认 True（runner 已显式开启，与生产对齐）；全部保持可配 |
+| R1 | communicate 动作一律逐笔人审；生产靠 `--live-auto-send`+env 双开关旁路 | **已落地**：`PluginActionPolicy(auto_approve_risks=...)` 按风险级免审（communicate 可配 auto；transaction 永不可配——构造即拒；身份门不受影响）。生产 runner 双开关保持不动（已验证路径），新装配用策略参数 |
+| R2 | 主动行为 `daily_limit=2`、被动回复静默豁免核心默认 False | **维持核心保守默认，放宽落在部署层**：runner 侧 env 已是主动 10/日 + 被动豁免 True（test_qq_policy_runner 锁死该行为）；核心默认保持保守 + 显式开启，避免库默认在多用户场景误伤 |
 | R3 | DeepSeek base_url 强制 https | 允许回环/私网 http（`http://127.0.0.1`、`http://10/172.16/192.168` 段）；公网 http 仍拒绝 |
 | R4 | 记忆写入长期事实需显式 consent 参数 | owner 直聊消息视为 consent（陪伴场景「记住我」是默认期待）；curator 证据/来源/可删除语义不动；提供「忘掉」命令路径 |
 
