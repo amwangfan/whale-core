@@ -150,3 +150,26 @@ def test_web_rejection_blocks_dispatch():
                            daily_limit=10)
     assert outbox.inspect("id2", prefs, now=datetime.now(timezone.utc),
                           explicitly_approved=True).status == "rejected"
+
+
+def test_sse_pushes_new_events_after_connection():
+    store = InMemoryStore()
+    ctx = ApiContext(store=store)
+    server = WhaleApiServer(ctx, port=0, token="secret")
+    server.start()
+    conn = HTTPConnection("127.0.0.1", server.port, timeout=4)
+    try:
+        conn.request("GET", "/api/v1/events", headers={"Authorization": "Bearer secret"})
+        response = conn.getresponse()
+        assert response.status == 200
+        ctx.log_event("new-event", "later")
+        data = b""
+        for _ in range(3):
+            data += response.read1(1024)
+            if b"new-event" in data:
+                break
+        assert b"new-event" in data
+        assert b"later" in data
+    finally:
+        conn.close()
+        server.stop()
