@@ -1,0 +1,405 @@
+/* Whale 控制台 — 深色主题，无 UI 框架 */
+
+:root {
+  --bg: #0e131a;
+  --panel: #161e29;
+  --panel-2: #1c2634;
+  --border: #2a3646;
+  --text: #d7e0ea;
+  --muted: #8494a7;
+  --accent: #4aa3ff;
+  --ok: #3fb970;
+  --warn: #d9a13b;
+  --bad: #e05d5d;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  font-size: 14px;
+}
+
+.app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---------- 顶栏 ---------- */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.brand {
+  font-weight: 600;
+  font-size: 16px;
+  white-space: nowrap;
+}
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  flex: 1;
+  flex-wrap: wrap;
+}
+
+.tab {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted);
+  padding: 6px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.tab:hover {
+  color: var(--text);
+  background: var(--panel-2);
+}
+
+.tab.active {
+  color: var(--text);
+  background: var(--panel-2);
+  border-color: var(--border);
+}
+
+.token-box {
+  display: flex;
+  gap: 6px;
+}
+
+.token-box input {
+  width: 200px;
+}
+
+/* ---------- 通用控件 ---------- */
+
+input,
+button {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 14px;
+}
+
+input:focus {
+  outline: 1px solid var(--accent);
+}
+
+button {
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #0b1420;
+  font-weight: 600;
+}
+
+button.danger:hover:not(:disabled) {
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
+.content {
+  padding: 16px;
+  flex: 1;
+}
+
+.page-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.page-head h2 {
+  margin: 0;
+  font-size: 18px;
+  flex: 1;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.small {
+  font-size: 12px;
+}
+
+.mono {
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-size: 13px;
+}
+
+.empty {
+  color: var(--muted);
+  padding: 32px;
+  text-align: center;
+}
+
+/* ---------- 横幅 / 徽标 ---------- */
+
+.banner {
+  padding: 10px 14px;
+  border-radius: 6px;
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+}
+
+.banner.warn {
+  border-color: var(--warn);
+  color: var(--warn);
+  background: rgba(217, 161, 59, 0.08);
+}
+
+.banner.error {
+  border-color: var(--bad);
+  color: var(--bad);
+  background: rgba(224, 93, 93, 0.08);
+}
+
+.banner.ok {
+  border-color: var(--ok);
+  color: var(--ok);
+  background: rgba(63, 185, 112, 0.08);
+}
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+  margin-right: 6px;
+}
+
+.badge.ok {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.badge.warn {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.badge.bad {
+  color: var(--bad);
+  border-color: var(--bad);
+}
+
+/* ---------- 总览卡片 ---------- */
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+}
+
+.card-title {
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.card-value {
+  font-size: 20px;
+  font-weight: 600;
+}
+
+/* ---------- 表格 ---------- */
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.table th,
+.table td {
+  text-align: left;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.table th {
+  color: var(--muted);
+  font-weight: 500;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  background: var(--panel-2);
+}
+
+.table tr:last-child td {
+  border-bottom: none;
+}
+
+.actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+/* ---------- 列表（记忆 / 审批） ---------- */
+
+.searchbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.searchbar input {
+  flex: 1;
+  max-width: 480px;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.list-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.list-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+/* ---------- 对话 ---------- */
+
+.chat {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 130px);
+}
+
+.chat-log {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 8px 0;
+}
+
+.msg {
+  display: flex;
+  gap: 10px;
+  max-width: 80%;
+}
+
+.msg.user {
+  align-self: flex-end;
+  flex-direction: row-reverse;
+}
+
+.msg-role {
+  color: var(--muted);
+  font-size: 12px;
+  padding-top: 6px;
+  white-space: nowrap;
+}
+
+.msg-body {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.msg.user .msg-body {
+  background: var(--panel-2);
+  border-color: var(--accent);
+}
+
+.chat-input {
+  display: flex;
+  gap: 8px;
+  padding-top: 10px;
+}
+
+.chat-input input {
+  flex: 1;
+}
+
+/* ---------- 事件流 ---------- */
+
+.event-log {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  height: calc(100vh - 190px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.event-row {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+}
+
+.event-detail {
+  word-break: break-all;
+}
