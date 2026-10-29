@@ -5,9 +5,10 @@ import Plugins from './components/Plugins';
 import MemoryView from './components/Memory';
 import Approvals from './components/Approvals';
 import Chat from './components/Chat';
+import Tasks from './components/Tasks';
 import Events from './components/Events';
 
-type TabKey = 'overview' | 'plugins' | 'memory' | 'approvals' | 'chat' | 'events';
+type TabKey = 'overview' | 'plugins' | 'memory' | 'approvals' | 'chat' | 'tasks' | 'events';
 
 const TABS: { key: TabKey; label: string }[] = [
   { key: 'overview', label: '总览' },
@@ -15,6 +16,7 @@ const TABS: { key: TabKey; label: string }[] = [
   { key: 'memory', label: '记忆' },
   { key: 'approvals', label: '审批' },
   { key: 'chat', label: '对话' },
+  { key: 'tasks', label: '任务' },
   { key: 'events', label: '事件' },
 ];
 
@@ -86,6 +88,9 @@ export default function App() {
             </section>
             <section hidden={tab !== 'chat'}>
               <Chat />
+            </section>
+            <section hidden={tab !== 'tasks'}>
+              <Tasks />
             </section>
             <section hidden={tab !== 'events'}>
               <Events />

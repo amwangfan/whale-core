@@ -69,6 +69,22 @@ export interface Approval {
   status: string;
 }
 
+/**
+ * 任务轨迹记录（kv `task:{id}` 落库形态）：
+ * - `goal` / `capabilities` 是「模型提出的计划」，不代表已执行；
+ * - `receipts` 是「实际执行的回执」，逐条对应真实发生（或被拒/挂起）的动作。
+ */
+export interface TaskRecord {
+  task_id: string;
+  /** epoch 秒 */
+  at: number;
+  goal: string;
+  status: 'answered' | 'clarify' | 'pending_approval' | 'denied' | 'failed' | string;
+  capabilities: string[];
+  receipts: string[];
+  [key: string]: unknown;
+}
+
 export interface WhaleEvent {
   at: number | string;
   kind: string;
@@ -205,6 +221,17 @@ export const api = {
 
   pluginHealth: (id: string) =>
     request<PluginHealth>(`/plugins/${encodeURIComponent(id)}/health`),
+
+  /** 整体替换插件配置；422 时 ApiError.message 为校验错误（只含字段名/期望类型）。 */
+  setPluginConfig: (id: string, config: Record<string, unknown>) =>
+    request<{ plugin_id: string; saved: boolean }>(
+      `/plugins/${encodeURIComponent(id)}/config`,
+      { method: 'POST', body: JSON.stringify({ config }) },
+    ),
+
+  tasks: async () => (await request<{ tasks: TaskRecord[] }>('/tasks')).tasks,
+
+  task: (id: string) => request<TaskRecord>(`/tasks/${encodeURIComponent(id)}`),
 
   searchMemory: async (q: string) =>
     (await request<{ hits: MemoryHit[] }>(`/memory/search?q=${encodeURIComponent(q)}`)).hits,

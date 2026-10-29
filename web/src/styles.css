@@ -216,6 +216,11 @@ button.danger:hover:not(:disabled) {
   border-color: var(--bad);
 }
 
+.badge.info {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
 /* ---------- 总览卡片 ---------- */
 
 .cards {
@@ -402,4 +407,102 @@ button.danger:hover:not(:disabled) {
 
 .event-detail {
   word-break: break-all;
+}
+
+/* ---------- 任务页 ---------- */
+
+.page-note {
+  margin: -6px 0 12px;
+}
+
+.list-item.clickable {
+  cursor: pointer;
+}
+
+.list-item.clickable:hover {
+  border-color: var(--accent);
+}
+
+.detail-panel {
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  cursor: default;
+}
+
+.section-label {
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 4px;
+}
+
+.receipt-list {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+details.receipts summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+details.receipts[open] summary {
+  margin-bottom: 6px;
+}
+
+/* ---------- 插件配置 ---------- */
+
+.expand-row td {
+  background: var(--panel-2);
+}
+
+.config-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.config-view {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.config-row {
+  display: flex;
+  gap: 12px;
+}
+
+.config-row > span:first-child {
+  min-width: 180px;
+  color: var(--muted);
+}
+
+.kv-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 6px;
+  align-items: center;
+}
+
+.kv-row input.key {
+  width: 220px;
+}
+
+.kv-row input.value {
+  flex: 1;
+}
+
+.config-panel .actions {
+  margin-bottom: 6px;
 }

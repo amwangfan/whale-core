@@ -98,4 +98,68 @@ describe('api client', () => {
     expect(apiUrl('/status')).toBe('/api/v1/status');
     expect(apiUrl('status')).toBe('/api/v1/status');
   });
+
+  it('tasks 请求 /tasks 并解包 result.tasks', async () => {
+    const tasks = [
+      {
+        task_id: 't-1',
+        at: 1730000000,
+        goal: '查天气',
+        status: 'answered',
+        capabilities: ['weather.lookup'],
+        receipts: ['weather:ok:sunny'],
+      },
+      {
+        task_id: 't-2',
+        at: 1729999999,
+        goal: '发邮件',
+        status: 'denied',
+        capabilities: ['mail.send'],
+        receipts: ['plugin-denied:mail:policy'],
+      },
+    ];
+    const fetchMock = stubFetch(mockResponse(200, { result: { tasks } }));
+    const r = await api.tasks();
+    expect(r).toHaveLength(2);
+    expect(r[0].task_id).toBe('t-1');
+    expect(r[1].status).toBe('denied');
+    const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('/api/v1/tasks');
+  });
+
+  it('task 按 id 编码请求详情，404 抛 ApiError', async () => {
+    const fetchMock = stubFetch(
+      mockResponse(404, { error: { code: 'not_found', message: 'no such task' } }),
+    );
+    const err: unknown = await api.task('a/b c').catch(e => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(404);
+    expect((err as ApiError).code).toBe('not_found');
+    const [url] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(`/api/v1/tasks/${encodeURIComponent('a/b c')}`);
+  });
+
+  it('setPluginConfig 以 POST 提交 {config}，422 暴露校验消息', async () => {
+    const fetchMock = stubFetch(
+      mockResponse(200, { result: { plugin_id: 'demo', saved: true } }),
+    );
+    const r = await api.setPluginConfig('demo', { api_key: 'sk-x', limit: 3 });
+    expect(r.saved).toBe(true);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('/api/v1/plugins/demo/config');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(String(init.body))).toEqual({ config: { api_key: 'sk-x', limit: 3 } });
+    expect((init.headers as Headers).get('Content-Type')).toBe('application/json');
+
+    stubFetch(
+      mockResponse(422, {
+        error: { code: 'invalid_config', message: "config field 'limit' must be of type 'number'" },
+      }),
+    );
+    const err: unknown = await api.setPluginConfig('demo', { limit: 'x' }).catch(e => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(422);
+    expect((err as ApiError).code).toBe('invalid_config');
+    expect((err as ApiError).message).toContain("'limit'");
+  });
 });
