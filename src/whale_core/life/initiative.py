@@ -171,6 +171,13 @@ class ProactiveOutbox:
         if draft is None:
             return DispatchVerdict("missing", "not found", draft_id)
         ledger = self.store.get(f"life:ledger:{draft_id}") or {}
+        decision = self.store.get(f"life:decision:{draft_id}") or {}
+        # Web approvals are durable authorization for a *future* dispatch,
+        # not proof that the message has been sent. Rejections always prevail.
+        if decision.get("decision") == "reject":
+            return DispatchVerdict("rejected", "owner rejected the draft", draft_id)
+        if decision.get("decision") == "approve":
+            explicitly_approved = True
         if ledger.get("attempts", 0) > 0:
             return DispatchVerdict("already_attempted", "no automatic repeat", draft_id)
         if not prefs.enabled:
