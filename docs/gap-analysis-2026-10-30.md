@@ -17,11 +17,11 @@
 
 | # | 路线图表项 | 现状 | 证据 | 差距 / 行动 |
 |---|-----------|------|------|-------------|
-| 1 | 统一 Runtime / 对话编排 | **stub** | `core/router.py` StubModelRouter 恒返回空 Decision（L21-26）；`core/companion.py` 只有单轮 chat | 无 `WhaleRuntime/ConversationOrchestrator`；无工具循环；事件流（WhaleAgent）与对话流（WhaleCompanion）未统一 |
-| 2 | 结构化 IntentPlan | **缺失** | — | 只有 `ActionIntent` 数据类（core/types.py）；无 goal/槽位/成功条件/澄清/取消语义 |
+| 1 | 统一 Runtime / 对话编排 | **PR-2 已落地** | `core/runtime.py` ConversationOrchestrator（记忆指令捷径/意图分流/有界工具执行/结果回流）；`core/router.py` StubModelRouter 保持测试替身定位 | 多轮/记忆/人格复用 WhaleCompanion；事件流 WhaleAgent 并存（roadmap §3.1） |
+| 2 | 结构化 IntentPlan | **PR-2 已落地** | `core/intent_plan.py`：校验+模型文本提取（35 例测试） | 「模型提议、核心裁决」：approved 等字段丢弃、risk_hint 仅参考、intent_id 核心生成 |
 | 3 | 插件管理器 | **已有代码（契约层已测试）** | manifest/registry/gateway/policy/processing 真实实现（test_plugins 27 例 + test_plugin_kinds 21 例）；注册只能代码显式 `register()`（registry.py L3-5 明示不做自动发现） | 缺：manifest 文件加载、生命周期（启停持久化）、健康检查、config_schema、api_version 兼容检查 |
 | 4 | 记忆 V1 | **PR-1 已落地（2026-10-30）** | store/sqlite/continuity/curation 真实实现 | ~~① chat() 不传 history~~ → `memory/history.py` 会话环形缓冲 + `chat(conversation_id=)`；~~② 召回断层~~ → chat 情节作为会话记忆注入（curated 事实仍优先）；~~③ 无导出~~ → `memory/export.py` JSONL 导出/导入；~~④ 双实现三处不一致~~ → parity 对齐 + `test_memory_parity.py` 双后端参数化。新增 `记住：/忘掉：` owner 指令（不调模型、带证据链）。测试：+48 例 |
-| 5 | 模型 provider | **已联通（未插件化）** | `core/deepseek.py` 真实 urllib HTTP 客户端，生产在用 | 硬编码装配、未注册为 model 插件；无重试/错误分类；base_url 强制 https（L13-14）卡死本地模型（local 配置档前提） |
+| 5 | 模型 provider | **PR-4 已落地** | `plugins/model_provider.py`：`register_openai_compatible`（kind=model，provides `llm.chat`）+ `resolve/require_chat_model` 能力解析；`core/deepseek.py`：ModelError 六类分类（config/auth/rate_limited/server/network/bad_response）+ 瞬时错误重试一次 + http 回环/私网放行（公网 http 仍拒，R3）+ `info()` 状态视图（不含 key） | 内置系统提示删除「不声称具有人类情感」一句（与 PR-0 回合入的禁忌 5→4 对齐，roadmap §7.4 一致性）；runner 切换到能力解析留待 PR-9 配置档统一接线 |
 | 6 | web.search / web.fetch | **缺失** | `shell_policy.SAFE_EXTRA_TOOLS` 只有工具名（L40-47） | 无任何实现 |
 | 7 | CLI（setup/doctor/run/plugins） | **缺失** | — | 仅 examples/ 两个脚本 |
 | 8 | 网页控制台 MVP | **缺失** | — | 无 web/ 目录、无 API 层；现有 HTTP 仅两个回环事件监听器（wq_push、qq_onebot，均 stdlib ThreadingHTTPServer + token） |
