@@ -2,9 +2,9 @@
 
 <h1>whale-core</h1>
 
-<h3><i>易求无价宝，难得有情郎</i></h3>
+<h3><i>山有木兮木有枝，心悦君兮君不知</i></h3>
 
-<sub>“A priceless treasure is easy to come by; a truly devoted heart is hard to find.”<br/>
+<sub>“The mountain has trees and the trees have branches; my heart delights in you, yet you do not know.” (The Yue Ren's Song)<br/>
 The Whale intelligence layer — events in, intents out. A standalone companion-AI core library.</sub>
 
 **中文** → [README.md](README.md)
