@@ -18,7 +18,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from whale_core.core.companion import WhaleCompanion
 from whale_core.core.runtime import ConversationOrchestrator
@@ -131,6 +131,84 @@ def _build_manager(config_dir: Path) -> PluginManager:
 def _print_load_errors(manager: PluginManager) -> None:
     for err in manager.errors:
         print(f"[warn] {err.get('path', '?')}: {err.get('error', '?')}")
+
+
+# ---------- whale api ----------
+
+API_TOKEN_FILENAME = "api_token"
+
+
+def _resolve_api_token(config_dir: Path, env: Mapping[str, str] | None = None) -> tuple[str, str]:
+    """解析 API token，返回 (token, 来源说明)。优先级：env > 持久化文件 > 新生成。
+
+    新生成只发生一次：token 打印一次后写入 config-dir/api_token（0600）复用。
+    """
+    import secrets as _secrets
+
+    env = os.environ if env is None else env
+    if (tok := (env.get("WHALE_API_TOKEN") or "").strip()):
+        return tok, "环境变量 WHALE_API_TOKEN"
+    token_path = config_dir / API_TOKEN_FILENAME
+    try:
+        existing = token_path.read_text(encoding="utf-8").strip()
+        if existing:
+            return existing, f"配置文件 {token_path}"
+    except OSError:
+        pass
+    token = _secrets.token_hex(24)
+    _ensure_layout(config_dir)
+    token_path.write_text(token + "\n", encoding="utf-8")
+    os.chmod(token_path, 0o600)
+    return token, f"新生成（已存入 {token_path}，权限 600）"
+
+
+def _repo_static_dir() -> Path | None:
+    """仓库内 web/dist 构建产物（存在才托管）。"""
+    dist = Path(__file__).resolve().parents[3] / "web" / "dist"
+    return dist if (dist / "index.html").is_file() else None
+
+
+def _build_api_server(args: argparse.Namespace) -> tuple[Any, str, str]:
+    """装配 API 服务，返回 (server, token, token_source)。"""
+    from whale_core.api.server import ApiContext, WhaleApiServer
+    from whale_core.profiles import assemble_runtime
+
+    config_dir = _config_dir(args)
+    config = _load_config(config_dir) or {}
+    profile = str(config.get("profile") or "demo")
+    bundle = assemble_runtime(profile, config_dir=str(config_dir))
+    token, token_source = _resolve_api_token(config_dir)
+    ctx = ApiContext(
+        store=bundle.store, manager=bundle.manager,
+        orchestrator=bundle.orchestrator, curator=bundle.companion.curator,
+        profile=profile,
+    )
+    server = WhaleApiServer(
+        ctx, host=args.host, port=args.port, token=token,
+        static_dir=str(_repo_static_dir() or "") or None,
+    )
+    for note in bundle.notes:
+        print(f"  [profile] {note}")
+    return server, token, token_source
+
+
+def _cmd_api(args: argparse.Namespace) -> int:
+    server, token, token_source = _build_api_server(args)
+    print(f"[api] 监听 http://{server.host}:{server.port}/api/v1")
+    print(f"[api] token 来源：{token_source}")
+    if token_source.startswith("新生成"):
+        print(f"[api] 新 token（只显示这一次）：{token}")
+    if _repo_static_dir() is None:
+        print("[api] 提示：web/dist 未构建（pnpm -C web build），控制台静态页不可用，API 正常")
+    if args.host not in ("127.0.0.1", "localhost", "::1"):
+        print("[api] ⚠️ 监听非回环地址——请确认有 TLS 反代与鉴权前置（roadmap §5.4）")
+    print("[api] Ctrl+C 停止")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n[api] 已停止")
+    return 0
+
 
 
 def _status_row(manager: PluginManager, plugin_id: str) -> dict[str, Any] | None:
@@ -530,6 +608,12 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("plugin_id")
         _add_config_dir(p)
         p.set_defaults(func=func)
+
+    p_api = sub.add_parser("api", help="启动管理 API + 控制台静态托管（默认 127.0.0.1）")
+    p_api.add_argument("--host", default="127.0.0.1", help="监听地址（默认 127.0.0.1）")
+    p_api.add_argument("--port", type=int, default=8080, help="监听端口（默认 8080）")
+    _add_config_dir(p_api)
+    p_api.set_defaults(func=_cmd_api)
 
     p_memory = sub.add_parser("memory", help="记忆导出 / 导入（JSONL）")
     msub = p_memory.add_subparsers(dest="memory_command", required=True)

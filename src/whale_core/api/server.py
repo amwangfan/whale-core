@@ -430,7 +430,9 @@ class WhaleApiServer:
         self._httpd.serve_forever()
 
     def stop(self) -> None:
-        self._httpd.shutdown()
-        self._httpd.server_close()
+        # shutdown() 只能在 serve_forever 进行中调用（否则永久阻塞）；
+        # 仅 start() 起过线程时才走 shutdown。
         if self._thread is not None:
+            self._httpd.shutdown()
             self._thread.join(timeout=3)
+        self._httpd.server_close()

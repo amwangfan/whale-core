@@ -355,3 +355,45 @@ def test_memory_export_missing_path_system_exit(tmp_path):
     with pytest.raises(SystemExit) as exc_info:
         main(["memory", "export"])
     assert exc_info.value.code != 0
+
+
+# ---------- whale api（PR-13 收尾） ----------
+
+def test_api_token_resolution(tmp_path, monkeypatch):
+    from whale_core.cli.main import _resolve_api_token
+    monkeypatch.delenv("WHALE_API_TOKEN", raising=False)
+    token, source = _resolve_api_token(tmp_path, env={})
+    assert token and "新生成" in source
+    import stat
+    mode = stat.S_IMODE((tmp_path / "api_token").stat().st_mode)
+    assert mode == 0o600
+    # 第二次复用同一 token
+    token2, source2 = _resolve_api_token(tmp_path, env={})
+    assert token2 == token and "新生成" not in source2
+    # env 优先
+    token3, source3 = _resolve_api_token(tmp_path, env={"WHALE_API_TOKEN": "envtok"})
+    assert token3 == "envtok"
+
+
+def test_build_api_server_demo(tmp_path, monkeypatch, capsys):
+    from types import SimpleNamespace
+    from whale_core.cli.main import _build_api_server
+    monkeypatch.delenv("WHALE_API_TOKEN", raising=False)
+    (tmp_path / "config.json").write_text('{"profile": "demo"}', encoding="utf-8")
+    args = SimpleNamespace(config_dir=str(tmp_path), host="127.0.0.1", port=0)
+    server, token, source = _build_api_server(args)
+    try:
+        assert server.port != 0  # 绑定临时端口
+        assert token
+        out = capsys.readouterr().out
+        assert "[mock]" in out  # demo 档 notes 诚实标注
+    finally:
+        server.stop()
+
+
+def test_api_subcommand_registered():
+    from whale_core.cli.main import build_parser
+    parser = build_parser()
+    # api 子命令存在且带 host/port
+    actions = [a for a in parser._subparsers._group_actions[0].choices]  # noqa: SLF001
+    assert "api" in actions
