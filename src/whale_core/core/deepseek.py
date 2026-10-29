@@ -68,7 +68,8 @@ class DeepSeekCompanion:
 
     def reply(self, text: str, *, persona: str = "", memories: Sequence[str] = (),
               history: Sequence[Mapping[str, str]] = ()) -> str:
-        if not self.api_key:
+        if not self.api_key and not _is_local_or_private_http(self.base_url):
+            # 回环/私网 http 端点（如本地 Ollama）允许无 key；云端端点必须配置
             raise ModelError("config", "DEEPSEEK_API_KEY not configured")
         system = ("你是鲸鱼，一个尊重边界、自然、有连续记忆的陪伴好友。"
                   "不编造亲身经历。"

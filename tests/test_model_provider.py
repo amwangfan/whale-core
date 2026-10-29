@@ -120,6 +120,14 @@ def test_missing_key_is_config_error():
     assert ei.value.kind == "config"
 
 
+def test_local_endpoint_allows_empty_key(monkeypatch):
+    """local 配置档：回环 http 端点（如 Ollama）无 key 也可调用。"""
+    calls = _fake_urlopen(monkeypatch, ["ok"])
+    d = DeepSeekCompanion(api_key="", base_url="http://127.0.0.1:11434/v1")
+    assert d.reply("hi") == "回了"
+    assert calls["n"] == 1
+
+
 def test_timeout_flows_through(monkeypatch):
     calls = _fake_urlopen(monkeypatch, ["ok"])
     d = DeepSeekCompanion(api_key="k", base_url="https://api.deepseek.com", timeout=7.5)
