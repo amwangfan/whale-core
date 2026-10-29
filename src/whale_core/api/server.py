@@ -106,6 +106,11 @@ class _Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         if not path.startswith(f"/api/{API_VERSION}/"):
+            # 非 API 路径：静态控制台（web/dist）。静态资源不鉴权（API 全部鉴权；
+            # 绑定默认回环；SPA 需先加载才能走登录流程）。
+            if method == "GET" and self.server.static_dir:  # type: ignore[attr-defined]
+                self._serve_static(path)
+                return
             self._send(404, _error("not_found", "unknown endpoint"))
             return
         if not self._authorized():
@@ -140,6 +145,32 @@ class _Handler(BaseHTTPRequestHandler):
             self._events_sse()
         else:
             self._send(404, _error("not_found", "unknown endpoint"))
+
+    # ---- 静态控制台（SPA） ----
+    _STATIC_TYPES = {
+        ".html": "text/html", ".js": "text/javascript", ".css": "text/css",
+        ".json": "application/json", ".svg": "image/svg+xml",
+        ".png": "image/png", ".ico": "image/x-icon", ".woff2": "font/woff2",
+        ".txt": "text/plain", ".map": "application/json",
+    }
+
+    def _serve_static(self, path: str) -> None:
+        from pathlib import Path
+        root: Path = self.server.static_dir  # type: ignore[attr-defined]
+        rel = path.lstrip("/") or "index.html"
+        target = (root / rel).resolve()
+        # 防目录穿越：必须落在 root 内
+        if root not in target.parents and target != root:
+            self._send(403, _error("forbidden", "path outside static root"))
+            return
+        if not target.is_file():
+            target = root / "index.html"  # SPA 回落
+            if not target.is_file():
+                self._send(404, _error("not_found", "console not built (web/dist missing)"))
+                return
+        ctype = self._STATIC_TYPES.get(target.suffix.lower(), "application/octet-stream")
+        data = target.read_bytes()
+        self._send(200, data, content_type=ctype)
 
     # ---- 路由实现 ----
     def _status(self) -> None:
@@ -317,10 +348,14 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 class WhaleApiServer:
-    """管理 API 服务：默认 127.0.0.1，token 必填。"""
+    """管理 API 服务：默认 127.0.0.1，token 必填。
+
+    ``static_dir`` 给定时（指向 web/dist 构建产物），GET 非 /api/ 路径按 SPA
+    方式提供静态文件（防目录穿越；非文件路径回落 index.html）。
+    """
 
     def __init__(self, ctx: ApiContext, *, host: str = "127.0.0.1", port: int = 8080,
-                 token: str = "") -> None:
+                 token: str = "", static_dir: str | None = None) -> None:
         if not token:
             raise ValueError("API token is required (management API must not be unauthenticated)")
         self.ctx = ctx
@@ -328,6 +363,11 @@ class WhaleApiServer:
         self._httpd = ThreadingHTTPServer((host, port), _Handler)
         self._httpd.ctx = ctx       # type: ignore[attr-defined]
         self._httpd.token = token   # type: ignore[attr-defined]
+        # 静态目录词法归一 + resolve，供穿越校验
+        from pathlib import Path
+        self._httpd.static_dir = (  # type: ignore[attr-defined]
+            Path(static_dir).resolve() if static_dir else None
+        )
         self._thread: threading.Thread | None = None
 
     @property

@@ -214,3 +214,37 @@ def test_events_sse_replay(api):
 def test_server_requires_token():
     with pytest.raises(ValueError):
         WhaleApiServer(ApiContext(store=InMemoryStore()), port=0, token="")
+
+
+# ---------- 静态控制台（SPA） ----------
+
+@pytest.fixture()
+def api_static(tmp_path):
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<html>console</html>", encoding="utf-8")
+    (dist / "assets" / "app.js").write_text("console.log(1)", encoding="utf-8")
+    ctx = ApiContext(store=InMemoryStore())
+    server = WhaleApiServer(ctx, port=0, token=TOKEN, static_dir=str(dist))
+    server.start()
+    yield server
+    server.stop()
+
+
+def test_static_index_and_spa_fallback(api_static):
+    status, raw = _req(api_static, "GET", "/", token="")  # 静态资源不鉴权
+    assert status == 200 and b"console" in raw
+    status, raw = _req(api_static, "GET", "/plugins/whatever", token="")
+    assert status == 200 and b"console" in raw  # SPA 回落
+
+
+def test_static_traversal_blocked(api_static):
+    status, _ = _req(api_static, "GET", "/../secrets", token="")
+    assert status in (403, 404)  # 穿越被拒（http.client 可能先归一化路径）
+    status, raw = _req(api_static, "GET", "/assets/app.js", token="")
+    assert status == 200
+
+
+def test_static_absent_dir_404(api):
+    status, raw = _req(api, "GET", "/", token="")
+    assert status == 404
