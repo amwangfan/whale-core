@@ -197,6 +197,16 @@ class PluginManager:
             self._schemas.pop(pid, None)
         state = PluginState(plugin_id=pid, status="loaded", manifest=manifest)
         self._states[pid] = state
+        # Upgrade legacy configs which stored plain secret values in SQLite.
+        # A missing/unwritable private directory is reported as an error rather
+        # than silently leaving tokens in the ordinary kv.
+        previous = self._store.get(self._config_key(pid))
+        if isinstance(previous, Mapping):
+            try:
+                self.set_config(pid, previous)
+            except (OSError, ValueError) as exc:
+                self.errors.append({"path": source,
+                                    "error": "secret migration failed: " + type(exc).__name__})
         # 回放持久化启停状态：enabled 的插件重新注册，disabled 的保持禁用
         persisted = self._store.get(self._state_key(pid))
         if isinstance(persisted, Mapping):
@@ -472,16 +482,33 @@ class PluginManager:
         self._save_secrets(plugin_id, secrets or {})
         self._store.put(self._config_key(plugin_id), plain)
 
+    @classmethod
+    def _apply_patch(cls, current: dict, changes: Mapping[str, Any]) -> None:
+        for key, value in changes.items():
+            if value is None:
+                current.pop(key, None)
+            elif value == "***":
+                continue  # untouched masked secret
+            elif isinstance(value, Mapping) and isinstance(current.get(key), Mapping):
+                nested = dict(current[key])
+                cls._apply_patch(nested, value)
+                current[key] = nested
+            elif isinstance(value, list) and isinstance(current.get(key), list):
+                # UI may round-trip masked nested list entries unchanged.
+                old = current[key]
+                current[key] = [
+                    old[i] if item == "***" and i < len(old) else item
+                    for i, item in enumerate(value)
+                ]
+            else:
+                current[key] = value
+
     def patch_config(self, plugin_id: str, changes: Mapping[str, Any]) -> None:
         """PATCH semantics: absent keys stay; null deletes; *** preserves secrets."""
         if not isinstance(changes, Mapping):
             raise ValueError("config changes must be an object")
         current = self.runtime_config(plugin_id)
-        for key, value in changes.items():
-            if value is None:
-                current.pop(key, None)
-            elif value != "***":
-                current[key] = value
+        self._apply_patch(current, changes)
         self.set_config(plugin_id, current)
 
     def config_view(self, plugin_id: str) -> dict[str, Any]:
