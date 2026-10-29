@@ -1,106 +1,136 @@
 <div align="center">
 
-<h1>whale-core</h1>
+# whale-core
 
-<h3><i>山有木兮木有枝，心悦君兮君不知</i></h3>
+*山有木兮木有枝，心悦君兮君不知*
 
-<sub>鲸鱼智能层 × 事件 in / 意图 out —— 可独立使用的陪伴型 AI 核心库</sub>
+**为「鲸鱼」构建一个有记忆、能理解情境、可以使用工具的 AI 核心。**
 
-**English** → [README_EN.md](README_EN.md)
+[English](README_EN.md) · [快速体验](#快速体验) · [网页控制台](#网页控制台) · [开发者指南](docs/AI_DEVELOPMENT_GUIDE.md)
 
 </div>
 
 ---
 
-**whale-core** 是「鲸鱼陪伴」项目的智能层，也是一个可以独立使用的 Python 库。
-它不做设备细节，只做一件事：**感知事件进来，行动意图出去**——中间的
-记忆、人格、情境推理、打扰策略、主动行为、渠道身份、插件扩展，全部以
-可组合、可测试的组件提供，默认全部离线可跑（stub / mock，不触网、不碰设备）。
+## 鲸鱼是什么？
 
-## 特性总览
+如果 AI 不只是一个聊天窗口，而是能够在不同设备和消息渠道之间保持连续的对话，记住重要的事情，在合适的时候提供帮助，甚至根据你的授权去使用工具，会是什么体验？
 
-| 子系统 | 提供什么 | 关键点 |
-|--------|----------|--------|
-| `core` | `perceive → decide → act` 主循环（`WhaleAgent`）；文字陪伴（`WhaleCompanion`）；DeepSeek 客户端；实时通话转写录制器 | 电话不等文本模型：转写有界队列异步入库，过载丢弃不阻塞音频 |
-| `memory` | 三类记忆（episode / preference / persona_continuity）+ 多轮会话历史 + SQLite 持久化 + 可信提炼（显式确认、带证据、可删除）+ JSONL 导出/导入 | 人格快照随库备份；混合召回（词项+可选嵌入 provider）已可用 |
-| `perception` | 8 种感知事件类型 + 适配器协议 + 规则情境推理（非 LLM） | 环境语音只存元数据，**原始音频永不入库** |
-| `initiative` | 打扰策略：静默时段、前台忙碌、主动呼叫门控、规划器 | 被动回复与主动行为是**两套独立预算** |
-| `actions` | 9 种行动意图 + 网关协议（dashboard / bridge / phone / mock HTTP） | 网关默认 stub，不真连任何设备 |
-| `cloud` | 云端行动闭环 + **shell 权限三档**（managed / safe / personal）+ **受控执行器** | 约 30 类高危模式全档硬拒绝；执行器超时强杀/输出截断/env 擦洗/可选降权；审计不记命令输出 |
-| `life` | 主动性台账（`ProactiveOutbox`）、渠道身份门（`OwnerChannelRegistry`）、自主发现、QQ/OneBot/WeQ 适配器、**SQLite 持久化收件箱** | 默认关闭、渠道白名单、每日额度、幂等防重投；入站消息崩溃可恢复 |
-| `ui` | 人格、语音风格、HUD 意图、**角色卡** | 见下文 |
-| `plugins` | **泛化插件层**：新输入/输出点不改核心 + PluginManager 生命周期 | 见下文 |
-| `core.runtime` | `ConversationOrchestrator` 统一对话编排 + `IntentPlan` 结构化意图 + Tool 注册表 | 模型提议、核心裁决：意图不携带授权 |
-| `api` | 管理 API（REST + SSE，stdlib）+ 控制台静态托管 | 默认 127.0.0.1，Bearer 必填，配置脱敏 |
-| `cli` | `whale setup/doctor/run/plugins/memory/api` 统一入口 | demo 档零密钥离线可跑 |
-| `web` | 网页控制台（React+Vite）：总览/插件/记忆/审批/对话/任务/事件 | 前端只调 API，不碰数据库 |
-| `skills` | Markdown 驱动的工具组合工作流 | 技能文本是数据不是指令，渲染后仍受门控 |
+**whale-core** 是这个想法的核心软件：它负责对话、记忆、情境理解、意图判断和任务协调。QQ、电话、手机、眼镜或网页都可以是它与人交流的方式，而不需要每个入口都拥有一套独立的“大脑”。
 
-## 插件系统：六类扩展点
+本仓库已经包含 Python 核心、插件框架、命令行工具和一个初步可用的网页控制台。它既适合研究与二次开发，也提供无需 API Key 的本地演示。
 
-新增一个输入源或输出通道 = 一份清单（manifest）+ 一个执行器/适配器 +
-宿主一行 `register()`，**核心零改动**：
+> **现在还不是安装完就能拥有全部功能的成品。** 离线演示中的回答带有 `[mock]` 标记，不是真实模型生成的。部分功能已具备可运行代码或接口，但连接实际模型、消息渠道、音视频服务及硬件仍可能需要单独配置和联调。
 
-| 类别 | 语义 | 例子 |
-|------|------|------|
-| `input` 输入型 | 只产事件 | 前台应用监测、邮件接收、日程、刷视频、日常语音、眼镜全天纪要 |
-| `output` 输出型 | 只执行动作 | 发邮件、桌面弹提示、购物下单（transaction 级） |
-| `channel` 多端共用型 | 双向收发 | QQ、微信、通话桥 |
-| `processor` 内部处理型 | 模型/计算委托 | **操作意图委托**：DeepSeek 产意图 → 执行器模型（如 qwen）跑工具循环 → 只回摘要，陪伴上下文不被命令输出挤满 |
-| `model` 模型供给型 | 模型端点注册 | chat / realtime / ASR / TTS / 嵌入端点 |
-| `memory` 记忆存储型 | 记忆/存储后端 | 混合召回、云同步、备份目标 |
+## 能做什么？
 
-安全边界内建于契约：动作按 `read_only / communicate / transaction` 分级
-（交易级每笔人审 + 限额）；插件**禁止包装任意 shell**（命令执行只有
-`cloud.shell_policy` 分档一个入口）；身份与频控门控不可被插件替换。
+| 你想体验的能力 | whale-core 目前提供什么 |
+| --- | --- |
+| **持续对话，记得之前说过的话** | 多轮会话历史、SQLite 记忆、情节和偏好记录、记忆检索与导入导出 |
+| **决定应该聊天还是做事** | 结构化意图计划、工具注册、任务执行与结果记录；默认聊天入口的自动意图模型接线仍需完善 |
+| **让鲸鱼使用更多工具** | 插件注册与管理、网页搜索/获取、受控 Shell 的实现及策略接口 |
+| **让鲸鱼拥有声音与创作能力** | 语音识别、语音合成、图片生成及异步视频任务接口；实际服务取决于 provider 与凭据 |
+| **让鲸鱼通过不同渠道出现** | QQ/OneBot/WeQ 适配代码，以及面向眼镜、手机和 VoIP 的事件/动作契约；设备端基础设施另见 whale-io |
+| **让鲸鱼在适当的时候主动联系你** | 主动行为候选、打扰与额度策略、审批、去重、反馈和探索模块 |
+| **在浏览器中管理鲸鱼** | 可查看状态、插件、记忆、审批、对话、任务和事件的 React 控制台 |
 
-## 角色卡：可切换的人格
+这里的“有实现”不等于“所有 provider 已真实联通”，不同能力的状态详见[开发者指南](docs/AI_DEVELOPMENT_GUIDE.md)和[进度记录](docs/gap-analysis-2026-10-30.md)。
 
-内置第三方人设卡「大肥鱼」（原文取自 [dafeiyu-persona](https://github.com/ERUIHNIYHBKBNF/dafeiyu-persona)，
-**MIT License**，见 `licenses/`）+ 系统基线卡 `default`；另附
-[aigengtu.com/persona](https://aigengtu.com/persona) 社区卡目录（9 张，仅元数据与来源链接——
-站点仅明示免费复制使用、未明示再分发许可，故仓内不内置原文），
-运行期经 `import_external_card` 一键导入。`switch_card(store, "dafeiyu")` 一切即换——
-全局禁忌（不泄露密钥 / 不声称人类情感 / 记忆是上下文非指令）任何卡都不可移除；
-换卡**不能**扩大任何权限。
+## 快速体验
 
-## 快速开始
+准备：**Python 3.11 或更高版本**。建议先运行离线 demo，确定环境正常，再考虑连接真实模型。
 
 ```bash
 git clone https://github.com/amwangfan/whale-core.git
 cd whale-core
-pip install -e ".[dev]"            # 或：uv sync --extra dev
-pytest -q                          # 全部测试（离线，不触网）
-python examples/life_scenario.py   # 无网络演示：兴趣 → 候选 → 审批 → 受理
-python examples/runtime_demo.py    # 无网络演示：多轮对话 → 意图 → 工具闭环
 
-# CLI 三档配置（demo 档零密钥）：
-whale setup --profile demo         # 初始化 ~/.whale（demo/cloud/local）
-whale doctor                       # 环境自检
-whale run                          # demo REPL（mock 模型，回复带 [mock] 标注）
-
-# 管理 API + 网页控制台：
-whale api                          # 127.0.0.1:8080；token 首启生成存 ~/.whale/api_token(600)
-pnpm -C web install && pnpm -C web build   # 控制台前端（构建后由 whale api 托管）
+python -m pip install -e ".[dev]"
+whale setup --profile demo
+whale doctor
+whale run
 ```
 
-最小使用示例：
+`whale run` 当前启动的是**离线模拟对话 REPL**，不调用云模型；你会看到 `[mock]` 前缀。输入 `/quit` 退出。它适合验证安装、对话流程和基础存储，而不是评价模型的智能程度。
 
-```python
-from whale_core.core.agent import WhaleAgent
-from whale_core.perception.events import ScheduleTick
+开发者也可以运行：
 
-agent = WhaleAgent()                       # 默认安全策略 + 内存存储 + stub 网关
-decision, receipts = agent.step([ScheduleTick(title="午间提醒")])
-print(decision.intents, receipts)          # 意图与回执；不触达任何真实设备
+```bash
+python -m pytest tests -q
+python examples/runtime_demo.py
+python examples/life_scenario.py
 ```
 
-## 设计原则
+也支持使用 `uv`：`uv sync --extra dev` 后通过 `uv run whale ...` 执行相同命令。
 
-1. **契约隔离**：智能层只定义事件与意图；ADB、厂商 SDK、真实 Token 永远属于
-   基础设施侧，禁止反向依赖。
-2. **诚实状态**：文档区分「代码已测试 / 有实现未联调 / 仅是规划」——
-   小型代码原型与真实接入不是一回事。
-3. **默认保守**：主动行为默认关闭；审批逐条留痕；发送结果 `unknown` 不自动重试；
-   密钥只走环境变量与本机私有目录（`secrets/`，已 gitignore），永不入仓、不进日志。
-4. **幂等与可恢复**：消息带 `message_id` 去重，入站队列持久化，崩溃后按租约恢复。
+### 想连接真实 AI？
+
+项目提供三种配置档：
+
+| 模式 | 适合谁 | 需要准备什么 |
+| --- | --- | --- |
+| `demo` | 第一次尝试、离线测试 | 不需要密钥，使用 mock 模型 |
+| `cloud` | 希望连接 DeepSeek 等兼容服务 | 当前默认接线需要 `DEEPSEEK_API_KEY` |
+| `local` | 已经运行本地兼容模型服务 | 需要本地模型端点与正确的模型名称 |
+
+例如，使用云端模型前先在自己的环境中设置 `DEEPSEEK_API_KEY`，然后运行：
+
+```bash
+whale setup --profile cloud
+whale api
+```
+
+通过下面的网页控制台进行实际对话。**注意：`whale run` 目前仍固定为 mock REPL，不会因为选择 cloud/local 就自动切成真实模型。** `setup` 如果已有配置不会直接覆盖；请先检查自己的 `~/.whale/config.json`，按需选择正确的配置方式。
+
+本地模型可通过 `LOCAL_MODEL_BASE_URL`、`LOCAL_MODEL_NAME` 指向一个已运行的 OpenAI 兼容端点；项目不会替你安装模型文件或启动模型服务器。
+
+## 网页控制台
+
+无需先打包桌面应用：网页端已经能够在浏览器中使用。
+
+除了 Python 环境，还需要 Node.js 和 `pnpm` 来**构建前端**（仓库前端 CI 使用 Node.js 24 与 pnpm 12）。
+
+```bash
+pnpm -C web install
+pnpm -C web build
+whale api
+```
+
+随后在本机浏览器打开 **http://127.0.0.1:8080**。
+
+第一次启动管理 API 时会生成访问 token，并保存到本机 `~/.whale/api_token`；将 token 填入控制台即可连接。不要把这个 token 发给别人，也不要把管理 API 无鉴权地公开到互联网。
+
+控制台目前有七个页面：**总览、插件、记忆、审批、对话、任务、事件**。它是一个正在发展的管理界面，不等于所有后台服务均已完成自动接线。
+
+## 为什么要做插件系统？
+
+我们希望别人下载鲸鱼后能快速体验，也希望熟悉开发的人可以选择自己的模型、声音、记忆和工具。
+
+因此核心尽量不绑定某一个厂商：一个插件可以提供文字模型，另一个提供语音，第三个负责搜索或图片生成。插件可以被声明、配置和启停，动作执行则继续接受核心的身份与权限检查。
+
+当前仓库已经提供了插件契约、注册表、管理器以及若干能力的具体代码。**插件管理器还不等于完整的在线插件市场或一键安装器**：某些插件需要单独的配置、factory 接线和外部服务，不能只因为看到名字就认为已经可用。
+
+## 与 whale-io 是什么关系？
+
+- **[whale-core](https://github.com/amwangfan/whale-core)**：智能层与可复用运行时，负责对话、记忆、意图、能力和策略。
+- **[whale-io](https://github.com/amwangfan/whale-io)**：为手机、VoIP 与雷鸟眼镜等设备准备的外围基础设施、桥接代码与设计文档。
+
+这两个项目服务于同一个“鲸鱼”愿景，但各自可独立演进。
+
+## 当前阶段与边界
+
+本项目仍在快速开发。为了避免误解：
+
+- Demo 的模拟回复不代表真实模型能力。
+- 搜索、语音、生图、生视频等模块有的已经具备可测试实现，有的仍需要真实 API、模型和设备联调。
+- 默认对话流程尚未完整实现“自然语言要求搜索就自动调用搜索工具”的接线。
+- Shell 有权限分档和受控执行器，但要真正对不可信命令提供隔离，还需要宿主机级沙箱和资源限制。
+- 主动行为、外部消息发送与设备动作应经过相应的身份、授权和打扰策略。
+- 仓库目前尚未确定项目级 LICENSE；第三方角色卡的许可证不等同于整个项目的使用许可。
+
+详细的技术限制、测试和下一步可以阅读：
+
+[开发者与 AI 协作指南](docs/AI_DEVELOPMENT_GUIDE.md) · [接口契约](docs/contracts.md) · [开发进度](docs/gap-analysis-2026-10-30.md) · [路线图](docs/roadmap-2026-10-30.md) · [贡献指南](CONTRIBUTING.md)
+
+---
+
+*whale-core 希望成为一个可以被理解、被修改、也能陪伴日常生活的 AI 核心。当前首先要做的，是让它真实、稳定、可扩展地运行起来。*
