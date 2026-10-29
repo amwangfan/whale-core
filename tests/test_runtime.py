@@ -263,3 +263,20 @@ def test_invalid_tool_risk_rejected():
     except ValueError:
         return
     raise AssertionError("invalid risk class must fail")
+
+
+def test_task_turn_is_recorded_for_console():
+    """任务轨迹落库（roadmap §5.2-6：区分模型提出与实际执行）。"""
+    store, brain = InMemoryStore(), FakeBrain()
+    tools = ToolRegistry()
+    tools.register(ToolSpec(name="search_web", capability="web.search",
+                            handler=lambda a: "结果文本"))
+    orch = _orch(store, brain, intent_model=ScriptedIntentModel(
+        _plan_text(capabilities=["web.search"], task_id="t-99")), tools=tools)
+    result = orch.handle_message("c", "查一下")
+    assert result.task_id == "t-99"
+    record = store.get("task:t-99")
+    assert record["goal"] == "测试目标"
+    assert record["status"] == "answered"
+    assert record["receipts"][0].startswith("tool:search_web:ok:")
+    assert store.get("tasks:recent") == ["t-99"]

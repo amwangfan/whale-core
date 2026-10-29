@@ -248,3 +248,37 @@ def test_static_traversal_blocked(api_static):
 def test_static_absent_dir_404(api):
     status, raw = _req(api, "GET", "/", token="")
     assert status == 404
+
+
+# ---------- tasks 轨迹（PR-13 API 侧） ----------
+
+def test_tasks_endpoint_lists_recorded_tasks(api):
+    # 走一次 task 型对话（无意图模型不会产任务——直接测 store 形状 + 端点）
+    store = api.ctx.store
+    store.put("task:t1", {"task_id": "t1", "at": 1.0, "goal": "g",
+                          "status": "answered", "capabilities": ["web.search"],
+                          "receipts": ["tool:search_web:ok:x"]})
+    store.put("tasks:recent", ["t1"])
+    status, raw = _req(api, "GET", "/api/v1/tasks")
+    assert status == 200
+    tasks = _json(raw)["result"]["tasks"]
+    assert tasks[0]["task_id"] == "t1"
+    status, raw = _req(api, "GET", "/api/v1/tasks/t1")
+    assert status == 200
+    status, _ = _req(api, "GET", "/api/v1/tasks/nope")
+    assert status == 404
+
+
+def test_plugin_config_set_and_masked_view(api):
+    mgr = api.ctx.manager
+    status, raw = _req(api, "POST", "/api/v1/plugins/web_search/config",
+                       body={"config": {"api_key": "sekrit-123", "region": "us"}})
+    assert status == 200
+    # info 里的 config 是脱敏视图：键名含 key 的值被打码
+    status, raw = _req(api, "GET", "/api/v1/plugins/web_search")
+    config = _json(raw)["result"]["config"]
+    assert config.get("region") == "us"
+    assert "sekrit-123" not in raw.decode()
+    status, _ = _req(api, "POST", "/api/v1/plugins/nope/config",
+                     body={"config": {}})
+    assert status == 404

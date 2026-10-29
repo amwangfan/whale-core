@@ -139,6 +139,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._memory(method, parts, query)
         elif head == "chat" and method == "POST":
             self._chat()
+        elif head == "tasks":
+            self._tasks(method, parts)
         elif head == "approvals":
             self._approvals(method, parts)
         elif head == "events" and method == "GET":
@@ -216,6 +218,22 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if len(parts) == 3:
             pid, action = parts[1], parts[2]
+            if action == "config" and method == "POST":
+                body = self._body_json()
+                if body is None or not isinstance(body.get("config"), dict):
+                    self._send(400, _error("bad_request", "body must contain config object"))
+                    return
+                try:
+                    mgr.set_config(pid, body["config"])
+                except KeyError:
+                    self._send(404, _error("not_found", f"unknown plugin {pid!r}"))
+                    return
+                except ValueError as exc:
+                    self._send(422, _error("invalid_config", str(exc)[:200]))
+                    return
+                self.ctx.log_event("plugin:config", pid)
+                self._send(200, _json_bytes({"result": {"plugin_id": pid, "saved": True}}))
+                return
             if action in ("enable", "disable") and method == "POST":
                 try:
                     if action == "enable":
@@ -303,6 +321,26 @@ class _Handler(BaseHTTPRequestHandler):
             "reply": result.reply, "status": result.status,
             "receipts": list(result.receipts), "task_id": result.task_id,
         }}))
+
+    def _tasks(self, method: str, parts: list[str]) -> None:
+        store = self.ctx.store
+        if len(parts) == 1 and method == "GET":
+            index = store.get("tasks:recent") or []
+            tasks = []
+            for task_id in reversed(index[-50:]):
+                record = store.get(f"task:{task_id}")
+                if isinstance(record, dict):
+                    tasks.append(record)
+            self._send(200, _json_bytes({"result": {"tasks": tasks}}))
+            return
+        if len(parts) == 2 and method == "GET":
+            record = store.get(f"task:{parts[1]}")
+            if not isinstance(record, dict):
+                self._send(404, _error("not_found", "no such task"))
+                return
+            self._send(200, _json_bytes({"result": record}))
+            return
+        self._send(404, _error("not_found", "unknown endpoint"))
 
     def _approvals(self, method: str, parts: list[str]) -> None:
         store = self.ctx.store

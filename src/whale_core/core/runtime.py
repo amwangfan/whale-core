@@ -211,9 +211,11 @@ class ConversationOrchestrator:
                 status = "failed"
                 reply = "工具执行出了问题，这次没做成"
             append_turn(self.store, conversation_id, text, reply)
-            return TurnResult(reply=reply, status=status, plan=plan,
-                              receipts=tuple(receipts),
-                              task_id=plan.task_id or plan.intent_id)
+            result = TurnResult(reply=reply, status=status, plan=plan,
+                                receipts=tuple(receipts),
+                                task_id=plan.task_id or plan.intent_id)
+            self._record_task(result)
+            return result
 
         # 6. 工具结果回流陪伴模型（数据注入，受人格禁忌约束）
         if results:
@@ -225,8 +227,29 @@ class ConversationOrchestrator:
             augmented = text + "\n\n[所需工具当前不可用，如实说明]"
         reply = self.companion.chat(augmented, conversation_id=conversation_id)
         status = "answered" if results else "failed"
-        return TurnResult(reply=reply, status=status, plan=plan,
-                          receipts=tuple(receipts), task_id=plan.task_id or plan.intent_id)
+        result = TurnResult(reply=reply, status=status, plan=plan,
+                            receipts=tuple(receipts), task_id=plan.task_id or plan.intent_id)
+        self._record_task(result)
+        return result
+
+    def _record_task(self, result: TurnResult) -> None:
+        """任务轨迹落库（kv `task:{id}` + 环形索引 `tasks:recent` 上限 50）——
+        供控制台「任务与行动」页核对「模型提出」与「实际执行」（roadmap §5.2-6）。"""
+        if result.plan is None:
+            return
+        import time as _time
+        record = {
+            "task_id": result.task_id, "at": _time.time(),
+            "goal": result.plan.goal[:500], "status": result.status,
+            "capabilities": list(result.plan.capabilities),
+            "receipts": list(result.receipts),
+        }
+        self.store.put(f"task:{result.task_id}", record)
+        index = self.store.get("tasks:recent") or []
+        if not isinstance(index, list):
+            index = []
+        index.append(result.task_id)
+        self.store.put("tasks:recent", index[-50:])
 
     def _run_tool(self, spec: ToolSpec, plan: IntentPlan) -> tuple[bool, str]:
         """执行单个工具，返回 (ok, receipt)。风险门控：非只读必经插件网关。"""
