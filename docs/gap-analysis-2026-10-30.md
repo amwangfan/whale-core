@@ -1,0 +1,96 @@
+# 现状—目标差距表与最小实施切片（2026-10-30）
+
+> 依据 [roadmap-2026-10-30.md](roadmap-2026-10-30.md)（v2，含 §15-18 工作约定）§12/§13/§17 产出：
+> 先审查、再给差距、再切片、随后直接进入实现。
+> 状态口径（§17.2）：**implemented（有代码）/ tested（有自动化测试）/ integrated（接入真实运行链路）/
+> externally_verified（真实服务联调）/ stub/mock / missing**；表中用中文等价标注。
+> 评审基线：`main @ b401af7`，`pytest tests/ -q` = **288 passed**（纯离线，参数化展开后），
+> src 约 6.5K LOC，零第三方依赖；QQ 链路在 N100 生产真实运行（收→DeepSeek→审批→实发，
+> 2026-10-30 04:30 端到端验收）。
+> whale-io 侧评审：`docs/architecture.md`、`docs/plugin-architecture.md`（N100 本地副本）；
+> `cloud-model-orchestration.md` / `reference-projects.md` 留待 P1 启动时评审。
+> 评审方式（§16 记录）：三个并行调查子代理分读 core+memory / plugins+actions+cloud /
+> life+perception+initiative+ui+tests（行号级证据），主代理亲读 shell_policy、plugins/manifest、
+> registry、gateway、life/initiative 并复核子代理结论一致性后汇总。
+
+## 1. 差距表（按 roadmap §8 P0 顺序）
+
+| # | 路线图表项 | 现状 | 证据 | 差距 / 行动 |
+|---|-----------|------|------|-------------|
+| 1 | 统一 Runtime / 对话编排 | **stub** | `core/router.py` StubModelRouter 恒返回空 Decision（L21-26）；`core/companion.py` 只有单轮 chat | 无 `WhaleRuntime/ConversationOrchestrator`；无工具循环；事件流（WhaleAgent）与对话流（WhaleCompanion）未统一 |
+| 2 | 结构化 IntentPlan | **缺失** | — | 只有 `ActionIntent` 数据类（core/types.py）；无 goal/槽位/成功条件/澄清/取消语义 |
+| 3 | 插件管理器 | **已有代码（契约层已测试）** | manifest/registry/gateway/policy/processing 真实实现（test_plugins 27 例 + test_plugin_kinds 21 例）；注册只能代码显式 `register()`（registry.py L3-5 明示不做自动发现） | 缺：manifest 文件加载、生命周期（启停持久化）、健康检查、config_schema、api_version 兼容检查 |
+| 4 | 记忆 V1 | **部分已测试，关键断层** | store/sqlite/continuity/curation 真实实现 | ① **chat() 不传 history**（companion.py L28 只传 persona+memories）→ 生产无多轮上下文；② **召回断层**：chat 写入的 episode（tags=("chat",)）永远过不了 `curator.recall` 的 "curated" 过滤（curation.py L79-80）→ 记忆实际是只写不读；③ 无 JSONL 导出/备份 API；④ InMemory 与 Sqlite 三处行为不一致（record key 的 get()、list 顺序、序列化语义） |
+| 5 | 模型 provider | **已联通（未插件化）** | `core/deepseek.py` 真实 urllib HTTP 客户端，生产在用 | 硬编码装配、未注册为 model 插件；无重试/错误分类；base_url 强制 https（L13-14）卡死本地模型（local 配置档前提） |
+| 6 | web.search / web.fetch | **缺失** | `shell_policy.SAFE_EXTRA_TOOLS` 只有工具名（L40-47） | 无任何实现 |
+| 7 | CLI（setup/doctor/run/plugins） | **缺失** | — | 仅 examples/ 两个脚本 |
+| 8 | 网页控制台 MVP | **缺失** | — | 无 web/ 目录、无 API 层；现有 HTTP 仅两个回环事件监听器（wq_push、qq_onebot，均 stdlib ThreadingHTTPServer + token） |
+| 9 | 配置档 demo/cloud/local | **部分** | runner 有 stub 脑回退（DEEPSEEK_API_KEY 缺失时） | 无 profiles/ 正式配置档 |
+| 10 | 基础安全（API 鉴权/Secret 遮蔽/审计） | **部分** | 监听器 Bearer 强制、shell/插件审计脱敏已测试 | API 层不存在；随 PR-7 补齐 |
+| 11 | 发布基础 | **缺失** | 根目录**无 LICENSE**；licenses/ 仅第三方卡许可 | roadmap §10.13 发布阻塞项，需 owner 选定许可证 |
+| 12 | 核心安全不变量（身份门/风险矩阵/频控/审计） | **已测试、已联通** | channels/initiative/plugins/shell_policy 全链路生产在用 | 保持，见 §4 放宽边界 |
+
+## 2. 可复用资产（禁止重写，直接复用）
+
+- **插件四件套**：`plugins/manifest.py`（六分类+风险级+校验）、`registry.py`（显式注册+kind 唯一归属）、`gateway.py`（fail-closed 单一执行点）、`policy.py`（门控矩阵+交易限额带锁预占）；`processing.py`（ProcessorRouter 摘要截断+DelegatingIntentProcessor 工具循环参考实现）。
+- **主动性与账本**：`life/initiative.py` ProactiveOutbox（草稿/裁决/台账/反馈/双配额/unknown 不重试）——生产验证。
+- **QQ 生产链**：`life/wq_push.py`（SSE 监听）、`life/inbox.py`（幂等队列+租约恢复）、`life/qq_weq_plugin.py`（channel 插件范例）、`life/weq_send.py`（真实 tRPC 发送）、`life/full_mode_window.py`（按需开窗）。
+- **人格**：`ui/persona_cards.py`（内置+导入+切换+全局禁忌硬前缀）——生产在用。
+- **API 层技术先例**：wq_push/qq_onebot 的 stdlib `http.server.ThreadingHTTPServer` + token 模式，离线可测。
+- **云端闭环骨架**：`cloud/loop.py`（规则选择器+门控裁决真实，派发端 stub）——PR-2 的 Runtime 可与之合流。
+
+## 3. 最小实施切片（PR 序列）
+
+每片一个可验收目标：目的 / 范围 / 测试 / 回滚 = revert。依赖序严格按 roadmap §8「重要依赖顺序」。
+
+| PR | 目标 | 主要新增/改动 | 验收要点 |
+|----|------|--------------|----------|
+| **PR-0** 文档与合规 | 任务书与差距表入仓；LICENSE 落地 | `docs/roadmap-2026-10-30.md`、本文档、`LICENSE`（等 owner 选定）、README 状态表 | CI 绿；文档状态口径诚实 |
+| **PR-1** 记忆 V1 修复 | 补齐 roadmap §7.4 三个已确认缺口 | `core/companion.py`（传 history，会话环形缓冲存 MemoryStore kv）、`memory/curation.py`（chat episode 可按衰减召回，curated 仍优先且证据语义不动）、`memory/store.py`+`sqlite_store.py`（行为对齐+parity 测试）、`memory/export.py`（JSONL 导出/删除已有 delete 对齐） | 多轮对话测试（模型侧断言收到 history）；召回测试；parity 参数化测试；288+ 全绿 |
+| **PR-2** IntentPlan + Runtime 骨架 | 结构化意图 + 统一对话编排 | `core/intent_plan.py`（IntentPlan schema+校验+澄清态）、`core/runtime.py`（ConversationOrchestrator：上下文组装→意图校验→能力选择→策略门控→执行→回执，复用 PluginGateway/Outbox）；StubModelRouter 标注为测试替身并给「未配置」显式错误路径 | 意图 Schema 负向测试；模型不能自批的测试；闭环走 mock executor |
+| **PR-3** PluginManager | 清单文件加载 + 生命周期 | `plugins/manager.py`（manifest JSON 目录加载——**显式启用清单，非自动发现**；enable/disable 持久化到 kv；healthcheck 协议；api_version 兼容检查） | 加载/启停/健康检查测试；禁用后能力消失测试；故障隔离测试 |
+| **PR-4** 模型 provider 化 | DeepSeek 注册为 model 插件（provides `llm.chat`） | `plugins/model_openai_compatible/`（官方插件，含超时/错误分类/有限重试）；base_url 允许 `http://127.0.0.1`/回环（local 档前提）；runner 装配改走 capability 解析 | 回环 mock HTTP 测试；失败回退可理解错误 |
+| **PR-5** 搜索工具 | `web.search` + `web.fetch` 官方插件 | `plugins/search_web/`（可插拔 provider，默认免 key 实现）+ `plugins/web_fetch/`（stdlib 抓取+正文提取；SSRF：拦回环/私网/元数据地址、限大小限超时——可配置白名单） | 离线 mock 测试；SSRF 负向测试；回答带来源链接 |
+| **PR-6** CLI | `whale setup/doctor/run/plugins` | `cli/`（argparse stdlib）；pyproject entry point | 各子命令冒烟测试 |
+| **PR-7** API 层 | REST + SSE，token 鉴权 | `api/`（stdlib ThreadingHTTPServer，沿用 wq_push 模式；路由按 roadmap §5.3 轮廓；统一错误格式；默认 127.0.0.1） | 未授权拒绝测试；Secret 不回显测试；离线回环测试 |
+| **PR-8** 控制台 MVP | 总览/Providers/插件/记忆/审批/日志 | `web/`（TS+React+Vite；前端只调 API） | 构建进 CI；页面对齐 roadmap §5.2 验收 |
+| **PR-9** 配置档 | demo/cloud/local | `profiles/` + CLI 接线 | 离线 demo 零密钥启动验收 |
+
+**P0 端到端主线**（roadmap §13.5）：PR-1→2→4→5 完成后即具备「多轮对话 → 记忆召回 → 搜索工具 → 带来源总结」；PR-7/8 让控制台可见可管。
+
+## 4. 安全限制现状评估与放宽边界（owner 已定方向 2026-10-30：「合理放宽，不过于严格」）
+
+背景：当前是**单 owner 个人陪伴**部署。部分保守默认面向「多用户/不可信环境」设计，对 owner 体验构成摩擦。放宽原则：**做成可配置策略 + 单 owner 场景的合理默认值，而不是删除机制**；面向他人安全的底线不动。
+
+### 放宽（做成配置项/放宽默认）
+
+| # | 现状 | 改法 |
+|---|------|------|
+| R1 | communicate 动作一律逐笔人审；生产靠 `--live-auto-send`+env 双开关旁路 | 审批策略按风险级可配置：`read_only` 恒自动；`communicate` 对 owner 绑定渠道可配 `auto`（默认仍 `ask`）；双开关语义并入正式配置，保留启动横幅公示 |
+| R2 | 主动行为 `daily_limit=2`、被动回复静默豁免核心默认 False | 默认值放宽：主动默认 10/日；被动豁免静默默认 True（runner 已显式开启，与生产对齐）；全部保持可配 |
+| R3 | DeepSeek base_url 强制 https | 允许回环/私网 http（`http://127.0.0.1`、`http://10/172.16/192.168` 段）；公网 http 仍拒绝 |
+| R4 | 记忆写入长期事实需显式 consent 参数 | owner 直聊消息视为 consent（陪伴场景「记住我」是默认期待）；curator 证据/来源/可删除语义不动；提供「忘掉」命令路径 |
+
+### 保持不动（底线，不参与放宽）
+
+身份门与渠道白名单（保护的是 owner 自己的账号风控）；transaction 逐笔人审+限额；Shell 33 条硬拒清单（全是灾难级：rm 根目录/fork bomb/关防火墙/抹审计/git push --force 等，无误伤日常）；密钥不进日志/manifest；注入防护（卡片/记忆=上下文非指令）；发送结果 unknown 不自动重试；插件不做自动发现（PR-3 是「显式清单加载」不是自动扫描）；GLOBAL_TABOOS 4 条。
+
+## 5. 风险与注意事项
+
+- **stdlib API vs FastAPI**：选 stdlib 保离线测试 purity，代价是手写路由/SSE；若后续要 WebSocket 再评估（SSE 对控制台推送已够）。
+- **免 key 搜索**（如 DDG HTML 端点）稳定性一般：provider 必须可插拔，失败有明确错误。
+- **记忆自动召回打通后**，召回质量靠词项匹配（bigram）——embedding 混合召回是 P1 可选项，不在 P0。
+- **web/ 前端**引入首个 Node 工具链：构建产物不入库，CI 构建即可。
+- 每次 PR 同步更新本文档状态列；诚实标注，不把 stub 说成已联通。
+
+## 6. 并行分工约定（roadmap §16 落地）
+
+| 角色 | 承担 | 实例 |
+|------|------|------|
+| 主代理（本会话） | 架构决策、接口冻结、集成、全量测试、对外报告；core/ 与 life/ 等共享文件的直接改动 | 本差距表；各 PR 的契约定义与合入 |
+| 调查/研究子代理 | 只读调研，出证据报告 | 本次三路线现状精读 |
+| 实现子代理 | 边界清晰、文件不重叠的模块实现（契约由主代理先冻结） | PR-1 起按模块切分 |
+| 独立审查子代理 | 安全敏感 PR（审批/密钥/SSRF/删除语义）的独立评审，与实现者分离 | PR-1 记忆删除语义、PR-5 SSRF、PR-7 鉴权 |
+
+冲突规避：同一文件不并行；共享契约（IntentPlan、Capability schema、API 路由）主代理先定稿再分包。
+Token 约定（§15）：以工程质量为先，充分迭代「分析→实现→测试→审查→修正」，不为省 token 省略测试与审查。
