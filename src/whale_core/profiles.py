@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Mapping
 
@@ -80,7 +81,7 @@ def assemble_runtime(
     store = store or _default_store(config_dir)
     registry = PluginRegistry()
     manager = PluginManager(registry, store,
-                            secret_dir=(__import__('pathlib').Path(config_dir) / 'secrets') if config_dir else None)
+                            secret_dir=(Path(config_dir) / 'secrets') if config_dir else None)
     tools = ToolRegistry()
     notes: list[str] = []
 
