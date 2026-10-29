@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Callable
 
 from whale_core.core.companion import TextCompanion, WhaleCompanion
+from whale_core.core.memory_commands import handle_memory_command
 from whale_core.life.channels import OwnerEvent
 from whale_core.life.initiative import ProactiveDraft, ProactiveOutbox, ProactivePrefs
 from whale_core.memory.curation import MemoryCurator
@@ -39,39 +40,13 @@ class QqInboundWorkflow:
         self._now = now_fn or (lambda: datetime.now(timezone.utc))
         self._curator = MemoryCurator(store)
 
-    _REMEMBER_PREFIXES = ("记住：", "记住:", "记住 ")
-    _FORGET_PREFIXES = ("忘掉：", "忘掉:", "忘记：", "忘记:", "忘掉 ", "忘记 ")
-
     def _memory_command_reply(self, text: str, event: OwnerEvent) -> str | None:
-        """owner 显式记忆指令（记住/忘掉）；非指令返回 None。
-
-        - 记住：<事实> → curated 稳定事实（consent=True——owner 显式指令即同意；
-          evidence 指向触发消息；stable_fact=True 不衰减）；
-        - 忘掉/忘记：<线索> → 词项召回最相关的一条 curated 记忆并删除；
-          只删 curated 记录（curator.forget 语义），聊天情节不受影响。
-        """
-        for prefix in self._REMEMBER_PREFIXES:
-            if text.startswith(prefix):
-                fact = text[len(prefix):].strip()
-                if not fact:
-                    return "想让我记住什么？"
-                self._curator.remember(
-                    fact, source="qq:owner",
-                    evidence_id=f"qq:{event.conversation}:{event.message_id}",
-                    importance=0.8, confidence=1.0, stable_fact=True, consent=True,
-                )
-                return f"好，我记住啦：{fact[:50]}"
-        for prefix in self._FORGET_PREFIXES:
-            if text.startswith(prefix):
-                clue = text[len(prefix):].strip()
-                if not clue:
-                    return "想让我忘掉什么？"
-                hits = self._curator.recall(clue, limit=1)
-                if hits and self._curator.forget(hits[0].record.key):
-                    summary = str(hits[0].record.content.get("summary", ""))
-                    return f"已忘掉：{summary[:50]}"
-                return "没有找到相关的记忆诶"
-        return None
+        """委托给 core.memory_commands 的共享实现（QQ 侧只提供来源与证据链）。"""
+        return handle_memory_command(
+            self.store, text, source="qq:owner",
+            evidence_id=f"qq:{event.conversation}:{event.message_id}",
+            curator=self._curator,
+        )
 
     def handle_owner_event(self, event: OwnerEvent) -> dict:
         """处理一条已配对的所有者消息，返回结构化结果（不含发送行为）。
