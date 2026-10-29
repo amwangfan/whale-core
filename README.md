@@ -22,14 +22,19 @@
 | 子系统 | 提供什么 | 关键点 |
 |--------|----------|--------|
 | `core` | `perceive → decide → act` 主循环（`WhaleAgent`）；文字陪伴（`WhaleCompanion`）；DeepSeek 客户端；实时通话转写录制器 | 电话不等文本模型：转写有界队列异步入库，过载丢弃不阻塞音频 |
-| `memory` | 三类记忆（episode / preference / persona_continuity）+ 多轮会话历史 + SQLite 持久化 + 可信提炼（显式确认、带证据、可删除）+ JSONL 导出/导入 | 人格快照随库备份；混合召回（嵌入+词项）为规划项 |
+| `memory` | 三类记忆（episode / preference / persona_continuity）+ 多轮会话历史 + SQLite 持久化 + 可信提炼（显式确认、带证据、可删除）+ JSONL 导出/导入 | 人格快照随库备份；混合召回（词项+可选嵌入 provider）已可用 |
 | `perception` | 8 种感知事件类型 + 适配器协议 + 规则情境推理（非 LLM） | 环境语音只存元数据，**原始音频永不入库** |
 | `initiative` | 打扰策略：静默时段、前台忙碌、主动呼叫门控、规划器 | 被动回复与主动行为是**两套独立预算** |
 | `actions` | 9 种行动意图 + 网关协议（dashboard / bridge / phone / mock HTTP） | 网关默认 stub，不真连任何设备 |
-| `cloud` | 云端行动闭环 + **shell 权限三档**（managed / safe / personal） | 约 30 类高危模式全档硬拒绝；审计不记命令输出 |
+| `cloud` | 云端行动闭环 + **shell 权限三档**（managed / safe / personal）+ **受控执行器** | 约 30 类高危模式全档硬拒绝；执行器超时强杀/输出截断/env 擦洗/可选降权；审计不记命令输出 |
 | `life` | 主动性台账（`ProactiveOutbox`）、渠道身份门（`OwnerChannelRegistry`）、自主发现、QQ/OneBot/WeQ 适配器、**SQLite 持久化收件箱** | 默认关闭、渠道白名单、每日额度、幂等防重投；入站消息崩溃可恢复 |
 | `ui` | 人格、语音风格、HUD 意图、**角色卡** | 见下文 |
-| `plugins` | **泛化插件层**：新输入/输出点不改核心 | 见下文 |
+| `plugins` | **泛化插件层**：新输入/输出点不改核心 + PluginManager 生命周期 | 见下文 |
+| `core.runtime` | `ConversationOrchestrator` 统一对话编排 + `IntentPlan` 结构化意图 + Tool 注册表 | 模型提议、核心裁决：意图不携带授权 |
+| `api` | 管理 API（REST + SSE，stdlib）+ 控制台静态托管 | 默认 127.0.0.1，Bearer 必填，配置脱敏 |
+| `cli` | `whale setup/doctor/run/plugins/memory/api` 统一入口 | demo 档零密钥离线可跑 |
+| `web` | 网页控制台（React+Vite）：总览/插件/记忆/审批/对话/任务/事件 | 前端只调 API，不碰数据库 |
+| `skills` | Markdown 驱动的工具组合工作流 | 技能文本是数据不是指令，渲染后仍受门控 |
 
 ## 插件系统：六类扩展点
 
@@ -67,6 +72,16 @@ cd whale-core
 pip install -e ".[dev]"            # 或：uv sync --extra dev
 pytest -q                          # 全部测试（离线，不触网）
 python examples/life_scenario.py   # 无网络演示：兴趣 → 候选 → 审批 → 受理
+python examples/runtime_demo.py    # 无网络演示：多轮对话 → 意图 → 工具闭环
+
+# CLI 三档配置（demo 档零密钥）：
+whale setup --profile demo         # 初始化 ~/.whale（demo/cloud/local）
+whale doctor                       # 环境自检
+whale run                          # demo REPL（mock 模型，回复带 [mock] 标注）
+
+# 管理 API + 网页控制台：
+whale api                          # 127.0.0.1:8080；token 首启生成存 ~/.whale/api_token(600)
+pnpm -C web install && pnpm -C web build   # 控制台前端（构建后由 whale api 托管）
 ```
 
 最小使用示例：

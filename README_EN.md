@@ -26,14 +26,19 @@ devices).
 | Subsystem | What it provides | Highlights |
 |-----------|------------------|------------|
 | `core` | `perceive → decide → act` loop (`WhaleAgent`); text companion (`WhaleCompanion`); DeepSeek client; realtime-call transcript recorder | Calls never wait on the text model: transcripts queue asynchronously (bounded, drop-on-overload), never blocking audio |
-| `memory` | Three memory kinds (episode / preference / persona continuity) + multi-turn session history + SQLite persistence + trusted curation (explicit confirmation, evidence-linked, deletable) + JSONL export/import | Persona snapshots backed up with the store; hybrid recall (embedding + lexical) is planned |
+| `memory` | Three memory kinds (episode / preference / persona continuity) + multi-turn session history + SQLite persistence + trusted curation (explicit confirmation, evidence-linked, deletable) + JSONL export/import | Persona snapshots backed up with the store; hybrid recall (lexical + optional embedding provider) available |
 | `perception` | 8 perception event types + adapter protocol + rule-based situation reasoner (no LLM) | Ambient speech stores metadata only — **raw audio bytes never enter the store** |
 | `initiative` | Disturbance policy: quiet hours, foreground-busy, proactive-call gating, planners | Passive replies and proactive behavior use **two separate budgets** |
 | `actions` | 9 action intents + gateway protocols (dashboard / bridge / phone / mock HTTP) | Gateways are stubs by default — nothing really connects |
-| `cloud` | Cloud action loop + **three-tier shell policy** (managed / safe / personal) | ~30 high-risk patterns hard-denied in every tier; audits never record command output |
+| `cloud` | Cloud action loop + **three-tier shell policy** (managed / safe / personal) + **controlled executor** | ~30 high-risk patterns hard-denied; executor: timeout kill / output caps / env scrubbing / optional privilege drop; audits never record command output |
 | `life` | Proactive outbox (`ProactiveOutbox`), channel identity gate (`OwnerChannelRegistry`), discovery, QQ/OneBot/WeQ adapters, **persistent SQLite inbox** | Off by default, per-channel allowlist, daily quotas, idempotent no-redelivery; inbound messages survive crashes |
 | `ui` | Persona, voice style, HUD intents, **persona cards** | See below |
-| `plugins` | **Generalized plugin layer**: new I/O points without touching core | See below |
+| `plugins` | **Generalized plugin layer**: new I/O points without touching core + PluginManager lifecycle | See below |
+| `core.runtime` | `ConversationOrchestrator` (unified conversation flow) + `IntentPlan` + tool registry | Model proposes, core adjudicates — intents carry no authorization |
+| `api` | Management API (REST + SSE, stdlib) + console static hosting | 127.0.0.1 by default, Bearer required, configs masked |
+| `cli` | `whale setup/doctor/run/plugins/memory/api` entry points | demo profile runs offline with zero keys |
+| `web` | Web console (React+Vite): overview / plugins / memory / approvals / chat / tasks / events | Frontend talks only to the API |
+| `skills` | Markdown-driven tool-composition workflows | Skill text is data, not instructions — still gated after rendering |
 
 ## Plugin system: six extension kinds
 
@@ -78,6 +83,16 @@ cd whale-core
 pip install -e ".[dev]"            # or: uv sync --extra dev
 pytest -q                          # full suite (offline, no network)
 python examples/life_scenario.py   # offline demo: interest → candidate → approval → receipt
+python examples/runtime_demo.py    # offline demo: multi-turn chat → intent → tool loop
+
+# CLI profiles (demo needs zero keys):
+whale setup --profile demo         # initialize ~/.whale (demo/cloud/local)
+whale doctor                       # environment self-check
+whale run                          # demo REPL (mock model, replies tagged [mock])
+
+# Management API + web console:
+whale api                          # 127.0.0.1:8080; token generated on first run into ~/.whale/api_token (600)
+pnpm -C web install && pnpm -C web build   # console frontend (served by whale api once built)
 ```
 
 Minimal usage:
