@@ -462,7 +462,7 @@ class _Handler(BaseHTTPRequestHandler):
                 else:
                     batch = [event for event in snapshot if event.get("seq", 0) > last]
                 for event in batch:
-                    self.wfile.write(b"data: " + _json_bytes(event) + b"\\n\\n")
+                    self.wfile.write(b"data: " + _json_bytes(event) + b"\n\n")
                     last = max(last, int(event.get("seq", 0)))
                 now = time.monotonic()
                 if now - last_heartbeat >= 15.0 or (last_heartbeat == 0 and not batch):
