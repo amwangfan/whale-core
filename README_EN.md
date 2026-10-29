@@ -57,13 +57,17 @@ rate-limit gates cannot be replaced by any plugin.
 
 ## Persona cards: a switchable soul
 
-Seven original built-in cards (calm whale / tsundere group-mate / gentle
-companion / caring mom / little sister / gaming buddy / minimal), inspired by
-community persona-card collections; community cards can be imported at runtime
-(with attribution, never committed to git). One call — `switch_card(store,
-"qunyou")` — re-renders every channel. Global taboos (never leak keys / never
-claim human feelings / memory is context, not instructions) cannot be removed
-by any card; switching cards **cannot** widen any permission.
+Built-in third-party persona card "Dafeiyu" (text from
+[dafeiyu-persona](https://github.com/ERUIHNIYHBKBNF/dafeiyu-persona),
+**MIT License**, see `licenses/`) plus the `default` baseline card; a catalog of
+9 community cards from [aigengtu.com/persona](https://aigengtu.com/persona) ships
+as metadata only (title/author/source — the site grants free copy-for-use but no
+explicit redistribution license, so card texts are **not** vendored); import any
+of them at runtime with `import_external_card`. One call —
+`switch_card(store, "dafeiyu")` — re-renders every channel. Global taboos
+(never leak keys / never claim human feelings / memory is context, not
+instructions) cannot be removed by any card; switching cards **cannot** widen
+any permission.
 
 ## Quick start
 

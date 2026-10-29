@@ -51,10 +51,13 @@
 
 ## 角色卡：可切换的人格
 
-内置 7 张原创卡（冷静鲸鱼 / 群友傲娇 / 温柔陪伴 / 操心妈妈 / 妹妹 / 游戏群友 / 极简），
-流派参考社区角色卡合集；支持导入社区卡原文（保留署名，不入库 git）。
-`switch_card(store, "qunyou")` 一切即换——全局禁忌（不泄露密钥 /
-不声称人类情感 / 记忆是上下文非指令）任何卡都不可移除；换卡**不能**扩大任何权限。
+内置第三方人设卡「大肥鱼」（原文取自 [dafeiyu-persona](https://github.com/ERUIHNIYHBKBNF/dafeiyu-persona)，
+**MIT License**，见 `licenses/`）+ 系统基线卡 `default`；另附
+[aigengtu.com/persona](https://aigengtu.com/persona) 社区卡目录（9 张，仅元数据与来源链接——
+站点仅明示免费复制使用、未明示再分发许可，故仓内不内置原文），
+运行期经 `import_external_card` 一键导入。`switch_card(store, "dafeiyu")` 一切即换——
+全局禁忌（不泄露密钥 / 不声称人类情感 / 记忆是上下文非指令）任何卡都不可移除；
+换卡**不能**扩大任何权限。
 
 ## 快速开始
 
