@@ -37,10 +37,13 @@ class ApiContext:
     orchestrator: Any = None   # ConversationOrchestrator
     curator: Any = None        # MemoryCurator
     started_at: float = field(default_factory=time.time)
-    events: list[dict] = field(default_factory=list)  # 近期事件环（API 层可观测性）
+    events: list[dict] = field(default_factory=list)  # bounded, non-durable log
+    event_seq: int = 0
 
     def log_event(self, kind: str, detail: str = "") -> None:
-        self.events.append({"at": time.time(), "kind": kind, "detail": detail[:200]})
+        self.event_seq += 1
+        self.events.append({"at": time.time(), "seq": self.event_seq,
+                            "kind": kind, "detail": detail[:200]})
         del self.events[:-200]
 
 
@@ -227,7 +230,7 @@ class _Handler(BaseHTTPRequestHandler):
                     self._send(400, _error("bad_request", "body must contain config object"))
                     return
                 try:
-                    mgr.set_config(pid, body["config"])
+                    mgr.patch_config(pid, body["config"])
                 except KeyError:
                     self._send(404, _error("not_found", f"unknown plugin {pid!r}"))
                     return
@@ -380,19 +383,30 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(404, _error("not_found", "unknown endpoint"))
 
     def _approvals(self, method: str, parts: list[str]) -> None:
+        """Decisions authorize later dispatch; they do NOT send a message."""
         store = self.ctx.store
         if len(parts) == 1 and method == "GET":
             pending = []
             for key in store.keys():
                 if not key.startswith("life:draft:"):
                     continue
+                draft_id = key.split(":", 2)[2]
                 draft = store.get(key)
-                ledger = store.get("life:ledger:" + key.split(":", 2)[2]) or {}
-                if isinstance(draft, dict):
-                    pending.append({"draft_id": draft.get("draft_id", key.split(":", 2)[2]),
-                                    "text": str(draft.get("text", ""))[:200],
-                                    "channel": draft.get("channel", ""),
-                                    "status": ledger.get("status", "unknown")})
+                ledger = store.get("life:ledger:" + draft_id) or {}
+                decision = store.get("life:decision:" + draft_id) or {}
+                if not isinstance(draft, dict):
+                    continue
+                status = ledger.get("status", "draft")
+                if ledger.get("attempts", 0) > 0 or status in ("accepted", "unknown"):
+                    continue
+                pending.append({
+                    "draft_id": draft.get("draft_id", draft_id),
+                    "text": str(draft.get("text", ""))[:200],
+                    "channel": draft.get("channel", ""),
+                    "status": status,
+                    "decision": decision.get("decision", ""),
+                    "execution_status": "not_dispatched",
+                })
             self._send(200, _json_bytes({"result": {"approvals": pending}}))
             return
         if len(parts) == 3 and parts[2] == "decision" and method == "POST":
@@ -402,24 +416,63 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(400, _error("bad_request", "decision must be approve|reject"))
                 return
             draft_id = parts[1]
+            if not draft_id or not isinstance(store.get(f"life:draft:{draft_id}"), dict):
+                self._send(404, _error("not_found", "no such draft"))
+                return
+            ledger = store.get(f"life:ledger:{draft_id}") or {}
+            if ledger.get("attempts", 0) > 0:
+                self._send(409, _error("conflict", "draft already attempted"))
+                return
             key = f"life:decision:{draft_id}"
+            existing = store.get(key) or {}
+            if existing.get("decision"):
+                if existing.get("decision") != decision:
+                    self._send(409, _error("conflict", "draft decision already recorded"))
+                    return
+                self._send(200, _json_bytes({"result": {
+                    "draft_id": draft_id, "decision": decision,
+                    "execution_status": "not_dispatched",
+                }}))
+                return
             store.put(key, {"decision": decision, "at": time.time()})
             self.ctx.log_event(f"approval:{decision}", draft_id)
-            self._send(200, _json_bytes({"result": {"draft_id": draft_id, "decision": decision}}))
+            self._send(200, _json_bytes({"result": {
+                "draft_id": draft_id, "decision": decision,
+                "execution_status": "not_dispatched",
+            }}))
             return
         self._send(404, _error("not_found", "unknown endpoint"))
 
     def _events_sse(self) -> None:
-        """SSE：先回放近期事件，之后每 15s 心跳（MVP 语义，客户端断线重连拉新）。"""
+        """Keep an authenticated SSE stream open, replaying buffered events."""
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "keep-alive")
         self.end_headers()
-        for event in self.ctx.events[-SSE_REPLAY_LIMIT:]:
-            self.wfile.write(b"data: " + _json_bytes(event) + b"\n\n")
-        self.wfile.write(b": ping\n\n")
-        self.wfile.flush()
+        # Snapshot by index; events are capped at 200, so a slow client may lose
+        # old entries. No promise of durable event delivery.
+        last = 0
+        last_heartbeat = 0.0
+        try:
+            while True:
+                snapshot = list(self.ctx.events)
+                if last == 0:
+                    batch = snapshot[-SSE_REPLAY_LIMIT:]
+                else:
+                    batch = [event for event in snapshot if event.get("seq", 0) > last]
+                for event in batch:
+                    self.wfile.write(b"data: " + _json_bytes(event) + b"\n\n")
+                    last = max(last, int(event.get("seq", 0)))
+                now = time.monotonic()
+                if now - last_heartbeat >= 15.0 or (last_heartbeat == 0 and not batch):
+                    self.wfile.write(b": ping\n\n")
+                    last_heartbeat = now
+                if batch or last_heartbeat == now:
+                    self.wfile.flush()
+                time.sleep(0.5)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
 
 
 class WhaleApiServer:

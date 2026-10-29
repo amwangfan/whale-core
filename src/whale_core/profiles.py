@@ -13,11 +13,13 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Mapping
 
 from whale_core.core.companion import WhaleCompanion
 from whale_core.core.runtime import ConversationOrchestrator, ToolRegistry, ToolSpec
+from whale_core.core.intent_router import SearchIntentRouter
 from whale_core.memory.curation import MemoryCurator
 from whale_core.memory.sqlite_store import SqliteMemoryStore
 from whale_core.memory.store import InMemoryStore, MemoryStore
@@ -78,7 +80,8 @@ def assemble_runtime(
     env = os.environ if env is None else env
     store = store or _default_store(config_dir)
     registry = PluginRegistry()
-    manager = PluginManager(registry, store)
+    manager = PluginManager(registry, store,
+                            secret_dir=(Path(config_dir) / 'secrets') if config_dir else None)
     tools = ToolRegistry()
     notes: list[str] = []
 
@@ -91,14 +94,19 @@ def assemble_runtime(
             handler=lambda args: "[mock] 罐装结果：示例标题 — 摘要（https://example.com）",
         ))
     elif profile == "cloud":
-        model = register_openai_compatible(registry)
+        model = register_openai_compatible(
+            registry, api_key=env.get("DEEPSEEK_API_KEY"),
+            base_url=env.get("DEEPSEEK_BASE_URL"),
+            model=env.get("DEEPSEEK_MODEL"),
+        )
         notes.append("cloud 档：DeepSeek（OpenAI 兼容）模型已注册（llm.chat）")
         if not (env.get("DEEPSEEK_API_KEY") or "").strip():
             notes.append("[warn] DEEPSEEK_API_KEY 未配置——模型调用会以 config 错误失败")
         if (env.get("TAVILY_API_KEY") or env.get("BRAVE_API_KEY")):
             from whale_core.plugins.web_fetch import register_web_fetch
             from whale_core.plugins.web_search import register_web_search
-            register_web_search(registry, tools)
+            from whale_core.plugins.web_search import select_provider
+            register_web_search(registry, tools, provider=select_provider(env))
             register_web_fetch(registry, tools)
             notes.append("搜索/抓取工具已挂载（web.search / web.fetch）")
         else:
@@ -114,7 +122,14 @@ def assemble_runtime(
         notes.append(f"local 档：本地端点 {model.base_url}（模型 {model.model}）")
 
     companion = WhaleCompanion(store, model, curator=MemoryCurator(store))
-    orchestrator = ConversationOrchestrator(store, companion, tools=tools)
+    # Explicit searches route to web.search; arbitrary LLM tool planning is opt-in.
+    # Safe if no search provider is installed: runtime reports capability unavailable.
+    llm_intent = env.get("WHALE_INTENT_MODEL_ENABLED", "") == "1"
+    intent_model = SearchIntentRouter(model=model, enable_llm=llm_intent and profile != "demo")
+    if llm_intent and profile != "demo":
+        notes.append("LLM 意图识别已启用（WHALE_INTENT_MODEL_ENABLED=1）")
+    orchestrator = ConversationOrchestrator(store, companion, tools=tools,
+                                            intent_model=intent_model)
     return RuntimeBundle(
         profile=profile, store=store, registry=registry, manager=manager,
         tools=tools, companion=companion, orchestrator=orchestrator, notes=notes,

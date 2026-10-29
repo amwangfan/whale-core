@@ -17,6 +17,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -87,12 +89,17 @@ class PluginManager:
         store: MemoryStore,
         *,
         factories: Mapping[str, Callable[[], Mapping[str, Any] | None]] | None = None,
+        secret_dir: str | Path | None = None,
     ) -> None:
         self._registry = registry
         self._store = store
         self._factories = dict(factories or {})
         self._states: dict[str, PluginState] = {}
         self._schemas: dict[str, Mapping[str, Any]] = {}
+        # Sensitive values are not placed in the regular kv/SQLite config.
+        # Without secret_dir they live only in this process.
+        self._secret_dir = Path(secret_dir) if secret_dir is not None else None
+        self._secret_cache: dict[str, dict[str, Any]] = {}
         self.errors: list[dict[str, str]] = []
 
     @property
@@ -190,6 +197,22 @@ class PluginManager:
             self._schemas.pop(pid, None)
         state = PluginState(plugin_id=pid, status="loaded", manifest=manifest)
         self._states[pid] = state
+        # Upgrade legacy configs which stored plain secret values in SQLite.
+        # A missing/unwritable private directory is reported as an error rather
+        # than silently leaving tokens in the ordinary kv.
+        previous = self._store.get(self._config_key(pid))
+        if isinstance(previous, Mapping):
+            properties = (schema or {}).get("properties") or {}
+            names = {name for name, spec in properties.items()
+                     if isinstance(spec, Mapping) and spec.get("format") == "secret"}
+            sanitized, _ = self._partition_secrets(previous, names)
+            # Do NOT write markers back to the private file on reload.
+            if sanitized != dict(previous):
+                try:
+                    self.set_config(pid, previous)
+                except (OSError, ValueError) as exc:
+                    self.errors.append({"path": source,
+                                        "error": "secret migration failed: " + type(exc).__name__})
         # 回放持久化启停状态：enabled 的插件重新注册，disabled 的保持禁用
         persisted = self._store.get(self._state_key(pid))
         if isinstance(persisted, Mapping):
@@ -368,14 +391,131 @@ class PluginManager:
                     f"must be of type {spec.get('type')!r}"
                 )
 
+    def _secret_path(self, plugin_id: str) -> Path | None:
+        if self._secret_dir is None:
+            return None
+        return self._secret_dir / (plugin_id + ".json")
+
+    def _load_secrets(self, plugin_id: str) -> dict[str, Any]:
+        path = self._secret_path(plugin_id)
+        if path is None:
+            return dict(self._secret_cache.get(plugin_id, {}))
+        try:
+            result = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+        return result if isinstance(result, dict) else {}
+
+    def _save_secrets(self, plugin_id: str, data: dict[str, Any]) -> None:
+        path = self._secret_path(plugin_id)
+        if path is None:
+            self._secret_cache[plugin_id] = dict(data)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(path.parent, 0o700)
+        fd, name = tempfile.mkstemp(prefix=".whale-secrets-", dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                os.chmod(name, 0o600)
+                json.dump(data, stream, ensure_ascii=False)
+            os.replace(name, path)
+        finally:
+            if os.path.exists(name):
+                os.unlink(name)
+
+    @classmethod
+    def _partition_secrets(cls, data: Any, secret_fields: set[str],
+                           *, private: bool = False) -> tuple[Any, Any]:
+        """Return (nonsecret config, secrets) with the original shape preserved.
+
+        A secret leaf becomes a marker in normal config. Store encrypted secrets
+        through a dedicated backend in production; our stdlib fallback is a
+        private 0600 file outside SQLite, *not encryption at rest*.
+        """
+        if isinstance(data, Mapping):
+            plain, secrets = {}, {}
+            for key, value in data.items():
+                key = str(key)
+                child_private = private or key in secret_fields or any(
+                    hint in key.lower() for hint in _SECRET_HINTS)
+                sanitized, sensitive = cls._partition_secrets(
+                    value, secret_fields, private=child_private)
+                plain[key] = sanitized
+                if sensitive is not None:
+                    secrets[key] = sensitive
+            return plain, secrets or None
+        if isinstance(data, list):
+            plain, secrets = [], []
+            for value in data:
+                sanitized, sensitive = cls._partition_secrets(
+                    value, secret_fields, private=private)
+                plain.append(sanitized)
+                secrets.append(sensitive)
+            return plain, secrets if any(x is not None for x in secrets) else None
+        if private and data not in ("", None):
+            return "***", data
+        return data, None
+
+    @classmethod
+    def _restore_secrets(cls, plain: Any, sensitive: Any) -> Any:
+        if sensitive is None:
+            return plain
+        if isinstance(plain, Mapping) and isinstance(sensitive, Mapping):
+            return {k: cls._restore_secrets(v, sensitive.get(k)) for k, v in plain.items()}
+        if isinstance(plain, list) and isinstance(sensitive, list):
+            return [cls._restore_secrets(v, sensitive[i] if i < len(sensitive) else None)
+                    for i, v in enumerate(plain)]
+        return sensitive
+
+    def runtime_config(self, plugin_id: str) -> dict[str, Any]:
+        """Trusted-host-only view; NEVER return this through the management API."""
+        if plugin_id not in self._states:
+            raise KeyError(f"unknown plugin: {plugin_id!r}")
+        plain = self._store.get(self._config_key(plugin_id)) or {}
+        return self._restore_secrets(plain, self._load_secrets(plugin_id))
+
     def set_config(self, plugin_id: str, config: Mapping[str, Any]) -> None:
-        """按 config_schema（若有）校验后存 kv；失败 ValueError（消息含字段名）。"""
+        """Validate and split secrets out of ordinary SQLite/kv configuration."""
         if plugin_id not in self._states:
             raise KeyError(f"unknown plugin: {plugin_id!r}")
         schema = self._schemas.get(plugin_id)
         if schema is not None:
             self._validate_config(plugin_id, schema, config)
-        self._store.put(self._config_key(plugin_id), dict(config))
+        properties = (schema or {}).get("properties") or {}
+        names = {name for name, spec in properties.items()
+                 if isinstance(spec, Mapping) and spec.get("format") == "secret"}
+        plain, secrets = self._partition_secrets(dict(config), names)
+        self._save_secrets(plugin_id, secrets or {})
+        self._store.put(self._config_key(plugin_id), plain)
+
+    @classmethod
+    def _apply_patch(cls, current: dict, changes: Mapping[str, Any]) -> None:
+        for key, value in changes.items():
+            if value is None:
+                current.pop(key, None)
+            elif value == "***":
+                continue  # untouched masked secret
+            elif isinstance(value, Mapping) and isinstance(current.get(key), Mapping):
+                nested = dict(current[key])
+                cls._apply_patch(nested, value)
+                current[key] = nested
+            elif isinstance(value, list) and isinstance(current.get(key), list):
+                # UI may round-trip masked nested list entries unchanged.
+                old = current[key]
+                current[key] = [
+                    old[i] if item == "***" and i < len(old) else item
+                    for i, item in enumerate(value)
+                ]
+            else:
+                current[key] = value
+
+    def patch_config(self, plugin_id: str, changes: Mapping[str, Any]) -> None:
+        """PATCH semantics: absent keys stay; null deletes; *** preserves secrets."""
+        if not isinstance(changes, Mapping):
+            raise ValueError("config changes must be an object")
+        current = self.runtime_config(plugin_id)
+        self._apply_patch(current, changes)
+        self.set_config(plugin_id, current)
 
     def config_view(self, plugin_id: str) -> dict[str, Any]:
         """配置脱敏视图：secret 字段值替换为 "***"（存在）或 ""（未配置）。

@@ -77,13 +77,22 @@ function PluginConfigPanel({ pluginId, onSaved }: { pluginId: string; onSaved: (
     setNotice(null);
     try {
       const config: Record<string, unknown> = {};
+      const original = state.kind === 'ok' ? state.detail.config ?? {} : {};
+      const currentKeys = new Set<string>();
       for (const row of rows) {
         const key = row.key.trim();
-        if (!key) continue; // 忽略空 key 行
+        if (!key) continue;
+        currentKeys.add(key);
+        // A masked, untouched secret must NOT be replaced with an empty string.
+        if (row.masked && row.value === '') continue;
         config[key] = parseValue(row.value);
       }
+      // The API accepts a patch; null explicitly deletes a removed key.
+      for (const key of Object.keys(original)) {
+        if (!currentKeys.has(key)) config[key] = null;
+      }
       await api.setPluginConfig(pluginId, config);
-      setNotice('配置已保存（secret 字段将脱敏存储，只显示 ***）。');
+      setNotice('配置已保存；未修改的敏感字段保持原值。');
       await load(); // 重新拉取脱敏视图
       onSaved(); // 刷新外层插件列表
     } catch (e) {
@@ -133,8 +142,8 @@ function PluginConfigPanel({ pluginId, onSaved }: { pluginId: string; onSaved: (
               className="value mono"
               placeholder={
                 row.masked
-                  ? '已配置（***）：输入新值覆盖，留空提交将清除'
-                  : '值（支持 JSON：123 / true / "文本"）；secret 字段会脱敏存储'
+                  ? '已配置（***）：留空保持原值；修改后输入新值'
+                  : '值（支持 JSON：123 / true / "文本"）；secret 字段不会写入普通 SQLite 配置'
               }
               value={row.value}
               onChange={e => setRow(i, { value: e.target.value, masked: false })}
@@ -151,8 +160,8 @@ function PluginConfigPanel({ pluginId, onSaved }: { pluginId: string; onSaved: (
           </button>
         </div>
         <div className="muted small">
-          提示：提交会整体替换该插件配置；secret 字段（键名含 token/key/secret/password
-          或 schema 标记 format:secret）脱敏存储，保存后只显示 ***，不会回显明文。
+          提示：仅提交改动字段；删除整行才会删除配置。敏感字段由服务端单独保存，
+          控制台只显示 ***，未修改时不覆盖旧值。
         </div>
       </div>
 

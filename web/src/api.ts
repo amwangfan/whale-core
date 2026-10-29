@@ -67,6 +67,8 @@ export interface Approval {
   text: string;
   channel: string;
   status: string;
+  decision?: 'approve' | 'reject' | '';
+  execution_status?: string;
 }
 
 /**
