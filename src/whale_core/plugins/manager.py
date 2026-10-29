@@ -202,11 +202,17 @@ class PluginManager:
         # than silently leaving tokens in the ordinary kv.
         previous = self._store.get(self._config_key(pid))
         if isinstance(previous, Mapping):
-            try:
-                self.set_config(pid, previous)
-            except (OSError, ValueError) as exc:
-                self.errors.append({"path": source,
-                                    "error": "secret migration failed: " + type(exc).__name__})
+            properties = (schema or {}).get("properties") or {}
+            names = {name for name, spec in properties.items()
+                     if isinstance(spec, Mapping) and spec.get("format") == "secret"}
+            sanitized, _ = self._partition_secrets(previous, names)
+            # Do NOT write markers back to the private file on reload.
+            if sanitized != dict(previous):
+                try:
+                    self.set_config(pid, previous)
+                except (OSError, ValueError) as exc:
+                    self.errors.append({"path": source,
+                                        "error": "secret migration failed: " + type(exc).__name__})
         # 回放持久化启停状态：enabled 的插件重新注册，disabled 的保持禁用
         persisted = self._store.get(self._state_key(pid))
         if isinstance(persisted, Mapping):
