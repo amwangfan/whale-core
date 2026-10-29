@@ -79,7 +79,8 @@ def assemble_runtime(
     env = os.environ if env is None else env
     store = store or _default_store(config_dir)
     registry = PluginRegistry()
-    manager = PluginManager(registry, store)
+    manager = PluginManager(registry, store,
+                            secret_dir=(__import__('pathlib').Path(config_dir) / 'secrets') if config_dir else None)
     tools = ToolRegistry()
     notes: list[str] = []
 
