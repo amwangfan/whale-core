@@ -89,16 +89,3 @@ print(decision.intents, receipts)          # 意图与回执；不触达任何�
 3. **默认保守**：主动行为默认关闭；审批逐条留痕；发送结果 `unknown` 不自动重试；
    密钥只走环境变量与本机私有目录（`secrets/`，已 gitignore），永不入仓、不进日志。
 4. **幂等与可恢复**：消息带 `message_id` 去重，入站队列持久化，崩溃后按租约恢复。
-
-## 与 whale-io 的关系
-
-本仓库源自 whale-io monorepo 的 `whale-core/` 目录，独立成仓对外发布；
-whale-io 承载设备侧基础设施（眼镜上镜链路、VoIP 来电音频桥、前台监测 App）
-与产品文档，whale-core 只承载**智能层库**。本仓库自全新首提交开始，
-不继承 monorepo 历史。
-
-详细设计文档（在 whale-io 主仓）：
-[云端多模型编排](https://github.com/amwangfan/whale-io/blob/main/docs/cloud-model-orchestration.md) ·
-[端云交互与 shell 分级](https://github.com/amwangfan/whale-io/blob/main/docs/cloud-operations.md) ·
-[插件架构](https://github.com/amwangfan/whale-io/blob/main/docs/plugin-architecture.md) ·
-[角色卡](https://github.com/amwangfan/whale-io/blob/main/docs/persona-cards.md)

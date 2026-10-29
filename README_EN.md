@@ -104,18 +104,3 @@ print(decision.intents, receipts)          # intents and receipts; no real devic
    (`secrets/`, git-ignored) — never committed, never logged.
 4. **Idempotence and recovery**: messages dedupe by `message_id`; the inbound
    queue is persistent and recovers by lease after a crash.
-
-## Relationship to whale-io
-
-This repository is the standalone publication of the `whale-core/` directory
-from the whale-io monorepo. whale-io hosts the device-side infrastructure
-(glasses push pipeline, VoIP call audio bridge, foreground-monitor app) and the
-product documents; whale-core hosts only the **intelligence-layer library**.
-This repository starts from a fresh initial commit and does not carry the
-monorepo history.
-
-Detailed design documents (in the whale-io monorepo):
-[Cloud model orchestration](https://github.com/amwangfan/whale-io/blob/main/docs/cloud-model-orchestration.md) ·
-[Edge-cloud interaction & shell tiers](https://github.com/amwangfan/whale-io/blob/main/docs/cloud-operations.md) ·
-[Plugin architecture](https://github.com/amwangfan/whale-io/blob/main/docs/plugin-architecture.md) ·
-[Persona cards](https://github.com/amwangfan/whale-io/blob/main/docs/persona-cards.md)
