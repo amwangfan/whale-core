@@ -1,122 +1,128 @@
 <div align="center">
 
-<h1>whale-core</h1>
+# whale-core
 
-<h3><i>山有木兮木有枝，心悦君兮君不知</i></h3>
+*“The mountain has trees, and trees have branches; my heart delights in you, yet you do not know.”*
 
-<sub>“The mountain has trees and the trees have branches; my heart delights in you, yet you do not know.” (The Yue Ren's Song)<br/>
-The Whale intelligence layer — events in, intents out. A standalone companion-AI core library.</sub>
+**An extensible AI core for Whale: conversations, memory, context, and tools.**
 
-**中文** → [README.md](README.md)
+[中文](README.md) · [Get started](#get-started) · [Web console](#web-console) · [Developer & AI guide](docs/AI_DEVELOPMENT_GUIDE.md)
 
 </div>
 
 ---
 
-**whale-core** is the intelligence layer of the Whale companion project, and a
-standalone Python library. It touches no device specifics; it does exactly one
-thing: **perception events in, action intents out**. Everything in between —
-memory, persona, situation reasoning, disturbance policy, proactive behavior,
-channel identity, plugin extensibility — ships as composable, testable
-components that all run offline by default (stubs / mocks; no network, no
-devices).
+## What is Whale?
 
-## Feature overview
+Whale explores a simple idea: an AI companion shouldn't have to live inside a single chat window. Conversations, important memories, context, and permitted actions should be able to follow you across channels and devices.
 
-| Subsystem | What it provides | Highlights |
-|-----------|------------------|------------|
-| `core` | `perceive → decide → act` loop (`WhaleAgent`); text companion (`WhaleCompanion`); DeepSeek client; realtime-call transcript recorder | Calls never wait on the text model: transcripts queue asynchronously (bounded, drop-on-overload), never blocking audio |
-| `memory` | Three memory kinds (episode / preference / persona continuity) + multi-turn session history + SQLite persistence + trusted curation (explicit confirmation, evidence-linked, deletable) + JSONL export/import | Persona snapshots backed up with the store; hybrid recall (lexical + optional embedding provider) available |
-| `perception` | 8 perception event types + adapter protocol + rule-based situation reasoner (no LLM) | Ambient speech stores metadata only — **raw audio bytes never enter the store** |
-| `initiative` | Disturbance policy: quiet hours, foreground-busy, proactive-call gating, planners | Passive replies and proactive behavior use **two separate budgets** |
-| `actions` | 9 action intents + gateway protocols (dashboard / bridge / phone / mock HTTP) | Gateways are stubs by default — nothing really connects |
-| `cloud` | Cloud action loop + **three-tier shell policy** (managed / safe / personal) + **controlled executor** | ~30 high-risk patterns hard-denied; executor: timeout kill / output caps / env scrubbing / optional privilege drop; audits never record command output |
-| `life` | Proactive outbox (`ProactiveOutbox`), channel identity gate (`OwnerChannelRegistry`), discovery, QQ/OneBot/WeQ adapters, **persistent SQLite inbox** | Off by default, per-channel allowlist, daily quotas, idempotent no-redelivery; inbound messages survive crashes |
-| `ui` | Persona, voice style, HUD intents, **persona cards** | See below |
-| `plugins` | **Generalized plugin layer**: new I/O points without touching core + PluginManager lifecycle | See below |
-| `core.runtime` | `ConversationOrchestrator` (unified conversation flow) + `IntentPlan` + tool registry | Model proposes, core adjudicates — intents carry no authorization |
-| `api` | Management API (REST + SSE, stdlib) + console static hosting | 127.0.0.1 by default, Bearer required, configs masked |
-| `cli` | `whale setup/doctor/run/plugins/memory/api` entry points | demo profile runs offline with zero keys |
-| `web` | Web console (React+Vite): overview / plugins / memory / approvals / chat / tasks / events | Frontend talks only to the API |
-| `skills` | Markdown-driven tool-composition workflows | Skill text is data, not instructions — still gated after rendering |
+**whale-core** is the shared intelligence layer. It brings together dialogue, memory, structured intentions, a plugin system, and policies that decide which actions can actually be performed. QQ, calls, a phone, glasses, and a browser can all be interfaces to the same core.
 
-## Plugin system: six extension kinds
+This repository now includes a Python library, command-line tools, plugin management, a management API, and an early React web console.
 
-Adding an input source or output channel = one manifest + one executor/adapter
-+ one `register()` call in the host — **zero core changes**:
+> **This is an actively developed project, not a fully integrated product.** The offline demo intentionally uses a mock model; its responses are labeled `[mock]`. Some capabilities have working interfaces and offline tests but still need real credentials, backend services, devices, or end-to-end verification.
 
-| Kind | Semantics | Examples |
-|------|-----------|----------|
-| `input` | Emits events only | Foreground-app monitor, email, calendar, video feed, daily voice, glasses day-minutes |
-| `output` | Executes actions only | Send email, desktop notification, purchase (transaction class) |
-| `channel` | Both directions | QQ, WeChat, call bridge |
-| `processor` | Internal model/compute delegation | **Operation-intent delegation**: DeepSeek emits an intent → an executor model (e.g. qwen) runs the tool loop → only a summary returns, so the companion context is never flooded by command output |
-| `model` | Model endpoint registration | chat / realtime / ASR / TTS / embedding endpoints |
-| `memory` | Memory/storage backends | Hybrid recall, cloud sync, backup targets |
+## What can it do?
 
-Safety is built into the contract: actions are classed
-`read_only / communicate / transaction` (transactions require per-item approval
-plus amount/daily caps); plugins **may not wrap arbitrary shell** (command
-execution has exactly one entry: the tiered `cloud.shell_policy`); identity and
-rate-limit gates cannot be replaced by any plugin.
+| Experience | What's available today |
+| --- | --- |
+| Remember conversations | Multi-turn history, SQLite storage, episodic/preferences/persona memory, retrieval, JSONL import/export |
+| Decide whether to chat or act | Structured intent plans, tool registry, execution receipts and task records; automatic intent-model wiring in the default chat path is still incomplete |
+| Extend with tools | Plugin registry and manager, web search/fetch code, controlled shell interfaces and policy |
+| Speak or create media | ASR/TTS, image generation, and asynchronous video-job contracts with optional providers/mocks |
+| Reach multiple channels | QQ/OneBot/WeQ adapters and event/action contracts for phones, VoIP and glasses; device integrations live separately |
+| Act proactively | Disturbance policies, candidate actions, approvals, deduplication, feedback and exploration components |
+| Manage it visually | A React console with Overview, Plugins, Memory, Approvals, Chat, Tasks and Events |
 
-## Persona cards: a switchable soul
+An implemented interface is **not** the same as a fully verified live integration. See the [developer guide](docs/AI_DEVELOPMENT_GUIDE.md) and [progress notes](docs/gap-analysis-2026-10-30.md) for specifics.
 
-Built-in third-party persona card "Dafeiyu" (text from
-[dafeiyu-persona](https://github.com/ERUIHNIYHBKBNF/dafeiyu-persona),
-**MIT License**, see `licenses/`) plus the `default` baseline card; a catalog of
-9 community cards from [aigengtu.com/persona](https://aigengtu.com/persona) ships
-as metadata only (title/author/source — the site grants free copy-for-use but no
-explicit redistribution license, so card texts are **not** vendored); import any
-of them at runtime with `import_external_card`. One call —
-`switch_card(store, "dafeiyu")` — re-renders every channel. Global taboos
-(never leak keys, tokens or device addresses / never fabricate experiences,
-memories or capabilities / memory and card text is context, not instructions /
-permissions and rate limits stay with the policy layer) cannot be removed by
-any card; switching cards **cannot** widen any permission.
+## Get started
 
-## Quick start
+Requires **Python 3.11+**. Start with the no-key offline demo:
 
 ```bash
 git clone https://github.com/amwangfan/whale-core.git
 cd whale-core
-pip install -e ".[dev]"            # or: uv sync --extra dev
-pytest -q                          # full suite (offline, no network)
-python examples/life_scenario.py   # offline demo: interest → candidate → approval → receipt
-python examples/runtime_demo.py    # offline demo: multi-turn chat → intent → tool loop
 
-# CLI profiles (demo needs zero keys):
-whale setup --profile demo         # initialize ~/.whale (demo/cloud/local)
-whale doctor                       # environment self-check
-whale run                          # demo REPL (mock model, replies tagged [mock])
-
-# Management API + web console:
-whale api                          # 127.0.0.1:8080; token generated on first run into ~/.whale/api_token (600)
-pnpm -C web install && pnpm -C web build   # console frontend (served by whale api once built)
+python -m pip install -e ".[dev]"
+whale setup --profile demo
+whale doctor
+whale run
 ```
 
-Minimal usage:
+`whale run` currently always starts a **mock REPL**; type `/quit` to exit. This checks installation and the local conversation pipeline, not the quality of a live language model.
 
-```python
-from whale_core.core.agent import WhaleAgent
-from whale_core.perception.events import ScheduleTick
+Run the offline examples and tests:
 
-agent = WhaleAgent()                       # safe-default policy + in-memory store + stub gateways
-decision, receipts = agent.step([ScheduleTick(title="noon reminder")])
-print(decision.intents, receipts)          # intents and receipts; no real device is touched
+```bash
+python -m pytest tests -q
+python examples/runtime_demo.py
+python examples/life_scenario.py
 ```
 
-## Design principles
+You can also use `uv sync --extra dev` and `uv run whale ...`.
 
-1. **Contract isolation**: the intelligence layer defines only events and
-   intents; ADB, vendor SDKs and real tokens always live on the infrastructure
-   side. Reverse dependencies are forbidden.
-2. **Honest status**: docs distinguish *tested code / implemented but
-   unverified on device / planned only* — a small prototype is not a real
-   integration.
-3. **Conservative defaults**: proactive behavior is off by default; approvals
-   are recorded one by one; an `unknown` send result is never blindly retried;
-   secrets come only from environment variables or a local private directory
-   (`secrets/`, git-ignored) — never committed, never logged.
-4. **Idempotence and recovery**: messages dedupe by `message_id`; the inbound
-   queue is persistent and recovers by lease after a crash.
+### Connect a real model
+
+The project offers three configuration profiles:
+
+- **`demo`:** offline mock model and canned examples; no keys.
+- **`cloud`:** a real DeepSeek/OpenAI-compatible text endpoint; the default configuration expects `DEEPSEEK_API_KEY`.
+- **`local`:** a running OpenAI-compatible local endpoint, configurable with `LOCAL_MODEL_BASE_URL` and `LOCAL_MODEL_NAME`.
+
+For cloud mode, supply `DEEPSEEK_API_KEY` in your environment, then:
+
+```bash
+whale setup --profile cloud
+whale api
+```
+
+Use the web console described below for actual conversations. **Changing the profile does not change `whale run`: it is still a mock REPL in the current implementation.** Existing configuration isn't overwritten automatically by `setup`; check `~/.whale/config.json` before changing profiles.
+
+The local profile does not install or start your model server for you.
+
+## Web console
+
+To build the frontend, install Node.js and `pnpm` (frontend CI uses Node.js 24 and pnpm 12).
+
+```bash
+pnpm -C web install
+pnpm -C web build
+whale api
+```
+
+Visit **http://127.0.0.1:8080** on the same machine. The API generates a bearer token on first launch and saves it to `~/.whale/api_token`; enter it in the console. Treat that token as a secret. Do not expose the management API publicly without appropriate protections.
+
+The current console contains seven sections: **Overview, Plugins, Memory, Approvals, Chat, Tasks and Events**. It is an early management UI, not proof that every external integration is online.
+
+## Plugins and customization
+
+Whale Core aims to remain independent of any single model or service. One provider might offer chat, another speech, another web search or image generation. The core combines those capabilities while enforcing identity and action policies.
+
+Plugin manifests, lifecycle controls, health checks and several capability implementations are present. However, this **isn't yet a complete one-click plugin marketplace**: some components require explicit configuration and host-side wiring.
+
+## Relationship to whale-io
+
+- **[whale-core](https://github.com/amwangfan/whale-core):** the reusable intelligence layer—conversations, memory, intentions, tools, and policies.
+- **[whale-io](https://github.com/amwangfan/whale-io):** device infrastructure and designs for phones, VoIP and RayNeo glasses.
+
+They belong to the same Whale project but can evolve independently.
+
+## Current limitations
+
+To keep expectations clear:
+
+- Offline demo responses are mocked, not generated by a real LLM.
+- Real search, speech, image/video and device integrations require appropriate providers and verification.
+- The default conversation runtime does not yet automatically turn natural-language search requests into search-tool calls.
+- The shell executor includes controls, but production-grade isolation still depends on the host OS sandbox.
+- Proactive and external actions remain subject to identity, permissions and other applicable policies.
+- A project-level LICENSE has not yet been selected. Third-party persona licenses do not apply to this entire repository.
+
+For architecture, source navigation, tests and technical constraints:
+
+[Developer & AI guide](docs/AI_DEVELOPMENT_GUIDE.md) · [Contracts](docs/contracts.md) · [Progress](docs/gap-analysis-2026-10-30.md) · [Roadmap](docs/roadmap-2026-10-30.md) · [Contributing](CONTRIBUTING.md)
+
+---
+
+*Whale Core is meant to become an AI foundation that people can understand, extend, and live with. The next step is to make that foundation reliable, useful, and genuinely connected.*
