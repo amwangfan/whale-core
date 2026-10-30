@@ -117,9 +117,9 @@ ASR 输入应是 WAV 等供应商支持的完整音频文件的标准 base64，�
 
 这是与上面 chunk/poll 会话**并存的第二种传输**：浏览器 AudioWorklet 采集/播放 PCM16 16 kHz，经 WebSocket 中继直达现有 whale-io 音频桥 TCP 帧，不经过文字模型，延迟显著低于 base64 轮询。控制台「媒体与语音」页的「低延迟通话」入口使用它；「实时语音」入口仍走上面的 `/voice/sessions`，两者互不影响。
 
-> **诚实声明：协议按 PR#4 契约实现（`uint32 BE 长度 + uint8 类型 + payload`，类型 0=PCM、1=控制文本，连接后先发 `AUTH <token>`、验证 `HELLO` 问候），离线回环测试验证了帧往返、AUTH、票据防重放与回环/TLS 约束；尚未与真实 whale-io 桥联调。** 真实桥联调通过前不要对owner 宣称浏览器原生电话能力已可用。
+> **诚实声明（2026-10-31 G0 更新）：线协议已与 whale-io `server.py` 逐字节对齐**（`uint32 BE 长度（仅 payload）+ uint8 类型 + payload`——注意 PR#4 旧契约的长度字段含类型字节，二者每帧错位 1 字节，已修正），握手为显式状态机：有 `BRIDGE_TOKEN` 时 `AUTH → AUTH_OK → HELLO`，无 token 时直接 `HELLO`；鉴权失败（对端直接断开）、`AUTH_FAIL`、乱序、PCM 抢跑、超时一律拒绝并释放 socket。测试夹具（`tests/fixtures/whale_io_protocol.py`）**直接复制** whale-io@48f5993 的服务端帧序，非简化替身。**真机联调（真实 whale-io echo/omni）尚未进行**——联调通过前不要对 owner 宣称浏览器原生电话能力已可用。
 
-配置（全部环境变量，填 `WHALE_PCM_BRIDGE_HOST` 才注册 `voice_bridge` 插件，能力名 `voice.pcm_bridge`）：
+配置（环境变量或设置页「服务」区均可——`WHALE_PCM_BRIDGE_*` 已纳入设置契约，TOKEN 不回显；填 `WHALE_PCM_BRIDGE_HOST` 才注册 `voice_bridge` 插件，能力名 `voice.pcm_bridge`）：
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
