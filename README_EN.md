@@ -16,6 +16,16 @@ whale-core puts Whale's conversation, long-term memory, intent routing, tools, v
 
 The repository provides the core library, a CLI, a management API, a web console, Linux/macOS desktop entry points and container deployment. There is no production mock/demo profile: anything that needs a model or service calls a real endpoint, and missing configuration is an explicit error. The official search and QQ channel plugins ship with the packages; third-party directory plugins load only from explicit paths, with no auto-discovery.
 
+## Interface
+
+Screenshots below come from a local temporary setup with sample data; they contain no real account, token or service credentials.
+
+![Overview](docs/screenshots/readme-overview.png)
+
+![Chat](docs/screenshots/readme-chat.png)
+
+<img src="docs/screenshots/readme-mobile.png" width="320" alt="Overview on a phone">
+
 ## What it can do
 
 | Feature | What is implemented | Requirements |
@@ -24,7 +34,7 @@ The repository provides the core library, a CLI, a management API, a web console
 | Search and reading | Search, fetch, source links, combined reading workflows | Tavily / Brave keys, or set `WHALE_SEARCH_PROVIDER` to `bing` / `ddg` for keyless providers; keyless providers may be blocked by bot checks |
 | Plugins and settings | Manifests, real enable/disable, persistent config, connection tests, hot switching, per-role models (intent/execution/safety review), daily request budgets, persona taboos, diagnostics | Console settings; third-party manifests still need a host-provided executor |
 | Tool tasks | Persistent traces, step and deadline limits, cancellation, per-action approval and resume, two-phase slow tasks (acknowledge, then deliver), recovery of in-flight tasks after restart | High-risk actions always pass the policy layer; unknown external outcomes are never retried automatically |
-| Voice and media | ASR, TTS, image generation, asynchronous Wan video, private artifacts; TTS output can be sent as QQ voice messages and images can be mixed with text | A DashScope-compatible platform or OpenAI-compatible endpoints, configured as needed; see integration status below |
+| Voice and media | ASR, TTS, image generation, asynchronous Wan video, private artifacts; TTS output can be sent as QQ voice messages and images can be mixed with text | A DashScope-compatible platform or OpenAI-compatible endpoints, configured as needed; see [capability configuration](docs/media-and-voice.md) for setup and integration boundaries |
 | Realtime voice | Native Realtime WSS sessions (browser microphone, interruption, persona and memory, transcripts written to memory); plus a whale-io PCM relay for low-latency calls | A Realtime-compatible service and the optional `voice` extra; the PCM relay has not been tested against the real audio bridge |
 | Semantic memory | Optional real embeddings fused with keyword recall, fallback on failure, cache cleanup | An OpenAI-compatible embedding endpoint; keyword recall keeps working without it |
 | Proactive exploration | Interests, real search and reading, candidate drafts, quiet hours, quotas, backoff, scheduled worker, pause | Scheduled exploration is off by default; outbound delivery needs a bound channel dispatcher |
