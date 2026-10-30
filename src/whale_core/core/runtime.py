@@ -334,12 +334,15 @@ class ConversationOrchestrator:
                 return TurnResult(
                     reply=self.companion.chat(text, conversation_id=conversation_id),
                     status="answered")
+            plan_text = text
+            if images:
+                plan_text = f"（用户消息附带 {len(images)} 张图片，已可读取）\n" + text
             try:
                 plan = plan_from_model_text(
-                    self.intent_model.plan(text, context=self._intent_context(conversation_id, text)))
+                    self.intent_model.plan(plan_text, context=self._intent_context(conversation_id, text)))
             except Exception:
                 return TurnResult(
-                    reply=self.companion.chat(text, conversation_id=conversation_id),
+                    reply=self.companion.chat(text, conversation_id=conversation_id, images=images),
                     status="answered", receipts=("intent:error→plain-chat",))
             slow = plan.kind == "task" and any(
                 str(c).startswith(self.SLOW_CAPABILITY_PREFIXES) for c in plan.capabilities)
@@ -417,9 +420,13 @@ class ConversationOrchestrator:
         # 3. 意图规划（模型提议，核心裁决；失败回落纯对话）
         # 意图模型需要上下文（近期历史+相关记忆）才能做合理默认——
         # 空上下文会让它问出「哪个城市」这种上下文里明明有答案的瞎话。
+        # 带附件时告知意图模型（它是文本规划看不见图，否则会误以为没图去澄清）。
+        plan_text = text
+        if images:
+            plan_text = f"（用户消息附带 {len(images)} 张图片，已可读取）\n" + text
         try:
             plan = plan_from_model_text(
-                self.intent_model.plan(text, context=self._intent_context(conversation_id, text)))
+                self.intent_model.plan(plan_text, context=self._intent_context(conversation_id, text)))
         except IntentPlanError:
             receipt = "intent:parse-failed→plain-chat"
             reply = self.companion.chat(text, conversation_id=conversation_id)
@@ -441,6 +448,7 @@ class ConversationOrchestrator:
                 conversation_id, text,
                 f"用户的请求缺少必要信息，需要澄清这一点：{ask}\n"
                 "请用你自己的人格语气自然地追问，简短，不要复读上面的原文。",
+                images=images,
             )
             return TurnResult(reply=reply, status="clarify", plan=plan,
                               task_id=plan.task_id or plan.intent_id)
@@ -803,7 +811,8 @@ class ConversationOrchestrator:
         tags = [str(r).split(":")[0] for r in receipts][-3:]
         return "执行失败（" + "、".join(tags) + "）"
 
-    def _voiced(self, conversation_id: str, text: str, note: str) -> str:
+    def _voiced(self, conversation_id: str, text: str, note: str,
+                images: Sequence[bytes] = ()) -> str:
         """系统结局（澄清/待批/拒绝）经陪伴模型用人格语气表达。
 
         意图模型的原文（如 clarification_question）**绝不直接当回复**——
@@ -818,7 +827,8 @@ class ConversationOrchestrator:
             f"{caps_line}\n{note}\n"
             "===== 系统提示结束 ====="
         )
-        return self.companion.chat(augmented, conversation_id=conversation_id, user_text=text)
+        return self.companion.chat(augmented, conversation_id=conversation_id, user_text=text,
+                                   images=images)
 
     def _run_tool(self, spec: ToolSpec, plan: IntentPlan, *, action: ActionIntent | None = None) -> tuple[bool, str]:
         """执行单个工具，返回 (ok, receipt)。风险门控：非只读必经插件网关。"""

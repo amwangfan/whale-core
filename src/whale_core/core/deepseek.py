@@ -5,6 +5,7 @@ bad_response——供宿主做可理解报错与回退决策（roadmap §8 P0-5�
 瞬时错误（rate_limited / server / network）自动重试一次；auth / bad_response 不重试。
 """
 from __future__ import annotations
+import base64
 import json
 import math
 import http.client
