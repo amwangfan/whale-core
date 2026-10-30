@@ -332,6 +332,29 @@ def cmd_run(args) -> int:
     plugin_registry = PluginRegistry()
     adapter, _executor = register_qq_weq_plugin(
         plugin_registry, port=send_port, outbox=workflow.outbox, prefs=prefs)
+
+    # 意图模型（可选，默认关）：QQ_INTENT_MODEL=<模型 id> 开启——同 AgentScope
+    # 平台的 OpenAI 兼容端点复用 DEEPSEEK_* 凭据；规则优先（显式搜索指令本地
+    # 识别零额外调用），LLM 规划用于其余消息。实测选型记录见 gap-analysis。
+    intent_model_id = os.environ.get("QQ_INTENT_MODEL", "").strip()
+    if intent_model_id:
+        from whale_core.core.intent_router import SearchIntentRouter
+        from whale_core.core.runtime import ConversationOrchestrator, ToolRegistry
+        intent_brain = DeepSeekCompanion(model=intent_model_id)  # 同平台不同模型
+        tools = ToolRegistry()
+        if (os.environ.get("TAVILY_API_KEY") or os.environ.get("BRAVE_API_KEY")):
+            from whale_core.plugins.web_fetch import register_web_fetch
+            from whale_core.plugins.web_search import register_web_search, select_provider
+            register_web_search(plugin_registry, tools, provider=select_provider(os.environ))
+            register_web_fetch(plugin_registry, tools)
+            tool_note = "搜索/抓取已挂载"
+        else:
+            tool_note = "搜索未挂载（无 TAVILY/BRAVE key，搜索意图会诚实报不可用）"
+        workflow.orchestrator = ConversationOrchestrator(
+            store, workflow.companion,
+            intent_model=SearchIntentRouter(model=intent_brain, enable_llm=True),
+            tools=tools)
+        print(f"[意图] 模型={intent_model_id}（规则优先+LLM 规划；{tool_note}）")
     owner_draft_ids: set[str] = set()
     approved_draft_ids: set[str] = set()
     plugin_gateway = build_qq_weq_gateway(
