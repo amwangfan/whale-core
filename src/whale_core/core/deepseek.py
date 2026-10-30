@@ -6,6 +6,8 @@ bad_response——供宿主做可理解报错与回退决策（roadmap §8 P0-5�
 """
 from __future__ import annotations
 import json
+import math
+import http.client
 import os
 import time
 import urllib.error
@@ -14,6 +16,19 @@ import urllib.request
 from typing import Mapping, Sequence
 
 _DEFAULT_BASE = "https://api.deepseek.com"
+MAX_MODEL_RESPONSE_BYTES = 2 * 1024 * 1024
+
+
+class _RejectRedirects(urllib.request.HTTPRedirectHandler):
+    """Model credentials must never follow redirects to another origin."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _open_model_request(request, *, timeout):
+    return urllib.request.build_opener(_RejectRedirects()).open(request, timeout=timeout)
+
 
 
 class ModelError(RuntimeError):
@@ -53,10 +68,22 @@ def _is_local_or_private_http(url: str) -> bool:
 class DeepSeekCompanion:
     def __init__(self, *, api_key: str | None = None, base_url: str | None = None,
                  model: str | None = None, timeout: float = 25.0):
-        self.api_key = api_key if api_key is not None else os.environ.get("DEEPSEEK_API_KEY", "")
+        self.api_key = (api_key if api_key is not None else os.environ.get("DEEPSEEK_API_KEY", "")).strip()
+        if any(ord(c) < 32 or ord(c) == 127 for c in self.api_key):
+            raise ValueError("model API key contains invalid control characters")
         self.base_url = (base_url or os.environ.get("DEEPSEEK_BASE_URL", _DEFAULT_BASE)).rstrip("/")
-        if not (self.base_url.startswith("https://") or _is_local_or_private_http(self.base_url)):
-            raise ValueError("DeepSeek companion requires HTTPS (or loopback/private HTTP)")
+        try:
+            parts = urllib.parse.urlsplit(self.base_url)
+            valid_url = (bool(parts.hostname) and parts.username is None and parts.password is None
+                         and not parts.query and not parts.fragment
+                         and parts.port != 0
+                         and (parts.scheme == "https" or _is_local_or_private_http(self.base_url)))
+        except ValueError:
+            valid_url = False
+        if not valid_url:
+            raise ValueError("model endpoint requires HTTPS (or loopback/private HTTP), without URL credentials/query/fragment")
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("model timeout must be finite and positive")
         self.model = model or os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
         self.timeout = timeout
 
@@ -64,7 +91,7 @@ class DeepSeekCompanion:
         """状态展示用（绝不含 api_key）。"""
         return {"provider": "openai-compatible", "model": self.model,
                 "base_url_host": urllib.parse.urlsplit(self.base_url).hostname or "",
-                "configured": bool(self.api_key)}
+                "configured": bool(self.api_key) or _is_local_or_private_http(self.base_url)}
 
     def reply(self, text: str, *, persona: str = "", memories: Sequence[str] = (),
               history: Sequence[Mapping[str, str]] = ()) -> str:
@@ -94,13 +121,20 @@ class DeepSeekCompanion:
         raise last
 
     def _post(self, body: bytes) -> str:
+        headers = {"Content-Type": "application/json", "Accept-Encoding": "identity"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         req = urllib.request.Request(self.base_url + "/chat/completions", data=body,
-                                     headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}, method="POST")
+                                     headers=headers, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as response:
-                data = json.load(response)
+            with _open_model_request(req, timeout=self.timeout) as response:
+                raw = response.read(MAX_MODEL_RESPONSE_BYTES + 1)
+                if len(raw) > MAX_MODEL_RESPONSE_BYTES:
+                    raise ModelError("bad_response", "model response exceeds size limit")
+                data = json.loads(raw.decode("utf-8"))
         except urllib.error.HTTPError as exc:
             status = exc.code
+            exc.close()
             if status in (401, 403):
                 raise ModelError("auth", f"model auth failed ({status})", status=status) from exc
             if status == 429:
@@ -108,9 +142,9 @@ class DeepSeekCompanion:
             if 500 <= status < 600:
                 raise ModelError("server", f"model server error ({status})", status=status, retryable=True) from exc
             raise ModelError("bad_response", f"model HTTP error ({status})", status=status) from exc
-        except (urllib.error.URLError, TimeoutError) as exc:
+        except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
             raise ModelError("network", f"model network error: {type(exc).__name__}", retryable=True) from exc
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as exc:
             raise ModelError("bad_response", "model returned invalid JSON") from exc
         try:
             result = data["choices"][0]["message"]["content"]

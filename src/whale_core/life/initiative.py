@@ -180,6 +180,9 @@ class ProactiveOutbox:
             explicitly_approved = True
         if ledger.get("attempts", 0) > 0:
             return DispatchVerdict("already_attempted", "no automatic repeat", draft_id)
+        global_settings = self.store.get("workflows:settings") or {}
+        if isinstance(global_settings, dict) and global_settings.get("paused") is True and not passive_reply:
+            return DispatchVerdict("paused", "global proactive pause", draft_id)
         if not prefs.enabled:
             return DispatchVerdict("disabled", "proactivity disabled", draft_id)
         if draft.channel not in prefs.allowed_channels:

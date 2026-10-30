@@ -261,7 +261,7 @@ def test_submit_network_error_raises_video_error():
     mgr, _, _ = _manager(_SubmitBoomProvider())
     with pytest.raises(VideoError) as ei:
         mgr.submit("x")
-    assert ei.value.kind == "network" and ei.value.retryable
+    assert ei.value.kind == "network" and not ei.value.retryable
 
 
 def test_submit_bad_response_empty_task_id():

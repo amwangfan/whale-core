@@ -1,34 +1,32 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from "react";
 
-/** 简单的数据加载 hook：挂载时执行 fn，提供 reload 手动刷新。 */
+/** Only the latest request may update a mounted page. */
 export function useApi<T>(fn: () => Promise<T>) {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-
+  const generation = useRef(0);
   const reload = useCallback(() => {
+    const current = ++generation.current;
     setLoading(true);
     setError(null);
-    let cancelled = false;
-    fn()
-      .then(d => {
-        if (!cancelled) setData(d);
+    void fn()
+      .then((d) => {
+        if (current === generation.current) setData(d);
       })
-      .catch(e => {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      .catch((e) => {
+        if (current === generation.current)
+          setError(e instanceof Error ? e.message : String(e));
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (current === generation.current) setLoading(false);
       });
-    return () => {
-      cancelled = true;
-    };
   }, [fn]);
-
   useEffect(() => {
-    const cancel = reload();
-    return cancel;
+    reload();
+    return () => {
+      ++generation.current;
+    };
   }, [reload]);
-
   return { data, error, loading, reload };
 }

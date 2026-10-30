@@ -32,8 +32,8 @@ class _FakeResponse:
         self._body = body
         self.headers = {"Content-Type": content_type}
 
-    def read(self) -> bytes:
-        return self._body
+    def read(self, size=-1) -> bytes:
+        return self._body[:size] if size >= 0 else self._body
 
     def __enter__(self):
         return self
@@ -56,7 +56,7 @@ def _capture_urlopen(monkeypatch, response=None, *, error: Exception | None = No
             raise error
         return response
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr("whale_core.plugins.provider_http.open_request", fake_urlopen)
     return captured
 
 

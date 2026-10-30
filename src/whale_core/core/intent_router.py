@@ -7,7 +7,10 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Protocol
+from typing import Protocol, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from whale_core.core.runtime import ToolRegistry
 
 from whale_core.core.intent_plan import plan_from_model_text, IntentPlanError
 
@@ -26,7 +29,9 @@ class ReplyModel(Protocol):
 class SearchIntentRouter:
     """规则优先；可选模型识别其它任务，但模型不能批准动作。"""
 
-    def __init__(self, *, model: ReplyModel | None = None, enable_llm: bool = False):
+    def __init__(self, *, model: ReplyModel | None = None, enable_llm: bool = False,
+                 tools: ToolRegistry | None = None):
+        self.tools = tools
         self.model = model
         self.enable_llm = enable_llm and model is not None
 
@@ -43,12 +48,32 @@ class SearchIntentRouter:
                     "reason": "用户明确要求搜索公开信息",
                 }, ensure_ascii=False)
         if self.enable_llm:
+            specs = self.tools.specs() if self.tools is not None else []
+            capabilities = ({s.capability for s in specs} if self.tools is not None
+                            else {"web.search"})
+            hints = {
+                "web.search": "query: 搜索词, limit: 结果数量",
+                "web.fetch": "url: 要读取的公开HTTP(S)链接",
+                "media.image.generate": "prompt: 图片描述, size: 可选图片尺寸",
+                "media.video.generate": "prompt: 视频描述",
+                "tts.synthesize": "text: 要朗读的文字",
+                "asr.transcribe": "audio: 已提供的音频数据或资源引用；缺音频时澄清",
+                "shell.execute": "command: 命令字符串；执行仍受宿主审批和沙箱限制",
+            }
+            catalog = []
+            for capability in sorted(capabilities):
+                matching = [s for s in specs if s.capability == capability]
+                detail = hints.get(capability, "参数须符合工具契约")
+                if matching:
+                    detail += "；" + matching[0].description[:300]
+                catalog.append(f"{capability}（{detail}）")
             prompt = (
                 "仅返回一个 JSON 对象，不要代码围栏。你负责建议意图，不能授予权限。"
                 '格式：{"goal":"目标","kind":"chat|task|clarify",'
                 '"slots":{},"capabilities":[],"clarification_question":""}。'
                 "只有确实需要工具且能力已明确时才用 task；普通谈话用 chat。"
-                "不得自行声明审批通过。可用只读能力：web.search（参数 query）。"
+                "不得自行声明审批通过；能力的风险与审批由宿主策略裁决。"
+                "仅可选择以下当前已挂载能力：" + "；".join(catalog) + "。"
                 "澄清要克制：能从上下文/记忆合理推断的缺省值就直接默认（如地点类请求"
                 "没明说地点时，默认用户所在地；用户有出行信息时，用行程目的地或出发地）；"
                 "确实无法推断才 clarify。"
@@ -62,7 +87,7 @@ class SearchIntentRouter:
             except IntentPlanError:
                 return json.dumps({"goal": text[:500] or "对话", "kind": "chat"},
                                   ensure_ascii=False)
-            if plan.kind == "task" and any(cap != "web.search" for cap in plan.capabilities):
+            if plan.kind == "task" and any(cap not in capabilities for cap in plan.capabilities):
                 return json.dumps({"goal": text[:500] or "对话", "kind": "chat"},
                                   ensure_ascii=False)
             return raw
