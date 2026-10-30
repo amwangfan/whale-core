@@ -30,7 +30,7 @@ Version 0.1.0, early development. Module interfaces will still change.
 
 As of 2026-10-30:
 
-- `python -m pytest tests -q`: 803 passed, fully offline, no network access
+- `python -m pytest tests -q`: 808 passed, fully offline, no network access
 - No mock/demo profile. Conversations always hit a real model endpoint and fail loudly without credentials; test doubles live only under `tests/`
 - The console has 7 tabs: Overview, Plugins, Memory, Approvals, Chat, Tasks, Events
 - The QQ / WeQ chain (inbound message → model → human approval → send) has been verified end to end on a real account
@@ -40,7 +40,7 @@ Current state by module:
 | Module | Status | Notes |
 | --- | --- | --- |
 | Conversation and memory | Working | Multi-turn history, SQLite storage, episodic/preference records, recall, JSONL import/export, `记住：`/`忘掉：` commands |
-| Intents and tools | Working | Rule-based routing; explicit search requests call a configured search tool; free-form tool planning needs `WHALE_INTENT_MODEL_ENABLED=1` |
+| Intents and tools | Working | Rule-based routing; explicit search requests call a configured search tool; optional LLM intent planning (`WHALE_INTENT_MODEL_ENABLED=1`) grounds defaults in memory and recent context (e.g. location defaults to your city); clarify/approval/denial replies are voiced by the whale persona |
 | Model access | Needs a real endpoint | Any OpenAI-compatible endpoint; the `local` profile points at a local service, `cloud` defaults to DeepSeek |
 | Search and fetch | Partly working | Needs `TAVILY_API_KEY` or `BRAVE_API_KEY`; the DDG fallback is often blocked by bot checks |
 | Plugin system | Working | Manifest loading, enable/disable, health checks, redacted config, per-risk approval exemptions |
