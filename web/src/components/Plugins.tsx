@@ -1,284 +1,294 @@
-import { Fragment, useCallback, useEffect, useState } from 'react';
-import { api, ApiError, PluginDetail, PluginHealth } from '../api';
-import { useApi } from '../hooks';
-
-type HealthState =
-  | { kind: 'loading' }
-  | { kind: 'ok'; health: PluginHealth }
-  | { kind: 'error'; message: string };
-
-// ---------- 插件配置面板（脱敏视图 + key=value 编辑） ----------
-
-interface KvRow {
-  key: string;
-  value: string;
-  /** 脱敏视图中为 "***"（已配置的 secret）：不回显，等待用户输入新值。 */
-  masked: boolean;
-}
-
-function configToRows(config: Record<string, unknown>): KvRow[] {
-  return Object.entries(config).map(([key, value]) => ({
-    key,
-    value: value === '***' ? '' : typeof value === 'string' ? value : JSON.stringify(value) ?? '',
-    masked: value === '***',
-  }));
-}
-
-/** 值解析：优先按 JSON（支持 123 / true / false / null / "文本"），失败按字符串。 */
-function parseValue(raw: string): unknown {
-  const trimmed = raw.trim();
-  if (trimmed === '') return '';
-  try {
-    return JSON.parse(trimmed) as unknown;
-  } catch {
-    return raw;
-  }
-}
-
-function formatConfigValue(value: unknown): string {
-  if (value === '***') return '***（已配置，不回显）';
-  if (value === '') return '（未配置）';
-  return typeof value === 'string' ? value : JSON.stringify(value) ?? String(value);
-}
-
-type ConfigLoadState =
-  | { kind: 'loading' }
-  | { kind: 'error'; message: string }
-  | { kind: 'ok'; detail: PluginDetail };
-
-function PluginConfigPanel({ pluginId, onSaved }: { pluginId: string; onSaved: () => void }) {
-  const [state, setState] = useState<ConfigLoadState>({ kind: 'loading' });
-  const [rows, setRows] = useState<KvRow[]>([]);
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-
+import { useCallback, useEffect, useState } from "react";
+import { api, PluginDetail } from "../api";
+import { useApi } from "../hooks";
+import Icon from "./Icon";
+export function PluginConfigPanel({
+  pluginId,
+  onSaved,
+}: {
+  pluginId: string;
+  onSaved: () => void;
+}) {
+  const [detail, setDetail] = useState<PluginDetail | null>(null);
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const load = useCallback(async () => {
-    setState({ kind: 'loading' });
     try {
-      const detail = await api.plugin(pluginId);
-      setState({ kind: 'ok', detail });
-      setRows(configToRows(detail.config ?? {}));
+      const d = await api.plugin(pluginId);
+      setDetail(d);
+      setValues(
+        Object.fromEntries(
+          Object.entries({
+            ...Object.fromEntries(
+              Object.entries(d.config_schema?.properties || {}).map(
+                ([k, v]) => [k, v.default ?? ""],
+              ),
+            ),
+            ...d.config,
+          }).map(([k, v]) => [
+            k,
+            v === "***" ? "" : typeof v === "string" ? v : JSON.stringify(v),
+          ]),
+        ),
+      );
     } catch (e) {
-      setState({ kind: 'error', message: e instanceof Error ? e.message : String(e) });
+      setError(String(e));
     }
   }, [pluginId]);
-
   useEffect(() => {
     void load();
   }, [load]);
-
-  const setRow = (i: number, patch: Partial<KvRow>) =>
-    setRows(rs => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
-
-  const submit = async () => {
-    setSaving(true);
-    setSaveError(null);
-    setNotice(null);
+  const save = async () => {
+    setBusy(true);
+    setError("");
+    setNotice("");
     try {
       const config: Record<string, unknown> = {};
-      const original = state.kind === 'ok' ? state.detail.config ?? {} : {};
-      const currentKeys = new Set<string>();
-      for (const row of rows) {
-        const key = row.key.trim();
-        if (!key) continue;
-        currentKeys.add(key);
-        // A masked, untouched secret must NOT be replaced with an empty string.
-        if (row.masked && row.value === '') continue;
-        config[key] = parseValue(row.value);
-      }
-      // The API accepts a patch; null explicitly deletes a removed key.
-      for (const key of Object.keys(original)) {
-        if (!currentKeys.has(key)) config[key] = null;
+      for (const [key, value] of Object.entries(values)) {
+        const spec = detail?.config_schema?.properties?.[key];
+        if (detail?.config?.[key] === "***" && !value) continue;
+        if (spec?.type === "number" || spec?.type === "integer") {
+          if (!value.trim() || !Number.isFinite(Number(value)))
+            throw new Error(`${key} 需要有效数字`);
+          config[key] = Number(value);
+        } else if (spec?.type === "boolean") config[key] = value === "true";
+        else config[key] = value;
       }
       await api.setPluginConfig(pluginId, config);
-      setNotice('配置已保存；未修改的敏感字段保持原值。');
-      await load(); // 重新拉取脱敏视图
-      onSaved(); // 刷新外层插件列表
+      await load();
+      onSaved();
+      setNotice("配置已保存，并已应用到后续调用。");
     } catch (e) {
-      const prefix = e instanceof ApiError && e.status === 422 ? '校验失败（422）：' : '';
-      setSaveError(prefix + (e instanceof Error ? e.message : String(e)));
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setSaving(false);
+      setBusy(false);
     }
   };
-
-  if (state.kind === 'loading') return <div className="muted">加载配置…</div>;
-  if (state.kind === 'error') return <div className="banner error">{state.message}</div>;
-
-  const config = state.detail.config ?? {};
-
+  const test = async () => {
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const r = await api.pluginTest(pluginId);
+      setNotice(
+        r.ok
+          ? `检查通过${r.latency_ms !== null ? ` · ${r.latency_ms} ms` : ""}（${r.via === "ping" ? "实际模型请求" : "本地配置检查"}）`
+          : `检查失败：${r.error_kind || "请确认插件已启用且凭据完整"}`,
+      );
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
     <div className="config-panel">
-      <div>
-        <div className="section-label">当前配置（脱敏视图）</div>
-        {Object.keys(config).length === 0 ? (
-          <div className="muted">暂无已保存的配置。</div>
-        ) : (
-          <div className="config-view">
-            {Object.entries(config).map(([k, v]) => (
-              <div key={k} className="config-row">
-                <span className="mono">{k}</span>
-                <span className={v === '***' || v === '' ? 'mono muted' : 'mono'}>
-                  {formatConfigValue(v)}
-                </span>
-              </div>
-            ))}
+      {!detail ? (
+        <p className="muted">读取配置…</p>
+      ) : (
+        <>
+          <div className="form-grid">
+            {Object.entries(values).map(([key, value]) => {
+              const spec = detail.config_schema?.properties?.[key];
+              const secret =
+                spec?.format === "secret" ||
+                /key|token|secret|password/i.test(key);
+              return (
+                <label className="field" key={key}>
+                  <span>
+                    {(
+                      {
+                        base_url: "服务地址",
+                        model: "模型名称",
+                        api_key: "API 密钥",
+                        timeout: "超时（秒）",
+                        provider: "搜索服务",
+                        target: "固定接收方",
+                        voice: "音色",
+                      } as Record<string, string>
+                    )[key] || key}
+                  </span>
+                  {spec?.type === "boolean" ? (
+                    <select
+                      value={value}
+                      onChange={(e) =>
+                        setValues((v) => ({ ...v, [key]: e.target.value }))
+                      }
+                    >
+                      <option value="true">开启</option>
+                      <option value="false">关闭</option>
+                    </select>
+                  ) : (
+                    <input
+                      type={
+                        secret
+                          ? "password"
+                          : spec?.type === "number"
+                            ? "number"
+                            : "text"
+                      }
+                      autoComplete="off"
+                      value={value}
+                      placeholder={
+                        detail.config?.[key] === "***"
+                          ? "已配置 · 留空保留原值"
+                          : key
+                      }
+                      onChange={(e) =>
+                        setValues((v) => ({ ...v, [key]: e.target.value }))
+                      }
+                    />
+                  )}{" "}
+                  {secret && (
+                    <small>
+                      密钥不会回显。留空保留；清除请在 API 提交 null。
+                    </small>
+                  )}
+                </label>
+              );
+            })}
           </div>
-        )}
-      </div>
-
-      <div>
-        <div className="section-label">编辑配置（每行一个 key=value，提交整体替换）</div>
-        {rows.map((row, i) => (
-          <div className="kv-row" key={i}>
-            <input
-              className="key mono"
-              placeholder="key"
-              value={row.key}
-              onChange={e => setRow(i, { key: e.target.value })}
-            />
-            <input
-              className="value mono"
-              placeholder={
-                row.masked
-                  ? '已配置（***）：留空保持原值；修改后输入新值'
-                  : '值（支持 JSON：123 / true / "文本"）；secret 字段不会写入普通 SQLite 配置'
-              }
-              value={row.value}
-              onChange={e => setRow(i, { value: e.target.value, masked: false })}
-            />
-            <button onClick={() => setRows(rs => rs.filter((_, j) => j !== i))}>✕</button>
+          <div className="actions">
+            <button
+              className="primary"
+              disabled={busy}
+              onClick={() => void save()}
+            >
+              {busy ? "处理中…" : "保存配置"}
+            </button>
+            <button disabled={busy} onClick={() => void test()}>
+              测试连接 / 配置
+            </button>
           </div>
-        ))}
-        <div className="actions">
-          <button onClick={() => setRows(rs => [...rs, { key: '', value: '', masked: false }])}>
-            添加一行
-          </button>
-          <button className="primary" disabled={saving} onClick={() => void submit()}>
-            {saving ? '保存中…' : '保存配置'}
-          </button>
+          <p className="muted small">
+            模型连接测试会发起一次简短请求；其他能力执行本地配置检查。保存配置后再启用插件。
+          </p>
+        </>
+      )}
+      {error && (
+        <div className="banner error" role="alert">
+          {error}
         </div>
-        <div className="muted small">
-          提示：仅提交改动字段；删除整行才会删除配置。敏感字段由服务端单独保存，
-          控制台只显示 ***，未修改时不覆盖旧值。
+      )}
+      {notice && (
+        <div className="banner ok" role="status">
+          {notice}
         </div>
-      </div>
-
-      {saveError && <div className="banner error">{saveError}</div>}
-      {notice && <div className="banner ok">{notice}</div>}
+      )}
     </div>
   );
 }
-
-// ---------- 插件列表 ----------
-
 export default function Plugins() {
-  const listFn = useCallback(() => api.plugins(), []);
-  const { data: plugins, error, loading, reload } = useApi(listFn);
-  const [busy, setBusy] = useState<string | null>(null);
-  const [health, setHealth] = useState<Record<string, HealthState>>({});
-  const [configFor, setConfigFor] = useState<string | null>(null);
-
+  const { data, loading, error, reload } = useApi(
+    useCallback(() => api.plugins(), []),
+  );
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [busy, setBusy] = useState("");
+  const [notice, setNotice] = useState("");
+  const [actionError, setActionError] = useState("");
   const toggle = async (id: string, enabled: boolean) => {
     setBusy(id);
+    setActionError("");
     try {
       await api.setPluginEnabled(id, enabled);
+      setNotice(enabled ? "插件已启用。" : "插件已禁用，后续调用已停止。");
       reload();
     } catch (e) {
-      alert(`操作失败：${e instanceof Error ? e.message : String(e)}`);
+      setActionError(String(e));
+      reload();
     } finally {
-      setBusy(null);
+      setBusy("");
     }
   };
-
-  const checkHealth = async (id: string) => {
-    setHealth(h => ({ ...h, [id]: { kind: 'loading' } }));
-    try {
-      const h = await api.pluginHealth(id);
-      setHealth(prev => ({ ...prev, [id]: { kind: 'ok', health: h } }));
-    } catch (e) {
-      setHealth(prev => ({
-        ...prev,
-        [id]: { kind: 'error', message: e instanceof Error ? e.message : String(e) },
-      }));
-    }
-  };
-
   return (
     <div>
       <div className="page-head">
-        <h2>插件</h2>
-        <button onClick={reload}>刷新</button>
+        <div>
+          <h2>插件与能力</h2>
+          <p className="muted">按需开启，让鲸鱼拥有适合你的能力。</p>
+        </div>
+        <button onClick={reload}>刷新列表</button>
       </div>
-
-      {loading && <div className="muted">加载中…</div>}
-      {error && <div className="banner error">{error}</div>}
-      {plugins && plugins.length === 0 && <div className="empty">没有已加载的插件。</div>}
-
-      {plugins && plugins.length > 0 && (
-        <table className="table">
-          <thead>
-            <tr>
-              <th>名称</th>
-              <th>ID</th>
-              <th>版本</th>
-              <th>类型</th>
-              <th>状态</th>
-              <th>启用</th>
-              <th>操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            {plugins.map(p => {
-              const h = health[p.plugin_id];
-              const expanded = configFor === p.plugin_id;
-              return (
-                <Fragment key={p.plugin_id}>
-                  <tr>
-                    <td>{p.name}</td>
-                    <td className="mono">{p.plugin_id}</td>
-                    <td className="mono">{p.version}</td>
-                    <td>{p.kind}</td>
-                    <td>
-                      <span className={p.enabled ? 'badge ok' : 'badge'}>{p.status}</span>
-                      {h?.kind === 'loading' && <span className="muted"> 检查中…</span>}
-                      {h?.kind === 'ok' && (
-                        <span
-                          className={h.health.status === 'healthy' ? 'badge ok' : 'badge warn'}
-                          title={h.health.detail ?? ''}
-                        >
-                          {h.health.status}
-                        </span>
-                      )}
-                      {h?.kind === 'error' && <span className="badge bad">{h.message}</span>}
-                    </td>
-                    <td>{p.enabled ? '是' : '否'}</td>
-                    <td className="actions">
-                      <button
-                        disabled={busy === p.plugin_id}
-                        onClick={() => void toggle(p.plugin_id, !p.enabled)}
-                      >
-                        {p.enabled ? '禁用' : '启用'}
-                      </button>
-                      <button onClick={() => void checkHealth(p.plugin_id)}>健康</button>
-                      <button onClick={() => setConfigFor(expanded ? null : p.plugin_id)}>
-                        {expanded ? '收起' : '配置'}
-                      </button>
-                    </td>
-                  </tr>
-                  {expanded && (
-                    <tr className="expand-row">
-                      <td colSpan={7}>
-                        <PluginConfigPanel pluginId={p.plugin_id} onSaved={reload} />
-                      </td>
-                    </tr>
-                  )}
-                </Fragment>
-              );
-            })}
-          </tbody>
-        </table>
+      {(error || actionError) && (
+        <div className="banner error">{error || actionError}</div>
+      )}
+      {notice && <div className="banner ok">{notice}</div>}
+      {loading && !data && <div className="empty">读取能力…</div>}
+      <div className="plugin-grid">
+        {data?.map((p) => (
+          <article
+            key={p.plugin_id}
+            className={`plugin-card ${p.enabled ? "is-enabled" : ""}`}
+          >
+            <div className="plugin-top">
+              <span className="plugin-icon">
+                <Icon
+                  name={
+                    p.plugin_id.includes("speech")
+                      ? "chat"
+                      : p.plugin_id.includes("media")
+                        ? "media"
+                        : "plugins"
+                  }
+                  size={24}
+                />
+              </span>
+              <span
+                className={`badge ${p.enabled ? "ok" : p.status === "error" ? "bad" : ""}`}
+              >
+                {p.enabled
+                  ? "已启用"
+                  : p.status === "error"
+                    ? "配置异常"
+                    : "未启用"}
+              </span>
+            </div>
+            <h3>{p.name}</h3>
+            <p className="plugin-id mono">
+              {p.plugin_id} · v{p.version}
+            </p>
+            <div className="cap-tags">
+              {(Array.isArray(p.provides) ? (p.provides as string[]) : []).map(
+                (c) => (
+                  <span className="badge" key={c}>
+                    {c}
+                  </span>
+                ),
+              )}
+              {(Array.isArray(p.actions) ? (p.actions as string[]) : []).map(
+                (c) => (
+                  <span className="badge" key={c}>
+                    {c}
+                  </span>
+                ),
+              )}
+            </div>
+            <div className="plugin-actions">
+              <button
+                onClick={() =>
+                  setExpanded(expanded === p.plugin_id ? null : p.plugin_id)
+                }
+              >
+                {expanded === p.plugin_id ? "收起配置" : "配置与测试"}
+              </button>
+              <button
+                className={p.enabled ? "" : "primary"}
+                disabled={busy === p.plugin_id}
+                onClick={() => void toggle(p.plugin_id, !p.enabled)}
+              >
+                {busy === p.plugin_id ? "处理中…" : p.enabled ? "禁用" : "启用"}
+              </button>
+            </div>
+            {expanded === p.plugin_id && (
+              <PluginConfigPanel pluginId={p.plugin_id} onSaved={reload} />
+            )}
+          </article>
+        ))}
+      </div>
+      {!loading && !data?.length && (
+        <div className="empty">没有加载的插件。</div>
       )}
     </div>
   );

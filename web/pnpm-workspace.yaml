@@ -1,0 +1,4 @@
+# Vite's esbuild binary is provided by its platform package. Do not run dependency
+# postinstall scripts during this project's install/build.
+allowBuilds:
+  esbuild: false

@@ -6,9 +6,9 @@
  * - 错误统一抛 ApiError（code/message 取自 `{error:{code,message}}`）。
  */
 
-export const API_BASE = '/api/v1';
+export const API_BASE = "/api/v1";
 
-const TOKEN_KEY = 'whale.console.token';
+const TOKEN_KEY = "whale.console.token";
 
 // ---------- 类型（与后端契约一一对应） ----------
 
@@ -20,6 +20,9 @@ export interface StatusResult {
   plugins: { loaded: number; enabled: number };
   memory: { episodes: number; preferences: number };
   drafts_pending: number;
+  capabilities?: string[];
+  tasks_running?: number;
+  initiative_paused?: boolean;
 }
 
 export interface HealthResult {
@@ -38,11 +41,17 @@ export interface PluginInfo {
 
 export interface PluginDetail extends PluginInfo {
   config?: Record<string, unknown>;
+  config_schema?: {
+    properties?: Record<
+      string,
+      { type?: string; format?: string; default?: unknown; enum?: unknown[] }
+    >;
+  };
 }
 
 export interface PluginHealth {
   plugin_id: string;
-  status: 'healthy' | 'unhealthy' | 'unknown' | 'disabled' | 'missing' | string;
+  status: "healthy" | "unhealthy" | "unknown" | "disabled" | "missing" | string;
   detail?: string;
 }
 
@@ -67,8 +76,9 @@ export interface Approval {
   text: string;
   channel: string;
   status: string;
-  decision?: 'approve' | 'reject' | '';
+  decision?: "approve" | "reject" | "";
   execution_status?: string;
+  args?: Record<string, unknown>;
 }
 
 /**
@@ -81,7 +91,8 @@ export interface TaskRecord {
   /** epoch 秒 */
   at: number;
   goal: string;
-  status: 'answered' | 'clarify' | 'pending_approval' | 'denied' | 'failed' | string;
+  status:
+    "answered" | "clarify" | "pending_approval" | "denied" | "failed" | string;
   capabilities: string[];
   receipts: string[];
   [key: string]: unknown;
@@ -101,7 +112,7 @@ export class ApiError extends Error {
 
   constructor(code: string, message: string, status: number) {
     super(message);
-    this.name = 'ApiError';
+    this.name = "ApiError";
     this.code = code;
     this.status = status;
   }
@@ -117,7 +128,7 @@ let cachedToken: string | null = null;
 
 function storageAvailable(): boolean {
   try {
-    return typeof localStorage !== 'undefined';
+    return typeof localStorage !== "undefined";
   } catch {
     return false;
   }
@@ -125,7 +136,9 @@ function storageAvailable(): boolean {
 
 export function getToken(): string {
   if (cachedToken === null) {
-    cachedToken = storageAvailable() ? localStorage.getItem(TOKEN_KEY) ?? '' : '';
+    cachedToken = storageAvailable()
+      ? (localStorage.getItem(TOKEN_KEY) ?? "")
+      : "";
   }
   return cachedToken;
 }
@@ -161,32 +174,40 @@ function notifyUnauthorized(): void {
 // ---------- 请求核心 ----------
 
 export function apiUrl(path: string): string {
-  return `${API_BASE}${path.startsWith('/') ? path : `/${path}`}`;
+  return `${API_BASE}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
 /** 发起请求并返回原始 Response；非 2xx 时按 `{error:{code,message}}` 解析并抛 ApiError。 */
-async function rawRequest(path: string, init?: RequestInit): Promise<Response> {
+export async function rawRequest(
+  path: string,
+  init?: RequestInit,
+): Promise<Response> {
   const headers = new Headers(init?.headers);
   const token = getToken();
-  if (token) headers.set('Authorization', `Bearer ${token}`);
-  if (init?.body != null && !headers.has('Content-Type')) {
-    headers.set('Content-Type', 'application/json');
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  if (init?.body != null && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
   }
   let res: Response;
   try {
     res = await fetch(apiUrl(path), { ...init, headers });
   } catch (e) {
-    throw new ApiError('network', e instanceof Error ? e.message : 'network error', 0);
+    throw new ApiError(
+      "network",
+      e instanceof Error ? e.message : "network error",
+      0,
+    );
   }
   if (!res.ok) {
     let code = `http_${res.status}`;
     let message = res.statusText || `HTTP ${res.status}`;
     try {
       const body: unknown = await res.json();
-      if (body && typeof body === 'object' && 'error' in body) {
-        const err = (body as { error: { code?: unknown; message?: unknown } }).error;
-        if (typeof err.code === 'string') code = err.code;
-        if (typeof err.message === 'string') message = err.message;
+      if (body && typeof body === "object" && "error" in body) {
+        const err = (body as { error: { code?: unknown; message?: unknown } })
+          .error;
+        if (typeof err.code === "string") code = err.code;
+        if (typeof err.message === "string") message = err.message;
       }
     } catch {
       /* 非 JSON 错误体：保留 http_<status> 兜底 */
@@ -198,7 +219,7 @@ async function rawRequest(path: string, init?: RequestInit): Promise<Response> {
 }
 
 /** JSON 端点：解包 `{result: ...}`。 */
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await rawRequest(path, init);
   const body = (await res.json()) as { result: T };
   return body.result;
@@ -206,19 +227,123 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 // ---------- 端点 ----------
 
+export interface Artifact {
+  artifact_id: string;
+  media_type: string;
+  size: number;
+}
+export interface Job extends TaskRecord {
+  kind: string;
+  args: Record<string, unknown>;
+  error?: string;
+  result: {
+    text?: string;
+    reply?: string;
+    artifacts?: Artifact[];
+    [key: string]: unknown;
+  };
+}
+export interface ConsoleSettings {
+  profile: string;
+  persona: string;
+  personas: { card_id: string; title: string; description: string }[];
+  life: {
+    paused: boolean;
+    daily_limit: number;
+    quiet_start: string;
+    quiet_end: string;
+    allowed_channels: string[];
+    allow_calls: boolean;
+    allowed_hosts: string[];
+    interval_s: number;
+  };
+  shell: { tier: string; timeout_s: number; output_chars: number };
+  bindings: { channel: string; account: string }[];
+  intent_model_enabled: boolean;
+  budget: { model_calls: number; media_jobs: number };
+}
+export interface LifeResult {
+  settings: ConsoleSettings["life"];
+  interests: { topic: string; weight: number }[];
+  diary: { day: string; note: string; sources: string[] }[];
+}
 export const api = {
-  status: () => request<StatusResult>('/status'),
+  settings: () => request<ConsoleSettings>("/settings"),
+  saveSettings: (value: Partial<ConsoleSettings>) =>
+    request<{ saved: boolean }>("/settings", {
+      method: "POST",
+      body: JSON.stringify(value),
+    }),
+  diagnostics: () => request<Record<string, unknown>>("/diagnostics"),
+  pluginTest: (id: string) =>
+    request<{
+      ok: boolean;
+      latency_ms: number | null;
+      via: string;
+      error_kind?: string;
+    }>(`/plugins/${encodeURIComponent(id)}/test`, { method: "POST" }),
+  submitJob: (
+    kind: string,
+    args: Record<string, unknown>,
+    requestId = crypto.randomUUID(),
+  ) =>
+    request<Job>("/jobs", {
+      method: "POST",
+      body: JSON.stringify({ kind, args, request_id: requestId }),
+    }),
+  job: (id: string) => request<Job>(`/jobs/${encodeURIComponent(id)}`),
+  refreshJob: (id: string) =>
+    request<Job>(`/jobs/${encodeURIComponent(id)}/refresh`, { method: "POST" }),
+  cancelJob: (id: string) =>
+    request<Job>(`/jobs/${encodeURIComponent(id)}/cancel`, { method: "POST" }),
+  history: (id: string) =>
+    request<{ history: { role: "user" | "assistant"; content: string }[] }>(
+      `/conversations/${encodeURIComponent(id)}`,
+    ),
+  clearHistory: (id: string) =>
+    request(`/conversations/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  listMemory: () => request<{ hits: MemoryHit[]; total: number }>("/memory"),
+  importMemory: (text: string) =>
+    request<{ imported: number; skipped: number }>("/memory/import", {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    }),
+  life: () => request<LifeResult>("/life"),
+  interest: (topic: string, remove = false) =>
+    request("/life/interests", {
+      method: "POST",
+      body: JSON.stringify({ topic, remove }),
+    }),
+  lifeFeedback: (topic: string, signal: string) =>
+    request("/life/feedback", {
+      method: "POST",
+      body: JSON.stringify({ topic, signal }),
+    }),
+  voiceSession: () =>
+    request<{
+      url: string;
+      session_id: string;
+      protocol?: string;
+      ticket?: string;
+      sample_rate?: number;
+    }>("/voice/session", {
+      method: "POST",
+      body: "{}",
+    }),
+  status: () => request<StatusResult>("/status"),
 
-  health: () => request<HealthResult>('/health'),
+  health: () => request<HealthResult>("/health"),
 
-  plugins: async () => (await request<{ plugins: PluginInfo[] }>('/plugins')).plugins,
+  plugins: async () =>
+    (await request<{ plugins: PluginInfo[] }>("/plugins")).plugins,
 
-  plugin: (id: string) => request<PluginDetail>(`/plugins/${encodeURIComponent(id)}`),
+  plugin: (id: string) =>
+    request<PluginDetail>(`/plugins/${encodeURIComponent(id)}`),
 
   setPluginEnabled: (id: string, enabled: boolean) =>
     request<{ plugin_id: string; status: string }>(
-      `/plugins/${encodeURIComponent(id)}/${enabled ? 'enable' : 'disable'}`,
-      { method: 'POST' },
+      `/plugins/${encodeURIComponent(id)}/${enabled ? "enable" : "disable"}`,
+      { method: "POST" },
     ),
 
   pluginHealth: (id: string) =>
@@ -228,39 +353,47 @@ export const api = {
   setPluginConfig: (id: string, config: Record<string, unknown>) =>
     request<{ plugin_id: string; saved: boolean }>(
       `/plugins/${encodeURIComponent(id)}/config`,
-      { method: 'POST', body: JSON.stringify({ config }) },
+      { method: "POST", body: JSON.stringify({ config }) },
     ),
 
-  tasks: async () => (await request<{ tasks: TaskRecord[] }>('/tasks')).tasks,
+  tasks: async () => (await request<{ tasks: TaskRecord[] }>("/tasks")).tasks,
 
   task: (id: string) => request<TaskRecord>(`/tasks/${encodeURIComponent(id)}`),
 
   searchMemory: async (q: string) =>
-    (await request<{ hits: MemoryHit[] }>(`/memory/search?q=${encodeURIComponent(q)}`)).hits,
+    (
+      await request<{ hits: MemoryHit[] }>(
+        `/memory/search?q=${encodeURIComponent(q)}`,
+      )
+    ).hits,
 
-  getMemory: (key: string) => request<Record<string, unknown>>(`/memory/${encodeURIComponent(key)}`),
+  getMemory: (key: string) =>
+    request<Record<string, unknown>>(`/memory/${encodeURIComponent(key)}`),
 
   deleteMemory: (key: string) =>
-    request<{ deleted: boolean }>(`/memory/${encodeURIComponent(key)}`, { method: 'DELETE' }),
+    request<{ deleted: boolean }>(`/memory/${encodeURIComponent(key)}`, {
+      method: "DELETE",
+    }),
 
   /** 导出 NDJSON 原文（响应不是 JSON 包装，是 text/plain 流）。 */
   exportMemory: async (): Promise<string> => {
-    const res = await rawRequest('/memory/export', { method: 'POST' });
+    const res = await rawRequest("/memory/export", { method: "POST" });
     return res.text();
   },
 
-  chat: (text: string, conversationId = 'console') =>
-    request<ChatResult>('/chat', {
-      method: 'POST',
+  chat: (text: string, conversationId = "console") =>
+    request<ChatResult>("/chat", {
+      method: "POST",
       body: JSON.stringify({ conversation_id: conversationId, text }),
     }),
 
-  approvals: async () => (await request<{ approvals: Approval[] }>('/approvals')).approvals,
+  approvals: async () =>
+    (await request<{ approvals: Approval[] }>("/approvals")).approvals,
 
-  decideApproval: (draftId: string, decision: 'approve' | 'reject') =>
+  decideApproval: (draftId: string, decision: "approve" | "reject") =>
     request<{ draft_id: string; decision: string }>(
       `/approvals/${encodeURIComponent(draftId)}/decision`,
-      { method: 'POST', body: JSON.stringify({ decision }) },
+      { method: "POST", body: JSON.stringify({ decision }) },
     ),
 };
 
@@ -280,26 +413,27 @@ export function streamEvents(handlers: EventStreamHandlers): EventStream {
   const controller = new AbortController();
   void (async () => {
     try {
-      const res = await rawRequest('/events', {
-        headers: { Accept: 'text/event-stream' },
+      const res = await rawRequest("/events", {
+        headers: { Accept: "text/event-stream" },
         signal: controller.signal,
       });
-      if (!res.body) throw new ApiError('no_stream', 'SSE response has no body', res.status);
+      if (!res.body)
+        throw new ApiError("no_stream", "SSE response has no body", res.status);
       handlers.onOpen?.();
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
-      let buffer = '';
+      let buffer = "";
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
         let idx: number;
-        while ((idx = buffer.indexOf('\n')) >= 0) {
-          const line = buffer.slice(0, idx).replace(/\r$/, '');
+        while ((idx = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, idx).replace(/\r$/, "");
           buffer = buffer.slice(idx + 1);
           // 只处理 data: 行；心跳注释（": ping"）与空行忽略
-          if (!line.startsWith('data:')) continue;
-          const payload = line.slice('data:'.length).trim();
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice("data:".length).trim();
           if (!payload) continue;
           try {
             handlers.onEvent(JSON.parse(payload) as WhaleEvent);
@@ -308,7 +442,9 @@ export function streamEvents(handlers: EventStreamHandlers): EventStream {
           }
         }
       }
-      handlers.onError?.(new ApiError('stream_closed', 'event stream closed', 0));
+      handlers.onError?.(
+        new ApiError("stream_closed", "event stream closed", 0),
+      );
     } catch (e) {
       if (controller.signal.aborted) return; // 主动 close，不算错误
       handlers.onError?.(e instanceof Error ? e : new Error(String(e)));

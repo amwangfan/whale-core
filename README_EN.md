@@ -1,3 +1,5 @@
+> Current console/runtime completion work: see [implementation status](docs/completion-status.md), [deployment](docs/deployment.md), and [service bridges](docs/service-bridges.md). These documents supersede older progress counts below. The browser realtime/PCM relay, Wan video provider and native device adapters are implemented, but real service/device and target deployment verification are still incomplete; Windows is excluded.
+
 <div align="center">
 
 # whale-core

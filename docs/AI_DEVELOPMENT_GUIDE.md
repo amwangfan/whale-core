@@ -1,3 +1,5 @@
+> 本轮更新：以 [completion-status.md](completion-status.md)、[completion-plan.md](completion-plan.md)、[service-bridges.md](service-bridges.md) 和 [deployment.md](deployment.md) 为最新状态。下文保留旧审阅快照，不能继续据此断言新版没有隔离入口或审批派发。
+
 # Whale Core · 开发者与 AI 协作指南
 
 > 面向维护者、贡献者与编程 AI。**面向普通使用者的入口是 [README](../README.md)**。本文件是代码导航与工作约定，不替代源码、测试和契约文档。
