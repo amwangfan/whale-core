@@ -105,10 +105,18 @@ class QqInboundWorkflow:
                 except MediaInputError as exc:
                     print(f"  [附件] 本地图片被拒：{exc}")
             if image is None:
-                url = str(att.get("url") or "")
-                if url.startswith("https://"):
+                # 候选下载链：attachments 可带 urls 有序列表（QQ CDN 相对路径
+                # 已被渠道适配器补全为多个 rkey 候选），逐个尝试。
+                candidates = att.get("urls") or ()
+                if not candidates:
+                    single = str(att.get("url") or "")
+                    candidates = (single,) if single else ()
+                for url in candidates[:4]:
+                    if not str(url).startswith("https://"):
+                        continue
                     try:
-                        image = self._media_validator.from_url(url)
+                        image = self._media_validator.from_url(str(url))
+                        break
                     except MediaInputError as exc:
                         print(f"  [附件] 远端图片被拒：{exc}")
             if image is not None:

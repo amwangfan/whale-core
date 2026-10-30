@@ -54,6 +54,100 @@ def parse_push_events(body: bytes | None) -> list[dict] | None:
     return [e for e in events if isinstance(e, dict)]
 
 
+# QQ 多媒体 CDN：相对路径需补多媒体域名 + 活 rkey（rkey 由 weq 账号监控
+# 刷新，约 57 分钟过期）。只读 weq 配置目录，不写。
+_QQ_MEDIA_HOST = "https://multimedia.nt.qq.com.cn"
+# rkey type 10=c2c 图（appid 1406）、20=群图（appid 1407）
+_RKEY_APPID = {10: "1406", 20: "1407"}
+
+
+def _load_weq_rkeys(config_dir: str = "") -> list[tuple[str, str]]:
+    """从 weq 账号配置读未过期的图片 rkey，返回 [(appid, "&rkey=...")]。
+
+    配置目录默认 ~/.config/weq（WHALE_WEQ_CONFIG_DIR 可覆盖）；读不到/过期
+    一律返回空——调用方按「无可用下载链」处理，不伪造 URL。
+    """
+    import glob
+    import json
+    import os
+    import time
+
+    base = (config_dir or os.environ.get("WHALE_WEQ_CONFIG_DIR", "")
+            or os.path.expanduser("~/.config/weq"))
+    now = time.time()
+    out: list[tuple[str, str]] = []
+
+    def _walk(obj):
+        if isinstance(obj, dict):
+            if isinstance(obj.get("rkeys"), list):
+                return obj["rkeys"]
+            for value in obj.values():
+                found = _walk(value)
+                if found is not None:
+                    return found
+        return None
+
+    for path in glob.glob(os.path.join(base, "config", "accounts", "*.json")):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                rkeys = _walk(json.load(fh))
+        except Exception:
+            continue
+        for rk in rkeys or ():
+            if not isinstance(rk, dict):
+                continue
+            appid = _RKEY_APPID.get(rk.get("type"))
+            value = str(rk.get("rkey") or "")
+            try:
+                fresh = float(rk.get("createTime", 0)) + float(
+                    rk.get("ttlSeconds", 0)) > now
+            except (TypeError, ValueError):
+                fresh = False
+            if appid and value.startswith("&rkey=") and fresh:
+                out.append((appid, value))
+    return out
+
+
+def _pic_download_urls(data: Mapping, *, chat_type: str,
+                       rkeys: list[tuple[str, str]]) -> tuple[str, ...]:
+    """pic 元素 → 候选下载 URL（有序，最坏情况为空 tuple）。
+
+    - 绝对 https URL：直接可用；
+    - 相对 /download 路径 或仅 fileToken：补多媒体域名 + 按场景匹配 appid
+      的活 rkey（c2c=1406/type10，group=1407/type20；两者都试，场景优先）。
+    """
+    url = str(data.get("originalUrl") or "")
+    token = str(data.get("fileToken") or "")
+    out: list[str] = []
+    if url.startswith("https://"):
+        out.append(url[:2000])
+    path = ""
+    if url.startswith("/"):
+        path = url
+    elif token and not out:
+        scene_appid = "1407" if chat_type == "group" else "1406"
+        path = f"/download?appid={scene_appid}&fileid={token}&spec=0"
+    if path and rkeys:
+        import re as _re
+
+        # 场景匹配的 appid 优先（c2c=1406，group=1407），另一场景兜底
+        scene_first = ("1407", "1406") if chat_type == "group" else ("1406", "1407")
+        ordered = ([rk for rk in rkeys if rk[0] == scene_first[0]]
+                   + [rk for rk in rkeys if rk[0] == scene_first[1]])
+        for rk_appid, rk in ordered:
+            candidate = _QQ_MEDIA_HOST + path
+            if "appid=" in candidate:
+                candidate = _re.sub(r"appid=\d+", f"appid={rk_appid}", candidate)
+            out.append((candidate + rk)[:2000])
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for u in out:
+        if u not in seen:
+            seen.add(u)
+            deduped.append(u)
+    return tuple(deduped[:4])
+
+
 def sse_message_to_incoming(event: Mapping, *, self_uin: str,
                             accept_group: bool = False) -> Incoming | None:
     """WeQ SSE 单条 message 事件 → Incoming；不收/解析不了的一律 None（宁缺勿错）。
@@ -89,17 +183,34 @@ def sse_message_to_incoming(event: Mapping, *, self_uin: str,
     # 附件：pic 元素带本机缓存路径（filePath）与 CDN 链接（originalUrl）
     attachments = []
     elements = event.get("elements")
+    rkeys: list[tuple[str, str]] = []
+    if isinstance(elements, list) and any(
+            isinstance(el, dict) and el.get("type") == "pic" for el in elements):
+        rkeys = _load_weq_rkeys()
     if isinstance(elements, list):
         for el in elements[:8]:
             if not isinstance(el, dict) or el.get("type") != "pic":
                 continue
             data = el.get("data") or {}
+            urls = _pic_download_urls(data, chat_type=str(chat_type or "c2c"),
+                                      rkeys=rkeys)
             attachments.append({
                 "kind": "pic",
                 "file_path": str(data.get("filePath") or "")[:500],
-                "url": str(data.get("originalUrl") or "")[:2000],
+                "url": urls[0] if urls else "",
+                "urls": urls,
                 "name": str(data.get("fileName") or "image")[:100],
             })
+    # 诊断（结构性，不含正文/URL）：图片链路排障用——记录元素类型序列与
+    # pic 元素实际携带的字段名，便于确认上游推送是否含附件。
+    if elements:
+        kinds = [str(el.get("type")) for el in elements if isinstance(el, dict)][:8]
+        pic_fields = sorted({k for el in elements if isinstance(el, dict)
+                             and el.get("type") == "pic"
+                             for k in (el.get("data") or {}).keys()
+                             if (el.get("data") or {}).get(k)})[:12]
+        print(f"  [调试] msg={msg_id} elements={kinds} pic_fields={pic_fields}",
+              flush=True)
     return Incoming(channel="qq", account=sender,
                     conversation=f"{conversation_kind}:{conv_id}",
                     message_id=msg_id, text=text, transport_authenticated=True,

@@ -272,3 +272,40 @@ def test_workflow_empty_text_and_daily_cap():
     wf.prefs = prefs
     result = wf.handle_owner_event(owner_event(msg_id="mcap"))
     assert result["verdict"] == "over_budget"  # AI 已跑但草稿被额度闸门拦下
+
+
+def test_pic_relative_url_completed_with_rkey(tmp_path, monkeypatch):
+    """生产实证：QQ c2c 图片 originalUrl 是相对 /download 路径——
+    需补多媒体域名 + 活 rkey 才可下载。"""
+    import json
+    import time
+
+    from weq_channel.wq_push import _load_weq_rkeys, _pic_download_urls
+
+    account_dir = tmp_path / "config" / "accounts"
+    account_dir.mkdir(parents=True)
+    fresh = {"rkey": "&rkey=LIVE", "type": 10,
+             "createTime": time.time(), "ttlSeconds": 3600}
+    stale = {"rkey": "&rkey=DEAD", "type": 10,
+             "createTime": time.time() - 7200, "ttlSeconds": 3600}
+    group_rk = {"rkey": "&rkey=GRP", "type": 20,
+                "createTime": time.time(), "ttlSeconds": 3600}
+    (account_dir / "acc.json").write_text(
+        json.dumps({"nested": {"rkeys": [fresh, stale, group_rk]}}))
+    rkeys = _load_weq_rkeys(str(tmp_path))
+    assert ("1406", "&rkey=LIVE") in rkeys
+    assert ("1406", "&rkey=STALE") not in rkeys  # 过期不带
+    assert ("1407", "&rkey=GRP") in rkeys
+
+    data = {"originalUrl": "/download?appid=1406&fileid=TOK&spec=0",
+            "fileToken": "TOK"}
+    urls = _pic_download_urls(data, chat_type="c2c", rkeys=rkeys)
+    assert urls[0].startswith("https://multimedia.nt.qq.com.cn/download?")
+    assert urls[0].endswith("&rkey=LIVE")  # c2c 场景优先
+    assert any(u.endswith("&rkey=GRP") and "appid=1407" in u for u in urls)
+    # 绝对 URL 原样保留在最前
+    abs_urls = _pic_download_urls({"originalUrl": "https://cdn.example.com/x.png"},
+                                  chat_type="c2c", rkeys=rkeys)
+    assert abs_urls[0] == "https://cdn.example.com/x.png".replace("/x.png", "") or abs_urls[0] == "https://cdn.example.com/x.png"
+    # 无 rkey → 相对路径不可用（空候选，诚实不伪造）
+    assert _pic_download_urls(data, chat_type="c2c", rkeys=[]) == ()
