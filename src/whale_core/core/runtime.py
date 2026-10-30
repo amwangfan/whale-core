@@ -345,13 +345,14 @@ class ConversationOrchestrator:
             # G1-B：先持久化台账（pending）再 ack——ack 不得先于持久任务创建。
             task_id, plan = self._persist_task(
                 plan, conversation_id=env.conversation_id, text=env.text,
-                source=env.source, channel=env.channel, async_delivery=True)
+                source=env.source, channel=env.channel, owner_id=env.owner_id,
+                async_delivery=True)
             try:
                 ack = self._voiced(
                     env.conversation_id, env.text,
                     "用户的请求需要耗时工具处理（生图/搜索等，约半分钟到几分钟）。"
                     "请用你自己的人格语气先回一句你已经在做了、稍后给结果——简短自然，"
-                    "不要假装已经完成。")
+                    "不要假装已经完成。", turn_key=task_id)
             except Exception:
                 ack = "好，我在处理了，稍后给你结果。"  # ack 模型失败不阻断任务
             self._save_task(task_id, plan, "acknowledged", ())
@@ -368,7 +369,8 @@ class ConversationOrchestrator:
                             "用户发来一张参考图，想用它的风格/角色再创作。"
                             "用一句话（≤80字）描述这张图的角色外观与画风要点，供生图模型参考。"
                             "只写描述，不要客套。",
-                            conversation_id=env.conversation_id, images=images)
+                            conversation_id=env.conversation_id, images=images,
+                            episodic=False)
                         desc = (desc or "").strip()[:200]
                         if desc:
                             slots = dict(plan.slots)
@@ -463,11 +465,13 @@ class ConversationOrchestrator:
                 f"用户的请求缺少必要信息，需要澄清这一点：{ask}\n"
                 "请用你自己的人格语气自然地追问，简短，不要复读上面的原文。",
                 images=env.images,
+                turn_key=plan.task_id or plan.intent_id,
             )
             return TurnResult(reply=reply, status="clarify", plan=plan,
                               task_id=plan.task_id or plan.intent_id)
         return self._start_plan(decision.plan, env.conversation_id, text,
-                                source=env.source, channel=env.channel)
+                                source=env.source, channel=env.channel,
+                                owner_id=env.owner_id)
 
     def recover_interrupted_tasks(self, *, on_complete=None) -> list[str]:
         """进程重启后恢复被掐断的在途任务（G1-B phase 感知）。
@@ -555,7 +559,8 @@ class ConversationOrchestrator:
                                     source=source, tool_name=name)
 
     def _persist_task(self, plan: IntentPlan, *, conversation_id: str, text: str,
-                      source: str, channel: str = "", tool_name: str = "",
+                      source: str, channel: str = "", owner_id: str = "",
+                      tool_name: str = "",
                       async_delivery: bool = False) -> tuple[str, IntentPlan]:
         """G1-B：在任何外部效果（含 ack）之前持久化任务台账。
 
@@ -579,10 +584,11 @@ class ConversationOrchestrator:
             self.store.put(f"runtime:task:{task_id}", {
                 "plan": persisted_plan, "transient_keys": sorted(transient_keys),
                 "conversation_id": conversation_id, "source": source,
-                "channel": channel, "text": text, "next_step": 0, "results": [],
+                "channel": channel, "owner_id": owner_id,
+                "text": text, "next_step": 0, "results": [],
                 "receipts": [], "tool_name": tool_name, "async": async_delivery,
             })
-            self._save_task(task_id, plan, "pending", ())
+            self._save_task(task_id, plan, "pending", (), owner_id=owner_id)
             self._append_event(task_id, "planned",
                                source=source, channel=channel)
         return task_id, plan
@@ -603,10 +609,11 @@ class ConversationOrchestrator:
             self.store.put(f"runtime:task:{task_id}", journal)
 
     def _start_plan(self, plan: IntentPlan, conversation_id: str, text: str, *,
-                    source: str, tool_name: str = "", channel: str = "") -> TurnResult:
+                    source: str, tool_name: str = "", channel: str = "",
+                    owner_id: str = "") -> TurnResult:
         task_id, _plan = self._persist_task(
             plan, conversation_id=conversation_id, text=text, source=source,
-            channel=channel, tool_name=tool_name)
+            channel=channel, owner_id=owner_id, tool_name=tool_name)
         return self._execute_task(task_id)
 
     # ---- G1-B：phase 状态机、事件流水与送达回执 ----
@@ -715,6 +722,38 @@ class ConversationOrchestrator:
             if (record.get("phase") in ("succeeded", "delivery_failed")
                     and delivery.get("state") in ("pending", "failed")):
                 out.append(record)
+        return out
+
+    def tasks_for_owner(self, owner_id: str, *, limit: int = 20) -> list[dict]:
+        """G2 跨设备连续性：同一逻辑 owner 在任何渠道都能查到自己任务的进度。
+
+        按 journal 里的 owner_id 归并（信封由渠道适配器在宿主侧认证后填写）；
+        返回记录含 phase/status/delivery，但**不含**正文全文——跨渠道只暴露
+        进度与结局摘要，私有上下文不跨权限域泄漏。
+        """
+        owner_id = (owner_id or "").strip()
+        if not owner_id:
+            return []
+        out: list[dict] = []
+        recent = self.store.get("tasks:recent") or []
+        for task_id in reversed(recent):
+            record = self.store.get(f"task:{task_id}")
+            journal = self.store.get(f"runtime:task:{task_id}")
+            if not isinstance(record, dict) or not isinstance(journal, dict):
+                continue
+            if str(journal.get("owner_id") or "") != owner_id:
+                continue
+            out.append({
+                "task_id": task_id,
+                "goal": record.get("goal", ""),
+                "phase": record.get("phase", record.get("status", "")),
+                "status": record.get("status", ""),
+                "channel": journal.get("channel", ""),
+                "delivery": (record.get("delivery") or {}).get("state", ""),
+                "at": record.get("at", 0),
+            })
+            if len(out) >= limit:
+                break
         return out
 
     def redeliver_task(self, task_id: str) -> dict:
@@ -951,7 +990,8 @@ class ConversationOrchestrator:
                      + "\n".join(_scrub_untrusted(r) for r in results)
                      + "\n===== 不可信工具输出结束 =====\n" + note)
         try:
-            reply = self.companion.chat(augmented, conversation_id=cid, user_text=text)
+            reply = self.companion.chat(augmented, conversation_id=cid, user_text=text,
+                                        turn_key=task_id)
         except Exception:
             # Journal survives even if the response model fails after an action.
             reply = note
@@ -1170,7 +1210,7 @@ class ConversationOrchestrator:
         return "执行失败（" + "、".join(tags) + "）"
 
     def _voiced(self, conversation_id: str, text: str, note: str,
-                images: Sequence[bytes] = ()) -> str:
+                images: Sequence = (), turn_key: str = "") -> str:
         """系统结局（澄清/待批/拒绝）经陪伴模型用人格语气表达。
 
         意图模型的原文（如 clarification_question）**绝不直接当回复**——
@@ -1186,7 +1226,7 @@ class ConversationOrchestrator:
             "===== 系统提示结束 ====="
         )
         return self.companion.chat(augmented, conversation_id=conversation_id, user_text=text,
-                                   images=images)
+                                   images=images, turn_key=turn_key)
 
     def _run_tool(self, spec: ToolSpec, plan: IntentPlan, *, action: ActionIntent | None = None) -> tuple[bool, str]:
         """执行单个工具，返回 (ok, receipt)。风险门控：非只读必经插件网关。"""
