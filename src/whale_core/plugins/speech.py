@@ -240,48 +240,20 @@ class OpenAICompatibleTTS(_OpenAICompatibleBase):
         return audio
 
 
-class MockASR:
-    """mock：demo/测试替身（docstring 标注 mock）。确定性输出，不走网络。
-
-    输出由输入派生（语言 + 字节数），同一输入永远同一输出。
-    """
-
-    def __init__(self, *, prefix: str = "[mock-asr]"):
-        self.prefix = prefix
-
-    def transcribe(self, audio: bytes, *, lang: str = "zh") -> str:
-        return f"{self.prefix} lang={lang} bytes={len(audio)}"
-
-
-class MockTTS:
-    """mock：demo/测试替身（docstring 标注 mock）。确定性输出，不走网络。
-
-    输出是伪音频字节（输入文本的 UTF-8 加上头部标记），仅用于打通链路。
-    """
-
-    def __init__(self, *, magic: bytes = b"MOCKTTS\n"):
-        self.magic = magic
-
-    def synthesize(self, text: str, *, voice: str = "", rate: float = 1.0) -> bytes:
-        return self.magic + f"voice={voice or 'default'} rate={rate}\n".encode() \
-            + text.encode("utf-8")
-
-
 def register_speech(registry: PluginRegistry, *,
                     asr: ASRProvider | None = None,
                     tts: TTSProvider | None = None) -> dict:
     """注册 ASR/TTS 两个 model 插件（plugin_id="speech_asr"/"speech_tts"）。
 
-    provider 对象注入；任一参数为 None 时挂对应 Mock（demo 可用）。返回值标注
-    哪些位置用的是 mock：``{"asr": obj, "tts": obj, "mock": ("asr", ...)}``。
+    provider 必须由宿主显式注入（**没有 mock 默认**——mock 模式已按 owner
+    决策移除：缺 provider 就诚实失败，绝不用罐装替身冒充能力）。
     """
-    mocked: list[str] = []
-    if asr is None:
-        asr = MockASR()
-        mocked.append("asr")
-    if tts is None:
-        tts = MockTTS()
-        mocked.append("tts")
+    if asr is None or tts is None:
+        raise ValueError(
+            "register_speech requires real providers (asr=..., tts=...); "
+            "mock defaults were removed — inject OpenAICompatibleASR/TTS or "
+            "your own provider"
+        )
     registry.register(
         PluginManifest(
             plugin_id="speech_asr", name="ASR（语音识别）", version="1.0.0",
@@ -298,4 +270,4 @@ def register_speech(registry: PluginRegistry, *,
         ),
         provider=tts,
     )
-    return {"asr": asr, "tts": tts, "mock": tuple(mocked)}
+    return {"asr": asr, "tts": tts}

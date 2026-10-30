@@ -32,7 +32,7 @@ class ApiContext:
 
     store: MemoryStore
     version: str = "0.1.0"
-    profile: str = "demo"
+    profile: str = "local"
     manager: Any = None        # PluginManager
     orchestrator: Any = None   # ConversationOrchestrator
     curator: Any = None        # MemoryCurator

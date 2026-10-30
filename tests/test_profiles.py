@@ -13,18 +13,15 @@ def test_unknown_profile_rejected():
         assemble_runtime("yolo")
 
 
-def test_demo_profile_offline_mock():
-    bundle = assemble_runtime("demo")
-    assert bundle.profile == "demo"
-    result = bundle.orchestrator.handle_message("c", "你好")
-    assert result.reply.startswith("[mock]")
-    assert any("mock" in n for n in bundle.notes)
-    # demo 档有罐装搜索工具
-    assert bundle.tools.get("search_web") is not None
+def test_demo_profile_removed():
+    """mock/demo 档已移除（owner 决策 2026-10-30）：不再存在。"""
+    with pytest.raises(ValueError):
+        assemble_runtime("demo")
+    assert "demo" not in __import__("whale_core.profiles", fromlist=["x"]).PROFILE_NAMES
 
 
-def test_demo_memory_command_works():
-    bundle = assemble_runtime("demo")
+def test_local_memory_command_works():
+    bundle = assemble_runtime("local", env={})
     result = bundle.orchestrator.handle_message("c", "记住：我怕辣")
     assert result.reply.startswith("好，我记住啦")
 
@@ -70,6 +67,6 @@ def test_local_profile_custom_endpoint():
 
 
 def test_config_dir_persists_store(tmp_path):
-    bundle = assemble_runtime("demo", config_dir=str(tmp_path))
+    bundle = assemble_runtime("local", env={}, config_dir=str(tmp_path))
     assert isinstance(bundle.store, SqliteMemoryStore)
     assert (tmp_path / "memory.sqlite3").exists()

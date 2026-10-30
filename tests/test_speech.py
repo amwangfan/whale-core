@@ -13,11 +13,11 @@ import pytest
 
 from whale_core.plugins.manifest import PluginKind
 from whale_core.plugins.registry import PluginRegistry
+from _doubles import MockASR, MockTTS
 from whale_core.plugins.speech import (
     ASR_TRANSCRIBE,
     TTS_SYNTHESIZE,
-    MockASR,
-    MockTTS,
+
     OpenAICompatibleASR,
     OpenAICompatibleTTS,
     SpeechError,
@@ -279,7 +279,7 @@ def test_register_speech_registers_both_and_resolves():
     asr = OpenAICompatibleASR(api_key="k", base_url="http://127.0.0.1:9000/v1")
     tts = MockTTS()
     result = register_speech(registry, asr=asr, tts=tts)
-    assert result == {"asr": asr, "tts": tts, "mock": ()}
+    assert result == {"asr": asr, "tts": tts}
 
     for pid, cap in (("speech_asr", ASR_TRANSCRIBE), ("speech_tts", TTS_SYNTHESIZE)):
         manifest = registry.manifest(pid)
@@ -291,12 +291,9 @@ def test_register_speech_registers_both_and_resolves():
     assert registry.providers_for(TTS_SYNTHESIZE) == [("speech_tts", tts)]
 
 
-def test_register_speech_none_falls_back_to_mocks():
+def test_register_speech_requires_providers():
+    """mock 默认已移除（owner 决策）：缺 provider 诚实 ValueError。"""
     registry = PluginRegistry()
-    result = register_speech(registry)
-    assert isinstance(result["asr"], MockASR)
-    assert isinstance(result["tts"], MockTTS)
-    assert result["mock"] == ("asr", "tts")
-    # mock 也能被能力解析出来（demo 可用）
-    assert registry.providers_for(ASR_TRANSCRIBE)[0][1] is result["asr"]
-    assert registry.providers_for(TTS_SYNTHESIZE)[0][1] is result["tts"]
+    with pytest.raises(ValueError):
+        register_speech(registry)
+    assert registry.providers_for(ASR_TRANSCRIBE) == []

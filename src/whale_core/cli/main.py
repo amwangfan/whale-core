@@ -1,4 +1,4 @@
-"""whale CLI：setup / doctor / run / plugins / memory（roadmap §9 demo 档入口）。
+"""whale CLI：setup / doctor / run / plugins / memory（roadmap §9 入口）。
 
 设计约定（与仓内安全约定一致）：
 
@@ -8,7 +8,7 @@
   ``manifests/``（插件清单目录，显式加载、不做自动发现）；
 - ``main(argv)`` 返回退出码，库函数绝不 ``sys.exit``（argparse 自身的
   SystemExit 除外）；``python3 -m whale_core.cli.main`` 可直接运行；
-- demo REPL 使用内置 mock 模型，回复一律带 ``[mock]`` 前缀（诚实标注）。
+- 没有 demo/mock 档（owner 决策）：run 连接配置档对应的真实模型端点。
 """
 
 from __future__ import annotations
@@ -35,10 +35,6 @@ RUN_CONVERSATION_ID = "cli"
 
 # 各档位的默认 config.json 内容：只含非敏感信息与 env 引用名。
 PROFILE_CONFIGS: dict[str, dict[str, Any]] = {
-    "demo": {
-        "profile": "demo",
-        "model": {"plugin": "mock"},
-    },
     "cloud": {
         "profile": "cloud",
         "model": {"plugin": "deepseek", "api_key_env": "DEEPSEEK_API_KEY"},
@@ -77,12 +73,6 @@ token/key/secret/password 的值一律以 *** 脱敏。
 注意：清单不含任何凭据；密钥只放环境变量 / 宿主私有配置。
 """
 
-
-class MockChatModel:
-    """demo 档内置陪伴模型：不调任何外部服务，回复带 [mock] 诚实标注。"""
-
-    def reply(self, text: str, *, persona: str = "", memories=(), history=()) -> str:
-        return f"[mock] 鲸鱼收到：{text[:200]}（demo 档为本地 mock 模型，未连接真实 LLM）"
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +165,7 @@ def _build_api_server(args: argparse.Namespace) -> tuple[Any, str, str]:
 
     config_dir = _config_dir(args)
     config = _load_config(config_dir) or {}
-    profile = str(config.get("profile") or "demo")
+    profile = str(config.get("profile") or "local")
     bundle = assemble_runtime(profile, config_dir=str(config_dir))
     token, token_source = _resolve_api_token(config_dir)
     ctx = ApiContext(
@@ -230,16 +220,16 @@ def _cmd_setup(args: argparse.Namespace) -> int:
     profile = args.profile
     if profile is None:
         if interactive:
-            answer = input("选择档位 [demo/cloud/local]（默认 demo）：").strip().lower()
+            answer = input("选择档位 [cloud/local]（默认 local）：").strip().lower()
             if not answer:
-                profile = "demo"
+                profile = "local"
             elif answer in PROFILE_CONFIGS:
                 profile = answer
             else:
-                print(f"错误：未知档位 {answer!r}（可选 demo/cloud/local）", file=sys.stderr)
+                print(f"错误：未知档位 {answer!r}（可选 cloud/local）", file=sys.stderr)
                 return 2
         else:
-            profile = "demo"
+            profile = "local"
 
     config_path = config_dir / CONFIG_FILENAME
     if config_path.exists() and not args.force:
@@ -275,8 +265,8 @@ def _cmd_setup(args: argparse.Namespace) -> int:
     print(f"已写入 {config_path}（profile={profile}）")
     print(f"记忆库：{config_dir / MEMORY_FILENAME}")
     print(f"插件清单目录：{manifests_dir}（格式见 README.txt）")
-    if profile == "demo":
-        print("demo 档无需任何 API key，`whale run` 使用内置 mock 模型。")
+    if profile == "local":
+        print("local 档无需 API key；`whale run` 连接本地模型端点（默认 127.0.0.1:11434，先确认它在跑）。")
     elif profile == "cloud":
         env_name = config["model"]["api_key_env"]
         print(f"cloud 档将从环境变量 {env_name} 读取 key（不会写入配置文件）。")
@@ -349,9 +339,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     else:
         profile = config.get("profile", "")
         model = config.get("model") or {}
-        if profile == "demo":
-            rep.ok("模型 provider：demo 档使用内置 mock 模型，无需 key")
-        elif profile == "cloud":
+        if profile == "cloud":
             env_name = str(model.get("api_key_env") or "DEEPSEEK_API_KEY")
             if os.environ.get(env_name):
                 rep.ok(f"模型 provider：cloud 档 key 已配置（env {env_name}）")
@@ -397,7 +385,7 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
-# run（demo REPL）
+# run（REPL，真实模型端点）
 # ---------------------------------------------------------------------------
 
 
@@ -406,7 +394,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     _ensure_layout(config_dir)
     from whale_core.profiles import assemble_runtime
     config = _load_config(config_dir) or {}
-    profile = str(config.get("profile") or "demo")
+    profile = str(config.get("profile") or "local")
     try:
         bundle = assemble_runtime(profile, config_dir=str(config_dir))
     except ValueError as exc:
@@ -414,8 +402,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return 2
     store = bundle.store
     orchestrator = bundle.orchestrator
-    print(f"whale {profile} REPL —— 输入 /quit 退出" +
-          ("（mock 模型，输出带 [mock]）" if profile == "demo" else "（真实模型端点）"))
+    print(f"whale {profile} REPL —— 输入 /quit 退出（真实模型端点）")
     for note in bundle.notes:
         print(f"  [profile] {note}")
     try:
@@ -588,7 +575,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_setup = sub.add_parser("setup", help="初始化配置目录与 config.json")
     p_setup.add_argument(
         "--profile", choices=sorted(PROFILE_CONFIGS), default=None,
-        help="档位：demo（默认，mock 模型）/ cloud（DeepSeek，需 env key）/ local（本地端点）",
+        help="档位：cloud（DeepSeek，需 env key）/ local（本地端点，默认）",
     )
     p_setup.add_argument(
         "--non-interactive", action="store_true",
@@ -604,7 +591,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_config_dir(p_doctor)
     p_doctor.set_defaults(func=_cmd_doctor)
 
-    p_run = sub.add_parser("run", help="demo REPL（内置 mock 模型）")
+    p_run = sub.add_parser("run", help="REPL（使用配置档对应的真实模型端点）")
     _add_config_dir(p_run)
     p_run.set_defaults(func=_cmd_run)
 

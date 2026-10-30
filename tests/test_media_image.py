@@ -18,11 +18,12 @@ from whale_core.plugins.media_image import (
     PLUGIN_ID,
     ImageError,
     ImageTaskResult,
-    MockImageProvider,
+
     OpenAIImagesProvider,
     register_image_gen,
 )
 from whale_core.plugins.registry import PluginRegistry
+from _doubles import MockImageProvider
 
 
 # ---------- 离线 HTTP 替身 ----------
@@ -207,15 +208,12 @@ def test_mock_is_labelled():
 
 # ---------- 注册形状 + providers_for 解析 ----------
 
-def test_register_defaults_to_labelled_mock():
+def test_register_requires_provider():
+    """mock 默认已移除（owner 决策）：缺 provider 诚实 ValueError。"""
     registry = PluginRegistry()
-    provider = register_image_gen(registry)
-    assert isinstance(provider, MockImageProvider)
-    manifest = registry.manifest(PLUGIN_ID)
-    assert manifest is not None
-    assert manifest.resolved_kind is PluginKind.MODEL
-    assert manifest.provides == (IMAGE_GENERATE,)
-    assert "mock" in manifest.description.lower()
+    with pytest.raises(ValueError):
+        register_image_gen(registry)
+    assert registry.manifest(PLUGIN_ID) is None
 
 
 def test_register_shape_and_providers_for_resolution():

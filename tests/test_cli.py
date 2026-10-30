@@ -2,7 +2,7 @@
 
 用 tmp_path 作 --config-dir，capsys 抓输出，monkeypatch 控环境变量与 stdin。
 覆盖冻结契约：setup 三档与覆盖语义、doctor 退出码与前缀、plugins 全子命令、
-memory 导出导入往返、demo REPL 的 [mock] 前缀与历史累积、argparse SystemExit。
+memory 导出导入往返、run REPL（替身模型）历史累积、argparse SystemExit。
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import pytest
 from whale_core.cli.main import main
 from whale_core.memory.history import load_history
 from whale_core.memory.sqlite_store import SqliteMemoryStore
+from whale_core.core.deepseek import DeepSeekCompanion
 from whale_core.memory.store import MemoryKind, MemoryRecord
 
 # ---------------------------------------------------------------------------
@@ -57,25 +58,25 @@ def _read_config(config_dir):
 # ---------------------------------------------------------------------------
 
 
-def test_setup_demo_writes_config(tmp_path, capsys):
-    rc = main(["setup", "--profile", "demo", "--config-dir", str(tmp_path)])
+def test_setup_local_writes_config(tmp_path, capsys):
+    rc = main(["setup", "--profile", "local", "--config-dir", str(tmp_path)])
     assert rc == 0
     config = _read_config(tmp_path)
-    assert config["profile"] == "demo"
-    assert config["model"]["plugin"] == "mock"
+    assert config["profile"] == "local"
+    assert config["model"]["base_url"]
     assert (tmp_path / "memory.sqlite3").is_file()
     readme = tmp_path / "manifests" / "README.txt"
     assert readme.is_file()
     assert "plugin_id" in readme.read_text(encoding="utf-8")
     out = capsys.readouterr().out
-    assert "demo" in out
+    assert "local" in out
 
 
 def test_setup_repeat_does_not_overwrite(tmp_path, capsys):
-    assert main(["setup", "--profile", "demo", "--config-dir", str(tmp_path)]) == 0
+    assert main(["setup", "--profile", "local", "--config-dir", str(tmp_path)]) == 0
     config_path = tmp_path / "config.json"
-    config_path.write_text('{"profile": "demo", "sentinel": true}', encoding="utf-8")
-    rc = main(["setup", "--profile", "demo", "--config-dir", str(tmp_path),
+    config_path.write_text('{"profile": "local", "sentinel": true}', encoding="utf-8")
+    rc = main(["setup", "--profile", "local", "--config-dir", str(tmp_path),
                "--non-interactive"])
     assert rc == 0
     assert _read_config(tmp_path).get("sentinel") is True
@@ -83,13 +84,13 @@ def test_setup_repeat_does_not_overwrite(tmp_path, capsys):
 
 
 def test_setup_force_overwrites(tmp_path):
-    assert main(["setup", "--profile", "demo", "--config-dir", str(tmp_path)]) == 0
-    (tmp_path / "config.json").write_text('{"profile": "local"}', encoding="utf-8")
-    rc = main(["setup", "--profile", "demo", "--config-dir", str(tmp_path),
+    assert main(["setup", "--profile", "local", "--config-dir", str(tmp_path)]) == 0
+    (tmp_path / "config.json").write_text('{"profile": "cloud"}', encoding="utf-8")
+    rc = main(["setup", "--profile", "local", "--config-dir", str(tmp_path),
                "--force"])
     assert rc == 0
     config = _read_config(tmp_path)
-    assert config["profile"] == "demo"
+    assert config["profile"] == "local"
     assert "sentinel" not in config
 
 
@@ -112,10 +113,10 @@ def test_setup_cloud_with_key_stores_env_reference_not_key(tmp_path, monkeypatch
     assert "sk-live-secret-123" not in raw  # 密钥本体绝不落盘
 
 
-def test_setup_non_interactive_defaults_to_demo(tmp_path):
+def test_setup_non_interactive_defaults_to_local(tmp_path):
     rc = main(["setup", "--config-dir", str(tmp_path), "--non-interactive"])
     assert rc == 0
-    assert _read_config(tmp_path)["profile"] == "demo"
+    assert _read_config(tmp_path)["profile"] == "local"
 
 
 def test_setup_local_profile(tmp_path):
@@ -131,8 +132,8 @@ def test_setup_local_profile(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_doctor_all_ok_after_demo_setup(tmp_path, capsys):
-    assert main(["setup", "--profile", "demo", "--config-dir", str(tmp_path)]) == 0
+def test_doctor_all_ok_after_local_setup(tmp_path, capsys):
+    assert main(["setup", "--profile", "local", "--config-dir", str(tmp_path)]) == 0
     capsys.readouterr()
     rc = main(["doctor", "--config-dir", str(tmp_path)])
     out = capsys.readouterr().out
@@ -310,12 +311,17 @@ def test_memory_import_missing_file(tmp_path, capsys):
 # ---------------------------------------------------------------------------
 
 
-def test_run_repl_mock_prefix_and_history(tmp_path, monkeypatch, capsys):
+def _fake_model_reply(self, text, *, persona="", memories=(), history=()):
+    return "[double] 鲸鱼收到：" + text[:50]  # 测试替身（非产品 mock 模式）
+
+
+def test_run_repl_and_history(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr("sys.stdin", io.StringIO("你好鲸鱼\n今天天气不错\n/quit\n"))
+    monkeypatch.setattr(DeepSeekCompanion, "reply", _fake_model_reply)
     rc = main(["run", "--config-dir", str(tmp_path)])
     out = capsys.readouterr().out
     assert rc == 0
-    assert out.count("whale> [mock]") == 2  # 两条回复均带 [mock] 诚实标注
+    assert out.count("whale> [double]") == 2
     assert "bye" in out
     store = SqliteMemoryStore(tmp_path / "memory.sqlite3")
     history = load_history(store, "cli")
@@ -323,15 +329,16 @@ def test_run_repl_mock_prefix_and_history(tmp_path, monkeypatch, capsys):
     assert len(history) == 4  # 两轮：user+assistant 各两条
     assert history[0] == {"role": "user", "content": "你好鲸鱼"}
     assert history[1]["role"] == "assistant"
-    assert history[1]["content"].startswith("[mock]")
+    assert history[1]["content"].startswith("[double]")
 
 
 def test_run_repl_eof_exits(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr("sys.stdin", io.StringIO("只说一句\n"))  # 无 /quit，靠 EOF
+    monkeypatch.setattr(DeepSeekCompanion, "reply", _fake_model_reply)
     rc = main(["run", "--config-dir", str(tmp_path)])
     out = capsys.readouterr().out
     assert rc == 0
-    assert "[mock]" in out
+    assert "[double]" in out
 
 
 # ---------------------------------------------------------------------------
@@ -375,18 +382,18 @@ def test_api_token_resolution(tmp_path, monkeypatch):
     assert token3 == "envtok"
 
 
-def test_build_api_server_demo(tmp_path, monkeypatch, capsys):
+def test_build_api_server_local(tmp_path, monkeypatch, capsys):
     from types import SimpleNamespace
     from whale_core.cli.main import _build_api_server
     monkeypatch.delenv("WHALE_API_TOKEN", raising=False)
-    (tmp_path / "config.json").write_text('{"profile": "demo"}', encoding="utf-8")
+    (tmp_path / "config.json").write_text('{"profile": "local"}', encoding="utf-8")
     args = SimpleNamespace(config_dir=str(tmp_path), host="127.0.0.1", port=0)
     server, token, source = _build_api_server(args)
     try:
         assert server.port != 0  # 绑定临时端口
         assert token
         out = capsys.readouterr().out
-        assert "[mock]" in out  # demo 档 notes 诚实标注
+        assert "local 档" in out  # local 档 notes
     finally:
         server.stop()
 

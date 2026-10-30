@@ -213,57 +213,26 @@ class OpenAIImagesProvider:
             raise ImageError("bad_response", "image endpoint returned invalid JSON") from exc
 
 
-def _mock_svg_data_uri(prompt: str, size: str, index: int) -> str:
-    """确定性罐装产物：内嵌 prompt 摘要的 SVG data URI（mock 专用）。"""
-    width, _, height = size.partition("x")
-    label = html.escape(f"mock #{index + 1}: {prompt[:60]}", quote=False)
-    svg = (
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}">'
-        f'<rect width="100%" height="100%" fill="#dfe9f3"/>'
-        f'<text x="16" y="32" font-size="20" fill="#334455">{label}</text>'
-        f"</svg>"
-    )
-    return "data:image/svg+xml," + urllib.parse.quote(svg, safe="")
-
-
-class MockImageProvider:
-    """**Mock**（罐装产物，测试/离线开发专用）：不发起任何网络请求。
-
-    返回确定性 SVG ``data:`` URI 产物引用——同参数多次调用结果完全相等。
-    产物不落盘；存储与过期清理由宿主负责。真实端点请用 OpenAIImagesProvider。
-    """
-
-    def generate(
-        self, prompt: str, *, size: str = "1024x1024", n: int = 1
-    ) -> ImageTaskResult:
-        prompt, size, n = _validate_request(prompt, size, n)
-        images = tuple(_mock_svg_data_uri(prompt, size, i) for i in range(n))
-        return ImageTaskResult(task_id="mock-image-task", status="succeeded", images=images)
-
-
 def register_image_gen(
     registry: PluginRegistry, *, provider: object = None
 ) -> object:
     """注册 media.image.generate 能力（model 类插件），返回接线好的 provider。
 
-    ``provider`` 缺省时挂 **MockImageProvider**（罐装 mock 产物，仅供契约先行 /
-    离线开发，manifest 描述中明确标注）；真实部署由宿主构造
-    ``OpenAIImagesProvider`` 传入（凭据只在宿主 env / 私有配置，manifest 不含）。
+    ``provider`` 必须由宿主显式注入（如 ``OpenAIImagesProvider``）——
+    **没有 mock 默认**（mock 模式已按 owner 决策移除：缺 provider 诚实失败）。
     重复注册同 plugin_id 由 PluginRegistry 既有约束抛 ValueError。
     """
-    defaulted = provider is None
-    if defaulted:
-        provider = MockImageProvider()
+    if provider is None:
+        raise ValueError(
+            "register_image_gen requires a real provider; mock defaults were "
+            "removed — inject OpenAIImagesProvider or your own provider"
+        )
     manifest = PluginManifest(
         plugin_id=PLUGIN_ID,
         name="图像生成（media.image.generate）",
         version="0.1.0",
         author="whale-core",
-        description=(
-            "图像生成能力（**mock**：罐装 SVG 产物，仅供离线开发/契约先行）"
-            if defaulted
-            else "图像生成能力（OpenAI Images 兼容端点，宿主接线 provider）"
-        ),
+        description="图像生成能力（OpenAI Images 兼容端点，宿主接线 provider）",
         kind="model",
         provides=(IMAGE_GENERATE,),
     )

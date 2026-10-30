@@ -54,7 +54,7 @@
 | **PR-6** CLI | `whale setup/doctor/run/plugins` + `api` | **已落地（f0c407c + 3adb678）**：`cli/main.py`（30 例）——setup 三档/doctor 诊断/demo REPL/plugins 管理/memory 导出导入/api 入口（token 三源解析） | config.json 只存 env 引用名；mock 带 [mock] 前缀 |
 | **PR-7** API 层 | REST + SSE，token 鉴权 | **已落地（1062a0e + 9fc9868 + 5446ea1）**：`api/server.py`（22 例回环测试）——§5.3 路由 + 静态 SPA 托管（防穿越）+ /tasks + 插件配置端点；stop() 死锁修复 | token 必填/常量时间比较/脱敏视图/64KB body 上限 |
 | **PR-8** 控制台 MVP | 总览/插件/记忆/审批/对话/事件 | **已落地（44dd57c）**：`web/`（Vite+React18+TS strict，vitest 7 例，CI web-build.yml）；10 项端到端冒烟（真 API + SPA + SSE） | 任务页签与插件配置表单在 PR-13 增强 |
-| **PR-9** 配置档 | demo/cloud/local | **已落地（07955eb）**：`profiles.py` assemble_runtime 三档（demo 罐装/cloud env 装配/local 回环免 key）+ RuntimeBundle.notes 诚实标注；CLI `whale api` 接 profiles | 9 例；全量绿 |
+| **PR-9** 配置档 | ~~demo~~/cloud/local | **已落地（07955eb）+ owner 修订（2026-10-30 后续）：demo/mock 档整体移除**（「完全没必要」）——profiles 只余 cloud/local 两档真实装配；插件 register_* 不再有 mock 缺省（缺 provider 诚实 ValueError）；Mock 类移入 `tests/_doubles.py` 仅作测试替身。CLI/README/指南同步 | 全量绿 |
 
 ### P1/P2 已落地（2026-10-30 同日并行推进）
 

@@ -14,13 +14,14 @@ from whale_core.memory.store import InMemoryStore
 from whale_core.plugins.media_video import (
     MAX_PROMPT_CHARS,
     MEDIA_VIDEO_GENERATE,
-    MockVideoProvider,
+
     VideoError,
     VideoTask,
     VideoTaskManager,
     register_video_gen,
 )
 from whale_core.plugins.registry import PluginRegistry
+from _doubles import MockVideoProvider
 
 
 def _manager(provider=None, store=None):
@@ -223,10 +224,19 @@ def test_list_tasks_ignores_unrelated_keys():
 
 # ---------- 注册形状 ----------
 
+def test_register_requires_provider():
+    """mock 默认已移除（owner 决策）：缺 provider 诚实 ValueError。"""
+    registry = PluginRegistry()
+    with pytest.raises(ValueError):
+        register_video_gen(registry)
+    assert registry.manifest("media_video") is None
+
+
 def test_register_shape_and_providers_for_resolution():
     registry = PluginRegistry()
-    provider = register_video_gen(registry)
-    assert isinstance(provider, MockVideoProvider)  # 缺省挂 mock
+    provider = MockVideoProvider()
+    returned = register_video_gen(registry, provider=provider)
+    assert returned is provider
 
     manifest = registry.manifest("media_video")
     assert manifest is not None

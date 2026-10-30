@@ -106,66 +106,6 @@ class VideoProvider(Protocol):
         ...
 
 
-class MockVideoProvider:
-    """确定性替身（**mock**：无网络、无真实生成，仅供测试与本地开发）。
-
-    行为脚本化：
-
-    - ``submit`` 依次返回 ``"mock-video-0001"`` 等 task_id；
-    - 每个任务前 ``running_polls`` 次 ``poll`` 返回 ``("running", "", "")``，
-      之后进入终态：默认 ``("succeeded", "https://mock.invalid/video/<task_id>.mp4", "")``；
-      构造时 ``final_status="failed"`` 则返回 ``("failed", "", fail_error)``；
-    - ``cancel`` 标记任务取消并返回 True（未知 id 返回 False）；取消后
-      ``poll`` 恒返回 ``("cancelled", "", "")``。
-
-    ``submit_calls`` / ``poll_calls`` / ``cancel_calls`` 计数供测试断言；
-    ``submitted`` 记录每次 submit 的 ``(prompt, duration_s, size)``。
-    """
-
-    def __init__(self, *, running_polls: int = 2, final_status: str = STATUS_SUCCEEDED,
-                 fail_error: str = "mock failure"):
-        if final_status not in (STATUS_SUCCEEDED, STATUS_FAILED):
-            raise ValueError(f"mock final_status must be succeeded/failed, got {final_status!r}")
-        self.running_polls = max(0, int(running_polls))
-        self.final_status = final_status
-        self.fail_error = fail_error
-        self.submit_calls = 0
-        self.poll_calls = 0
-        self.cancel_calls = 0
-        self.submitted: list[tuple[str, int, str]] = []
-        self._tasks: dict[str, dict[str, Any]] = {}
-
-    def submit(self, prompt: str, *, duration_s: int = DEFAULT_DURATION_S,
-               size: str = DEFAULT_SIZE) -> str:
-        self.submit_calls += 1
-        task_id = f"mock-video-{self.submit_calls:04d}"
-        self._tasks[task_id] = {"polls": 0, "cancelled": False}
-        self.submitted.append((prompt, duration_s, size))
-        return task_id
-
-    def poll(self, task_id: str) -> tuple[str, str, str]:
-        self.poll_calls += 1
-        rec = self._tasks.get(task_id)
-        if rec is None:
-            raise VideoError("not_found", f"unknown mock video task: {task_id!r}")
-        if rec["cancelled"]:
-            return (STATUS_CANCELLED, "", "")
-        rec["polls"] += 1
-        if rec["polls"] <= self.running_polls:
-            return (STATUS_RUNNING, "", "")
-        if self.final_status == STATUS_FAILED:
-            return (STATUS_FAILED, "", self.fail_error)
-        return (STATUS_SUCCEEDED, f"https://mock.invalid/video/{task_id}.mp4", "")
-
-    def cancel(self, task_id: str) -> bool:
-        self.cancel_calls += 1
-        rec = self._tasks.get(task_id)
-        if rec is None:
-            return False
-        rec["cancelled"] = True
-        return True
-
-
 def _validate_prompt(prompt: str) -> str:
     """prompt 必填非空；超长截断到 MAX_PROMPT_CHARS。"""
     if not isinstance(prompt, str) or not prompt.strip():
@@ -308,11 +248,15 @@ def register_video_gen(registry: PluginRegistry, *,
                        provider: VideoProvider | None = None) -> VideoProvider:
     """注册 ``media.video.generate`` 能力为 model 插件（plugin_id="media_video"）。
 
-    ``provider`` 缺省挂 :class:`MockVideoProvider`（**mock 替身**，仅供开发/测试；
-    未与任何真实视频服务联调）。返回接线好的 provider 对象。
+    ``provider`` 必须由宿主显式注入——**没有 mock 默认**（mock 模式已按
+    owner 决策移除：缺 provider 诚实失败）。未与任何真实视频服务联调。
+    返回接线好的 provider 对象。
     """
     if provider is None:
-        provider = MockVideoProvider()
+        raise ValueError(
+            "register_video_gen requires a real provider; mock defaults were "
+            "removed — inject your VideoProvider implementation"
+        )
     registry.register(
         PluginManifest(
             plugin_id="media_video",

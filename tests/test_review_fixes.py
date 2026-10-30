@@ -58,13 +58,22 @@ def test_legacy_plugin_secret_migrates_on_manifest_load(tmp_path):
     assert "LEGACY-SECRET" not in repr(store.get("plugin:config:demo_plugin"))
 
 
-def test_demo_intent_router_search_and_normal_chat():
-    bundle = assemble_runtime("demo")
+def test_intent_router_search_and_normal_chat(monkeypatch):
+    """local 档（demo 档已移除）：规则路由搜索进 web.search，闲聊走 chat。"""
+    monkeypatch.setattr(DeepSeekCompanion, "reply",
+                        lambda self, text, **kwargs: "REAL-MODEL-FAKE-TRANSPORT")
+    from whale_core.plugins.web_search import TavilyProvider, SearchResult
+    monkeypatch.setattr(TavilyProvider, "search",
+                        lambda self, query, **kwargs: [
+                            SearchResult(title="Evidence", url="https://example.com",
+                                         snippet=query, source="tavily")
+                        ])
+    bundle = assemble_runtime("local", env={"TAVILY_API_KEY": "test"})
     searched = bundle.orchestrator.handle_message("c", "帮我搜索：鲸鱼")
     assert searched.plan is not None
     assert searched.plan.capabilities == ("web.search",)
     assert "tool:search_web:ok:" in " ".join(searched.receipts)
-    assert searched.reply.startswith("[mock]")
+    assert searched.reply == "REAL-MODEL-FAKE-TRANSPORT"
     casual = bundle.orchestrator.handle_message("c", "你好呀")
     assert casual.status == "answered"
     assert casual.plan is not None and casual.plan.kind == "chat"

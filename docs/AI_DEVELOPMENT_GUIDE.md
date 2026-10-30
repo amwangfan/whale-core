@@ -10,10 +10,10 @@ Whale Core 是独立的 Python 智能层及初步可运行的管理服务，核�
 
 - 当前核心使用 Python 3.11+；网页前端使用 React + TypeScript + Vite。
 - 管理 API 当前基于 Python 标准库 HTTP server 与 SSE，并非 FastAPI。
-- Demo 模式使用 mock 模型和模拟搜索数据；不能描述成实际 AI 服务已经接通。
+- 项目不设 demo/mock 档（owner 决策 2026-10-30）：对话永远来自真实模型端点；缺凭据时诚实报错。测试替身集中在 `tests/_doubles.py`。
 - 真实模型在 cloud/local 档可配置；`whale run` 使用当前配置档。默认 `SearchIntentRouter` 对明确搜索指令进行只读路由；更复杂的 LLM 意图识别仅在 `WHALE_INTENT_MODEL_ENABLED=1` 时启用。
 - QQ/WeQ 相关适配代码、主动行为策略、音频桥契约已经存在，但具体生产部署与设备联调状态应另行核实。
-- ASR/TTS、图像/视频生成提供契约、部分 provider 或 mock；对未接实际凭据的服务，不得称为真实联调完成。
+- ASR/TTS、图像/视频生成提供契约与 provider 接口；对未接实际凭据的服务，不得称为真实联调完成。
 - 项目根目录在本次审阅时尚无项目 LICENSE；`licenses/` 中第三方人设许可不是整个 whale-core 的许可。对外发行或复用代码前须由维护者确定许可证。
 
 ## 2. 代码地图（从职责而非文件名理解）
@@ -45,9 +45,9 @@ python -m pytest tests -q
 # uv sync --extra dev
 # uv run pytest -q
 
-whale setup --profile demo
+whale setup --profile local
 whale doctor
-whale run                  # 遵循当前配置档：demo mock / cloud/local 模型端点
+whale run                  # 遵循当前配置档：cloud/local 真实模型端点（无 demo/mock 档）
 
 # 网页控制台
 pnpm -C web install
@@ -96,7 +96,7 @@ API 首次启动生成或从环境变量读取 token；`~/.whale/api_token` 为�
 
 - 无需核查就假定先前的差距报告仍然准确；
 - 未经授权部署生产、切换账号、执行破坏性 Shell 或删除用户数据；
-- 将 mock/stub、CI 绿色与真实硬件/服务联调混为一谈；
+- 将测试替身、CI 绿色与真实硬件/服务联调混为一谈；
 - 为追求“完全依照旧任务书”而覆盖已经正确的新实现。
 
 完成后应报告：修改了哪些文件、为什么如此选择、实际运行了哪些测试、真实联通到哪一层、还有什么风险。
@@ -109,4 +109,4 @@ API 首次启动生成或从环境变量读取 token；`~/.whale/api_token` 为�
 - `docs/roadmap-2026-10-30.md` 与 `docs/gap-analysis-2026-10-30.md`：分别保留目标与阶段证据；代码变动时及时更新状态。
 - `CONTRIBUTING.md`：简明贡献流程与不可突破的底线。
 
-README 中展示的每条安装命令必须与当前实际 CLI 相符；任何“可用”说法都应标注 mock、需要额外凭据、已接线或已联调的边界。
+README 中展示的每条安装命令必须与当前实际 CLI 相符；任何“可用”说法都应标注需要额外凭据、已接线或已联调的边界。
