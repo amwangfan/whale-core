@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Callable
 
 from whale_core.core.companion import TextCompanion, WhaleCompanion
+from whale_core.core.memory_commands import handle_memory_command
 from whale_core.life.channels import OwnerEvent
 from whale_core.life.initiative import ProactiveDraft, ProactiveOutbox, ProactivePrefs
 from whale_core.memory.curation import MemoryCurator
@@ -37,6 +38,15 @@ class QqInboundWorkflow:
         # The live runner passes owner-bound, operator-configured prefs explicitly.
         self.prefs = prefs if prefs is not None else ProactivePrefs()
         self._now = now_fn or (lambda: datetime.now(timezone.utc))
+        self._curator = MemoryCurator(store)
+
+    def _memory_command_reply(self, text: str, event: OwnerEvent) -> str | None:
+        """委托给 core.memory_commands 的共享实现（QQ 侧只提供来源与证据链）。"""
+        return handle_memory_command(
+            self.store, text, source="qq:owner",
+            evidence_id=f"qq:{event.conversation}:{event.message_id}",
+            curator=self._curator,
+        )
 
     def handle_owner_event(self, event: OwnerEvent) -> dict:
         """处理一条已配对的所有者消息，返回结构化结果（不含发送行为）。
@@ -56,7 +66,14 @@ class QqInboundWorkflow:
         if not text:
             return {"skipped": "empty_text"}
 
-        reply = self.companion.chat(text)
+        # owner 显式记忆指令（记住/忘掉）：不调模型，确定性处理（省 token、可测试）。
+        # owner 直聊的显式指令即 consent（单 owner 陪伴场景，docs/gap-analysis §4 R4）；
+        # 证据链指向触发消息，记忆可经「忘掉」或删除语义移除。
+        command_reply = self._memory_command_reply(text, event)
+        if command_reply is not None:
+            reply = command_reply
+        else:
+            reply = self.companion.chat(text, conversation_id=event.conversation)
         if not reply or not reply.strip():
             return {"empty_reply": True, "draft_id": None}
 

@@ -13,6 +13,7 @@ from whale_core.memory.store import InMemoryStore
 from whale_core.ui.persona import WhalePersona
 from whale_core.ui.persona_cards import (
     ACTIVE_CARD_KEY,
+    AIGENGTU_CATALOG,
     BUILTIN_CARDS,
     CARD_KEY_PREFIX,
     DEFAULT_CARD_ID,
@@ -21,6 +22,7 @@ from whale_core.ui.persona_cards import (
     PersonaCard,
     PersonaCardLibrary,
     active_card,
+    catalog_entries,
     import_external_card,
     switch_card,
 )
@@ -34,13 +36,36 @@ from whale_core.ui.persona_cards import (
 def test_builtin_cards_unique_and_has_default() -> None:
     ids = [c.card_id for c in BUILTIN_CARDS]
     assert len(ids) == len(set(ids))
-    assert DEFAULT_CARD_ID in ids
-    assert {"qunyou", "wenrou", "mama", "meimei", "youxi", "mini"} <= set(ids)
+    assert set(ids) == {"default", "dafeiyu"}
+
+
+def test_builtin_dafeiyu_is_mit_third_party_card() -> None:
+    """内置第三方卡：dafeiyu-persona（MIT）——署名、来源、许可证、原文齐备。"""
+    card = PersonaCardLibrary().require("dafeiyu")
+    assert card.license == "MIT"
+    assert "dafeiyu-persona" in card.author
+    assert card.source_url.startswith("https://github.com/")
+    assert card.external_prompt and "大肥鱼" in card.external_prompt
+    persona = card.render_persona()
+    assert set(GLOBAL_TABOOS) <= set(persona.taboos)  # 第三方卡同样受全局禁忌约束
+
+
+def test_aigengtu_catalog_is_metadata_only() -> None:
+    """aigengtu 目录：仅元数据（标题/作者/来源），不含原文（站点未明示再分发许可）。"""
+    entries = catalog_entries()
+    assert entries and entries == AIGENGTU_CATALOG
+    assert len(entries) >= 8  # 覆盖群友/游戏/妈妈/妹妹/女儿等流派
+    for entry in entries:
+        assert entry.title and entry.author and entry.source_url
+        assert entry.external_prompt == ""  # 关键：目录不含任何卡原文
+    # 目录卡不在内置注册表（须运行期导入原文后才可用）
+    lib = PersonaCardLibrary()
+    assert all(lib.get(e.card_id) is None for e in entries)
 
 
 def test_library_get_require() -> None:
     lib = PersonaCardLibrary()
-    assert lib.get("qunyou") is not None
+    assert lib.get("dafeiyu") is not None
     assert lib.get("不存在的卡") is None
     with pytest.raises(ValueError):
         lib.require("不存在的卡")
@@ -100,35 +125,33 @@ def test_default_active_card_without_any_state(monkeypatch) -> None:
 
 def test_env_default_card_and_unknown_fallback(monkeypatch) -> None:
     store = InMemoryStore()
-    monkeypatch.setenv("WHALE_PERSONA_CARD", "wenrou")
-    assert active_card(store).card_id == "wenrou"
+    monkeypatch.setenv("WHALE_PERSONA_CARD", "dafeiyu")
+    assert active_card(store).card_id == "dafeiyu"
     monkeypatch.setenv("WHALE_PERSONA_CARD", "ghost-card")
     assert active_card(store).card_id == DEFAULT_CARD_ID
 
 
 def test_switch_persists_and_updates_continuity() -> None:
     store = InMemoryStore()
-    card = switch_card(store, "qunyou", session_id="s1")
-    assert card.card_id == "qunyou"
-    assert active_card(store).card_id == "qunyou"
+    card = switch_card(store, "dafeiyu", session_id="s1")
+    assert card.card_id == "dafeiyu"
+    assert active_card(store).card_id == "dafeiyu"
 
     snapshot = store.get_persona_continuity()
     assert snapshot is not None
-    assert snapshot.persona_name == "小鲸鱼"
-    assert snapshot.traits.get("card_id") == "qunyou"
+    assert snapshot.persona_name == "大肥鱼"
+    assert snapshot.traits.get("card_id") == "dafeiyu"
     assert snapshot.last_session_id == "s1"
     assert set(GLOBAL_TABOOS) <= set(snapshot.taboos)
 
     # 连续性上下文（DeepSeek 渲染来源）随切换更新
     ctx = build_continuity_context(store)
-    assert "小鲸鱼" in ctx.persona_summary
-    assert "默认一条消息 1~15 字" in ctx.persona_summary
-    assert "只影响表达，不改变权限" in ctx.persona_summary
+    assert "大肥鱼" in ctx.persona_summary
 
     # 切回默认
     switch_card(store, DEFAULT_CARD_ID)
     assert active_card(store).card_id == DEFAULT_CARD_ID
-    assert (store.get(ACTIVE_CARD_KEY) or {}).get("previous") == "qunyou"
+    assert (store.get(ACTIVE_CARD_KEY) or {}).get("previous") == "dafeiyu"
 
 
 def test_imported_card_prompt_reaches_model_context_as_labeled_external_context():
@@ -157,7 +180,7 @@ def test_switch_only_touches_persona_keys() -> None:
     store.put("life:quota:2026-10-29", 1)
     store.put("life:ledger:d1", {"status": "draft"})
     before = {k: store.get(k) for k in store.keys() if not k.startswith("persona:")}
-    switch_card(store, "mama")
+    switch_card(store, "dafeiyu")
     after = {k: store.get(k) for k in store.keys() if not k.startswith("persona:")}
     assert before == after
 

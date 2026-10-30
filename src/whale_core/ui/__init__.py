@@ -3,12 +3,14 @@
 from whale_core.ui.persona import WhalePersona
 from whale_core.ui.persona_cards import (
     ACTIVE_CARD_KEY,
+    AIGENGTU_CATALOG,
     BUILTIN_CARDS,
     DEFAULT_CARD_ID,
     GLOBAL_TABOOS,
     PersonaCard,
     PersonaCardLibrary,
     active_card,
+    catalog_entries,
     import_external_card,
     switch_card,
 )
@@ -24,10 +26,12 @@ __all__ = [
     "PersonaCard",
     "PersonaCardLibrary",
     "BUILTIN_CARDS",
+    "AIGENGTU_CATALOG",
     "GLOBAL_TABOOS",
     "DEFAULT_CARD_ID",
     "ACTIVE_CARD_KEY",
     "active_card",
     "switch_card",
     "import_external_card",
+    "catalog_entries",
 ]

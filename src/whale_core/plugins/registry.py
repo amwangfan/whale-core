@@ -106,6 +106,11 @@ class PluginRegistry:
         item = self._items.get(plugin_id)
         return item.executor if item else None
 
+    def provider_of(self, plugin_id: str):
+        """provider 类插件的内部对象（无则 None）。"""
+        item = self._items.get(plugin_id)
+        return item.provider if item else None
+
     def risk_of(self, plugin_id: str, action: str) -> RiskClass | None:
         manifest = self.manifest(plugin_id)
         return manifest.risk_of(action) if manifest else None

@@ -8,6 +8,7 @@ from uuid import uuid4
 from whale_core.memory.store import MemoryStore
 from whale_core.memory.curation import MemoryCurator
 from whale_core.memory.continuity import remember_episode, build_continuity_context
+from whale_core.memory.history import append_turn, load_history
 
 class TextCompanion(Protocol):
     def reply(self, text: str, *, persona: str = "", memories=(), history=()) -> str: ...
@@ -16,18 +17,32 @@ class WhaleCompanion:
     def __init__(self, store: MemoryStore, model: TextCompanion, *, curator: MemoryCurator | None = None):
         self.store, self.model, self.curator = store, model, curator
 
-    def chat(self, text: str) -> str:
+    def chat(self, text: str, *, conversation_id: str = "") -> str:
         ctx = build_continuity_context(self.store)
         if self.curator is not None:
             memories = [str(hit.record.content.get("summary", ""))
                         for hit in self.curator.recall(text)]
+            # 修复「只写不读」断层：近期对话情节作为会话记忆补充注入——
+            # curated 事实在前（证据语义优先），近期聊天情节在后，去重封顶 8 条。
+            for record in ctx.recent_episodes:
+                if "chat" not in record.tags:
+                    continue
+                summary = str(record.content.get("summary", ""))
+                if summary and summary not in memories:
+                    memories.append(summary)
+            memories = memories[:8]
         else:
             # Legacy chat-only behavior kept for backwards compatibility; opt in
             # to curated retrieval to avoid injecting raw transcripts by default.
             memories = [str(r.content.get("summary", "")) for r in ctx.recent_episodes]
-        response = self.model.reply(text, persona=ctx.persona_summary, memories=memories)
+        # 多轮历史：显式传 conversation_id 才启用（默认保持单轮行为，兼容旧调用方）。
+        history = load_history(self.store, conversation_id) if conversation_id else ()
+        response = self.model.reply(text, persona=ctx.persona_summary, memories=memories,
+                                    history=history)
         remember_episode(self.store, summary=f"用户：{text[:500]}\n鲸鱼：{response[:500]}",
                          key=f"ep:chat:{uuid4().hex}", tags=("chat",))
+        if conversation_id:
+            append_turn(self.store, conversation_id, text, response)
         return response
 
 class RealtimeTranscriptRecorder:

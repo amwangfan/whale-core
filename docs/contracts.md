@@ -61,7 +61,7 @@ Gateway 协议：`ActionGateway.dispatch(ActionIntent) → str`。
 | `parse_onebot_message` / `OneBotInboundBridge` | 协议端消息事件 → `Incoming(channel="qq")` → registry 配对产出 `OwnerEvent` | 群聊默认拒收；未鉴权/未配对事件不进入业务 |
 | `OneBotHttpListener` | 接收协议端「HTTP POST 事件推送」；无 token 拒绝启动，默认只绑 `127.0.0.1:18798` | 不记录消息正文，不回显 token |
 | `WeQSsePushListener` | 接收 WeQ「SSE 消息推送」（`{events:[...]}`，至少一次投递）：Bearer 鉴权、msgId 有界去重、自发消息过滤、立即 ACK + 单工作线程串行消费 | 未配对来件只暴露元数据；过载丢弃计数可见不静默 |
-| `QqInboundWorkflow` | `OwnerEvent` → WhaleCompanion（记忆召回 + DeepSeek + 情节回写）→ 回复草稿进 `ProactiveOutbox` 裁决 | **不发送任何消息**；策略闸门未过不调用 AI；direct_message 逐条人工批准 |
+| `QqInboundWorkflow` | `OwnerEvent` → 记忆指令捷径（记住/忘掉，不调模型）→ WhaleCompanion（人格 + 多轮历史 `chat:history:{会话}` + 记忆召回 + DeepSeek + 情节回写）→ 回复草稿进 `ProactiveOutbox` 裁决 | **不发送任何消息**；策略闸门未过不调用 AI；direct_message 逐条人工批准 |
 | `OneBotOutboundPort` | `direct_message` 草稿 → 绑定对端的 `send_private_msg`（默认 `enabled=False`） | 不群发、不换目标；受理 ≠ 送达，失败记 unknown 不重试 |
 | `WeQWebSendPort`（`life/weq_send.py`） | `direct_message` 草稿 → WeQ 内置 Web 服务 tRPC（`account.sendElements`）真实发送；登录 token 由用户从 WeQ 设置复制注入 | 不破解、不复用助手令牌；需 WeQ 完整模式；ok=true 仅代表服务端受理 |
 | `qq_weq_plugin`（`life/qq_weq_plugin.py`） | QQ/WeQ channel 插件：`qq.message` 输入适配、`send_message` communicate 动作、宿主台账 verifier 与共享 Outbox | 真实无人值守发送经 `PluginGateway`；`--auto-approve` 仍是隔离 dry-run；固定目标与被动回复预算沿用既有端口/账本 |
@@ -87,6 +87,19 @@ inbox（幂等/租约恢复/受控重试，issue #14）。
 | `MemoryRecord` | 统一记录事件形状 |
 | `PersonaContinuity` | 人格快照读写 stub（经 MemoryStore） |
 | `ContinuityContext` | 组装人格摘要 + 近期 episode/preference，供 decide |
+| `memory.history`（`chat:history:{会话}`） | 多轮会话历史环形缓冲（12 轮上限），读路径宽容降级 |
+| `memory.export` | 记忆 JSONL 导出/导入（只含记忆记录；kv 账本不导出；导入默认幂等跳过） |
+| `core.memory_commands` | owner 显式指令「记住：/忘掉：」——确定性处理、证据链、只删 curated 记录 |
+
+## 对话编排（Runtime · roadmap §3.1/§6）
+
+| 类型 | 语义 |
+|------|------|
+| `IntentPlan` | 结构化意图计划（goal/kind/slots/missing/capabilities/澄清/超时）；**模型提议、核心裁决**：`risk_hint` 仅参考，未定义字段（如 `approved`）解析即丢弃，不产生任何授权效果 |
+| `plan_from_model_text` | 从模型自由文本提取首个 JSON 对象并强校验（`IntentPlanError`） |
+| `ConversationOrchestrator` | 对话流编排：记忆指令捷径 → （无意图模型）纯对话 → 意图分流（chat/clarify/task）→ 有界工具执行 → 结果回流陪伴模型；回执如实记录，「已计划」不伪装「已执行」 |
+| `ToolSpec` / `ToolRegistry` | 模型可调用的具体操作（roadmap Tool 层）：显式注册、重名拒绝；非 read_only 工具必须映射插件动作并经 `PluginGateway` 派发（执行器不能自批） |
+| `TurnResult` | 一轮结果：reply + status（answered/clarify/pending_approval/denied/failed）+ plan + receipts + task_id |
 
 
 ## 情境推理（Perception stub）
