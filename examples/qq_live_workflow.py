@@ -333,6 +333,32 @@ def cmd_run(args) -> int:
     adapter, _executor = register_qq_weq_plugin(
         plugin_registry, port=send_port, outbox=workflow.outbox, prefs=prefs)
 
+    # 媒体/语音能力（可选挂载，按 env）：配了端点就注册 provider 插件，
+    # 运行时能力解析即刻可用；没配就完全不出现（无 mock 冒充）。
+    #   WHALE_IMAGE_BASE_URL/WHALE_IMAGE_API_KEY/WHALE_IMAGE_MODEL → media.image.generate
+    #   WHALE_SPEECH_BASE_URL/WHALE_SPEECH_API_KEY → asr.transcribe + tts.synthesize
+    image_base = os.environ.get("WHALE_IMAGE_BASE_URL", "").strip()
+    if image_base:
+        from whale_core.plugins.media_image import OpenAIImagesProvider, register_image_gen
+        register_image_gen(plugin_registry, provider=OpenAIImagesProvider(
+            api_key=os.environ.get("WHALE_IMAGE_API_KEY", ""),
+            base_url=image_base,
+            model=os.environ.get("WHALE_IMAGE_MODEL", "") or None,
+        ))
+        print(f"[能力] 生图已挂载（{image_base}）")
+    speech_base = os.environ.get("WHALE_SPEECH_BASE_URL", "").strip()
+    if speech_base:
+        from whale_core.plugins.speech import (
+            OpenAICompatibleASR, OpenAICompatibleTTS, register_speech)
+        register_speech(
+            plugin_registry,
+            asr=OpenAICompatibleASR(
+                api_key=os.environ.get("WHALE_SPEECH_API_KEY", ""), base_url=speech_base),
+            tts=OpenAICompatibleTTS(
+                api_key=os.environ.get("WHALE_SPEECH_API_KEY", ""), base_url=speech_base),
+        )
+        print(f"[能力] 语音（ASR/TTS）已挂载（{speech_base}）")
+
     # 意图模型（可选，默认关）：QQ_INTENT_MODEL=<模型 id> 开启——同 AgentScope
     # 平台的 OpenAI 兼容端点复用 DEEPSEEK_* 凭据；规则优先（显式搜索指令本地
     # 识别零额外调用），LLM 规划用于其余消息。实测选型记录见 gap-analysis。

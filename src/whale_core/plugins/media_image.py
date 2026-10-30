@@ -162,7 +162,7 @@ class OpenAIImagesProvider:
             or _is_local_or_private_http(self.base_url)
         ):
             raise ValueError("image provider requires HTTPS (or loopback/private HTTP)")
-        self.model = model
+        self.model = model or "dall-e-3"
         self.timeout = timeout
 
     def generate(
