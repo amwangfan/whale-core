@@ -2,126 +2,64 @@
 
 # whale-core
 
-*“The mountain has trees, and trees have branches; my heart delights in you, yet you do not know.”*
+Whale's shared runtime for conversation, memory, tools, voice and exploration.
 
-**An extensible AI core for Whale: conversations, memory, context, and tools.**
-
-[中文](README.md) · [Get started](#get-started) · [Web console](#web-console) · [Developer & AI guide](docs/AI_DEVELOPMENT_GUIDE.md)
+[中文](README.md) · [Deployment](docs/deployment.md) · [Capabilities](docs/media-and-voice.md) · [API](docs/management-api.md)
 
 </div>
 
----
+whale-core is the Python intelligence layer shared by the web console, QQ, phones, voice calls and glasses. Device and network adapters live in [whale-io](https://github.com/amwangfan/whale-io). Production profiles call real services; missing configuration is an error, never a canned answer.
 
-## What is Whale?
+The runtime includes persistent multi-turn conversation, SQLite memory, optional semantic retrieval, dynamic plugin lifecycle, bounded tool tasks, exact-action approval and resume, cancellation, source-linked search/reading, ASR/TTS, image generation, asynchronous Wan video, private media artifacts, native Realtime voice and opt-in scheduled exploration. The React console exposes setup, diagnostics and daily operations. Linux Shell execution requires an available Bubblewrap sandbox and explicit approval.
 
-Whale explores a simple idea: an AI companion shouldn't have to live inside a single chat window. Conversations, important memories, context, and permitted actions should be able to follow you across channels and devices.
+## Start from source
 
-**whale-core** is the shared intelligence layer. It brings together dialogue, memory, structured intentions, a plugin system, and policies that decide which actions can actually be performed. QQ, calls, a phone, glasses, and a browser can all be interfaces to the same core.
-
-This repository now includes a Python library, command-line tools, plugin management, a management API, and an early React web console.
-
-> **This is an actively developed project, not a fully integrated product.** There is no demo/mock mode — conversations always come from a real model endpoint. Some capabilities have working interfaces and offline tests but still need real credentials, backend services, devices, or end-to-end verification; missing credentials fail honestly instead of faking success.
-
-## What can it do?
-
-| Experience | What's available today |
-| --- | --- |
-| Remember conversations | Multi-turn history, SQLite storage, episodic/preferences/persona memory, retrieval, JSONL import/export |
-| Decide whether to chat or act | Structured intent plans, tool registry, execution receipts and task records; explicit search requests can use a configured search tool, with optional LLM intent planning |
-| Extend with tools | Plugin registry and manager, web search/fetch code, controlled shell interfaces and policy |
-| Speak or create media | ASR/TTS, image generation, and asynchronous video-job contracts with pluggable providers |
-| Reach multiple channels | QQ/OneBot/WeQ adapters and event/action contracts for phones, VoIP and glasses; device integrations live separately |
-| Act proactively | Disturbance policies, candidate actions, approvals, deduplication, feedback and exploration components |
-| Manage it visually | A React console with Overview, Plugins, Memory, Approvals, Chat, Tasks and Events |
-
-An implemented interface is **not** the same as a fully verified live integration. See the [developer guide](docs/AI_DEVELOPMENT_GUIDE.md) and [progress notes](docs/gap-analysis-2026-10-30.md) for specifics.
-
-## Get started
-
-Requires **Python 3.11+**. A running local model service (e.g. Ollama) lets you start with zero keys; the full test suite is offline regardless.
+Python 3.11+, Node 24 and pnpm 12 are required for development.
 
 ```bash
 git clone https://github.com/amwangfan/whale-core.git
 cd whale-core
-
-python -m pip install -e ".[dev]"
-whale setup --profile local      # zero keys: points at a local model endpoint (default 127.0.0.1:11434)
-whale doctor
-whale run                        # REPL against the real model endpoint; /quit to exit
-```
-
-There is no demo/mock mode: `whale run` always talks to a real model endpoint. If the local endpoint is not running you get a clear network error, not a canned reply.
-
-Run the offline examples and tests:
-
-```bash
-python -m pytest tests -q
-python examples/runtime_demo.py
-python examples/life_scenario.py
-```
-
-You can also use `uv sync --extra dev` and `uv run whale ...`.
-
-### Connect a real model
-
-The project offers two configuration profiles:
-
-- **`local`:** a running OpenAI-compatible local endpoint, configurable with `LOCAL_MODEL_BASE_URL` and `LOCAL_MODEL_NAME`; no key needed.
-- **`cloud`:** a real DeepSeek/OpenAI-compatible text endpoint; the default configuration expects `DEEPSEEK_API_KEY`.
-
-For cloud mode, supply `DEEPSEEK_API_KEY` in your environment, then:
-
-```bash
-whale setup --profile cloud
-whale api
-```
-
-Use `whale run` or the web console below for conversations. **The CLI now follows the configured profile**; missing credentials or unavailable endpoints produce failures, not fake successful replies. Existing configuration isn't overwritten automatically by `setup`; check `~/.whale/config.json` before changing profiles.
-
-The local profile does not install or start your model server for you.
-
-## Web console
-
-To build the frontend, install Node.js and `pnpm` (frontend CI uses Node.js 24 and pnpm 12).
-
-```bash
-pnpm -C web install
+python -m pip install -e ".[dev,voice]"
+pnpm -C web install --frozen-lockfile
 pnpm -C web build
 whale api
 ```
 
-Visit **http://127.0.0.1:8080** on the same machine. The API generates a bearer token on first launch and saves it to `~/.whale/api_token`; enter it in the console. Treat that token as a secret. Do not expose the management API publicly without appropriate protections.
+Open the local address printed by the server, paste the access token, then configure a real OpenAI-compatible model in Settings and test the connection. The default local endpoint is `http://127.0.0.1:11434/v1`; select a model actually installed on that server. The cloud default is DeepSeek, and other compatible endpoints can be configured.
 
-The current console contains seven sections: **Overview, Plugins, Memory, Approvals, Chat, Tasks and Events**. It is an early management UI, not proof that every external integration is online.
+```bash
+whale setup --profile local
+whale doctor
+whale run
+whale plugins list
+whale memory backup /private/backups/whale.sqlite3
+whale desktop --browser
+```
 
-## Plugins and customization
+Cloud CLI setup requires `DEEPSEEK_API_KEY`. Web setup can save private credentials directly. The default CLI data directory is `~/.whale`; use `--config-dir` to choose another directory. Desktop data has a separate platform default.
 
-Whale Core aims to remain independent of any single model or service. One provider might offer chat, another speech, another web search or image generation. The core combines those capabilities while enforcing identity and action policies.
+Build an installable wheel with `python scripts/build_release.py`. It includes the compiled console, so installed users do not need Node. Linux/macOS desktop launchers, optional native windows, frozen executables without Python, and non-root containers are documented in [deployment](docs/deployment.md) and [desktop packaging](docs/packaging-desktop.md). Windows is excluded from this implementation round.
 
-Plugin manifests, lifecycle controls, health checks and several capability implementations are present. However, this **isn't yet a complete one-click plugin marketplace**: some components require explicit configuration and host-side wiring.
+## Configuration, data and execution
 
-## Relationship to whale-io
+The authenticated API is local by default. Public hosting requires a TLS reverse proxy. Endpoints and credentials are atomically committed as one private settings snapshot; `config.json` is a nonsecret projection. Secrets are never returned through the API. Mode-0600 files and mode-0700 directories provide local permission protection, not encryption at rest.
 
-- **[whale-core](https://github.com/amwangfan/whale-core):** the reusable intelligence layer—conversations, memory, intentions, tools, and policies.
-- **[whale-io](https://github.com/amwangfan/whale-io):** device infrastructure and designs for phones, VoIP and RayNeo glasses.
+Raw audio remains in memory. Final transcripts may enter memory; media artifacts require authentication and have bounded retention and storage. Portable JSONL memory exchange and complete SQLite backup/restore are separate operations. Stop services before restore, and also back up the configuration/artifact directory for full recovery.
 
-They belong to the same Whale project but can evolve independently.
+Approval authorizes later execution; it does not claim delivery. In-flight cancellation cannot undo external effects. Unknown outcomes are not automatically retried. Active tasks block configuration replacement, and old plugin references are revoked after switching.
 
-## Current limitations
+Scheduled exploration is disabled by default and creates candidate drafts rather than sending messages. Global pause affects proactive dispatchers sharing the same canonical store, while explicitly passive replies may continue.
 
-To keep expectations clear:
+## Validation and limitations
 
-- There are no canned replies: all answers come from a real model endpoint; test doubles live only in tests/.
-- Real search, speech, image/video and device integrations require appropriate providers and verification.
-- The default runtime now routes clear, explicit search requests to `web.search` when configured; broader natural-language intent planning is optional (`WHALE_INTENT_MODEL_ENABLED=1`).
-- The shell executor includes controls, but production-grade isolation still depends on the host OS sandbox.
-- Proactive and external actions remain subject to identity, permissions and other applicable policies.
-- A project-level LICENSE has not yet been selected. Third-party persona licenses do not apply to this entire repository.
+```bash
+python -m pytest tests -q
+pnpm -C web test
+pnpm -C web build
+```
 
-For architecture, source navigation, tests and technical constraints:
+See the [completion report](docs/completion-report-2026-10-30.md) for current evidence. Tests cover real local HTTP transport, provider contracts, configuration faults, task/approval semantics, audio privacy, memory recovery, frontend interactions, installed wheels and frozen Linux executables. They do not establish successful paid-provider or physical-device integration.
 
-[Developer & AI guide](docs/AI_DEVELOPMENT_GUIDE.md) · [Contracts](docs/contracts.md) · [Progress](docs/gap-analysis-2026-10-30.md) · [Roadmap](docs/roadmap-2026-10-30.md) · [Contributing](CONTRIBUTING.md)
+Prior QQ/WeQ account integration is recorded in the project. This round does not send real account messages or invoke paid providers. The current container cannot run user-namespace isolation, so successful sandbox isolation still requires target-host validation; fail-closed behavior is tested. Docker and Linux/macOS wheel/frozen builds and isolated startup passed GitHub CI; actual GUI use still requires target-device validation. Signed/notarized macOS releases remain a separate distribution step.
 
----
-
-*Whale Core is meant to become an AI foundation that people can understand, extend, and live with. The next step is to make that foundation reliable, useful, and genuinely connected.*
+The project-level license remains owner-pending. Third-party notices under `licenses/` do not grant a license for the entire repository. Resolve the license before public redistribution.

@@ -5,7 +5,6 @@
 - provider：``OpenAICompatibleASR``（/v1/audio/transcriptions，multipart/form-data
   纯 stdlib 手搓）与 ``OpenAICompatibleTTS``（/v1/audio/speech，JSON POST，
   响应即音频字节）；
-- ``MockASR`` / ``MockTTS``：demo/测试替身，确定性输出、不走网络；
 - ``register_speech`` 把两者注册为 kind="model" 插件（端点凭据只在宿主 env /
   私有配置，manifest 不含）。
 
@@ -27,6 +26,7 @@ from typing import Protocol
 
 from whale_core.plugins.manifest import PluginManifest
 from whale_core.plugins.registry import PluginRegistry
+from whale_core.plugins import provider_http
 
 _DEFAULT_BASE = "https://api.openai.com/v1"
 _MAX_AUDIO_BYTES = 25 * 1024 * 1024  # 25MB：whisper 类端点的常见上限
@@ -136,7 +136,7 @@ class _OpenAICompatibleBase:
     def __init__(self, *, api_key: str = "", base_url: str = _DEFAULT_BASE,
                  model: str, timeout: float = 30.0):
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
-        self.base_url = (base_url or _DEFAULT_BASE).rstrip("/")
+        self.base_url = provider_http.validate_base_url(base_url or _DEFAULT_BASE)
         if not (self.base_url.startswith("https://")
                 or _is_local_or_private_http(self.base_url)):
             raise ValueError("speech provider requires HTTPS (or loopback/private HTTP)")
@@ -164,7 +164,9 @@ class OpenAICompatibleASR(_OpenAICompatibleBase):
                  model: str = "whisper-1", timeout: float = 30.0):
         super().__init__(api_key=api_key, base_url=base_url, model=model, timeout=timeout)
 
-    def transcribe(self, audio: bytes, *, lang: str = "zh") -> str:
+    def transcribe(self, audio: bytes, *, lang: str = "zh", format: str = "wav") -> str:
+        if format not in ("wav", "webm", "ogg", "mp3", "m4a", "flac", "mp4"):
+            raise ValueError("unsupported audio format")
         if not isinstance(audio, (bytes, bytearray)):
             raise TypeError("audio must be bytes")
         if len(audio) > _MAX_AUDIO_BYTES:
@@ -174,14 +176,16 @@ class OpenAICompatibleASR(_OpenAICompatibleBase):
         boundary = "----whale" + secrets.token_hex(16)
         body = _multipart_form_data(
             {"model": self.model, "language": lang},
-            "file", "audio.wav", bytes(audio), boundary)
+            "file", "audio."+format, bytes(audio), boundary)
         req = urllib.request.Request(
             self.base_url + "/audio/transcriptions", data=body,
             headers=self._headers(f"multipart/form-data; boundary={boundary}"),
             method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as response:
-                raw = response.read()
+            with provider_http.open_request(req, timeout=self.timeout) as response:
+                raw = provider_http.read_response(response, 1024*1024)
+        except ValueError:
+            raise SpeechError("bad_response", "speech response exceeds size limit") from None
         except urllib.error.HTTPError as exc:
             raise _classify_http_error(exc) from exc
         except (urllib.error.URLError, TimeoutError) as exc:
@@ -211,6 +215,8 @@ class OpenAICompatibleTTS(_OpenAICompatibleBase):
         self.voice = voice
 
     def synthesize(self, text: str, *, voice: str = "", rate: float = 1.0) -> bytes:
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("text must be non-empty")
         if len(text) > _MAX_TTS_CHARS:
             raise ValueError(f"text too long: {len(text)} chars > {_MAX_TTS_CHARS}")
         self._require_key()
@@ -225,9 +231,11 @@ class OpenAICompatibleTTS(_OpenAICompatibleBase):
             self.base_url + "/audio/speech", data=body,
             headers=self._headers("application/json"), method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as response:
+            with provider_http.open_request(req, timeout=self.timeout) as response:
                 content_type = (response.headers.get("Content-Type") or "").split(";")[0]
-                audio = response.read()
+                audio = provider_http.read_response(response, _MAX_AUDIO_BYTES)
+        except ValueError:
+            raise SpeechError("bad_response", "speech response exceeds size limit") from None
         except urllib.error.HTTPError as exc:
             raise _classify_http_error(exc) from exc
         except (urllib.error.URLError, TimeoutError) as exc:
@@ -237,6 +245,8 @@ class OpenAICompatibleTTS(_OpenAICompatibleBase):
         if not (media.startswith("audio/") or media == "application/octet-stream"):
             raise SpeechError(
                 "bad_response", f"tts returned non-audio content-type: {media or '?'}")
+        if not audio:
+            raise SpeechError("bad_response", "tts returned empty audio")
         return audio
 
 

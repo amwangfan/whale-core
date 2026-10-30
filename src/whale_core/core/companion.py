@@ -8,7 +8,7 @@ from uuid import uuid4
 from whale_core.memory.store import MemoryStore
 from whale_core.memory.curation import MemoryCurator
 from whale_core.memory.continuity import remember_episode, build_continuity_context
-from whale_core.memory.history import append_turn, load_history
+from whale_core.memory.history import append_turn, load_history, conversation_lock
 
 class TextCompanion(Protocol):
     def reply(self, text: str, *, persona: str = "", memories=(), history=()) -> str: ...
@@ -18,6 +18,10 @@ class WhaleCompanion:
         self.store, self.model, self.curator = store, model, curator
 
     def chat(self, text: str, *, conversation_id: str = "") -> str:
+        with conversation_lock(self.store, conversation_id):
+            return self._chat(text, conversation_id=conversation_id)
+
+    def _chat(self, text: str, *, conversation_id: str = "") -> str:
         ctx = build_continuity_context(self.store)
         if self.curator is not None:
             memories = [str(hit.record.content.get("summary", ""))
@@ -40,7 +44,8 @@ class WhaleCompanion:
         response = self.model.reply(text, persona=ctx.persona_summary, memories=memories,
                                     history=history)
         remember_episode(self.store, summary=f"用户：{text[:500]}\n鲸鱼：{response[:500]}",
-                         key=f"ep:chat:{uuid4().hex}", tags=("chat",))
+                         key=f"ep:chat:{uuid4().hex}", tags=("chat",),
+                         extra={"conversation_id": conversation_id[:160]})
         if conversation_id:
             append_turn(self.store, conversation_id, text, response)
         return response

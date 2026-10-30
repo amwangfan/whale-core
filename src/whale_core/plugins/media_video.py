@@ -2,8 +2,8 @@
 
 视频生成是异步任务形态：``submit`` 拿 task_id，``poll`` 查进度，终态拿产物 URL。
 真实异步视频服务（各家 API 形状差异大）经 :class:`VideoProvider` 协议注入；
-**本层只定义契约与任务生命周期，未与任何真实视频服务联调**。缺省 provider 是
-:class:`MockVideoProvider`（确定性替身，无网络、无真实生成，仅供开发/测试）。
+内置 DashScope Wan HTTP provider；是否已完成真实账号联调由部署验收记录说明。
+生产环境没有 mock provider 或静默回退。
 
 任务状态持久化到 MemoryStore 的 kv 层（``video:task:{task_id}``），进程重启后
 新建 manager（同 store 同 provider）即可恢复查询。终态（succeeded/failed/
@@ -13,11 +13,18 @@ cancelled）不再轮询 provider；poll 遇网络异常保持上次状态返回
 from __future__ import annotations
 
 import time
+import json
+import re
+import threading
+import urllib.request
+import urllib.error
+import urllib.parse
 from dataclasses import dataclass, replace
 from typing import Any, Mapping, Protocol
 
 from whale_core.plugins.manifest import PluginManifest
 from whale_core.plugins.registry import PluginRegistry
+from whale_core.plugins import provider_http
 
 MEDIA_VIDEO_GENERATE = "media.video.generate"
 
@@ -136,9 +143,14 @@ class VideoTaskManager:
     - 未知 task_id 的 poll/cancel 抛 ``VideoError(kind="not_found")``。
     """
 
-    def __init__(self, store: Any, provider: VideoProvider):
+    def __init__(self, store: Any, provider: VideoProvider, *, artifact_store=None, min_poll_interval: float = 0):
         self._store = store
         self._provider = provider
+        self._lock = threading.RLock()
+        self.timeout_seconds = 1800.0
+        self.artifact_store = artifact_store
+        self.min_poll_interval = max(0, min_poll_interval)
+        self._last_poll: dict[str, float] = {}
 
     @property
     def provider(self) -> VideoProvider:
@@ -163,7 +175,7 @@ class VideoTaskManager:
         except Exception as exc:
             raise VideoError(  # 不回显异常原文（脱敏纪律）
                 "network", f"video submit failed: {type(exc).__name__}",
-                retryable=True,
+                retryable=False,  # response loss may still have created a paid job
             ) from exc
         task_id = str(task_id or "").strip()
         if not task_id:
@@ -175,6 +187,10 @@ class VideoTaskManager:
         return task
 
     def poll(self, task_id: str) -> VideoTask:
+        with self._lock:
+            return self._poll_unlocked(task_id)
+
+    def _poll_unlocked(self, task_id: str) -> VideoTask:
         """查询任务：终态直接读缓存；非终态问 provider 并持久化最新状态。
 
         provider 抛异常（网络抖动等）时保持上次状态返回，error 字段记
@@ -183,6 +199,14 @@ class VideoTaskManager:
         task = self._load(task_id)
         if task.status in TERMINAL_STATUSES:
             return task
+        if task.created_at and time.time() - task.created_at > self.timeout_seconds:
+            task = replace(task, status=STATUS_FAILED, error="timeout:remote_execution_may_continue", updated_at=time.time())
+            self._save(task)
+            return task
+        last = self._last_poll.get(task_id, 0)
+        if time.monotonic() - last < self.min_poll_interval:
+            return task
+        self._last_poll[task_id] = time.monotonic()
         try:
             status, url, error = self._provider.poll(task_id)
         except Exception as exc:
@@ -191,12 +215,31 @@ class VideoTaskManager:
             self._save(task)
             return task
         status = str(status or "").strip() or task.status
+        if status not in (STATUS_PENDING, STATUS_RUNNING, *TERMINAL_STATUSES):
+            task = replace(task, error="bad_response:invalid_status", updated_at=time.time())
+            self._save(task)
+            return task
+        if status == STATUS_SUCCEEDED and not str(url or "").strip():
+            task = replace(task, error="bad_response:missing_artifact", updated_at=time.time())
+            self._save(task)
+            return task
+        if status == STATUS_SUCCEEDED and self.artifact_store is not None:
+            try:
+                url = self.artifact_store.save_reference(str(url), content_type="video/mp4").url
+            except Exception as exc:
+                task = replace(task, error="artifact_save_failed:"+type(exc).__name__, updated_at=time.time())
+                self._save(task)
+                return task
         task = replace(task, status=status, url=str(url or task.url),
                        error=str(error or ""), updated_at=time.time())
         self._save(task)
         return task
 
     def cancel(self, task_id: str) -> bool:
+        with self._lock:
+            return self._cancel_unlocked(task_id)
+
+    def _cancel_unlocked(self, task_id: str) -> bool:
         """取消任务：成功则落库为 cancelled 并返回 True；provider 异常返回 False。
 
         已 cancelled 幂等返回 True；其余终态（succeeded/failed）不可取消返回 False。
@@ -264,8 +307,86 @@ def register_video_gen(registry: PluginRegistry, *,
             version="1.0.0",
             kind="model",
             provides=(MEDIA_VIDEO_GENERATE,),
-            description="异步视频生成能力；真实服务经 VideoProvider 契约注入，缺省 mock（未联调真实服务）",
+            description="异步视频生成能力；真实服务经 VideoProvider 契约注入",
         ),
         provider=provider,
     )
     return provider
+
+
+class DashScopeWanVideoProvider:
+    """Wan 2.6 compatible text-to-video API, verified against Alibaba's API reference.
+
+    No automatic retries on submit: a lost response may still have created a paid job.
+    Cancellation is supported by the vendor only while the job is queued.
+    """
+    def __init__(self, *, api_key: str, base_url: str = "https://dashscope.aliyuncs.com/api/v1",
+                 model: str = "wan2.6-t2v", timeout: float = 30):
+        from whale_core.plugins.speech import _is_local_or_private_http
+        parts = urllib.parse.urlsplit(base_url)
+        if (parts.scheme != "https" and not _is_local_or_private_http(base_url)) or not parts.hostname or parts.username or parts.password or parts.query or parts.fragment:
+            raise ValueError("invalid video endpoint URL")
+        self.api_key, self.base_url, self.model = api_key, provider_http.validate_base_url(base_url), model
+        self.timeout = timeout
+
+    def _request(self, path: str, body: dict | None = None, *, method: str = "GET") -> dict:
+        if not self.api_key:
+            raise VideoError("config", "video API key not configured")
+        req = urllib.request.Request(self.base_url+path,
+            data=json.dumps(body).encode() if body is not None else None,
+            headers={"Content-Type": "application/json", "X-DashScope-Async": "enable"}, method=method)
+        # urllib redirects copy ordinary headers; unredirected headers protect credentials.
+        req.add_unredirected_header("Authorization", "Bearer "+self.api_key)
+        try:
+            with provider_http.open_request(req, timeout=self.timeout) as response:
+                raw = response.read(1024*1024+1)
+            if len(raw) > 1024*1024:
+                raise VideoError("bad_response", "video response exceeds limit")
+            data = json.loads(raw)
+        except urllib.error.HTTPError as exc:
+            kind = "auth" if exc.code in (401,403) else "quota" if exc.code == 429 else "server" if exc.code >= 500 else "bad_response"
+            raise VideoError(kind, f"video HTTP {exc.code}", retryable=method=="GET" and exc.code>=500) from None
+        except (urllib.error.URLError, OSError) as exc:
+            raise VideoError("network", f"video network error:{type(exc).__name__}", retryable=method=="GET") from None
+        except (ValueError, UnicodeError):
+            raise VideoError("bad_response", "invalid video JSON") from None
+        if not isinstance(data, dict) or data.get("code"):
+            raise VideoError("bad_response", "video service rejected request")
+        return data
+
+    @staticmethod
+    def _task_id(task_id: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", task_id):
+            raise VideoError("bad_response", "invalid video task id")
+        return task_id
+
+    def submit(self, prompt: str, *, duration_s: int = DEFAULT_DURATION_S, size: str = DEFAULT_SIZE) -> str:
+        prompt = _validate_prompt(prompt)
+        size = _validate_size(size)
+        if duration_s not in (5,10,15):
+            raise ValueError("Wan video duration must be 5, 10 or 15 seconds")
+        payload = {"model": self.model, "input": {"prompt": prompt[:1500]},
+                   "parameters": {"size": size.replace("x", "*"), "duration": duration_s}}
+        data = self._request("/services/aigc/video-generation/video-synthesis", payload, method="POST")
+        output = data.get("output") or {}
+        if not isinstance(output, dict):
+            raise VideoError("bad_response", "invalid video output")
+        return self._task_id(str(output.get("task_id") or ""))
+
+    def poll(self, task_id: str) -> tuple[str,str,str]:
+        output = self._request("/tasks/"+self._task_id(task_id)).get("output") or {}
+        if not isinstance(output, dict):
+            raise VideoError("bad_response", "invalid video output")
+        status = {"PENDING": STATUS_PENDING, "RUNNING": STATUS_RUNNING, "SUCCEEDED": STATUS_SUCCEEDED,
+                  "FAILED": STATUS_FAILED, "CANCELED": STATUS_CANCELLED}.get(output.get("task_status"))
+        if status is None:
+            raise VideoError("bad_response", "unknown video job state")
+        url = str(output.get("video_url") or "")
+        if status == STATUS_SUCCEEDED and not url.startswith("https://"):
+            raise VideoError("bad_response", "video result missing HTTPS URL")
+        error = "provider_failed" if status == STATUS_FAILED else ""
+        return status, url, error
+
+    def cancel(self, task_id: str) -> bool:
+        self._request("/tasks/"+self._task_id(task_id)+"/cancel", method="POST")
+        return True

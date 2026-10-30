@@ -3,6 +3,8 @@ name = "whale-core"
 version = "0.1.0"
 description = "Whale intelligence layer: companion AI core with events-in / intents-out contracts, memory, persona cards, plugin system and safety gates"
 readme = "README.md"
+# Third-party notices only; the project-level license is still owner-pending.
+license-files = ["licenses/*"]
 requires-python = ">=3.11"
 keywords = ["companion-ai", "agent", "memory", "plugins", "whale-io"]
 # Windows 没有系统 IANA 时区库，zoneinfo.ZoneInfo("Asia/Shanghai") 需要 tzdata；
@@ -11,9 +13,12 @@ dependencies = ["tzdata>=2024.1; sys_platform == 'win32'"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+voice = ["websockets>=14,<17"]
+desktop = ["pywebview>=5,<7"]
 
 [project.scripts]
 whale = "whale_core.cli.main:main"
+whale-desktop = "whale_core.cli.desktop:main"
 
 [project.urls]
 Homepage = "https://github.com/amwangfan/whale-core"
@@ -26,6 +31,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/whale_core"]
+# Release builders stage the compiled console here; normal editable installs
+# can continue to use web/dist without committing generated JavaScript.
+artifacts = ["src/whale_core/static/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

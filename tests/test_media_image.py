@@ -39,7 +39,7 @@ def _fake_urlopen(monkeypatch, scripted):
             raise scripted
         return io.BytesIO(json.dumps(scripted).encode())
 
-    monkeypatch.setattr("urllib.request.urlopen", fake)
+    monkeypatch.setattr("whale_core.plugins.provider_http.open_request", fake)
     return calls
 
 

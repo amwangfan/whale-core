@@ -1,6 +1,6 @@
 """PR-4 模型 provider 化：DeepSeekCompanion 错误分类/重试/http 放宽 + 能力注册解析。
 
-全部离线：HTTP 层用 monkeypatch 替换 urllib.request.urlopen。
+全部离线：HTTP 层用 monkeypatch 替换 whale_core.core.deepseek._open_model_request。
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ def _fake_urlopen(monkeypatch, script):
             raise item
         payload = json.dumps({"choices": [{"message": {"content": "回了"}}]}).encode()
         return io.BytesIO(payload)
-    monkeypatch.setattr("urllib.request.urlopen", fake)
+    monkeypatch.setattr("whale_core.core.deepseek._open_model_request", fake)
     return calls
 
 
@@ -105,7 +105,7 @@ def test_network_error_retryable(monkeypatch):
 
 
 def test_bad_response_shape(monkeypatch):
-    monkeypatch.setattr("urllib.request.urlopen",
+    monkeypatch.setattr("whale_core.core.deepseek._open_model_request",
                         lambda req, *, timeout=None: io.BytesIO(b'{"choices": []}'))
     d = DeepSeekCompanion(api_key="k", base_url="https://api.deepseek.com")
     with pytest.raises(ModelError) as ei:
@@ -168,3 +168,94 @@ def test_register_custom_endpoint():
     )
     assert companion.base_url == "http://127.0.0.1:11434"
     assert resolve_chat_model(registry) is companion
+
+
+@pytest.mark.parametrize("url", [
+    "https:///missing-host", "https://user:password@example.com/v1",
+    "https://example.com/v1?token=private", "https://example.com/v1#fragment",
+    "https://example.com:invalid", "https://example.com:0",
+])
+def test_invalid_endpoint_cannot_hide_credentials(url):
+    with pytest.raises(ValueError):
+        DeepSeekCompanion(api_key="key", base_url=url)
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf")])
+def test_invalid_timeout(timeout):
+    with pytest.raises(ValueError):
+        DeepSeekCompanion(api_key="key", timeout=timeout)
+
+
+def test_oversized_response_stops_at_limit(monkeypatch):
+    from whale_core.core.deepseek import MAX_MODEL_RESPONSE_BYTES
+    reads = []
+    class Response(io.BytesIO):
+        def read(self, count=-1):
+            reads.append(count)
+            return b"x" * count
+    monkeypatch.setattr("whale_core.core.deepseek._open_model_request",
+                        lambda req, *, timeout: Response())
+    with pytest.raises(ModelError) as caught:
+        DeepSeekCompanion(api_key="key").reply("hi")
+    assert caught.value.kind == "bad_response"
+    assert reads == [MAX_MODEL_RESPONSE_BYTES + 1]
+
+
+def test_non_utf8_response_is_classified(monkeypatch):
+    monkeypatch.setattr("whale_core.core.deepseek._open_model_request",
+                        lambda req, *, timeout: io.BytesIO(b"\xff"))
+    with pytest.raises(ModelError) as caught:
+        DeepSeekCompanion(api_key="secret").reply("hi")
+    assert caught.value.kind == "bad_response"
+    assert "secret" not in str(caught.value)
+
+
+def test_local_empty_key_does_not_send_bearer_header(monkeypatch):
+    seen = []
+    def fake(req, *, timeout):
+        seen.append(req.get_header("Authorization"))
+        return io.BytesIO(b'{"choices":[{"message":{"content":"ok"}}]}')
+    monkeypatch.setattr("whale_core.core.deepseek._open_model_request", fake)
+    model = DeepSeekCompanion(api_key="", base_url="http://127.0.0.1:1234/v1")
+    assert model.reply("hi") == "ok"
+    assert seen == [None] and model.info()["configured"]
+
+
+def test_redirect_never_sends_credentials_to_destination():
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    seen = []
+    class Destination(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+        def do_GET(self):
+            seen.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.end_headers()
+    destination = ThreadingHTTPServer(("127.0.0.1", 0), Destination)
+    class Redirect(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+        def do_POST(self):
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{destination.server_port}/stolen")
+            self.end_headers()
+    origin = ThreadingHTTPServer(("127.0.0.1", 0), Redirect)
+    threads = [threading.Thread(target=s.serve_forever, daemon=True)
+               for s in (destination, origin)]
+    for thread in threads:
+        thread.start()
+    try:
+        model = DeepSeekCompanion(api_key="sensitive-model-key",
+                                  base_url=f"http://127.0.0.1:{origin.server_port}")
+        with pytest.raises(ModelError) as caught:
+            model.reply("hi")
+        assert caught.value.status == 302 and caught.value.kind == "bad_response"
+        assert seen == []
+        assert "sensitive-model-key" not in str(caught.value)
+    finally:
+        for server in (origin, destination):
+            server.shutdown()
+            server.server_close()
+        for thread in threads:
+            thread.join(timeout=2)

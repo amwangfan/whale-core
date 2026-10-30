@@ -6,9 +6,9 @@
  * - 错误统一抛 ApiError（code/message 取自 `{error:{code,message}}`）。
  */
 
-export const API_BASE = '/api/v1';
+export const API_BASE = "/api/v1";
 
-const TOKEN_KEY = 'whale.console.token';
+const TOKEN_KEY = "whale.console.token";
 
 // ---------- 类型（与后端契约一一对应） ----------
 
@@ -42,7 +42,7 @@ export interface PluginDetail extends PluginInfo {
 
 export interface PluginHealth {
   plugin_id: string;
-  status: 'healthy' | 'unhealthy' | 'unknown' | 'disabled' | 'missing' | string;
+  status: "healthy" | "unhealthy" | "unknown" | "disabled" | "missing" | string;
   detail?: string;
 }
 
@@ -67,8 +67,11 @@ export interface Approval {
   text: string;
   channel: string;
   status: string;
-  decision?: 'approve' | 'reject' | '';
+  decision?: "approve" | "reject" | "";
   execution_status?: string;
+  kind?: "task" | "draft";
+  task_id?: string;
+  goal?: string;
 }
 
 /**
@@ -81,7 +84,13 @@ export interface TaskRecord {
   /** epoch 秒 */
   at: number;
   goal: string;
-  status: 'answered' | 'clarify' | 'pending_approval' | 'denied' | 'failed' | string;
+  status:
+    | "answered"
+    | "clarify"
+    | "pending_approval"
+    | "denied"
+    | "failed"
+    | string;
   capabilities: string[];
   receipts: string[];
   [key: string]: unknown;
@@ -93,6 +102,55 @@ export interface WhaleEvent {
   detail: string;
 }
 
+export interface RuntimeSettings {
+  profile: "cloud" | "local";
+  model: { base_url: string; model: string; api_key_configured: boolean };
+  intent_model_enabled: boolean;
+  capabilities: string[];
+  notes: string[];
+  services?: Record<string, string | boolean>;
+}
+export interface DiagnosticReport {
+  checks: { name: string; status: string; detail: string }[];
+  summary: Record<string, unknown>;
+}
+export interface ProviderTest {
+  ok: boolean;
+  latency_ms: number | null;
+  error_kind?: string;
+}
+
+export interface CapabilityResult {
+  output: string;
+  status: string;
+  reply: string;
+  receipts: unknown[];
+  task_id?: string;
+}
+export interface VideoTask {
+  task_id: string;
+  status: string;
+  prompt: string;
+  url: string;
+  error: string;
+  created_at: number;
+  updated_at: number;
+}
+export interface WorkflowSettings {
+  paused: boolean;
+  daily_limit: number;
+  quiet_start: string;
+  quiet_end: string;
+  timezone: string;
+  schedule_enabled?: boolean;
+  interval_s?: number;
+}
+export interface SkillInfo {
+  name: string;
+  description: string;
+  steps?: unknown[];
+}
+
 // ---------- 错误 ----------
 
 export class ApiError extends Error {
@@ -101,7 +159,7 @@ export class ApiError extends Error {
 
   constructor(code: string, message: string, status: number) {
     super(message);
-    this.name = 'ApiError';
+    this.name = "ApiError";
     this.code = code;
     this.status = status;
   }
@@ -117,7 +175,7 @@ let cachedToken: string | null = null;
 
 function storageAvailable(): boolean {
   try {
-    return typeof localStorage !== 'undefined';
+    return typeof localStorage !== "undefined";
   } catch {
     return false;
   }
@@ -125,7 +183,13 @@ function storageAvailable(): boolean {
 
 export function getToken(): string {
   if (cachedToken === null) {
-    cachedToken = storageAvailable() ? localStorage.getItem(TOKEN_KEY) ?? '' : '';
+    try {
+      cachedToken = storageAvailable()
+        ? (localStorage.getItem(TOKEN_KEY) ?? "")
+        : "";
+    } catch {
+      cachedToken = "";
+    }
   }
   return cachedToken;
 }
@@ -133,8 +197,12 @@ export function getToken(): string {
 export function setToken(token: string): void {
   cachedToken = token.trim();
   if (!storageAvailable()) return;
-  if (cachedToken) localStorage.setItem(TOKEN_KEY, cachedToken);
-  else localStorage.removeItem(TOKEN_KEY);
+  try {
+    if (cachedToken) localStorage.setItem(TOKEN_KEY, cachedToken);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* Private browsers may deny storage; keep this tab's session in memory. */
+  }
 }
 
 // 401 全局通知（App 订阅后提示「需要 token」）
@@ -161,32 +229,37 @@ function notifyUnauthorized(): void {
 // ---------- 请求核心 ----------
 
 export function apiUrl(path: string): string {
-  return `${API_BASE}${path.startsWith('/') ? path : `/${path}`}`;
+  return `${API_BASE}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
 /** 发起请求并返回原始 Response；非 2xx 时按 `{error:{code,message}}` 解析并抛 ApiError。 */
 async function rawRequest(path: string, init?: RequestInit): Promise<Response> {
   const headers = new Headers(init?.headers);
   const token = getToken();
-  if (token) headers.set('Authorization', `Bearer ${token}`);
-  if (init?.body != null && !headers.has('Content-Type')) {
-    headers.set('Content-Type', 'application/json');
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  if (init?.body != null && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
   }
   let res: Response;
   try {
-    res = await fetch(apiUrl(path), { ...init, headers });
+    res = await fetch(apiUrl(path), { ...init, headers, redirect: "error" });
   } catch (e) {
-    throw new ApiError('network', e instanceof Error ? e.message : 'network error', 0);
+    throw new ApiError(
+      "network",
+      e instanceof Error ? e.message : "network error",
+      0,
+    );
   }
   if (!res.ok) {
     let code = `http_${res.status}`;
     let message = res.statusText || `HTTP ${res.status}`;
     try {
       const body: unknown = await res.json();
-      if (body && typeof body === 'object' && 'error' in body) {
-        const err = (body as { error: { code?: unknown; message?: unknown } }).error;
-        if (typeof err.code === 'string') code = err.code;
-        if (typeof err.message === 'string') message = err.message;
+      if (body && typeof body === "object" && "error" in body) {
+        const err = (body as { error: { code?: unknown; message?: unknown } })
+          .error;
+        if (typeof err.code === "string") code = err.code;
+        if (typeof err.message === "string") message = err.message;
       }
     } catch {
       /* 非 JSON 错误体：保留 http_<status> 兜底 */
@@ -207,18 +280,115 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 // ---------- 端点 ----------
 
 export const api = {
-  status: () => request<StatusResult>('/status'),
+  conversation: (id = "console") =>
+    request<{
+      conversation_id: string;
+      messages: { role: "user" | "assistant"; content: string }[];
+    }>(`/conversations/${encodeURIComponent(id)}`),
+  deleteConversation: (id = "console") =>
+    request<unknown>(`/conversations/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
 
-  health: () => request<HealthResult>('/health'),
+  voiceOpen: (instructions: string) =>
+    request<{ session_id: string; status: string }>("/voice/sessions", {
+      method: "POST",
+      body: JSON.stringify({ instructions }),
+    }),
+  voiceAppend: (id: string, audio_base64: string) =>
+    request<unknown>(`/voice/sessions/${encodeURIComponent(id)}/append`, {
+      method: "POST",
+      body: JSON.stringify({ audio_base64 }),
+    }),
+  voiceCommit: (id: string) =>
+    request<unknown>(`/voice/sessions/${encodeURIComponent(id)}/commit`, {
+      method: "POST",
+      body: "{}",
+    }),
+  voiceReceive: (id: string, signal?: AbortSignal) =>
+    request<Record<string, unknown>>(
+      `/voice/sessions/${encodeURIComponent(id)}/receive`,
+      { method: "POST", body: JSON.stringify({ timeout: 5 }), signal },
+    ),
+  voiceCancel: (id: string) =>
+    request<unknown>(`/voice/sessions/${encodeURIComponent(id)}/cancel`, {
+      method: "POST",
+      body: "{}",
+    }),
+  voiceClose: (id: string) =>
+    request<unknown>(`/voice/sessions/${encodeURIComponent(id)}/close`, {
+      method: "POST",
+      body: "{}",
+    }),
 
-  plugins: async () => (await request<{ plugins: PluginInfo[] }>('/plugins')).plugins,
+  runCapability: (capability: string, params: Record<string, unknown>) =>
+    request<CapabilityResult>(
+      `/capabilities/${encodeURIComponent(capability)}`,
+      { method: "POST", body: JSON.stringify({ params }) },
+    ),
+  videoTasks: async () =>
+    (await request<{ tasks: VideoTask[] }>("/video/tasks")).tasks,
+  videoAction: (id: string, action: "poll" | "cancel") =>
+    request<VideoTask>(`/video/tasks/${encodeURIComponent(id)}/${action}`, {
+      method: "POST",
+    }),
+  artifact: async (path: string, signal?: AbortSignal) => {
+    if (!/^\/api\/v1\/artifacts\/[a-f0-9]{32}$/.test(path))
+      throw new ApiError("invalid_artifact", "产物地址无效", 0);
+    return (await rawRequest(path.slice(API_BASE.length), { signal })).blob();
+  },
+  skills: async () =>
+    (await request<{ skills: SkillInfo[] }>("/workflows/skills")).skills,
+  runSkill: (name: string, input_text: string) =>
+    request<unknown>(`/workflows/skills/${encodeURIComponent(name)}/run`, {
+      method: "POST",
+      body: JSON.stringify({ input_text }),
+    }),
+  explore: (topics: string[]) =>
+    request<unknown>("/workflows/explore", {
+      method: "POST",
+      body: JSON.stringify({ topics }),
+    }),
+  workflowSettings: () => request<WorkflowSettings>("/workflows/settings"),
+  saveWorkflowSettings: (settings: WorkflowSettings) =>
+    request<WorkflowSettings>("/workflows/settings", {
+      method: "POST",
+      body: JSON.stringify(settings),
+    }),
 
-  plugin: (id: string) => request<PluginDetail>(`/plugins/${encodeURIComponent(id)}`),
+  settings: () => request<RuntimeSettings>("/settings"),
+  saveSettings: (settings: {
+    profile?: "cloud" | "local";
+    model?: { base_url?: string; model?: string; api_key?: string | null };
+    intent_model_enabled?: boolean;
+    services?: Record<string, string | null>;
+  }) =>
+    request<RuntimeSettings>("/settings", {
+      method: "POST",
+      body: JSON.stringify(settings),
+    }),
+  testProvider: () =>
+    request<ProviderTest>("/providers/test", { method: "POST", body: "{}" }),
+  diagnostics: () => request<DiagnosticReport>("/diagnostics"),
+  testPlugin: (id: string) =>
+    request<ProviderTest & { via?: string }>(
+      `/plugins/${encodeURIComponent(id)}/test`,
+      { method: "POST" },
+    ),
+  status: () => request<StatusResult>("/status"),
+
+  health: () => request<HealthResult>("/health"),
+
+  plugins: async () =>
+    (await request<{ plugins: PluginInfo[] }>("/plugins")).plugins,
+
+  plugin: (id: string) =>
+    request<PluginDetail>(`/plugins/${encodeURIComponent(id)}`),
 
   setPluginEnabled: (id: string, enabled: boolean) =>
     request<{ plugin_id: string; status: string }>(
-      `/plugins/${encodeURIComponent(id)}/${enabled ? 'enable' : 'disable'}`,
-      { method: 'POST' },
+      `/plugins/${encodeURIComponent(id)}/${enabled ? "enable" : "disable"}`,
+      { method: "POST" },
     ),
 
   pluginHealth: (id: string) =>
@@ -228,39 +398,61 @@ export const api = {
   setPluginConfig: (id: string, config: Record<string, unknown>) =>
     request<{ plugin_id: string; saved: boolean }>(
       `/plugins/${encodeURIComponent(id)}/config`,
-      { method: 'POST', body: JSON.stringify({ config }) },
+      { method: "POST", body: JSON.stringify({ config }) },
     ),
 
-  tasks: async () => (await request<{ tasks: TaskRecord[] }>('/tasks')).tasks,
+  tasks: async () => (await request<{ tasks: TaskRecord[] }>("/tasks")).tasks,
 
   task: (id: string) => request<TaskRecord>(`/tasks/${encodeURIComponent(id)}`),
+  cancelTask: (id: string) =>
+    request<TaskRecord>(`/tasks/${encodeURIComponent(id)}/cancel`, {
+      method: "POST",
+    }),
+  decideTask: (id: string, decision: "approve" | "reject") =>
+    request<TaskRecord>(`/tasks/${encodeURIComponent(id)}/decision`, {
+      method: "POST",
+      body: JSON.stringify({ decision }),
+    }),
+  resumeTask: (id: string) =>
+    request<ChatResult>(`/tasks/${encodeURIComponent(id)}/resume`, {
+      method: "POST",
+    }),
 
   searchMemory: async (q: string) =>
-    (await request<{ hits: MemoryHit[] }>(`/memory/search?q=${encodeURIComponent(q)}`)).hits,
+    (
+      await request<{ hits: MemoryHit[] }>(
+        `/memory/search?q=${encodeURIComponent(q)}`,
+      )
+    ).hits,
 
-  getMemory: (key: string) => request<Record<string, unknown>>(`/memory/${encodeURIComponent(key)}`),
+  getMemory: (key: string) =>
+    request<Record<string, unknown>>(`/memory/${encodeURIComponent(key)}`),
 
   deleteMemory: (key: string) =>
-    request<{ deleted: boolean }>(`/memory/${encodeURIComponent(key)}`, { method: 'DELETE' }),
+    request<{ deleted: boolean }>(`/memory/${encodeURIComponent(key)}`, {
+      method: "DELETE",
+    }),
 
   /** 导出 NDJSON 原文（响应不是 JSON 包装，是 text/plain 流）。 */
   exportMemory: async (): Promise<string> => {
-    const res = await rawRequest('/memory/export', { method: 'POST' });
+    const res = await rawRequest("/memory/export", { method: "POST" });
     return res.text();
   },
 
-  chat: (text: string, conversationId = 'console') =>
-    request<ChatResult>('/chat', {
-      method: 'POST',
+  chat: (text: string, conversationId = "console", signal?: AbortSignal) =>
+    request<ChatResult>("/chat", {
+      method: "POST",
       body: JSON.stringify({ conversation_id: conversationId, text }),
+      signal,
     }),
 
-  approvals: async () => (await request<{ approvals: Approval[] }>('/approvals')).approvals,
+  approvals: async () =>
+    (await request<{ approvals: Approval[] }>("/approvals")).approvals,
 
-  decideApproval: (draftId: string, decision: 'approve' | 'reject') =>
+  decideApproval: (draftId: string, decision: "approve" | "reject") =>
     request<{ draft_id: string; decision: string }>(
       `/approvals/${encodeURIComponent(draftId)}/decision`,
-      { method: 'POST', body: JSON.stringify({ decision }) },
+      { method: "POST", body: JSON.stringify({ decision }) },
     ),
 };
 
@@ -280,26 +472,27 @@ export function streamEvents(handlers: EventStreamHandlers): EventStream {
   const controller = new AbortController();
   void (async () => {
     try {
-      const res = await rawRequest('/events', {
-        headers: { Accept: 'text/event-stream' },
+      const res = await rawRequest("/events", {
+        headers: { Accept: "text/event-stream" },
         signal: controller.signal,
       });
-      if (!res.body) throw new ApiError('no_stream', 'SSE response has no body', res.status);
+      if (!res.body)
+        throw new ApiError("no_stream", "SSE response has no body", res.status);
       handlers.onOpen?.();
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
-      let buffer = '';
+      let buffer = "";
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
         let idx: number;
-        while ((idx = buffer.indexOf('\n')) >= 0) {
-          const line = buffer.slice(0, idx).replace(/\r$/, '');
+        while ((idx = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, idx).replace(/\r$/, "");
           buffer = buffer.slice(idx + 1);
           // 只处理 data: 行；心跳注释（": ping"）与空行忽略
-          if (!line.startsWith('data:')) continue;
-          const payload = line.slice('data:'.length).trim();
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice("data:".length).trim();
           if (!payload) continue;
           try {
             handlers.onEvent(JSON.parse(payload) as WhaleEvent);
@@ -308,7 +501,9 @@ export function streamEvents(handlers: EventStreamHandlers): EventStream {
           }
         }
       }
-      handlers.onError?.(new ApiError('stream_closed', 'event stream closed', 0));
+      handlers.onError?.(
+        new ApiError("stream_closed", "event stream closed", 0),
+      );
     } catch (e) {
       if (controller.signal.aborted) return; // 主动 close，不算错误
       handlers.onError?.(e instanceof Error ? e : new Error(String(e)));

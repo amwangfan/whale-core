@@ -30,7 +30,8 @@ class QqInboundWorkflow:
 
     def __init__(self, store: MemoryStore, brain: TextCompanion, *,
                  prefs: ProactivePrefs | None = None,
-                 now_fn: Callable[[], datetime] | None = None) -> None:
+                 now_fn: Callable[[], datetime] | None = None,
+                 orchestrator=None) -> None:
         self.store = store
         self.companion = WhaleCompanion(store, brain, curator=MemoryCurator(store))
         self.outbox = ProactiveOutbox(store)
@@ -39,6 +40,9 @@ class QqInboundWorkflow:
         self.prefs = prefs if prefs is not None else ProactivePrefs()
         self._now = now_fn or (lambda: datetime.now(timezone.utc))
         self._curator = MemoryCurator(store)
+        # 可选的对话编排器（意图路由 + 工具）：设置后回复改由编排器产出
+        # （多轮/记忆/指令在编排器内部同款共享），本草稿仍走 Outbox 裁决。
+        self.orchestrator = orchestrator
 
     def _memory_command_reply(self, text: str, event: OwnerEvent) -> str | None:
         """委托给 core.memory_commands 的共享实现（QQ 侧只提供来源与证据链）。"""
@@ -72,6 +76,10 @@ class QqInboundWorkflow:
         command_reply = self._memory_command_reply(text, event)
         if command_reply is not None:
             reply = command_reply
+        elif self.orchestrator is not None:
+            result = self.orchestrator.handle_message(
+                event.conversation, text, source="qq:owner")
+            reply = result.reply
         else:
             reply = self.companion.chat(text, conversation_id=event.conversation)
         if not reply or not reply.strip():

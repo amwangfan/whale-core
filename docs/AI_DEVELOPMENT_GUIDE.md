@@ -1,5 +1,7 @@
 # Whale Core · 开发者与 AI 协作指南
 
+> 本文件保留早期审阅快照。本轮最终状态以 [完成记录](completion-report-2026-10-30.md)、当前源码及测试为准；Shell、媒体接线、后台探索、桌面入口和控制台均已继续实现，不应把下面的旧缺口当作当前结论。
+
 > 面向维护者、贡献者与编程 AI。**面向普通使用者的入口是 [README](../README.md)**。本文件是代码导航与工作约定，不替代源码、测试和契约文档。
 >
 > 更新范围：2026-10-30 的代码审阅快照。仓库可能继续快速变化，实施任何修改前必须以目标分支的最新代码为准。
@@ -20,7 +22,7 @@ Whale Core 是独立的 Python 智能层及初步可运行的管理服务，核�
 
 | 模块 | 代码入口 | 边界说明 |
 | --- | --- | --- |
-| 对话与工具编排 | `core/runtime.py`, `core/intent_plan.py`, `core/companion.py` | 会话、意图和工具结果；与事件驱动的 `WhaleAgent` 并存 |
+| 对话与工具编排 | `core/runtime.py`, `core/intent_plan.py`, `core/intent_router.py`, `core/companion.py` | 会话、意图（规则优先+可选 LLM）和工具结果；与事件驱动的 `WhaleAgent` 并存 |
 | 模型端点 | `core/deepseek.py`, `plugins/model_provider.py`, `profiles.py` | 供应商接口可换；不能把某个提供商硬编码成授权层 |
 | 记忆 | `memory/store.py`, `sqlite_store.py`, `history.py`, `curation.py`, `hybrid.py`, `export.py` | 会话历史、情节/偏好/人格、召回和导出；避免把未经确认的推断升级为事实 |
 | 插件运行机制 | `plugins/manifest.py`, `registry.py`, `manager.py`, `gateway.py`, `policy.py` | 六类插件、注册、启停、配置、策略；配置正确不等于执行器已接线 |
@@ -75,12 +77,13 @@ API 首次启动生成或从环境变量读取 token；`~/.whale/api_token` 为�
 以下是进一步实现时应优先复查的具体风险，属于**代码层面的发现或限制**，不是对已发生事故的判断：
 
 1. **已修复：`whale run` 与当前配置档不一致。** CLI 现在通过 `assemble_runtime(profile)` 装配；真实模型联调仍需独立验证。
-2. **部分修复：默认搜索意图接线。** 明确搜索请求被规则路由至 `web.search`；更复杂的意图识别可显式启用 LLM。不要将规则识别等同于完整意图模型。
+2. **部分修复：默认搜索意图接线。** 明确搜索请求被规则路由至 `web.search`；可选 LLM 意图规划现在会收到上下文摘要（查询相关记忆+稳定事实+近期历史），并按「能推断就默认、确实不行才澄清」的规矩走（地点缺省=用户所在地）；澄清/待批/拒绝等系统结局一律经陪伴人格产出，不直发意图模型原文。不要将规则识别等同于完整意图模型。
 3. **已改善，但没有加密：敏感配置。** 凭据从普通 SQLite/kv 配置分离到权限受限的私有文件（或仅进程内存），Web 采用 PATCH 保留未修改的遮蔽值。私有文件仍是明文，生产可接系统密钥库。
 4. **部分修复：审批与派发分离。** Web 审批记录会由 `ProactiveOutbox.inspect/dispatch` 消费，拒绝阻止派发；API 返回 `execution_status=not_dispatched`。尚需有运行中的 worker 负责后续派发。
 5. **已修复持续 SSE。** API 长连接推送事件与心跳，但事件内存环并非持久化台账；长期离线可能丢失历史事件。
 6. **Shell 不是完整沙箱。** `shell_executor.py` 有超时、输出截断、环境过滤和可选降权，但不自带完整的 OS 容器/系统资源隔离；`ShellPolicy` 字符串黑名单不能当作不可绕过的安全边界。
 7. **发行许可仍未确定。** 未明确项目级 LICENSE 前，不能向下载者承诺某个开源许可证或自由再分发权限。
+8. **已修复：系统结局曾绕过人格（AI 味回复）。** 澄清曾直接透出意图模型的 `clarification_question` 原文；现 `ConversationOrchestrator._voiced()` 统一让陪伴人格措辞（2026-10-30，owner 反馈修复）。 未明确项目级 LICENSE 前，不能向下载者承诺某个开源许可证或自由再分发权限。
 
 改进上述问题时优先增加回归测试，明确区分“代码实现”“mock 通过”“真实链路联通”。不要只在 README 中更改措辞来掩盖缺口。
 

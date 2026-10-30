@@ -88,20 +88,24 @@ def test_chat_plan_goes_plain_chat():
     assert result.plan is not None and result.plan.kind == "chat"
 
 
-def test_clarify_plan_asks_and_records_history():
+def test_clarify_plan_voiced_through_persona():
+    """澄清回复必须经陪伴人格产出（不直发意图模型原文——owner 报告的 AI 味 bug）。"""
     store, brain = InMemoryStore(), FakeBrain()
     orch = _orch(store, brain, intent_model=ScriptedIntentModel(
         _plan_text(kind="clarify", clarification_question="你想查哪个城市的天气？")))
     result = orch.handle_message("c", "帮我查天气")
     assert result.status == "clarify"
-    assert result.reply == "你想查哪个城市的天气？"
-    assert brain.calls == []  # 澄清不调陪伴模型
+    assert result.reply == "好的呀"  # 回复来自陪伴模型（替身）
+    assert brain.calls, "澄清必须调陪伴模型"
+    sent = brain.calls[-1]["text"]
+    assert "你想查哪个城市的天气？" in sent   # 澄清要点作为数据注入
+    assert "人格语气" in sent                 # 带人格化指令
+    assert "系统提示" in sent
     # 澄清轮写入历史，后续对话有上下文
     orch2 = _orch(store, brain)  # 无意图模型走纯对话
     orch2.handle_message("c", "上海")
     history = brain.calls[-1]["history"]
-    assert history[0]["content"] == "帮我查天气"
-    assert history[1]["content"] == "你想查哪个城市的天气？"
+    assert "帮我查天气" in history[0]["content"]
 
 
 def test_intent_parse_failure_falls_back_to_chat():
@@ -190,7 +194,8 @@ def test_risky_tool_via_gateway_hold_becomes_pending_approval():
         _plan_text(capabilities=["email.send"])), tools=tools, gateway=HoldGateway())
     result = orch.handle_message("c", "发邮件给老板")
     assert result.status == "pending_approval"
-    assert "批准" in result.reply
+    assert result.reply == "好的呀"  # 人格化回复来自陪伴模型
+    assert "需要他批准" in brain.calls[-1]["text"]  # 系统提示如实说明待批
 
 
 def test_risky_tool_via_gateway_ok():
@@ -280,3 +285,52 @@ def test_task_turn_is_recorded_for_console():
     assert record["status"] == "answered"
     assert record["receipts"][0].startswith("tool:search_web:ok:")
     assert store.get("tasks:recent") == ["t-99"]
+
+
+# ---------- 意图上下文与澄清克制（owner 反馈修复） ----------
+
+def test_intent_model_receives_context_with_history_and_memory():
+    """意图模型不再瞎问：上下文摘要含近期历史与相关记忆。"""
+    store, brain = InMemoryStore(), FakeBrain()
+    captured = {}
+
+    class CapturingIntent:
+        def plan(self, text, *, context=""):
+            captured["context"] = context
+            return '{"goal":"闲聊","kind":"chat"}'
+
+    orch = _orch(store, brain, intent_model=CapturingIntent())
+    orch.handle_message("c1", "我在成都")          # 写入历史
+    orch.handle_message("c1", "明天有雨吗")        # 第二轮应带上轮上下文
+    ctx = captured["context"]
+    assert "我在成都" in ctx          # 近期历史进入意图上下文
+    assert "用户：" in ctx            # 角色前缀
+
+    # 记忆也进入
+    orch2 = _orch(store, brain, intent_model=CapturingIntent())
+    store_curator = MemoryCurator(store)
+    store_curator.remember("用户在成都", source="t", evidence_id="e",
+                           stable_fact=True, consent=True)
+    orch2.handle_message("c1", "明天天气怎么样")
+    assert "用户在成都" in captured["context"]
+
+
+def test_clarify_prompt_guides_defaults():
+    """路由器的 LLM 提示词包含「默认优先、澄清兜底」规矩。"""
+    from whale_core.core.intent_router import SearchIntentRouter
+
+    class CaptureModel:
+        def __init__(self):
+            self.prompts = []
+
+        def reply(self, text, *, persona="", memories=(), history=()):
+            self.prompts.append(text)
+            return '{"goal":"x","kind":"chat"}'
+
+    model = CaptureModel()
+    router = SearchIntentRouter(model=model, enable_llm=True)
+    router.plan("明天有雨吗", context="记忆：用户在成都")
+    prompt = model.prompts[0]
+    assert "默认用户所在地" in prompt
+    assert "确实无法推断才" in prompt
+    assert "用户在成都" in prompt  # 上下文进提示词
