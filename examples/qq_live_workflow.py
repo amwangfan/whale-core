@@ -307,6 +307,12 @@ def cmd_run(args) -> int:
         print("[审批] --auto-approve = dry-run 演示：影子账本走流程，不触网、不占额度；"
               "真实发送用 approve 子命令（人工逐条）。")
     send_port = build_send_port(live_ok=live_auto)
+    # 图片产物本地字节直发（不经过网络/代理）：端口拿到 artifact 引用时
+    # 直接从 ArtifactStore 读字节（穿透 WindowedSendPort 取内层）。
+    if cap.artifacts is not None:
+        _inner_port = getattr(send_port, "_inner", send_port)
+        if hasattr(_inner_port, "send_image"):
+            _inner_port.artifact_reader = lambda aid: cap.artifacts.read(aid)
 
     # 按需完整模式窗口：启动即关窗定基线（幂等）；closer 只在 runner 主进程起——
     # approve 子进程是独立短命进程，只开窗/续期，关窗由本 closer 跨进程兜底。
@@ -441,14 +447,6 @@ def cmd_run(args) -> int:
     if workflow.orchestrator is not None:
         workflow.orchestrator.gateway = plugin_gateway
     # 两段式慢任务补发（owner 决策 2026-10-31）：ack 先回，结果后台好了再补
-    # 图片产物本地字节直发（不经过网络/代理）：端口拿到 artifact 引用时
-    # 直接从 ArtifactStore 读字节。
-    _artifacts = cap.artifacts
-    if _artifacts is not None:
-        _inner_port = getattr(port, "_inner", port)  # WindowedSendPort 取内层
-        if hasattr(_inner_port, "send_image"):
-            _inner_port.artifact_reader = lambda aid: _artifacts.read(aid)
-
     workflow._completion_sender = _send_completion
     # 语音产物补发：workflow 的补发回调现在带音频产物 id 列表
 
