@@ -12,7 +12,10 @@ from urllib.parse import urlsplit
 SERVICE_FIELDS = frozenset('WHALE_MEDIA_BASE_URL WHALE_MEDIA_API_KEY WHALE_MEDIA_PROVIDER WHALE_IMAGE_PROVIDER WHALE_SPEECH_PROVIDER WHALE_VIDEO_PROVIDER WHALE_EMBEDDING_BASE_URL WHALE_EMBEDDING_API_KEY WHALE_EMBEDDING_MODEL WHALE_SHELL_ENABLED WHALE_SHELL_TIER WHALE_SEARCH_PROVIDER TAVILY_API_KEY BRAVE_API_KEY WHALE_IMAGE_BASE_URL WHALE_IMAGE_API_KEY WHALE_IMAGE_MODEL WHALE_SPEECH_BASE_URL WHALE_SPEECH_API_KEY WHALE_ASR_MODEL WHALE_TTS_MODEL WHALE_TTS_VOICE WHALE_VIDEO_BASE_URL WHALE_VIDEO_API_KEY DASHSCOPE_API_KEY WHALE_VIDEO_MODEL WHALE_REALTIME_URL WHALE_REALTIME_API_KEY WHALE_REALTIME_MODEL WHALE_REALTIME_VOICE WHALE_REALTIME_PROTOCOL'.split())
 SECRET_FIELDS = frozenset(k for k in SERVICE_FIELDS if k.endswith('API_KEY'))
 
-MODEL_ROLES = frozenset({'chat', 'intent', 'executor', 'safety'})
+# 角色契约（owner 决策 2026-10-30，G1 收敛）：回复 chat / 意图+审核 intent /
+# 执行 executor。独立 safety 角色已并入 intent（同一模型规划+复核），
+# 旧配置里的 models.safety 在读取时迁移为 intent（见 read_models_view）。
+MODEL_ROLES = frozenset({'chat', 'intent', 'executor'})
 
 
 def read_models_view(config_dir, env: Mapping[str, str] | None = None) -> dict:
@@ -24,7 +27,10 @@ def read_models_view(config_dir, env: Mapping[str, str] | None = None) -> dict:
     import os
     env = os.environ if env is None else env
     config, private = read_settings_pair(config_dir)
-    models = config.get('models') or {}
+    models = dict(config.get('models') or {})
+    # 迁移：旧版独立 safety 角色并入 intent（仅当 intent 未显式配置）
+    if 'safety' in models and 'intent' not in models:
+        models['intent'] = models['safety']
     out = {}
     for role in sorted(MODEL_ROLES):
         cfg = dict(models.get(role) or {})

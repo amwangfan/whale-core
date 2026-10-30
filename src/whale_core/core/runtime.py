@@ -213,6 +213,51 @@ class TurnResult:
     task_id: str = ""
 
 
+@dataclass(frozen=True)
+class InputEnvelope:
+    """跨渠道统一入站信封（G1-A）：所有渠道的消息经同一结构进入编排器。
+
+    - ``source``：宿主侧认证后的来源标签（api/cli/qq/...），**永不来自
+      用户或模型输入**；
+    - ``channel``：逻辑渠道（qq/web/voice/...），供投递与隐私域判定；
+    - ``owner_id``：逻辑 owner 域（G2 跨设备连续性以此归并）；
+    - ``images``：已过可信边界验证的图片 ``((bytes, mime), ...)``。
+    """
+
+    conversation_id: str
+    text: str
+    source: str = "runtime"
+    channel: str = ""
+    owner_id: str = ""
+    images: tuple = ()
+    request_id: str = ""
+
+
+# 任务生命周期（G1-B）：pending → acknowledged → running(leased) →
+# waiting_approval(pending_approval) → succeeded/failed/unknown → delivered；
+# cancelled/denied 为旁路终态；delivery_failed 是「送达失败可见、可人工重发」。
+TASK_PHASES = frozenset({
+    "pending", "acknowledged", "running", "pending_approval",
+    "succeeded", "failed", "unknown", "cancelled", "denied",
+    "delivered", "delivery_failed",
+})
+
+# phase → 兼容 status（旧消费方读 status；新逻辑一律读 phase）
+_PHASE_STATUS = {"succeeded": "answered", "delivered": "answered",
+                 "delivery_failed": "answered"}
+
+
+@dataclass
+class _Decision:
+    """G1-A：一次请求至多一次规划的结果（模型提议、核心裁决后）。"""
+
+    route: str  # "empty" | "memory" | "chat" | "clarify" | "task"
+    plan: IntentPlan | None = None
+    receipt: str = ""  # 规划异常留痕（如 intent:parse-failed→plain-chat）
+    memory_reply: str = ""
+    slow: bool = False
+
+
 class ConversationOrchestrator:
     """对话流编排器：人格/记忆/历史经 WhaleCompanion 复用，工具经 ToolRegistry。"""
 
@@ -225,13 +270,15 @@ class ConversationOrchestrator:
         tools: ToolRegistry | None = None,
         gateway: ActionGatewayLike | None = None,
         tool_output_chars: int = TOOL_OUTPUT_MAX_CHARS,
-        max_tool_rounds: int = MAX_TOOL_ROUNDS,  # 预留：PR-2 单轮执行声明能力
+        max_tool_rounds: int = MAX_TOOL_ROUNDS,
+        executor_model=None,  # G1-C：可选多轮工具执行模型（llm.tool_executor 角色）
     ) -> None:
         self.store = store
         self.companion = companion
         self.intent_model = intent_model
         self.tools = tools or ToolRegistry()
         self.gateway = gateway
+        self.executor_model = executor_model
         self.tool_output_chars = tool_output_chars
         self.max_tool_rounds = max(1, min(32, int(max_tool_rounds)))
         state, first_runtime = _store_runtime_state(store)
@@ -241,36 +288,209 @@ class ConversationOrchestrator:
         self._transient_args: dict[str, dict] = state["transient_args"]
         # A process restart cannot prove whether an in-flight action happened.
         # Preserve it as unknown and never automatically replay it.
+        self._delivery_handlers: dict[str, Callable] = {}
         for task_id in ([key.removeprefix("task:") for key in store.keys() if key.startswith("task:")] if first_runtime else []):
             record = store.get(f"task:{task_id}")
             if isinstance(record, dict) and record.get("status") == "running":
-                record.update(status="unknown", error="runtime-restarted-during-execution")
+                record.update(status="unknown", phase="unknown",
+                              error="runtime-restarted-during-execution")
                 store.put(f"task:{task_id}", record)
-
-    def handle_message(self, conversation_id: str, text: str, *, source: str = "runtime",
-                       images: Sequence[bytes] = ()) -> TurnResult:
-        with conversation_lock(self.store, conversation_id):
-            return self._handle_message(conversation_id, text, source=source, images=images)
 
     # 慢能力前缀：这些任务执行耗时（生图/视频/搜索/抓取），适合两段式回复
     SLOW_CAPABILITY_PREFIXES = ("media.", "web.")
 
-    def recover_interrupted_tasks(self, *, on_complete=None) -> list[str]:
-        """进程重启后恢复被掐断的在途任务。
+    # ---- G1-A：统一入口（InputEnvelope）与唯一规划点 ----
 
-        - 台账 status=running 且 journal 尚未派发任何工具（next_step=0、
-          无回执）→ 安全重新执行（未产生外部副作用），完成后走 on_complete；
-        - 已派发过工具的 → 标记 unknown（外部结果不可知，不假装重来），
-          走 on_complete 告知用户「上次被重启打断」。
-        返回恢复处理的任务 id 列表。幂等：重复调用不会重复执行
-        （已恢复的会从 running 变成终态）。
+    def handle_message(self, conversation_id: str, text: str, *, source: str = "runtime",
+                       images: Sequence = ()) -> TurnResult:
+        return self.handle_envelope(InputEnvelope(
+            conversation_id=conversation_id, text=text, source=source,
+            images=tuple(images)))
+
+    def handle_envelope(self, env: InputEnvelope) -> TurnResult:
+        """同步入口：一次请求至多一次规划，Decision 直接消费。"""
+        with conversation_lock(self.store, env.conversation_id):
+            return self._finish_decision(env, self._decide(env))
+
+    def handle_message_async(
+        self, conversation_id: str, text: str, *, source: str = "runtime",
+        on_complete=None, images: Sequence = (),
+    ) -> TurnResult:
+        return self.handle_envelope_async(InputEnvelope(
+            conversation_id=conversation_id, text=text, source=source,
+            images=tuple(images)), on_complete=on_complete)
+
+    def handle_envelope_async(self, env: InputEnvelope, *, on_complete=None) -> TurnResult:
+        """两段式慢任务回复（owner 决策 2026-10-31；G1-A/B 重构）：
+
+        - **一次请求一次规划**：快路径（chat/clarify/无慢能力的任务/记忆指令）
+          复用同一个 Decision 同步执行，不二次规划；慢任务（含慢能力前缀）
+          复用同一个 IntentPlan 后台执行；
+        - **台账先于 ack**（G1-B）：任务先持久化 phase=pending，再生成并返回
+          人格语气占位 ack（status="ack"），随后标记 acknowledged；
+        - 后台线程执行完成后调 ``on_complete(TurnResult)`` 把真实结果交给
+          宿主补发；送达回执经 ``mark_delivered`` / ``mark_delivery_failed``
+          落到任务台账（delivery 子状态）。
+        """
+        with conversation_lock(self.store, env.conversation_id):
+            decision = self._decide(env)
+            if decision.route != "task" or not decision.slow:
+                return self._finish_decision(env, decision)
+            # 两段式的后台执行不等对话方：ack 已发，用户没被阻塞——超时按
+            # 供应商真实时长计（生图实测 60-180s），与同步路径的 60s 会话
+            # 超时是两个语义。这不是「加长超时糊弄失败」：同步路径保持 60s，
+            # 异步后台路径需要覆盖供应商真实执行时长才有意义。
+            plan = replace(decision.plan,
+                           timeout_s=max(decision.plan.timeout_s, 240.0))
+            # G1-B：先持久化台账（pending）再 ack——ack 不得先于持久任务创建。
+            task_id, plan = self._persist_task(
+                plan, conversation_id=env.conversation_id, text=env.text,
+                source=env.source, channel=env.channel, async_delivery=True)
+            try:
+                ack = self._voiced(
+                    env.conversation_id, env.text,
+                    "用户的请求需要耗时工具处理（生图/搜索等，约半分钟到几分钟）。"
+                    "请用你自己的人格语气先回一句你已经在做了、稍后给结果——简短自然，"
+                    "不要假装已经完成。")
+            except Exception:
+                ack = "好，我在处理了，稍后给你结果。"  # ack 模型失败不阻断任务
+            self._save_task(task_id, plan, "acknowledged", ())
+
+            images = env.images
+
+            def _run() -> None:
+                run_plan = plan
+                # 参考图转文字：生图任务且带附件图 → 先用视觉能力把参考图描述
+                # 成一句风格描述并进生图 prompt（意图模型是文本规划，看不见图）。
+                if images and any(str(c).startswith("media.image") for c in plan.capabilities):
+                    try:
+                        desc = self.companion.chat(
+                            "用户发来一张参考图，想用它的风格/角色再创作。"
+                            "用一句话（≤80字）描述这张图的角色外观与画风要点，供生图模型参考。"
+                            "只写描述，不要客套。",
+                            conversation_id=env.conversation_id, images=images)
+                        desc = (desc or "").strip()[:200]
+                        if desc:
+                            slots = dict(plan.slots)
+                            slots["prompt"] = (str(slots.get("prompt") or plan.goal)[:400]
+                                               + "。参考图特征：" + desc)
+                            run_plan = replace(plan, slots=slots)
+                            self._update_journal_plan(task_id, run_plan)
+                    except Exception:
+                        pass  # 描述失败不阻塞生图（按原 prompt 画）
+                try:
+                    result = self._execute_task(task_id)
+                except Exception:
+                    # 执行层异常已在台账留痕（failed/unknown）；回调仍要触发，
+                    # 让用户拿到诚实结局而不是沉默。
+                    record = self.store.get(f"task:{task_id}") or {}
+                    result = TurnResult(
+                        reply="任务执行中断，结果未知。",
+                        status=str(record.get("status", "unknown")),
+                        plan=plan, task_id=task_id)
+                if on_complete is not None:
+                    try:
+                        on_complete(result)
+                    except Exception:
+                        # 宿主补发异常：台账标记送达失败（可见、可人工重发）
+                        self.mark_delivery_failed(task_id, error="host-callback-raised")
+
+            threading.Thread(target=_run, daemon=True,
+                             name=f"whale-task-{task_id}").start()
+            return TurnResult(reply=ack, status="ack", plan=plan, task_id=task_id)
+
+    def _decide(self, env: InputEnvelope) -> _Decision:
+        """G1-A 唯一规划点：一次请求至多一次意图模型调用。
+
+        顺序（与 roadmap §6.2 一致）：空消息 → 记忆指令捷径（不调模型）→
+        无意图模型纯对话 → 意图规划（模型提议、核心裁决，失败回落纯对话）。
+        """
+        text = (env.text or "").strip()
+        if not text:
+            return _Decision(route="empty")
+        command = handle_memory_command(
+            self.store, text, source=env.source, curator=self.companion.curator,
+            evidence_id=f"{env.source}:{env.conversation_id}:{uuid4().hex}",
+        )
+        if command is not None:
+            return _Decision(route="memory", memory_reply=command)
+        if self.intent_model is None:
+            return _Decision(route="chat")
+        # 意图模型需要上下文（近期历史+相关记忆）才能做合理默认；
+        # 带附件时必须告知（它是文本规划看不见图，否则会误以为没图去澄清）。
+        plan_text = text
+        if env.images:
+            plan_text = f"（用户消息附带 {len(env.images)} 张图片，已可读取）\n" + text
+        try:
+            plan = plan_from_model_text(
+                self.intent_model.plan(
+                    plan_text, context=self._intent_context(env.conversation_id, text)))
+        except IntentPlanError:
+            return _Decision(route="chat", receipt="intent:parse-failed→plain-chat")
+        except Exception:
+            return _Decision(route="chat", receipt="intent:model-error→plain-chat")
+        if plan.kind == "chat":
+            return _Decision(route="chat", plan=plan)
+        if plan.kind == "clarify" or plan.needs_clarification:
+            return _Decision(route="clarify", plan=plan)
+        slow = any(str(c).startswith(self.SLOW_CAPABILITY_PREFIXES)
+                   for c in plan.capabilities)
+        return _Decision(route="task", plan=plan, slow=slow)
+
+    def _finish_decision(self, env: InputEnvelope, decision: _Decision) -> TurnResult:
+        """同步消费 Decision（handle_envelope 与 async 快路径共用）。"""
+        text = (env.text or "").strip()
+        if decision.route == "empty":
+            return TurnResult(reply="（空消息）", status="answered")
+        if decision.route == "memory":
+            if env.conversation_id:
+                append_turn(self.store, env.conversation_id, text, decision.memory_reply)
+            return TurnResult(reply=decision.memory_reply, status="answered",
+                              receipts=("memory-command",))
+        if decision.route == "chat":
+            receipts = (decision.receipt,) if decision.receipt else ()
+            plan = decision.plan
+            return TurnResult(
+                reply=self.companion.chat(text, conversation_id=env.conversation_id,
+                                          images=env.images),
+                status="answered", plan=plan, receipts=receipts,
+                task_id=(plan.task_id or plan.intent_id) if plan else "")
+        if decision.route == "clarify":
+            plan = decision.plan
+            ask = plan.clarification_question or "还需要更多信息"
+            reply = self._voiced(
+                env.conversation_id, text,
+                f"用户的请求缺少必要信息，需要澄清这一点：{ask}\n"
+                "请用你自己的人格语气自然地追问，简短，不要复读上面的原文。",
+                images=env.images,
+            )
+            return TurnResult(reply=reply, status="clarify", plan=plan,
+                              task_id=plan.task_id or plan.intent_id)
+        return self._start_plan(decision.plan, env.conversation_id, text,
+                                source=env.source, channel=env.channel)
+
+    def recover_interrupted_tasks(self, *, on_complete=None) -> list[str]:
+        """进程重启后恢复被掐断的在途任务（G1-B phase 感知）。
+
+        - phase=pending/acknowledged：任务已持久化但从未派发（ack 可能已发），
+          安全重新执行（未产生外部副作用），完成后走 on_complete；
+        - phase=running 且 journal 尚未派发任何工具（next_step=0、无回执）
+          → 同样安全重跑；
+        - 已派发过工具的 → 标记 unknown（外部结果不可知，**不自动重放**），
+          走 on_complete 告知用户「上次被重启打断」；
+        - phase=succeeded 但 delivery 未 delivered 的：不重跑，仅保持
+          「待补发」可见（宿主可用 redeliver_task 人工重发）。
+        返回恢复处理的任务 id 列表。幂等：重复调用不会重复执行。
         """
         recovered: list[str] = []
         for key in list(self.store.keys()):
             if not key.startswith("task:"):
                 continue
             record = self.store.get(key)
-            if not isinstance(record, dict) or record.get("status") != "running":
+            if not isinstance(record, dict):
+                continue
+            phase = record.get("phase") or record.get("status")
+            if phase not in ("pending", "acknowledged", "running"):
                 continue
             task_id = key[5:]
             journal = self.store.get(f"runtime:task:{task_id}")
@@ -285,6 +505,7 @@ class ConversationOrchestrator:
                 continue
             untouched = journal.get("next_step", 0) == 0 and not journal.get("receipts")
             if untouched:
+                self._append_event(task_id, "recovered", detail="restart-rerun")
                 def _rerun(tid=task_id, jid=journal):
                     result = self._execute_task(tid)
                     if on_complete is not None:
@@ -292,7 +513,7 @@ class ConversationOrchestrator:
                             on_complete(jid.get("conversation_id", ""), result.reply,
                                         result.status)
                         except Exception:
-                            pass
+                            self.mark_delivery_failed(tid, error="host-callback-raised")
                 threading.Thread(target=_rerun, daemon=True,
                                  name=f"whale-recover-{task_id}").start()
             else:
@@ -312,148 +533,6 @@ class ConversationOrchestrator:
                         pass
             recovered.append(task_id)
         return recovered
-
-    def handle_message_async(
-        self, conversation_id: str, text: str, *, source: str = "runtime",
-        on_complete=None, images: Sequence[bytes] = (),
-    ) -> TurnResult:
-        """两段式慢任务回复（owner 决策 2026-10-31）：
-
-        - 快路径（chat/clarify/无慢能力的任务/记忆指令）→ 与 handle_message
-          完全一致，同步返回，on_complete 不触发；
-        - 慢任务（含慢能力前缀）→ 立即返回人格语气的占位 ack
-          （status="ack"），任务在后台线程执行，完成后调
-          ``on_complete(TurnResult)`` 把真实结果交给宿主补发。
-        """
-        with conversation_lock(self.store, conversation_id):
-            text = (text or "").strip()
-            if not text:
-                return TurnResult(reply="（空消息）", status="answered")
-            # 快路径判定：无意图模型/记忆指令 → 直接走同步
-            if self.intent_model is None:
-                return TurnResult(
-                    reply=self.companion.chat(text, conversation_id=conversation_id),
-                    status="answered")
-            plan_text = text
-            if images:
-                plan_text = f"（用户消息附带 {len(images)} 张图片，已可读取）\n" + text
-            try:
-                plan = plan_from_model_text(
-                    self.intent_model.plan(plan_text, context=self._intent_context(conversation_id, text)))
-            except Exception:
-                return TurnResult(
-                    reply=self.companion.chat(text, conversation_id=conversation_id, images=images),
-                    status="answered", receipts=("intent:error→plain-chat",))
-            slow = plan.kind == "task" and any(
-                str(c).startswith(self.SLOW_CAPABILITY_PREFIXES) for c in plan.capabilities)
-            if not slow:
-                return self._handle_message(conversation_id, text, source=source, images=images)
-            # 两段式的后台执行不等对话方：ack 已发，用户没被阻塞——超时按
-            # 供应商真实时长计（生图实测 60-180s），与同步路径的 60s 会话
-            # 超时是两个语义。这不是「加长超时糊弄失败」：同步路径保持 60s，
-            # 异步后台路径需要覆盖供应商真实执行时长才有意义。
-            plan = replace(plan, timeout_s=max(plan.timeout_s, 240.0))
-
-            # 慢任务：先建台账（同 _start_plan 前半），回占位 ack，后台执行
-            ack = self._voiced(
-                conversation_id, text,
-                "用户的请求需要耗时工具处理（生图/搜索等，约半分钟到几分钟）。"
-                "请用你自己的人格语气先回一句你已经在做了、稍后给结果——简短自然，"
-                "不要假装已经完成。")
-            result_holder: dict = {}
-
-            def _run() -> None:
-                run_plan = plan
-                # 参考图转文字：生图任务且带附件图 → 先用视觉能力把参考图描述
-                # 成一句风格描述并进生图 prompt（意图模型是文本规划，看不见图）。
-                if images and any(str(c).startswith("media.image") for c in plan.capabilities):
-                    try:
-                        desc = self.companion.chat(
-                            "用户发来一张参考图，想用它的风格/角色再创作。"
-                            "用一句话（≤80字）描述这张图的角色外观与画风要点，供生图模型参考。"
-                            "只写描述，不要客套。",
-                            conversation_id=conversation_id, images=images)
-                        desc = (desc or "").strip()[:200]
-                        if desc:
-                            slots = dict(plan.slots)
-                            slots["prompt"] = (str(slots.get("prompt") or plan.goal)[:400]
-                                               + "。参考图特征：" + desc)
-                            run_plan = replace(plan, slots=slots)
-                    except Exception:
-                        pass  # 描述失败不阻塞生图（按原 prompt 画）
-                result = self._start_plan(run_plan, conversation_id, text, source=source)
-                result_holder["result"] = result
-                if on_complete is not None:
-                    try:
-                        on_complete(result)
-                    except Exception:
-                        pass  # 补发失败由宿主日志兜底，不反噬执行线程
-
-            threading.Thread(target=_run, daemon=True,
-                             name=f"whale-task-{plan.task_id or 'async'}").start()
-            return TurnResult(reply=ack, status="ack", plan=plan,
-                              task_id=plan.task_id or plan.intent_id)
-
-    def _handle_message(self, conversation_id: str, text: str, *, source: str = "runtime",
-                        images: Sequence[bytes] = ()) -> TurnResult:
-        text = (text or "").strip()
-        if not text:
-            return TurnResult(reply="（空消息）", status="answered")
-
-        # 1. 记忆指令捷径
-        command = handle_memory_command(
-            self.store, text, source=source, curator=self.companion.curator,
-            evidence_id=f"{source}:{conversation_id}:{uuid4().hex}",
-        )
-        if command is not None:
-            if conversation_id:
-                append_turn(self.store, conversation_id, text, command)
-            return TurnResult(reply=command, status="answered", receipts=("memory-command",))
-
-        # 2. 无意图模型 → 纯对话
-        if self.intent_model is None:
-            return TurnResult(
-                reply=self.companion.chat(text, conversation_id=conversation_id, images=images),
-                status="answered",
-            )
-
-        # 3. 意图规划（模型提议，核心裁决；失败回落纯对话）
-        # 意图模型需要上下文（近期历史+相关记忆）才能做合理默认——
-        # 空上下文会让它问出「哪个城市」这种上下文里明明有答案的瞎话。
-        # 带附件时告知意图模型（它是文本规划看不见图，否则会误以为没图去澄清）。
-        plan_text = text
-        if images:
-            plan_text = f"（用户消息附带 {len(images)} 张图片，已可读取）\n" + text
-        try:
-            plan = plan_from_model_text(
-                self.intent_model.plan(plan_text, context=self._intent_context(conversation_id, text)))
-        except IntentPlanError:
-            receipt = "intent:parse-failed→plain-chat"
-            reply = self.companion.chat(text, conversation_id=conversation_id)
-            return TurnResult(reply=reply, status="answered", receipts=(receipt,))
-        except Exception:
-            receipt = "intent:model-error→plain-chat"
-            reply = self.companion.chat(text, conversation_id=conversation_id)
-            return TurnResult(reply=reply, status="answered", receipts=(receipt,))
-
-        # 4. chat / clarify 分流
-        if plan.kind == "chat":
-            return TurnResult(
-                reply=self.companion.chat(text, conversation_id=conversation_id, images=images),
-                status="answered", plan=plan, task_id=plan.task_id or plan.intent_id,
-            )
-        if plan.kind == "clarify" or plan.needs_clarification:
-            ask = plan.clarification_question or "还需要更多信息"
-            reply = self._voiced(
-                conversation_id, text,
-                f"用户的请求缺少必要信息，需要澄清这一点：{ask}\n"
-                "请用你自己的人格语气自然地追问，简短，不要复读上面的原文。",
-                images=images,
-            )
-            return TurnResult(reply=reply, status="clarify", plan=plan,
-                              task_id=plan.task_id or plan.intent_id)
-
-        return self._start_plan(plan, conversation_id, text, source=source)
 
     def execute_tool(self, name: str, args: Mapping[str, Any], *,
                      conversation_id: str = "workflow", source: str = "api",
@@ -475,9 +554,14 @@ class ConversationOrchestrator:
             return self._start_plan(plan, conversation_id, f"执行工具：{spec.name}",
                                     source=source, tool_name=name)
 
-    def _start_plan(self, plan: IntentPlan, conversation_id: str, text: str, *,
-                    source: str, tool_name: str = "") -> TurnResult:
-        # Create the journal before any external effect.
+    def _persist_task(self, plan: IntentPlan, *, conversation_id: str, text: str,
+                      source: str, channel: str = "", tool_name: str = "",
+                      async_delivery: bool = False) -> tuple[str, IntentPlan]:
+        """G1-B：在任何外部效果（含 ack）之前持久化任务台账。
+
+        返回 (task_id, 带 task_id 的 plan)。台账 phase=pending，
+        journal 记录渠道/来源/原文供恢复与补发。
+        """
         import re
         task_id = plan.task_id or plan.intent_id
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", task_id):
@@ -493,30 +577,177 @@ class ConversationOrchestrator:
                 self._transient_args[task_id] = {k: plan.slots[k] for k in transient_keys}
                 persisted_plan["slots"] = {k: v for k, v in plan.slots.items() if k not in transient_keys}
             self.store.put(f"runtime:task:{task_id}", {
-                "plan": persisted_plan, "transient_keys": sorted(transient_keys), "conversation_id": conversation_id, "source": source,
-                "text": text, "next_step": 0, "results": [], "receipts": [],
-                "tool_name": tool_name,
+                "plan": persisted_plan, "transient_keys": sorted(transient_keys),
+                "conversation_id": conversation_id, "source": source,
+                "channel": channel, "text": text, "next_step": 0, "results": [],
+                "receipts": [], "tool_name": tool_name, "async": async_delivery,
             })
-            self._save_task(task_id, plan, "running", ())
+            self._save_task(task_id, plan, "pending", ())
+            self._append_event(task_id, "planned",
+                               source=source, channel=channel)
+        return task_id, plan
+
+    def _update_journal_plan(self, task_id: str, plan: IntentPlan) -> None:
+        """异步路径参考图改写后同步 journal 里的 plan（幂等键不变）。"""
+        with self._task_lock:
+            journal = self.store.get(f"runtime:task:{task_id}")
+            if not isinstance(journal, dict):
+                return
+            persisted_plan = asdict(plan)
+            transient_keys = set(journal.get("transient_keys") or [])
+            if transient_keys:
+                persisted_plan["slots"] = {
+                    k: v for k, v in persisted_plan["slots"].items()
+                    if k not in transient_keys}
+            journal["plan"] = persisted_plan
+            self.store.put(f"runtime:task:{task_id}", journal)
+
+    def _start_plan(self, plan: IntentPlan, conversation_id: str, text: str, *,
+                    source: str, tool_name: str = "", channel: str = "") -> TurnResult:
+        task_id, _plan = self._persist_task(
+            plan, conversation_id=conversation_id, text=text, source=source,
+            channel=channel, tool_name=tool_name)
         return self._execute_task(task_id)
+
+    # ---- G1-B：phase 状态机、事件流水与送达回执 ----
+
+    def _append_event(self, task_id: str, kind: str, **fields) -> None:
+        """任务事件流水（持久化、可审计）：每个生命周期转换一条。"""
+        try:
+            with self._task_lock:
+                record = self.store.get(f"task:{task_id}") or {}
+                events = list(record.get("events") or [])
+                entry = {"at": time.time(), "kind": kind}
+                entry.update({k: v for k, v in fields.items()
+                              if isinstance(v, (str, int, float, bool))})
+                events.append(entry)
+                record["events"] = events[-200:]
+                self.store.put(f"task:{task_id}", record)
+        except Exception:
+            pass  # 事件流水失败不影响主流程（台账本身仍在）
 
     def _save_task(self, task_id: str, plan: IntentPlan, status: str,
                    receipts, **extra) -> dict:
         with self._task_lock:
             return self._save_task_locked(task_id, plan, status, receipts, **extra)
 
+    _LEGACY_PHASE = {"answered": "succeeded"}  # 旧调用方传 status 词表
+
     def _save_task_locked(self, task_id: str, plan: IntentPlan, status: str,
                           receipts, **extra) -> dict:
         record = self.store.get(f"task:{task_id}") or {}
         if record.get("cancel_requested"):
             status = "unknown" if record.get("in_flight") else "cancelled"
+        phase = self._LEGACY_PHASE.get(status, status)
+        if phase not in TASK_PHASES:
+            phase = "unknown"
+        # 不回头：终态之后再 _save_task 只允许同态或 delivery 侧写
+        terminal = {"succeeded", "failed", "unknown", "cancelled", "denied",
+                    "delivered", "delivery_failed"}
+        old_phase = record.get("phase", "")
+        if old_phase in terminal and phase not in terminal:
+            phase = old_phase
         record.update({"task_id": task_id, "at": time.time(), "goal": plan.goal[:500],
-                       "status": status, "capabilities": list(plan.capabilities),
+                       "phase": phase,
+                       "status": _PHASE_STATUS.get(phase, phase),
+                       "capabilities": list(plan.capabilities),
                        "receipts": list(receipts), **extra})
         self.store.put(f"task:{task_id}", record)
         index = self.store.get("tasks:recent") or []
         self.store.put("tasks:recent", ([i for i in index if i != task_id] + [task_id])[-50:])
+        if old_phase != phase:
+            self._append_event(task_id, phase)
         return record
+
+    def register_delivery_handler(self, channel: str, handler) -> None:
+        """宿主登记渠道投递器：``callable(task_record) -> bool``（True=已送达）。
+
+        用于 redeliver_task 人工重发与启动恢复后的补发；handler 必须真实
+        发送后按结果返回，不允许「接口返回 ok 就视为已送达」之外的谎报——
+        返回 False 会保持 delivery_failed 可见。
+        """
+        self._delivery_handlers[channel] = handler
+
+    def mark_delivered(self, task_id: str, *, channel: str = "") -> None:
+        """宿主确认真实送达后调用（G1-B 送达回执，与「已执行」分开）。"""
+        with self._task_lock:
+            record = self.store.get(f"task:{task_id}")
+            if not isinstance(record, dict):
+                raise KeyError(task_id)
+            delivery = dict(record.get("delivery") or {})
+            delivery.update(state="delivered", last_error="",
+                            attempts=int(delivery.get("attempts", 0)) + 1,
+                            channel=channel or delivery.get("channel", ""))
+            record["delivery"] = delivery
+            if record.get("phase") in ("succeeded", "delivery_failed"):
+                record["phase"] = "delivered"
+                record["status"] = "answered"
+            self.store.put(f"task:{task_id}", record)
+        self._append_event(task_id, "delivered", channel=channel)
+
+    def mark_delivery_failed(self, task_id: str, *, error: str = "",
+                             channel: str = "") -> None:
+        """补发失败：保持可见（delivery_failed），可人工 redeliver_task。"""
+        with self._task_lock:
+            record = self.store.get(f"task:{task_id}")
+            if not isinstance(record, dict):
+                return
+            delivery = dict(record.get("delivery") or {})
+            delivery.update(state="failed", last_error=error[:200],
+                            attempts=int(delivery.get("attempts", 0)) + 1,
+                            channel=channel or delivery.get("channel", ""))
+            record["delivery"] = delivery
+            if record.get("phase") in ("succeeded", "delivered"):
+                record["phase"] = "delivery_failed"
+            self.store.put(f"task:{task_id}", record)
+        self._append_event(task_id, "delivery_failed", error=error[:120])
+
+    def undelivered_tasks(self) -> list[dict]:
+        """已完成但结果未确认送达的任务（待补发可见列表）。"""
+        out: list[dict] = []
+        for key in list(self.store.keys()):
+            if not key.startswith("task:"):
+                continue
+            record = self.store.get(key)
+            if not isinstance(record, dict):
+                continue
+            delivery = record.get("delivery") or {}
+            if (record.get("phase") in ("succeeded", "delivery_failed")
+                    and delivery.get("state") in ("pending", "failed")):
+                out.append(record)
+        return out
+
+    def redeliver_task(self, task_id: str) -> dict:
+        """人工重发：仅允许已执行成功但未确认送达的任务；不重新执行工具。"""
+        with self._task_lock:
+            record = self.store.get(f"task:{task_id}")
+            if not isinstance(record, dict):
+                raise KeyError(task_id)
+            if record.get("phase") not in ("succeeded", "delivery_failed"):
+                raise ValueError("only succeeded-but-undelivered tasks can be redelivered")
+            delivery = dict(record.get("delivery") or {})
+            if delivery.get("state") == "delivered":
+                raise ValueError("task already delivered")
+            channel = str(delivery.get("channel") or record.get("channel") or "")
+            reply = str(record.get("result_reply") or "")
+            if not reply:
+                raise ValueError("no stored result to redeliver")
+        handler = self._delivery_handlers.get(channel)
+        if handler is None:
+            raise ValueError(f"no delivery handler for channel {channel!r}")
+        try:
+            ok = bool(handler(record))
+        except Exception as exc:
+            self.mark_delivery_failed(task_id, error=f"redeliver:{type(exc).__name__}",
+                                      channel=channel)
+            raise
+        if ok:
+            self.mark_delivered(task_id, channel=channel)
+            self._append_event(task_id, "redelivered", channel=channel)
+        else:
+            self.mark_delivery_failed(task_id, error="redeliver:handler-false",
+                                      channel=channel)
+        return self.store.get(f"task:{task_id}") or {}
 
     def pending_tasks(self) -> list[dict]:
         return [r for task_id in self.store.get("tasks:recent") or []
@@ -533,13 +764,17 @@ class ConversationOrchestrator:
             record = self.store.get(f"task:{task_id}")
             if not isinstance(record, dict):
                 raise KeyError(task_id)
-            if record.get("status") not in {"running", "pending_approval"}:
+            if record.get("status") not in {"pending", "acknowledged", "running",
+                                            "pending_approval"}:
                 raise ValueError("task is already terminal")
             record["cancel_requested"] = True
-            record["status"] = "unknown" if record.get("in_flight") else "cancelled"
+            phase = "unknown" if record.get("in_flight") else "cancelled"
+            record["phase"] = phase
+            record["status"] = phase
             record["error"] = "cancel-requested-in-flight" if record.get("in_flight") else "cancelled"
             self.store.put(f"task:{task_id}", record)
-            if record["status"] == "cancelled":
+            self._append_event(task_id, phase, detail="cancel-requested")
+            if phase == "cancelled":
                 self._transient_args.pop(task_id, None)
             return record
 
@@ -563,8 +798,10 @@ class ConversationOrchestrator:
             record.update(decision=decision, decision_at=time.time())
             if decision == "reject":
                 record["status"] = "denied"
+                record["phase"] = "denied"
                 self._transient_args.pop(task_id, None)
             self.store.put(f"task:{task_id}", record)
+            self._append_event(task_id, "approved" if decision == "approve" else "rejected")
             return record
 
     def resume_task(self, task_id: str) -> TurnResult:
@@ -577,7 +814,9 @@ class ConversationOrchestrator:
             if task_id in self._active_tasks:
                 raise ValueError("task is already executing")
             record["status"] = "running"
+            record["phase"] = "running"
             self.store.put(f"task:{task_id}", record)
+            self._append_event(task_id, "resumed")
         journal = self.store.get(f"runtime:task:{task_id}") or {}
         with conversation_lock(self.store, str(journal.get("conversation_id", ""))):
             return self._execute_task(task_id)
@@ -587,6 +826,7 @@ class ConversationOrchestrator:
             if task_id in self._active_tasks:
                 raise ValueError("task is already executing")
             self._active_tasks.add(task_id)
+            self._append_event(task_id, "leased")
         try:
             return self._execute_task_inner(task_id)
         finally:
@@ -613,8 +853,17 @@ class ConversationOrchestrator:
                              "missing": tuple(raw["missing"])})
         text, cid = journal["text"], journal["conversation_id"]
         receipts, results = list(journal["receipts"]), list(journal["results"])
+        self._save_task(task_id, plan, "running", receipts)
         started = time.monotonic()
         status = "answered"
+        if not plan.capabilities and self.executor_model is not None:
+            # G1-C：模型执行器模式（可选）——固定链无法声明能力时由执行模型
+            # 逐轮提议工具；每步仍经 _dispatch_step 的审批/网关/预算门控。
+            status = self._execute_with_executor(
+                task_id, plan, journal, receipts, results, started)
+        elif not plan.capabilities:
+            receipts.append("capability-unavailable:(none-declared)")
+            status = "failed"
         for step, capability in enumerate(plan.capabilities):
             if step < journal["next_step"]:
                 continue
@@ -639,45 +888,21 @@ class ConversationOrchestrator:
                 status = "failed"
                 break
             spec = specs[0]
-            # Bind approval to a core-generated task identity, exact tool and args.
-            action = PluginAction(plugin_id=spec.plugin_id, action=spec.action,
-                                  target=str(plan.slots.get("target", "")), args=dict(plan.slots)).to_intent()
-            token = f"runtime-task:{task_id}:{step}"
-            registry = getattr(self.gateway, "registry", None)
-            manifest = registry.manifest(spec.plugin_id) if registry is not None else None
-            action = replace(action, reason=token, payload={**action.payload,
-                "runtime_manifest_version": manifest.version if manifest is not None else ""})
-            fingerprint = _action_fingerprint(action)
-            with self._task_lock:
-                record = self.store.get(f"task:{task_id}") or {}
-                if record.get("cancel_requested"):
-                    status = "cancelled"
-                    break
-                if record.get("decision") == "approve" and (
-                        record.get("pending_fingerprint") != fingerprint or
-                        record.get("approval_token") != token):
-                    receipts.append(f"tool-denied:{spec.name}:approval-scope-changed")
-                    status = "denied"
-                    break
-                record.update(status="running", in_flight=True, step=step,
-                              pending_fingerprint=fingerprint, approval_token=token)
-                self.store.put(f"task:{task_id}", record)
-            outcome = self._bounded_tool(spec, plan, action, remaining, task_id)
-            if outcome is None:
-                receipts.append(f"tool-timeout:{spec.name}:outcome-unknown")
+            outcome, note = self._dispatch_step(
+                task_id, spec, plan, dict(plan.slots), step, remaining)
+            if outcome == "cancelled":
+                if note:
+                    receipts.append(note)
+                status = "cancelled"
+                break
+            receipts.append(note)
+            if outcome == "timeout":
                 status = "unknown"
                 break
-            ok, note = outcome
-            receipts.append(note)
-            with self._task_lock:
-                record = self.store.get(f"task:{task_id}") or {}
-                record["in_flight"] = False
-                if record.get("cancel_requested"):
-                    status = "cancelled"
-                    self.store.put(f"task:{task_id}", record)
-                    break
-                self.store.put(f"task:{task_id}", record)
-            if not ok:
+            if outcome == "scope_denied":
+                status = "denied"
+                break
+            if outcome != "ok":
                 status = ("pending_approval" if note.startswith("plugin-hold:") else
                           "denied" if note.startswith(("plugin-denied:", "tool-denied:")) else "failed")
                 break
@@ -691,8 +916,6 @@ class ConversationOrchestrator:
                 record.pop("decision", None)
                 record.pop("approval_used", None)
                 self.store.put(f"task:{task_id}", record)
-        if not plan.capabilities:
-            status = "failed"
         record = self.store.get(f"task:{task_id}") or {}
         if record.get("cancel_requested"):
             status = "unknown" if record.get("in_flight") else "cancelled"
@@ -732,8 +955,143 @@ class ConversationOrchestrator:
         except Exception:
             # Journal survives even if the response model fails after an action.
             reply = note
+        # G1-B：成功结局留 result_reply 供人工重发；异步任务初始化 delivery
+        # 子状态（与「已执行」分开的送达回执）。
+        saved_phase = saved.get("phase", "")
+        if saved_phase == "succeeded":
+            with self._task_lock:
+                record = self.store.get(f"task:{task_id}") or {}
+                record["result_reply"] = reply[:4000]
+                if journal.get("async") and not record.get("delivery"):
+                    record["delivery"] = {
+                        "state": "pending",
+                        "channel": str(journal.get("channel") or journal.get("source") or ""),
+                        "attempts": 0, "last_error": ""}
+                self.store.put(f"task:{task_id}", record)
         return TurnResult(reply=reply, status=status, plan=plan,
                           receipts=tuple(receipts), task_id=task_id)
+
+    def _dispatch_step(self, task_id: str, spec: ToolSpec, plan: IntentPlan,
+                       args: Mapping[str, Any], step: int,
+                       remaining: float) -> tuple[str, str]:
+        """单个工具步骤的授权绑定与限时派发（固定链与模型执行器共用）。
+
+        审批绑定核心生成的任务身份 + 精确工具与参数指纹；非只读必经插件网关。
+        返回 ``(outcome, note)``：outcome ∈
+        ok | failed | timeout | cancelled | scope_denied；note 为回执文本。
+        """
+        # Bind approval to a core-generated task identity, exact tool and args.
+        action = PluginAction(plugin_id=spec.plugin_id, action=spec.action,
+                              target=str(args.get("target", "")),
+                              args=dict(args)).to_intent()
+        token = f"runtime-task:{task_id}:{step}"
+        registry = getattr(self.gateway, "registry", None)
+        manifest = registry.manifest(spec.plugin_id) if registry is not None else None
+        action = replace(action, reason=token, payload={**action.payload,
+            "runtime_manifest_version": manifest.version if manifest is not None else ""})
+        fingerprint = _action_fingerprint(action)
+        with self._task_lock:
+            record = self.store.get(f"task:{task_id}") or {}
+            if record.get("cancel_requested"):
+                return "cancelled", ""
+            if record.get("decision") == "approve" and (
+                    record.get("pending_fingerprint") != fingerprint or
+                    record.get("approval_token") != token):
+                return "scope_denied", f"tool-denied:{spec.name}:approval-scope-changed"
+            record.update(status="running", phase="running", in_flight=True,
+                          step=step,
+                          pending_fingerprint=fingerprint, approval_token=token)
+            self.store.put(f"task:{task_id}", record)
+        step_plan = plan if dict(args) == dict(plan.slots) else replace(plan, slots=dict(args))
+        outcome = self._bounded_tool(spec, step_plan, action, remaining, task_id)
+        if outcome is None:
+            return "timeout", f"tool-timeout:{spec.name}:outcome-unknown"
+        ok, note = outcome
+        with self._task_lock:
+            record = self.store.get(f"task:{task_id}") or {}
+            record["in_flight"] = False
+            cancelled = bool(record.get("cancel_requested"))
+            self.store.put(f"task:{task_id}", record)
+        if cancelled:
+            return "cancelled", note
+        return ("ok" if ok else "failed"), note
+
+    def _execute_with_executor(self, task_id: str, plan: IntentPlan,
+                               journal: dict, receipts: list, results: list,
+                               started: float) -> str:
+        """G1-C 多轮工具执行模型：模型提议下一步，核心裁决并执行每一步。
+
+        执行器只看到允许的工具目录（名称/能力/描述/风险）与有限轮预算；
+        每一步的参数校验、授权、审批、额度、幂等与结果截断都在核心
+        （``_dispatch_step`` 与固定链同一条门控路径）；每轮产生可回放的
+        结构化回执。固定 Skill 链（plan.capabilities 非空）仍是稳定保底
+        模式，本模式只在未声明能力且配置了 ``llm.tool_executor`` 时启用。
+        """
+        from whale_core.core.tool_executor import ExecutorStepError, ModelToolExecutor
+
+        executor = ModelToolExecutor(self.executor_model)
+        catalog = self.tools.specs()
+        step = int(journal.get("next_step", 0))
+        bad_proposals = 0
+        while step < self.max_tool_rounds:
+            record = self.store.get(f"task:{task_id}") or {}
+            if record.get("cancel_requested"):
+                return "cancelled" if not record.get("in_flight") else "unknown"
+            remaining = plan.timeout_s - (time.monotonic() - started)
+            if remaining <= 0:
+                receipts.append("task-timeout:before-dispatch")
+                return "failed"
+            try:
+                proposal = executor.propose(goal=plan.goal, catalog=catalog,
+                                            results=results, receipts=receipts)
+            except Exception as exc:
+                receipts.append(f"executor:invalid-proposal:{type(exc).__name__}")
+                bad_proposals += 1
+                if bad_proposals >= 2:
+                    return "failed"
+                continue
+            if proposal["action"] == "finish":
+                receipts.append("executor:finish")
+                return "answered"
+            if proposal["action"] == "fail":
+                receipts.append(f"executor:gave-up:{proposal['rationale'][:80]}")
+                return "failed"
+            spec = self.tools.get(proposal["tool"])
+            if spec is None:
+                receipts.append(f"executor:unknown-tool:{proposal['tool'][:40]}")
+                bad_proposals += 1
+                if bad_proposals >= 2:
+                    return "failed"
+                continue
+            bad_proposals = 0
+            outcome, note = self._dispatch_step(
+                task_id, spec, plan, proposal["args"], step, remaining)
+            if outcome == "cancelled":
+                if note:
+                    receipts.append(note)
+                return "cancelled"
+            receipts.append(note)
+            if outcome == "timeout":
+                return "unknown"
+            if outcome == "scope_denied":
+                return "denied"
+            if outcome != "ok":
+                return ("pending_approval" if note.startswith("plugin-hold:") else
+                        "denied" if note.startswith(("plugin-denied:", "tool-denied:"))
+                        else "failed")
+            payload = note.split(":ok:", 1)[-1]
+            results.append(f"[{spec.name}] {payload}")
+            step += 1
+            journal.update(next_step=step, results=results, receipts=receipts)
+            self.store.put(f"runtime:task:{task_id}", journal)
+            # The approval applies only to one action, never later steps.
+            with self._task_lock:
+                record = self.store.get(f"task:{task_id}") or {}
+                record.pop("decision", None)
+                record.pop("approval_used", None)
+                self.store.put(f"task:{task_id}", record)
+        receipts.append("task-limit:max-tool-rounds")
+        return "failed"
 
     def _bounded_tool(self, spec: ToolSpec, plan: IntentPlan, action: ActionIntent,
                       timeout: float, task_id: str) -> tuple[bool, str] | None:

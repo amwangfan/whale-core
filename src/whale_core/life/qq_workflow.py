@@ -116,7 +116,13 @@ class QqInboundWorkflow:
         return tuple(out)
 
     def _on_async_complete(self, event: OwnerEvent, result) -> None:
-        """两段式慢任务的完成回调：审核通过后交宿主补发真实结果。"""
+        """两段式慢任务的完成回调：审核通过后交宿主补发真实结果。
+
+        G1-B 送达回执：补发真实成功后 ``mark_delivered``；补发抛错
+        ``mark_delivery_failed``（台账可见、可人工重发）。审核拦截不算
+        送达失败——兜底说明发出即算已交付。
+        """
+        task_id = getattr(result, "task_id", "") or ""
         reply = getattr(result, "reply", "") or ""
         if not reply.strip():
             return
@@ -128,10 +134,25 @@ class QqInboundWorkflow:
                 print(f"  [审核] 补发被拦：{concern[:80]}")
                 fallback = "你要的东西做好了，但我对里面的链接不太放心，先没直接发——你在控制台任务页能看到，或者跟我说一声我再想办法给你。"
                 if self._completion_sender is not None:
-                    self._completion_sender(event, fallback)
+                    try:
+                        self._completion_sender(event, fallback)
+                        if self.orchestrator is not None and task_id:
+                            self.orchestrator.mark_delivered(task_id, channel="qq")
+                    except Exception:
+                        if self.orchestrator is not None and task_id:
+                            self.orchestrator.mark_delivery_failed(
+                                task_id, error="completion-send-raised")
                 return
         if self._completion_sender is not None:
-            self._completion_sender(event, reply, audio_ids)
+            try:
+                self._completion_sender(event, reply, audio_ids)
+            except Exception:
+                if self.orchestrator is not None and task_id:
+                    self.orchestrator.mark_delivery_failed(
+                        task_id, error="completion-send-raised")
+                raise
+            if self.orchestrator is not None and task_id:
+                self.orchestrator.mark_delivered(task_id, channel="qq")
 
     def _memory_command_reply(self, text: str, event: OwnerEvent) -> str | None:
         """委托给 core.memory_commands 的共享实现（QQ 侧只提供来源与证据链）。"""
@@ -167,15 +188,18 @@ class QqInboundWorkflow:
         if command_reply is not None:
             reply = command_reply
         elif self.orchestrator is not None:
+            from whale_core.core.runtime import InputEnvelope
+
             images = self._attachment_images(event) if event.attachments else ()
+            envelope = InputEnvelope(
+                conversation_id=event.conversation, text=text, source="qq:owner",
+                channel="qq", owner_id=event.owner_id, images=images)
             if self._completion_sender is not None:
-                result = self.orchestrator.handle_message_async(
-                    event.conversation, text, source="qq:owner",
-                    on_complete=lambda r, ev=event: self._on_async_complete(ev, r),
-                    images=images)
+                result = self.orchestrator.handle_envelope_async(
+                    envelope,
+                    on_complete=lambda r, ev=event: self._on_async_complete(ev, r))
             else:
-                result = self.orchestrator.handle_message(
-                    event.conversation, text, source="qq:owner", images=images)
+                result = self.orchestrator.handle_envelope(envelope)
             reply = result.reply
             turn_receipts = list(getattr(result, "receipts", []) or [])
         else:

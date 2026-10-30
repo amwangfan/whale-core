@@ -371,10 +371,12 @@ export default function Settings({
               </div>
               <div className="form-field">
                 <label>分角色模型（可选覆盖）</label>
-                {(["intent", "executor", "safety"] as const).map((role) => (
+                {(["intent", "executor"] as const).map((role) => (
                   <div key={role} className="role-model-row">
                     <div className="muted small">
-                      {role === "intent" ? "意图模型" : role === "executor" ? "任务执行模型" : "安全审核模型"}
+                      {role === "intent"
+                        ? "意图模型（规划+发送前审核，同一角色）"
+                        : "任务执行模型（多轮工具循环，需 WHALE_EXECUTOR_ENABLED=1）"}
                     </div>
                     <input
                       placeholder="模型名（留空=跟随主回复模型）"
