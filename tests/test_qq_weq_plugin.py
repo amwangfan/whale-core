@@ -316,3 +316,38 @@ def test_split_image_parts_html_img_tag():
     assert img.startswith("https://cdn.example.com/a.png")
     leftover = " ".join(c for k, c in parts if k == "text")
     assert "<img" not in leftover and "src=" not in leftover
+
+
+def test_split_image_parts_artifact_ref():
+    """本地产物引用 /api/v1/artifacts/<id> → artifact 段（本地字节直发）。"""
+    from weq_channel.weq_send import _split_image_parts
+    parts = _split_image_parts("画好了\n![图](/api/v1/artifacts/2b6a22648164457d8a9ebe5d0b552c86)\n看看")
+    kinds = [k for k, _ in parts]
+    assert "artifact" in kinds
+    aid = [c for k, c in parts if k == "artifact"][0]
+    assert aid == "2b6a22648164457d8a9ebe5d0b552c86"
+
+
+def test_mixed_send_artifact_bytes_no_network():
+    """artifact 段直接读本地字节发送，不发起任何网络下载。"""
+    from weq_channel.weq_send import _send_mixed_impl
+
+    class FakePort:
+        def __init__(self):
+            self.sent = []
+            self.artifact_reader = lambda aid: b"PNG-BYTES"
+
+        def _send_text_payload(self, text):
+            self.sent.append(("text", text))
+            return True
+
+        def send_image(self, data, *, filename="image.png"):
+            self.sent.append(("image", data, filename))
+            return True
+
+    port = FakePort()
+    ok = _send_mixed_impl(port, [("text", "画好了"),
+                                 ("artifact", "2b6a22648164457d8a9ebe5d0b552c86")])
+    assert ok
+    assert any(len(item) == 3 and item[0] == "image" and item[1] == b"PNG-BYTES" for item in port.sent)
+    # 无网络：FakePort 没有任何下载入口可用

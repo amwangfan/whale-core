@@ -441,6 +441,14 @@ def cmd_run(args) -> int:
     if workflow.orchestrator is not None:
         workflow.orchestrator.gateway = plugin_gateway
     # 两段式慢任务补发（owner 决策 2026-10-31）：ack 先回，结果后台好了再补
+    # 图片产物本地字节直发（不经过网络/代理）：端口拿到 artifact 引用时
+    # 直接从 ArtifactStore 读字节。
+    _artifacts = cap.artifacts
+    if _artifacts is not None:
+        _inner_port = getattr(port, "_inner", port)  # WindowedSendPort 取内层
+        if hasattr(_inner_port, "send_image"):
+            _inner_port.artifact_reader = lambda aid: _artifacts.read(aid)
+
     workflow._completion_sender = _send_completion
     # 语音产物补发：workflow 的补发回调现在带音频产物 id 列表
 

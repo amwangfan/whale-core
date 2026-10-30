@@ -134,7 +134,13 @@ class QqInboundWorkflow:
         reply = getattr(result, "reply", "") or ""
         if not reply.strip():
             return
-        audio_ids = _extract_audio_artifacts(getattr(result, "receipts", ()))
+        receipts = getattr(result, "receipts", ())
+        # 生图任务：模型未必把图片链接写进答复——产物 id 兜底注入，
+        # 保证补发里必有图片段（本地字节直发，不经过网络/代理）。
+        image_ids = _extract_image_artifacts(receipts)
+        if image_ids and not _has_image_ref(reply):
+            reply = reply.rstrip() + f"\n![图](/api/v1/artifacts/{image_ids[0]})"
+        audio_ids = _extract_audio_artifacts(receipts)
         if self._safety_reviewer is not None:
             concern = self._safety_reviewer(reply)
             if concern:
@@ -243,6 +249,39 @@ class QqInboundWorkflow:
                 result["safety_concern"] = str(concern)[:200]
                 result["reason"] = f"{result['reason']}｜安全审核：{result['safety_concern']}"
         return result
+
+
+def _extract_image_artifacts(receipts) -> tuple:
+    """从回执里提图片产物 id（生图工具 JSON 回执的 images 列表）。"""
+    import json as _json
+    ids: list = []
+    for r in receipts or ():
+        text = str(r)
+        if ":ok:" not in text or "/api/v1/artifacts/" not in text:
+            continue
+        payload = text.split(":ok:", 1)[-1]
+        try:
+            data = _json.loads(payload)
+        except Exception:
+            continue
+        for ref in (data.get("images") or [])[:2]:
+            ref = str(ref)
+            if "/api/v1/artifacts/" in ref:
+                ids.append(ref.rsplit("/", 1)[-1])
+    return tuple(ids)
+
+
+_IMG_REF_RE = None
+
+
+def _has_image_ref(text: str) -> bool:
+    import re
+    global _IMG_REF_RE
+    if _IMG_REF_RE is None:
+        _IMG_REF_RE = re.compile(
+            r"https?://[^\s)\]<>'\"]+\.(?:png|jpe?g|webp|gif)|/api/v1/artifacts/",
+            re.IGNORECASE)
+    return bool(_IMG_REF_RE.search(text or ""))
 
 
 def _extract_audio_artifacts(receipts) -> tuple:
