@@ -294,6 +294,9 @@ class WeQWebSendPort:
 
 # markdown 图片；模型有时写成不带 ! 的链接形态——也认（生产实证）
 _MARKDOWN_IMG_RE = re.compile(r"!?\[[^\]]*\]\((https?://[^)\s]+\.(?:png|jpe?g|webp|gif)[^)\s]*)\)", re.IGNORECASE)
+# HTML <img src="..."> 整标签识别（模型有时输出 HTML 而非 markdown——
+# 生产实证 2026-10-31）：整段摘除，URL 单独发图，不留 HTML 残片。
+_HTML_IMG_RE = re.compile(r"<img\b[^>]*?src=[\"'](https?://[^\"'\s]+\.(?:png|jpe?g|webp|gif)[^\"'\s]*)[\"'][^>]*>", re.IGNORECASE)
 _IMAGE_URL_RE = re.compile(
     r"https?://[^\s)\]<>'\"]+\.(?:png|jpe?g|webp|gif)(?:\?[^\s)\]<>'\"]*)?",
     re.IGNORECASE)
@@ -304,7 +307,11 @@ def _split_image_parts(text: str) -> list[tuple[str, str]]:
     """把文本拆成 [('text',...)|('image',url)] 按序分段。markdown 图片和裸图片
     链接都识别；链接本身从文本里摘除（图片单独发，不留重复链接）。"""
     spans: list[tuple[int, int, str]] = []
+    for m in _HTML_IMG_RE.finditer(text):
+        spans.append((m.start(), m.end(), m.group(1)))
     for m in _MARKDOWN_IMG_RE.finditer(text):
+        if any(s <= m.start() < e for s, e, _u in spans):
+            continue
         spans.append((m.start(), m.end(), m.group(1)))
     covered = [(s, e) for s, e, _ in spans]
     for m in _IMAGE_URL_RE.finditer(text):

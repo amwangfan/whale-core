@@ -302,3 +302,17 @@ def test_unpaired_never_reaches_plugin_layer():
                                    conversation="private:99999", message_id="x",
                                    text="hi", transport_authenticated=True)) is None
     assert list(adapter.poll()) == []
+
+
+def test_split_image_parts_html_img_tag():
+    """模型输出 HTML <img>（生产实证）：整标签摘除，URL 单独发图。"""
+    from weq_channel.weq_send import _split_image_parts
+    text = ('画好啦\n<img src="https://cdn.example.com/a.png?x=1" alt="鲸鱼" />\n'
+            '这是说明')
+    parts = _split_image_parts(text)
+    kinds = [k for k, _ in parts]
+    assert "image" in kinds
+    img = [c for k, c in parts if k == "image"][0]
+    assert img.startswith("https://cdn.example.com/a.png")
+    leftover = " ".join(c for k, c in parts if k == "text")
+    assert "<img" not in leftover and "src=" not in leftover
