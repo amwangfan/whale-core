@@ -1,3 +1,5 @@
+<div align="center">
+
 # whale-core
 
 *“The mountain has trees, and trees have branches; my heart delights in you, yet you do not know.”*
@@ -5,6 +7,8 @@
 The intelligence layer for Whale: conversations, memory, intents, tools and policies.
 
 [中文](README.md) · [Developer guide](docs/AI_DEVELOPMENT_GUIDE.md) · [Contracts](docs/contracts.md) · [Progress notes](docs/gap-analysis-2026-10-30.md)
+
+</div>
 
 ## What it is
 

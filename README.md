@@ -1,3 +1,5 @@
+<div align="center">
+
 # whale-core
 
 *山有木兮木有枝，心悦君兮君不知*
@@ -5,6 +7,8 @@
 鲸鱼项目的智能层：对话、记忆、意图、工具和策略。
 
 [English](README_EN.md) · [开发者指南](docs/AI_DEVELOPMENT_GUIDE.md) · [接口契约](docs/contracts.md) · [进度记录](docs/gap-analysis-2026-10-30.md)
+
+</div>
 
 ## 这是什么
 
