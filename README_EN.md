@@ -91,25 +91,6 @@ Daily model calls and media jobs have separate request budgets (defaults 200 and
 
 Raw audio stays in memory; final transcripts may become conversation memory. Image, audio and video artifacts are served only through authenticated endpoints, expire after seven days by default and have storage caps. Approval only authorizes: a task may still be pending, fail or end in an unknown state, and cancellation does not undo external effects. Proactive dispatchers sharing the same database honour a global pause, while explicit passive replies may continue.
 
-## Validation and boundaries
-
-```bash
-python -m pytest tests -q     # 1115 passed
-pnpm -C web test              # 38 passed
-pnpm -C web build
-```
-
-What recent work has verified against real services: image generation succeeded on a DashScope-compatible platform; TTS produced real audio (119 KB WAV) after aligning with the vendor protocol, and the WAV header cleaning lets it feed the voice encoder directly; the keyless Bing search provider worked on a campus network and is now used in production; image input was accepted by four platform models. The rest needs explicit qualification:
-
-- QQ voice messages and mixed image/text sending are wired to the real WeQ endpoints (sendVoice / sendImage) and accepted through automated tests; they have not been re-verified on a real account this round.
-- ASR (currently unavailable on the AgentScope platform), video and embeddings have not been tested with paid quota.
-- Real microphone calls, the whale-io PCM relay against the real audio bridge, and phone/glasses hardware have not been verified.
-- The current container cannot create user namespaces, so the Shell sandbox is verified only for fail-closed refusal; successful isolation needs validation on a target Linux host.
-- macOS native windows, signing and notarization have not been performed; Windows is out of scope.
-- The project-level license remains owner-pending. Third-party notices under `licenses/` do not grant a license for the entire repository.
-
-Offline tests, green CI and real-service integration are different acceptance levels; see the [completion report](docs/completion-report-2026-10-30.md) and the relevant commit messages for evidence and limits.
-
 ## Development docs
 
 - [Plan and gap analysis](docs/completion-plan-2026-10-30.md)
