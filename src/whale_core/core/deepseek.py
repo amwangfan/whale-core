@@ -96,7 +96,7 @@ class DeepSeekCompanion:
 
     def reply(self, text: str, *, persona: str = "", memories: Sequence[str] = (),
               history: Sequence[Mapping[str, str]] = (),
-              images: Sequence[bytes] = ()) -> str:
+              images: Sequence = ()) -> str:
         if not self.api_key and not _is_local_or_private_http(self.base_url):
             # 回环/私网 http 端点（如本地 Ollama）允许无 key；云端端点必须配置
             raise ModelError("config", "DEEPSEEK_API_KEY not configured")
@@ -106,14 +106,30 @@ class DeepSeekCompanion:
                   f"人格：{persona[:4000]}\n近期记忆：{json.dumps(list(memories)[-8:], ensure_ascii=False)[:3000]}")
         clean_history = [{"role": m["role"], "content": m["content"][:2000]}
                          for m in list(history)[-12:] if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)]
-        # 附带图片时用户消息转多模态 parts（OpenAI image_url data URI 形态）
+        # 附带图片时用户消息转多模态 parts（OpenAI image_url data URI 形态）。
+        # 每项允许 bytes（按内容嗅探 MIME）或 (bytes, mime)；不信任来源声称的
+        # MIME——一律以 ``sniff_image`` 的内容判定为准，嗅探失败跳过该图。
         if images:
             parts: list = [{"type": "text", "text": text[:4000]}]
             for img in list(images)[:4]:  # 至多 4 张，单张 ≤10MB
-                if isinstance(img, (bytes, bytearray)) and 0 < len(img) <= 10 * 1024 * 1024:
-                    b64 = base64.b64encode(bytes(img)).decode("ascii")
-                    parts.append({"type": "image_url",
-                                  "image_url": {"url": f"data:image/png;base64,{b64}"}})
+                data = img[0] if isinstance(img, tuple) else img
+                if not (isinstance(data, (bytes, bytearray))
+                        and 0 < len(data) <= 10 * 1024 * 1024):
+                    continue
+                mime = img[1] if isinstance(img, tuple) else ""
+                if mime not in ("image/png", "image/jpeg", "image/gif",
+                                "image/webp", "image/bmp"):
+                    try:
+                        from whale_core.core.media_input import sniff_image
+                        fmt, _, _ = sniff_image(bytes(data))
+                        mime = {"png": "image/png", "jpeg": "image/jpeg",
+                                "gif": "image/gif", "webp": "image/webp",
+                                "bmp": "image/bmp"}[fmt]
+                    except Exception:
+                        continue
+                b64 = base64.b64encode(bytes(data)).decode("ascii")
+                parts.append({"type": "image_url",
+                              "image_url": {"url": f"data:{mime};base64,{b64}"}})
             user_content: object = parts
         else:
             user_content = text[:4000]

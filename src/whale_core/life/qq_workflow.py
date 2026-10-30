@@ -25,6 +25,30 @@ from whale_core.memory.store import MemoryStore
 REPLY_CHANNEL = "direct_message"
 
 
+def _default_media_roots() -> tuple[str, ...]:
+    """QQ 本机媒体缓存白名单根目录（G0-B）。
+
+    - 显式配置优先：``WHALE_QQ_MEDIA_ROOTS``（os.pathsep 分隔）；
+    - 否则自动收敛到 QQ NT 客户端媒体缓存 ``~/.config/QQ/nt_qq_*/nt_data``
+      （仅收录当前真实存在的目录，fail-closed：一个都不存在就拒绝本地读取）。
+    """
+    import glob
+    import os
+
+    configured = os.environ.get("WHALE_QQ_MEDIA_ROOTS", "").strip()
+    if configured:
+        return tuple(
+            root for root in configured.split(os.pathsep) if root.strip()
+        )
+    return tuple(
+        path
+        for path in glob.glob(
+            os.path.expanduser("~/.config/QQ/nt_qq_*/nt_data")
+        )
+        if os.path.isdir(path)
+    )
+
+
 class QqInboundWorkflow:
     """OwnerEvent → 回复草稿 + 审批裁决。单实例串行使用（监听层已保证按序派发）。"""
 
@@ -33,7 +57,8 @@ class QqInboundWorkflow:
                  now_fn: Callable[[], datetime] | None = None,
                  orchestrator=None,
                  safety_reviewer=None,
-                 completion_sender=None) -> None:
+                 completion_sender=None,
+                 media_validator=None) -> None:
         self.store = store
         self.companion = WhaleCompanion(store, brain, curator=MemoryCurator(store))
         self.outbox = ProactiveOutbox(store)
@@ -51,35 +76,43 @@ class QqInboundWorkflow:
         # 可选补发回调（两段式慢任务）：callable(event, reply) -> None。
         # 由宿主注入真实发送路径（草稿+审批+网关）；慢任务 ack 后的结果经此补发。
         self._completion_sender = completion_sender
+        # 媒体输入可信边界（G0-B）：附件路径白名单/SSRF/格式与尺寸校验统一走
+        # core.media_input.ImageInputValidator；未注入时构造默认实例
+        # （本地路径 fail-closed——无白名单即拒绝本地读取，仅走受门控的 https）。
+        if media_validator is None:
+            from whale_core.core.media_input import ImageInputValidator
+
+            media_validator = ImageInputValidator(
+                allowed_roots=_default_media_roots()
+            )
+        self._media_validator = media_validator
 
     def _attachment_images(self, event: OwnerEvent) -> tuple:
-        """把消息附件读成图片字节：本机缓存路径优先（QQ 与本机同机），
-        公网 URL 兜底下载（https-only、限 20MB）。最多取 4 张。"""
-        import os
+        """把消息附件读成已验证图片 ``(bytes, mime)``：本机缓存路径优先
+        （白名单内），公网 URL 兜底（https + SSRF 门控）。最多取 4 张；
+        单张校验失败只跳过该附件，不阻断整轮对话。"""
+        from whale_core.core.media_input import MediaInputError
+
         out: list = []
         for att in (event.attachments or ())[:4]:
             if not isinstance(att, dict) or att.get("kind") != "pic":
                 continue
-            data = None
+            image = None
             path = str(att.get("file_path") or "")
-            if path and os.path.isfile(path):
+            if path:
                 try:
-                    with open(path, "rb") as fh:
-                        data = fh.read(20 * 1024 * 1024)
-                except OSError:
-                    data = None
-            if data is None:
+                    image = self._media_validator.from_local_path(path)
+                except MediaInputError as exc:
+                    print(f"  [附件] 本地图片被拒：{exc}")
+            if image is None:
                 url = str(att.get("url") or "")
                 if url.startswith("https://"):
                     try:
-                        import urllib.request
-                        req = urllib.request.Request(url, headers={"User-Agent": "whale-core/0.1"})
-                        with urllib.request.urlopen(req, timeout=20) as resp:
-                            data = resp.read(20 * 1024 * 1024)
-                    except Exception:
-                        data = None
-            if data:
-                out.append(data)
+                        image = self._media_validator.from_url(url)
+                    except MediaInputError as exc:
+                        print(f"  [附件] 远端图片被拒：{exc}")
+            if image is not None:
+                out.append((image.data, image.mime))
         return tuple(out)
 
     def _on_async_complete(self, event: OwnerEvent, result) -> None:
