@@ -60,6 +60,6 @@ pnpm -C web build
 
 See the [completion report](docs/completion-report-2026-10-30.md) for current evidence. Tests cover real local HTTP transport, provider contracts, configuration faults, task/approval semantics, audio privacy, memory recovery, frontend interactions, installed wheels and frozen Linux executables. They do not establish successful paid-provider or physical-device integration.
 
-Prior QQ/WeQ account integration is recorded in the project. This round does not send real account messages or invoke paid providers. The current container cannot run user-namespace isolation, so successful sandbox isolation still requires target-host validation; fail-closed behavior is tested. macOS, Docker and actual GUI validation have CI/target-environment paths. Signed/notarized macOS releases remain a separate distribution step.
+Prior QQ/WeQ account integration is recorded in the project. This round does not send real account messages or invoke paid providers. The current container cannot run user-namespace isolation, so successful sandbox isolation still requires target-host validation; fail-closed behavior is tested. Docker and Linux/macOS wheel/frozen builds and isolated startup passed GitHub CI; actual GUI use still requires target-device validation. Signed/notarized macOS releases remain a separate distribution step.
 
 The project-level license remains owner-pending. Third-party notices under `licenses/` do not grant a license for the entire repository. Resolve the license before public redistribution.

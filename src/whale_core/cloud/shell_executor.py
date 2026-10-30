@@ -91,7 +91,11 @@ class ShellExecutor:
             raise RuntimeError("sandbox unavailable: Linux bubblewrap is required")
         if os.geteuid() == 0 and not self.drop_to_user:
             raise RuntimeError("sandbox unavailable: run Whale as a non-root user or configure drop_to_user")
-        argv = [bwrap, "--unshare-all", "--die-with-parent", "--new-session",
+        prlimit = shutil.which("prlimit")
+        if not prlimit:
+            raise RuntimeError("execution unavailable: util-linux prlimit is required")
+        argv = [bwrap, "--unshare-all", "--unshare-user", "--disable-userns",
+                "--die-with-parent", "--new-session",
                 "--cap-drop", "ALL", "--proc", "/proc", "--dev", "/dev",
                 "--tmpfs", "/tmp", "--dir", "/home", "--dir", "/home/whale"]
         # Runtime libraries only; never bind /, /etc, host /proc, /home or sockets.
@@ -101,14 +105,20 @@ class ShellExecutor:
         # Only the explicitly granted task workspace is writable.
         argv.extend(["--bind", cwd, "/workspace", "--chdir", "/workspace",
                      "--setenv", "HOME", "/home/whale", "--setenv", "TMPDIR", "/tmp",
+                     # RLIMIT_NPROC counts tasks per real UID, not per process.
+                     # Install it only after bwrap has created its private user/PID
+                     # namespaces; an outer limit counts the host service/runner's
+                     # existing processes and can prevent even the first fork.
+                     "--", prlimit, f"--nproc={self.max_processes}:{self.max_processes}",
                      "--", "/bin/sh", "-c", command])
         return argv
 
     def _argv(self, command: str, cwd: str) -> list[str]:
         argv = (self._sandbox_argv(command, cwd) if self.sandbox == "bubblewrap"
                 else ["/bin/sh", "-c", command])
-        # Apply hard resource limits through a native launcher, avoiding Python
-        # preexec_fn in the threaded API process.
+        # Per-process hard limits can safely wrap the namespace launcher. The
+        # per-UID process limit belongs inside _sandbox_argv, never around bwrap
+        # or a trusted host shell. Avoid Python preexec_fn in the threaded API.
         if sys.platform.startswith("linux"):
             prlimit = shutil.which("prlimit")
             if not prlimit:
@@ -117,8 +127,7 @@ class ShellExecutor:
             argv = [prlimit, f"--cpu={cpu}:{cpu}",
                     f"--as={self.memory_bytes}:{self.memory_bytes}",
                     f"--fsize={self.file_bytes}:{self.file_bytes}",
-                    "--nofile=64:64", f"--nproc={self.max_processes}:{self.max_processes}",
-                    "--", *argv]
+                    "--nofile=64:64", "--", *argv]
         return argv
 
     def run(self, command: str, *, is_owner: bool, cwd: str | None = None) -> ExecutionResult:

@@ -23,14 +23,14 @@
 | 可视操作台 | 新响应式侧栏/连接页/总览/聊天/媒体/工作流/插件/记忆/任务/审批/事件/设置；真实操作与错误反馈 | 32项前端测试、TypeScript、生产构建；原生浏览器像素检查受本地端口不可达限制 |
 | wheel安装 | 包含当前控制台和内置Skill；离开源码目录安装仍可启动 | `build_release.py`, `verify_wheel.py`实际隔离安装验证 |
 | 非Windows桌面 | Linux/macOS原生窗口或浏览器入口、生命周期、平台数据/日志目录、菜单入口 | desktop与launcher测试；GUI使用替身，无真实图形显示环境 |
-| 免Python发行本体 | PyInstaller目录版/单文件版、内置运行时与控制台/Skill、Linux菜单和macOS.app包装 | Linux两种模式实际构建；空PATH/移除Python变量的独立启动验证；macOS待CI及目标设备 |
-| 容器与CI | 前端→wheel→非root镜像、持久卷/健康检查、默认回环映射、Linux/macOS打包与冻结CI | Docker/Compose与CI定义已实现；当前环境没有Docker，实际镜像构建由CI验证 |
+| 免Python发行本体 | PyInstaller目录版/单文件版、内置运行时与控制台/Skill、Linux菜单和macOS.app包装 | Linux两种模式实际构建；空PATH/移除Python变量独立启动通过；GitHub macOS ARM64冻结与独立启动亦通过，GUI待目标设备 |
+| 容器与CI | 前端→wheel→非root镜像、持久卷/健康检查、默认回环映射、Linux/macOS打包与冻结CI | GitHub Actions已完成镜像实际构建、Compose校验、非root运行及鉴权健康检查 |
 
 ## 实际测试
 
 最终本地验证：
 
-- `python -m pytest tests -q`：**923 passed**（基线为807 passed / 1 failed）。
+- `python -m pytest tests -q`：**925 passed**（基线为807 passed / 1 failed）。
 - `pnpm -C web test`：**32 passed**。
 - `pnpm -C web build`：TypeScript检查和Vite生产构建通过。
 - Python源码/脚本编译、`git diff --check`通过。
@@ -39,6 +39,8 @@
 - 独立安全复核覆盖配置写入中断/同代读取、热切换、审批、原始音频隐私、非法请求无付费调用、语音人格/记忆/去重和全局暂停。
 
 测试使用可控本地HTTP端点、协议替身和浏览器API替身，不把这些称为真实第三方服务联通。新增CI运行结果与本地结果分开记录，不能用“已添加CI”替代“CI已通过”。
+
+GitHub首轮安装发行检查（run 41050096142）已通过Docker、Linux/macOS wheel及两平台冻结包。Python 3.11普通用户CI额外暴露了宿主RLIMIT_NPROC误计入runner线程的问题：已将每UID进程额度移到私有用户命名空间内，并新增真实fork回归。可信宿主模式不再用共享UID额度冒充单任务隔离；CPU/内存/文件/描述符与沙箱限制保留。
 
 ## 关键决定
 
@@ -57,7 +59,7 @@
 - 未提供并使用真实模型/搜索/语音/图片/视频/embedding凭据，本轮没有付费调用。
 - 手机、雷鸟眼镜、VoIP与QQ/WeQ真机/真实账号未在本轮重新联调；设备适配继续由whale-io承担。先前真实QQ链路记录不等于新版本已重新验收。
 - 当前Linux容器不允许所需用户命名空间，未完成Bubblewrap成功隔离的目标机正向验收。
-- Docker不可在当前环境执行；macOS原生窗口、免Python包及签名/公证需要相应环境。已提供自动构建和验收路径，但本地不能替代这些结果。
+- GitHub Actions已实际通过Docker镜像/非root健康检查，以及Linux/macOS的wheel和免Python包构建/独立启动。macOS原生窗口与真实GUI点验、签名/公证仍未执行。
 - 云端浏览器不能访问本地开发端口，未完成真实页面截图和麦克风实听；前端行为测试、类型与构建已通过。
 - 项目级LICENSE按owner先前决定暂缓；第三方通知已随包保留，正式对外发行仍需确定项目许可。
 - Windows排除在本轮范围。多owner/多宿主机同步是路线图中“确有需要再做”的条件性扩展，本轮维持单owner canonical SQLite边界。

@@ -194,3 +194,34 @@ def test_real_namespace_support_is_explicit():
         assert result.status in ("error", "failed")
         assert "sandbox" in result.verdict_reason
         assert "isolated-whale" not in result.stdout
+
+
+def test_process_limit_is_installed_inside_required_user_namespace(monkeypatch, tmp_path):
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/" + name)
+    ex = ShellExecutor(PERSONAL, max_processes=7)
+    argv = ex._argv("echo isolated", str(tmp_path))
+    bwrap = argv.index("/usr/bin/bwrap")
+    sandbox_command = argv.index("--", bwrap)
+    assert "--unshare-user" in argv[bwrap:sandbox_command]
+    assert "--disable-userns" in argv[bwrap:sandbox_command]
+    assert not any(arg.startswith("--nproc=") for arg in argv[:sandbox_command])
+    assert argv[sandbox_command + 1:] == ["/usr/bin/prlimit", "--nproc=7:7", "--",
+                                          "/bin/sh", "-c", "echo isolated"]
+    # CPU, memory, file and descriptor limits still protect bwrap itself.
+    assert "--cpu=30:30" in argv[:bwrap]
+    assert "--as=536870912:536870912" in argv[:bwrap]
+    assert "--fsize=16777216:16777216" in argv[:bwrap]
+    assert "--nofile=64:64" in argv[:bwrap]
+
+
+def test_trusted_host_shell_never_sets_a_shared_uid_process_limit():
+    ex = _executor(max_processes=1)
+    argv = ex._argv("sleep 0.01; echo trusted-child", "/tmp")
+    assert not any(arg.startswith("--nproc=") for arg in argv)
+    # On an ordinary CI account the runner already has multiple same-UID tasks.
+    # The former outer --nproc=1 made this real child command fail to fork.
+    result = ex.run("sleep 0.01; echo trusted-child", is_owner=True)
+    assert result.status == "success", result.as_dict()
+    assert result.stderr == ""
+    assert result.stdout.strip() == "trusted-child"
