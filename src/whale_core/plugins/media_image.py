@@ -21,6 +21,7 @@ import urllib.request
 import uuid
 from dataclasses import dataclass
 from typing import Protocol
+from whale_core.core.network import open_provider_request, validate_provider_config
 
 from whale_core.plugins.manifest import PluginManifest
 from whale_core.plugins.registry import PluginRegistry
@@ -32,7 +33,7 @@ _DEFAULT_BASE_URL = "https://api.openai.com/v1"
 _MAX_PROMPT_CHARS = 4000
 _MIN_N = 1
 _MAX_N = 4
-ALLOWED_SIZES: tuple[str, ...] = ("1024x1024", "1792x1024", "1024x1792")
+ALLOWED_SIZES: tuple[str, ...] = ("1024x1024", "1536x1024", "1024x1536", "1792x1024", "1024x1792")
 _ALLOWED_SIZE_SET = frozenset(ALLOWED_SIZES)
 
 
@@ -94,6 +95,7 @@ def _is_local_or_private_http(url: str) -> bool:
     if host == "localhost":
         return True
     import ipaddress
+
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
@@ -152,7 +154,7 @@ class OpenAIImagesProvider:
         *,
         api_key: str = "",
         base_url: str = _DEFAULT_BASE_URL,
-        model: str = "dall-e-3",
+        model: str = "gpt-image-2",
         timeout: float = 60.0,
     ):
         self.api_key = api_key or ""
@@ -162,8 +164,18 @@ class OpenAIImagesProvider:
             or _is_local_or_private_http(self.base_url)
         ):
             raise ValueError("image provider requires HTTPS (or loopback/private HTTP)")
-        self.model = model or "dall-e-3"
+        self.model = model or "gpt-image-2"
         self.timeout = timeout
+        validate_provider_config(
+            self.base_url, timeout, allow_http=_is_local_or_private_http(self.base_url)
+        )
+
+    def healthcheck(self):
+        return (
+            True
+            if self.api_key or _is_local_or_private_http(self.base_url)
+            else "missing credentials"
+        )
 
     def generate(
         self, prompt: str, *, size: str = "1024x1024", n: int = 1
@@ -193,29 +205,40 @@ class OpenAIImagesProvider:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as response:
-                return json.loads(response.read(8 * 1024 * 1024).decode("utf-8", errors="replace"))
+            with open_provider_request(req, timeout=self.timeout) as response:
+                raw = response.read(64 * 1024 * 1024 + 1)
+                if len(raw) > 64 * 1024 * 1024:
+                    raise ImageError("bad_response", "image response too large")
+                return json.loads(raw.decode("utf-8", errors="replace"))
         except urllib.error.HTTPError as exc:
             status = exc.code
             if status in (401, 403):
-                raise ImageError("auth", f"image auth failed ({status})", status=status) from exc
+                raise ImageError(
+                    "auth", f"image auth failed ({status})", status=status
+                ) from exc
             if status == 429:
                 raise ImageError(
                     "quota", "image quota exhausted or rate limited (429)", status=429
                 ) from exc
             if 500 <= status < 600:
-                raise ImageError("server", f"image server error ({status})", status=status) from exc
-            raise ImageError("bad_response", f"image HTTP error ({status})", status=status) from exc
+                raise ImageError(
+                    "server", f"image server error ({status})", status=status
+                ) from exc
+            raise ImageError(
+                "bad_response", f"image HTTP error ({status})", status=status
+            ) from exc
         except (urllib.error.URLError, TimeoutError) as exc:
             # 消息只含异常类型名，不含 URL/凭据
-            raise ImageError("network", f"image network error: {type(exc).__name__}") from exc
+            raise ImageError(
+                "network", f"image network error: {type(exc).__name__}"
+            ) from exc
         except json.JSONDecodeError as exc:
-            raise ImageError("bad_response", "image endpoint returned invalid JSON") from exc
+            raise ImageError(
+                "bad_response", "image endpoint returned invalid JSON"
+            ) from exc
 
 
-def register_image_gen(
-    registry: PluginRegistry, *, provider: object = None
-) -> object:
+def register_image_gen(registry: PluginRegistry, *, provider: object = None) -> object:
     """注册 media.image.generate 能力（model 类插件），返回接线好的 provider。
 
     ``provider`` 必须由宿主显式注入（如 ``OpenAIImagesProvider``）——

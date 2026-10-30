@@ -16,6 +16,7 @@
 与 WhaleAgent（事件流）并存：本类是**对话流**的家；两者共用记忆/人格/
 策略/审计组件。长任务预算、超时与优先级独立，不阻塞实时链路。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -23,7 +24,11 @@ from typing import Any, Callable, Mapping, Protocol
 from uuid import uuid4
 
 from whale_core.core.companion import WhaleCompanion
-from whale_core.core.intent_plan import IntentPlan, IntentPlanError, plan_from_model_text
+from whale_core.core.intent_plan import (
+    IntentPlan,
+    IntentPlanError,
+    plan_from_model_text,
+)
 from whale_core.core.memory_commands import handle_memory_command
 from whale_core.core.types import ActionIntent
 from whale_core.memory.history import append_turn
@@ -40,6 +45,7 @@ _UNTRUSTED_CTRL_RE = None  # 惰性编译（见 _scrub_untrusted）
 def _scrub_untrusted(text: str) -> str:
     """清洗不可信工具输出中的控制字符（保留换行/制表），降低终端与注入面风险。"""
     import re
+
     global _UNTRUSTED_CTRL_RE
     if _UNTRUSTED_CTRL_RE is None:
         _UNTRUSTED_CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -49,13 +55,11 @@ def _scrub_untrusted(text: str) -> str:
 class IntentModel(Protocol):
     """意图模型契约：输入用户文本与上下文摘要，输出含 IntentPlan JSON 的文本。"""
 
-    def plan(self, text: str, *, context: str = "") -> str:
-        ...
+    def plan(self, text: str, *, context: str = "") -> str: ...
 
 
 class ActionGatewayLike(Protocol):
-    def dispatch(self, intent: ActionIntent) -> str:
-        ...
+    def dispatch(self, intent: ActionIntent) -> str: ...
 
 
 @dataclass(frozen=True)
@@ -143,20 +147,40 @@ class ConversationOrchestrator:
         self.tools = tools or ToolRegistry()
         self.gateway = gateway
         self.tool_output_chars = tool_output_chars
-        self.max_tool_rounds = max_tool_rounds
+        self.max_tool_rounds = max(1, min(16, int(max_tool_rounds)))
+        import threading
 
-    def handle_message(self, conversation_id: str, text: str, *, source: str = "runtime") -> TurnResult:
+        self._turn_lock = threading.RLock()
+
+    def handle_message(
+        self, conversation_id: str, text: str, *, source: str = "runtime", cancel=None
+    ) -> TurnResult:
+        # Single canonical writer for conversation history and task index updates.
+        with self._turn_lock:
+            if cancel is not None and cancel.is_set():
+                return TurnResult(reply="", status="cancelled")
+            return self._handle_message(
+                conversation_id, text, source=source, cancel=cancel
+            )
+
+    def _handle_message(
+        self, conversation_id: str, text: str, *, source: str = "runtime", cancel=None
+    ) -> TurnResult:
         text = (text or "").strip()
         if not text:
             return TurnResult(reply="（空消息）", status="answered")
 
         # 1. 记忆指令捷径
         command = handle_memory_command(
-            self.store, text, source=source,
+            self.store,
+            text,
+            source=source,
             evidence_id=f"{source}:{conversation_id}:{uuid4().hex}",
         )
         if command is not None:
-            return TurnResult(reply=command, status="answered", receipts=("memory-command",))
+            return TurnResult(
+                reply=command, status="answered", receipts=("memory-command",)
+            )
 
         # 2. 无意图模型 → 纯对话
         if self.intent_model is None:
@@ -170,7 +194,10 @@ class ConversationOrchestrator:
         # 空上下文会让它问出「哪个城市」这种上下文里明明有答案的瞎话。
         try:
             plan = plan_from_model_text(
-                self.intent_model.plan(text, context=self._intent_context(conversation_id, text)))
+                self.intent_model.plan(
+                    text, context=self._intent_context(conversation_id, text)
+                )
+            )
         except IntentPlanError:
             receipt = "intent:parse-failed→plain-chat"
             reply = self.companion.chat(text, conversation_id=conversation_id)
@@ -180,32 +207,53 @@ class ConversationOrchestrator:
             reply = self.companion.chat(text, conversation_id=conversation_id)
             return TurnResult(reply=reply, status="answered", receipts=(receipt,))
 
+        if cancel is not None and cancel.is_set():
+            return TurnResult(reply="", status="cancelled", plan=plan)
+
         # 4. chat / clarify 分流
         if plan.kind == "chat":
             return TurnResult(
                 reply=self.companion.chat(text, conversation_id=conversation_id),
-                status="answered", plan=plan, task_id=plan.task_id or plan.intent_id,
+                status="answered",
+                plan=plan,
+                task_id=plan.task_id or plan.intent_id,
             )
         if plan.kind == "clarify" or plan.needs_clarification:
             ask = plan.clarification_question or "还需要更多信息"
             reply = self._voiced(
-                conversation_id, text,
+                conversation_id,
+                text,
                 f"用户的请求缺少必要信息，需要澄清这一点：{ask}\n"
                 "请用你自己的人格语气自然地追问，简短，不要复读上面的原文。",
             )
-            return TurnResult(reply=reply, status="clarify", plan=plan,
-                              task_id=plan.task_id or plan.intent_id)
+            return TurnResult(
+                reply=reply,
+                status="clarify",
+                plan=plan,
+                task_id=plan.task_id or plan.intent_id,
+            )
 
         # 5. task：执行声明的能力
         receipts: list[str] = []
         results: list[str] = []
         blocked: str | None = None
-        for capability in plan.capabilities:
+        for index, capability in enumerate(plan.capabilities):
+            if cancel is not None and cancel.is_set():
+                return TurnResult(
+                    reply="", status="cancelled", plan=plan, receipts=tuple(receipts)
+                )
+            if index >= self.max_tool_rounds:
+                blocked = "tool-fail:round-limit"
+                receipts.append(blocked)
+                break
             specs = self.tools.for_capability(capability)
             if not specs:
-                receipts.append(f"capability-unavailable:{capability}")
-                continue
-            for spec in specs[:1]:  # 单轮每能力取第一个工具（provider 选择在 PR-4 深化）
+                blocked = f"capability-unavailable:{capability}"
+                receipts.append(blocked)
+                break
+            for spec in specs[
+                :1
+            ]:  # 单轮每能力取第一个工具（provider 选择在 PR-4 深化）
                 ok, note = self._run_tool(spec, plan)
                 receipts.append(note)
                 if ok:
@@ -222,22 +270,37 @@ class ConversationOrchestrator:
             # 回复也走陪伴模型用人格语气说（系统结局不该是客服腔）。
             if blocked.startswith("plugin-hold:"):
                 status = "pending_approval"
-                note = ("你打算执行的动作已挂起，需要主人批准后才能做（尚未执行）。"
-                        "用人格语气如实告诉用户：需要他批准。")
+                note = (
+                    "你打算执行的动作已挂起，需要主人批准后才能做（尚未执行）。"
+                    "用人格语气如实告诉用户：需要他批准。"
+                )
             elif blocked.startswith(("plugin-denied:", "tool-denied:")):
                 status = "denied"
-                note = ("你打算执行的动作被安全策略拦下了，没有执行。"
-                        "用人格语气如实告诉用户：这个动作现在不能做。")
+                note = (
+                    "你打算执行的动作被安全策略拦下了，没有执行。"
+                    "用人格语气如实告诉用户：这个动作现在不能做。"
+                )
             else:  # tool-fail / tool-unwired 等执行层失败
                 status = "failed"
-                note = ("工具执行出了问题，这次没做成。"
-                        "用人格语气如实告诉用户，别假装成功了。")
+                note = (
+                    "所需工具当前不可用或执行出了问题，这次没做成。"
+                    "用人格语气如实告诉用户，别假装成功了。"
+                )
             reply = self._voiced(conversation_id, text, note)
-            result = TurnResult(reply=reply, status=status, plan=plan,
-                                receipts=tuple(receipts),
-                                task_id=plan.task_id or plan.intent_id)
+            result = TurnResult(
+                reply=reply,
+                status=status,
+                plan=plan,
+                receipts=tuple(receipts),
+                task_id=plan.task_id or plan.intent_id,
+            )
             self._record_task(result)
             return result
+
+        if cancel is not None and cancel.is_set():
+            return TurnResult(
+                reply="", status="cancelled", plan=plan, receipts=tuple(receipts)
+            )
 
         # 6. 工具结果回流陪伴模型（**不可信数据**通道：网页/工具输出可能含注入文本）
         if results:
@@ -251,10 +314,27 @@ class ConversationOrchestrator:
             )
         else:
             augmented = text + "\n\n[所需工具当前不可用，如实说明]"
-        reply = self.companion.chat(augmented, conversation_id=conversation_id)
-        status = "answered" if results else "failed"
-        result = TurnResult(reply=reply, status=status, plan=plan,
-                            receipts=tuple(receipts), task_id=plan.task_id or plan.intent_id)
+        reply = self.companion.chat(
+            augmented, conversation_id=conversation_id, original_text=text
+        )
+        status = (
+            (
+                "pending_approval"
+                if blocked.startswith("plugin-hold:")
+                else "denied"
+                if blocked.startswith(("plugin-denied:", "tool-denied:"))
+                else "failed"
+            )
+            if blocked
+            else ("answered" if results else "failed")
+        )
+        result = TurnResult(
+            reply=reply,
+            status=status,
+            plan=plan,
+            receipts=tuple(receipts),
+            task_id=plan.task_id or plan.intent_id,
+        )
         self._record_task(result)
         return result
 
@@ -264,13 +344,15 @@ class ConversationOrchestrator:
         意图模型靠它做合理默认（如地点缺省=用户所在城市/行程目的地）。
         """
         from whale_core.memory.history import load_history
+
         parts: list[str] = []
         if self.companion.curator is not None:
             # 查询相关记忆 + 稳定事实（空查询只放 stable——owner 所在地等
             # 缺省值来源，与查询词项未必有交集）
             seen: set[str] = set()
-            for hit in list(self.companion.curator.recall(text, limit=3)) + \
-                    list(self.companion.curator.recall("", limit=5)):
+            for hit in list(self.companion.curator.recall(text, limit=3)) + list(
+                self.companion.curator.recall("", limit=5)
+            ):
                 if hit.record.key in seen:
                     continue
                 seen.add(hit.record.key)
@@ -295,7 +377,9 @@ class ConversationOrchestrator:
             f"{note}\n"
             "===== 系统提示结束 ====="
         )
-        return self.companion.chat(augmented, conversation_id=conversation_id)
+        return self.companion.chat(
+            augmented, conversation_id=conversation_id, original_text=text
+        )
 
     def _record_task(self, result: TurnResult) -> None:
         """任务轨迹落库（kv `task:{id}` + 环形索引 `tasks:recent` 上限 50）——
@@ -303,9 +387,12 @@ class ConversationOrchestrator:
         if result.plan is None:
             return
         import time as _time
+
         record = {
-            "task_id": result.task_id, "at": _time.time(),
-            "goal": result.plan.goal[:500], "status": result.status,
+            "task_id": result.task_id,
+            "at": _time.time(),
+            "goal": result.plan.goal[:500],
+            "status": result.status,
             "capabilities": list(result.plan.capabilities),
             "receipts": list(result.receipts),
         }
@@ -324,8 +411,10 @@ class ConversationOrchestrator:
             if self.gateway is None:
                 return False, f"tool-denied:{spec.name}:no-gateway"
             intent = PluginAction(
-                plugin_id=spec.plugin_id, action=spec.action,
-                target=str(plan.slots.get("target", "")), args=dict(plan.slots),
+                plugin_id=spec.plugin_id,
+                action=spec.action,
+                target=str(plan.slots.get("target", "")),
+                args=dict(plan.slots),
             ).to_intent()
             receipt = self.gateway.dispatch(intent)
             # 精确前缀匹配判定成功（安全审查修正：":ok:" 子串可被回执文本注入伪造）

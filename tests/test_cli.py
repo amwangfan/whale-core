@@ -76,8 +76,16 @@ def test_setup_repeat_does_not_overwrite(tmp_path, capsys):
     assert main(["setup", "--profile", "local", "--config-dir", str(tmp_path)]) == 0
     config_path = tmp_path / "config.json"
     config_path.write_text('{"profile": "local", "sentinel": true}', encoding="utf-8")
-    rc = main(["setup", "--profile", "local", "--config-dir", str(tmp_path),
-               "--non-interactive"])
+    rc = main(
+        [
+            "setup",
+            "--profile",
+            "local",
+            "--config-dir",
+            str(tmp_path),
+            "--non-interactive",
+        ]
+    )
     assert rc == 0
     assert _read_config(tmp_path).get("sentinel") is True
     assert "--force" in capsys.readouterr().out
@@ -86,8 +94,7 @@ def test_setup_repeat_does_not_overwrite(tmp_path, capsys):
 def test_setup_force_overwrites(tmp_path):
     assert main(["setup", "--profile", "local", "--config-dir", str(tmp_path)]) == 0
     (tmp_path / "config.json").write_text('{"profile": "cloud"}', encoding="utf-8")
-    rc = main(["setup", "--profile", "local", "--config-dir", str(tmp_path),
-               "--force"])
+    rc = main(["setup", "--profile", "local", "--config-dir", str(tmp_path), "--force"])
     assert rc == 0
     config = _read_config(tmp_path)
     assert config["profile"] == "local"
@@ -175,12 +182,14 @@ def test_doctor_cloud_with_key_ok_and_no_echo(tmp_path, monkeypatch, capsys):
 # ---------------------------------------------------------------------------
 
 
-def test_plugins_list_empty_dir(tmp_path, capsys):
+def test_plugins_list_builtin_catalog(tmp_path, capsys):
     rc = main(["plugins", "list", "--config-dir", str(tmp_path)])
     out = capsys.readouterr().out
     assert rc == 0
     assert "ID" in out and "STATUS" in out
-    assert "(no plugins loaded)" in out
+    assert "local_model" in out
+    assert "speech_asr" in out
+    assert "web_fetch" in out
 
 
 def test_plugins_list_tolerates_bad_manifest(tmp_path, capsys):
@@ -212,8 +221,10 @@ def test_plugins_enable_disable_flow(tmp_path, capsys):
 def test_plugins_info_masks_secrets(tmp_path, capsys):
     _write_manifest(tmp_path, ECHO_MANIFEST)
     store = SqliteMemoryStore(tmp_path / "memory.sqlite3")
-    store.put("plugin:config:echo",
-              {"api_token": "sk-plugin-secret", "endpoint": "https://api.example.com"})
+    store.put(
+        "plugin:config:echo",
+        {"api_token": "sk-plugin-secret", "endpoint": "https://api.example.com"},
+    )
     store.close()
     rc = main(["plugins", "info", "echo", "--config-dir", str(tmp_path)])
     out = capsys.readouterr().out
@@ -255,10 +266,14 @@ def test_plugins_doctor_missing_plugin(tmp_path):
 def _seed_records(config_dir):
     store = SqliteMemoryStore(config_dir / "memory.sqlite3")
     for i in range(3):
-        store.put_record(MemoryRecord(
-            kind=MemoryKind.EPISODE, key=f"ep:{i}",
-            content={"summary": f"记忆 {i}"}, tags=("chat",),
-        ))
+        store.put_record(
+            MemoryRecord(
+                kind=MemoryKind.EPISODE,
+                key=f"ep:{i}",
+                content={"summary": f"记忆 {i}"},
+                tags=("chat",),
+            )
+        )
     store.close()
 
 
@@ -293,15 +308,23 @@ def test_memory_import_skip_then_overwrite(tmp_path, capsys):
     assert rc == 0
     assert "imported 0, skipped 3" in capsys.readouterr().out
     # --overwrite：同 key 覆盖写入
-    rc = main(["memory", "import", str(export_file), "--overwrite",
-               "--config-dir", str(dst)])
+    rc = main(
+        ["memory", "import", str(export_file), "--overwrite", "--config-dir", str(dst)]
+    )
     assert rc == 0
     assert "imported 3, skipped 0" in capsys.readouterr().out
 
 
 def test_memory_import_missing_file(tmp_path, capsys):
-    rc = main(["memory", "import", str(tmp_path / "nope.jsonl"),
-               "--config-dir", str(tmp_path / "cfg")])
+    rc = main(
+        [
+            "memory",
+            "import",
+            str(tmp_path / "nope.jsonl"),
+            "--config-dir",
+            str(tmp_path / "cfg"),
+        ]
+    )
     assert rc == 1
     assert "不存在" in capsys.readouterr().err
 
@@ -366,12 +389,15 @@ def test_memory_export_missing_path_system_exit(tmp_path):
 
 # ---------- whale api（PR-13 收尾） ----------
 
+
 def test_api_token_resolution(tmp_path, monkeypatch):
     from whale_core.cli.main import _resolve_api_token
+
     monkeypatch.delenv("WHALE_API_TOKEN", raising=False)
     token, source = _resolve_api_token(tmp_path, env={})
     assert token and "新生成" in source
     import stat
+
     mode = stat.S_IMODE((tmp_path / "api_token").stat().st_mode)
     assert mode == 0o600
     # 第二次复用同一 token
@@ -385,6 +411,7 @@ def test_api_token_resolution(tmp_path, monkeypatch):
 def test_build_api_server_local(tmp_path, monkeypatch, capsys):
     from types import SimpleNamespace
     from whale_core.cli.main import _build_api_server
+
     monkeypatch.delenv("WHALE_API_TOKEN", raising=False)
     (tmp_path / "config.json").write_text('{"profile": "local"}', encoding="utf-8")
     args = SimpleNamespace(config_dir=str(tmp_path), host="127.0.0.1", port=0)
@@ -400,6 +427,7 @@ def test_build_api_server_local(tmp_path, monkeypatch, capsys):
 
 def test_api_subcommand_registered():
     from whale_core.cli.main import build_parser
+
     parser = build_parser()
     # api 子命令存在且带 host/port
     actions = [a for a in parser._subparsers._group_actions[0].choices]  # noqa: SLF001

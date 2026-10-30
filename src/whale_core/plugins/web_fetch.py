@@ -55,9 +55,13 @@ _READ_CHUNK = 65536
 _SNIFF_BYTES = 4096
 _REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
 _LINK_LOCAL_V4 = ipaddress.ip_network("169.254.0.0/16")
-_NAT64_WK = ipaddress.ip_network("64:ff9b::/96")       # NAT64 well-known（安全审查：is_global 误判）
+_NAT64_WK = ipaddress.ip_network(
+    "64:ff9b::/96"
+)  # NAT64 well-known（安全审查：is_global 误判）
 _NAT64_LOCAL = ipaddress.ip_network("64:ff9b:1::/48")  # NAT64 local-use
-_META_CHARSET_RE = re.compile(rb"<meta[^>]+charset=[\"']?\s*([A-Za-z0-9._-]+)", re.IGNORECASE)
+_META_CHARSET_RE = re.compile(
+    rb"<meta[^>]+charset=[\"']?\s*([A-Za-z0-9._-]+)", re.IGNORECASE
+)
 
 
 def _ip_allowed(ip) -> bool:
@@ -94,7 +98,9 @@ class _PeerCheckedHTTPConnection:  # 见下：两个子类共用
             try:
                 self.close()
             finally:
-                raise FetchError("blocked non-global peer after connect (rebinding guard)")
+                raise FetchError(
+                    "blocked non-global peer after connect (rebinding guard)"
+                )
 
 
 class _PeerCheckedHTTP(_PeerCheckedHTTPConnection, http.client.HTTPConnection):
@@ -239,10 +245,13 @@ def _sniff_meta_charset(body: bytes) -> str:
     return candidate if _valid_charset(candidate) else ""
 
 
-def _read_limited(response: Any, max_bytes: int, deadline: float | None = None) -> bytes:
+def _read_limited(
+    response: Any, max_bytes: int, deadline: float | None = None
+) -> bytes:
     """流式读取，至多 max_bytes 即停（绝不先 read() 全部）；可选总时限
     （防 trickle 响应挂死——每块读后检查 deadline，超时抛 FetchError）。"""
     import time as _time
+
     chunks: list[bytes] = []
     remaining = max_bytes
     while remaining > 0:
@@ -295,13 +304,16 @@ class WebFetcher:
         else:
             # 默认 opener：不跟跳转 + 连接层 peer 复核（TOCTOU/rebinding 防线）
             self._opener = urllib.request.build_opener(
-                _NoRedirectHandler(), _PeerCheckedHTTPHandler(), _PeerCheckedHTTPSHandler()
+                _NoRedirectHandler(),
+                _PeerCheckedHTTPHandler(),
+                _PeerCheckedHTTPSHandler(),
             )
         self._resolver = resolver if resolver is not None else _default_resolver
 
     def fetch(self, url: str) -> FetchResult:
         """抓取 ``url`` 并提取正文。失败一律 FetchError。"""
         import time as _time
+
         original = (url or "").strip()
         current = original
         redirects = 0
@@ -336,9 +348,7 @@ class WebFetcher:
                     continue
                 raise FetchError(f"HTTP error {exc.code}") from None
             except (TimeoutError, socket.timeout) as exc:
-                raise FetchError(
-                    f"request timed out after {self._timeout:g}s"
-                ) from exc
+                raise FetchError(f"request timed out after {self._timeout:g}s") from exc
             except urllib.error.URLError as exc:
                 raise FetchError(
                     f"request failed: {type(exc.reason).__name__}"
@@ -364,7 +374,9 @@ class WebFetcher:
             raise FetchError(f"invalid URL: {url!r}") from None
         scheme = (parts.scheme or "").lower()
         if scheme not in ("http", "https"):
-            raise FetchError(f"unsupported scheme {scheme or '(none)'!r}: http/https only")
+            raise FetchError(
+                f"unsupported scheme {scheme or '(none)'!r}: http/https only"
+            )
         host = parts.hostname
         if not host:
             raise FetchError(f"invalid URL (missing host): {url!r}")
@@ -374,7 +386,9 @@ class WebFetcher:
             raise FetchError(f"invalid URL (bad port): {url!r}") from None
         if self._allow_private:
             return
-        self._check_host(host, port if port is not None else (443 if scheme == "https" else 80))
+        self._check_host(
+            host, port if port is not None else (443 if scheme == "https" else 80)
+        )
 
     def _check_host(self, host: str, port: int) -> None:
         """SSRF 门控：解析出的**所有** IP 必须 is_global 才放行（肯定式）。
@@ -387,9 +401,7 @@ class WebFetcher:
         except FetchError:
             raise
         except Exception as exc:  # socket.gaierror / UnicodeError / ...
-            raise FetchError(
-                f"DNS resolution failed: {type(exc).__name__}"
-            ) from exc
+            raise FetchError(f"DNS resolution failed: {type(exc).__name__}") from exc
         addresses: set[Any] = set()
         for info in infos or ():
             try:
@@ -431,7 +443,12 @@ class _WebFetchExecutor:
     def __init__(self, fetcher: WebFetcher) -> None:
         self._fetcher = fetcher
 
-    def execute(self, action: str, target: str, args: Mapping[str, Any]) -> tuple[bool, str]:
+    def healthcheck(self):
+        return True  # local configuration check, not a network probe
+
+    def execute(
+        self, action: str, target: str, args: Mapping[str, Any]
+    ) -> tuple[bool, str]:
         if action != FETCH_ACTION:
             return False, f"unsupported action {action!r}"
         url = str(args.get("url") or target or "").strip()

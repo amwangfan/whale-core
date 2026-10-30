@@ -18,7 +18,6 @@ from whale_core.plugins.media_image import (
     PLUGIN_ID,
     ImageError,
     ImageTaskResult,
-
     OpenAIImagesProvider,
     register_image_gen,
 )
@@ -27,6 +26,7 @@ from _doubles import MockImageProvider
 
 
 # ---------- 离线 HTTP 替身 ----------
+
 
 def _fake_urlopen(monkeypatch, scripted):
     """scripted: dict（JSON 响应）或 Exception 实例。返回调用记录。"""
@@ -39,7 +39,7 @@ def _fake_urlopen(monkeypatch, scripted):
             raise scripted
         return io.BytesIO(json.dumps(scripted).encode())
 
-    monkeypatch.setattr("urllib.request.urlopen", fake)
+    monkeypatch.setattr("whale_core.plugins.media_image.open_provider_request", fake)
     return calls
 
 
@@ -52,6 +52,7 @@ def _provider():
 
 
 # ---------- 响应解析 ----------
+
 
 def test_parses_url_response(monkeypatch):
     calls = _fake_urlopen(monkeypatch, {"data": [{"url": "https://img.example/x.png"}]})
@@ -83,6 +84,7 @@ def test_unexpected_shape_raises_bad_response(monkeypatch):
 
 
 # ---------- 请求校验（prompt / size / n） ----------
+
 
 @pytest.mark.parametrize("provider_factory", [_provider, MockImageProvider])
 @pytest.mark.parametrize("prompt", ["", "   "])
@@ -116,7 +118,8 @@ def test_size_whitelist_accepts_known(size):
 @pytest.mark.parametrize("n,expected", [(0, 1), (-3, 1), (1, 1), (4, 4), (99, 4)])
 def test_n_clamped_to_1_4(monkeypatch, n, expected):
     calls = _fake_urlopen(
-        monkeypatch, {"data": [{"url": f"https://img.example/{i}.png"} for i in range(4)]}
+        monkeypatch,
+        {"data": [{"url": f"https://img.example/{i}.png"} for i in range(4)]},
     )
     _provider().generate("画一只鲸", n=n)
     sent = json.loads(calls["requests"][0].data.decode())
@@ -125,6 +128,7 @@ def test_n_clamped_to_1_4(monkeypatch, n, expected):
 
 
 # ---------- 错误分类（401/429/5xx/网络）与脱敏 ----------
+
 
 def test_401_classified_auth(monkeypatch):
     _fake_urlopen(monkeypatch, _http_error(401))
@@ -162,9 +166,15 @@ def test_missing_key_is_config_error():
     assert ei.value.kind == "config"
 
 
-@pytest.mark.parametrize("scripted", [
-    _http_error(401), _http_error(429), _http_error(503), urllib.error.URLError("boom"),
-])
+@pytest.mark.parametrize(
+    "scripted",
+    [
+        _http_error(401),
+        _http_error(429),
+        _http_error(503),
+        urllib.error.URLError("boom"),
+    ],
+)
 def test_error_message_never_contains_key(monkeypatch, scripted):
     _fake_urlopen(monkeypatch, scripted)
     with pytest.raises(ImageError) as ei:
@@ -175,24 +185,31 @@ def test_error_message_never_contains_key(monkeypatch, scripted):
 
 # ---------- base_url 策略（公网 https；回环/私网 http 放行） ----------
 
-@pytest.mark.parametrize("url", ["http://example.com", "http://api.openai.com", "ftp://x"])
+
+@pytest.mark.parametrize(
+    "url", ["http://example.com", "http://api.openai.com", "ftp://x"]
+)
 def test_base_url_public_http_rejected(url):
     with pytest.raises(ValueError):
         OpenAIImagesProvider(api_key="k", base_url=url)
 
 
-@pytest.mark.parametrize("url", [
-    "https://api.openai.com/v1",
-    "http://127.0.0.1:8080",
-    "http://localhost:9000",
-    "http://192.168.1.10:8000",
-])
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://api.openai.com/v1",
+        "http://127.0.0.1:8080",
+        "http://localhost:9000",
+        "http://192.168.1.10:8000",
+    ],
+)
 def test_base_url_https_or_private_http_allowed(url):
     provider = OpenAIImagesProvider(api_key="k", base_url=url)
     assert provider.base_url == url
 
 
 # ---------- Mock：确定性 + 标注 ----------
+
 
 def test_mock_deterministic_and_canned_svg():
     a = MockImageProvider().generate("画一只鲸", size="1024x1792", n=2)
@@ -207,6 +224,7 @@ def test_mock_is_labelled():
 
 
 # ---------- 注册形状 + providers_for 解析 ----------
+
 
 def test_register_requires_provider():
     """mock 默认已移除（owner 决策）：缺 provider 诚实 ValueError。"""
@@ -225,3 +243,12 @@ def test_register_shape_and_providers_for_resolution():
     assert found == [(PLUGIN_ID, custom)]
     assert registry.providers_for(IMAGE_GENERATE) == [(PLUGIN_ID, custom)]
     assert registry.providers_for("llm.chat") == []
+
+
+def test_current_image_default_and_standard_sizes(monkeypatch):
+    calls = _fake_urlopen(monkeypatch, {"data": [{"b64_json": "QUJD"}]})
+    provider = OpenAIImagesProvider(api_key="fixture")
+    provider.generate("sea", size="1536x1024")
+    payload = json.loads(calls["requests"][0].data)
+    assert payload["model"] == "gpt-image-2"
+    assert payload["size"] == "1536x1024"

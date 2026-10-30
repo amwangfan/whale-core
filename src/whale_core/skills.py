@@ -112,7 +112,9 @@ def _parse_arg_entry(text: str, line_no: int) -> tuple[str, str]:
     """解析一条 args 条目：``- key: value`` 或 ``key: value``。"""
     entry = text[2:].strip() if text.startswith("- ") else text
     if ":" not in entry:
-        raise SkillError(f"line {line_no}: malformed args entry (expected 'key: value'): {text!r}")
+        raise SkillError(
+            f"line {line_no}: malformed args entry (expected 'key: value'): {text!r}"
+        )
     key, _, value = entry.partition(":")
     key = key.strip()
     if not key:
@@ -130,8 +132,10 @@ def parse_skill(text: str) -> Skill:
         raise SkillError("line 1: empty skill text, expected '# skill: <name>'")
     first = lines[i].strip()
     if not first.startswith(_SKILL_HEADER):
-        raise SkillError(f"line {i + 1}: skill must start with '# skill: <name>', got {first!r}")
-    name = first[len(_SKILL_HEADER):].strip()
+        raise SkillError(
+            f"line {i + 1}: skill must start with '# skill: <name>', got {first!r}"
+        )
+    name = first[len(_SKILL_HEADER) :].strip()
     if not name:
         raise SkillError(f"line {i + 1}: skill name missing after '# skill:'")
 
@@ -148,11 +152,16 @@ def parse_skill(text: str) -> Skill:
             return
         if not cur["tool"]:
             raise SkillError(
-                f"line {cur['line']}: step {cur['name']!r} missing required 'tool:'")
-        steps.append(SkillStep(
-            name=cur["name"], tool=cur["tool"],
-            args=dict(cur["args"]), save_as=cur["save_as"],
-        ))
+                f"line {cur['line']}: step {cur['name']!r} missing required 'tool:'"
+            )
+        steps.append(
+            SkillStep(
+                name=cur["name"],
+                tool=cur["tool"],
+                args=dict(cur["args"]),
+                save_as=cur["save_as"],
+            )
+        )
         cur = None
 
     for i in range(i + 1, len(lines)):
@@ -163,13 +172,19 @@ def parse_skill(text: str) -> Skill:
             continue  # 空行任何位置都允许
         if stripped.startswith(_STEP_HEADER):
             finalize()
-            step_name = stripped[len(_STEP_HEADER):].strip()
+            step_name = stripped[len(_STEP_HEADER) :].strip()
             if not step_name:
                 raise SkillError(f"line {line_no}: step name missing after '## step:'")
             if step_name in seen_steps:
                 raise SkillError(f"line {line_no}: duplicate step name {step_name!r}")
             seen_steps.add(step_name)
-            cur = {"name": step_name, "line": line_no, "tool": "", "args": {}, "save_as": ""}
+            cur = {
+                "name": step_name,
+                "line": line_no,
+                "tool": "",
+                "args": {},
+                "save_as": "",
+            }
             in_args = False
             continue
         if stripped.startswith(_SKILL_HEADER):
@@ -177,7 +192,9 @@ def parse_skill(text: str) -> Skill:
         if in_args and raw[:1] in (" ", "\t"):
             key, value = _parse_arg_entry(stripped, line_no)
             if key in cur["args"]:
-                raise SkillError(f"line {line_no}: duplicate args key {key!r} in step {cur['name']!r}")
+                raise SkillError(
+                    f"line {line_no}: duplicate args key {key!r} in step {cur['name']!r}"
+                )
             cur["args"][key] = value
             continue
         in_args = False
@@ -185,37 +202,52 @@ def parse_skill(text: str) -> Skill:
             if stripped.startswith(_DESCRIPTION_KEY):
                 if description:
                     raise SkillError(f"line {line_no}: duplicate description")
-                description = stripped[len(_DESCRIPTION_KEY):].strip()
+                description = stripped[len(_DESCRIPTION_KEY) :].strip()
                 continue
             raise SkillError(
-                f"line {line_no}: unexpected content before first step: {stripped!r}")
+                f"line {line_no}: unexpected content before first step: {stripped!r}"
+            )
         # step 块内的键行
         if stripped.startswith("tool:"):
             if cur["tool"]:
-                raise SkillError(f"line {line_no}: duplicate 'tool:' in step {cur['name']!r}")
-            cur["tool"] = stripped[len("tool:"):].strip()
+                raise SkillError(
+                    f"line {line_no}: duplicate 'tool:' in step {cur['name']!r}"
+                )
+            cur["tool"] = stripped[len("tool:") :].strip()
             if not cur["tool"]:
-                raise SkillError(f"line {line_no}: empty 'tool:' in step {cur['name']!r}")
+                raise SkillError(
+                    f"line {line_no}: empty 'tool:' in step {cur['name']!r}"
+                )
         elif stripped == "args:" or stripped.startswith("args:"):
             if stripped != "args:":
                 raise SkillError(
-                    f"line {line_no}: 'args:' must be a bare block header, got {stripped!r}")
+                    f"line {line_no}: 'args:' must be a bare block header, got {stripped!r}"
+                )
             if cur["args"]:
-                raise SkillError(f"line {line_no}: duplicate 'args:' in step {cur['name']!r}")
+                raise SkillError(
+                    f"line {line_no}: duplicate 'args:' in step {cur['name']!r}"
+                )
             in_args = True
         elif stripped.startswith("save_as:"):
             if cur["save_as"]:
-                raise SkillError(f"line {line_no}: duplicate 'save_as:' in step {cur['name']!r}")
-            cur["save_as"] = stripped[len("save_as:"):].strip()
+                raise SkillError(
+                    f"line {line_no}: duplicate 'save_as:' in step {cur['name']!r}"
+                )
+            cur["save_as"] = stripped[len("save_as:") :].strip()
             if not cur["save_as"]:
-                raise SkillError(f"line {line_no}: empty 'save_as:' in step {cur['name']!r}")
+                raise SkillError(
+                    f"line {line_no}: empty 'save_as:' in step {cur['name']!r}"
+                )
         else:
             raise SkillError(
-                f"line {line_no}: unrecognized line in step {cur['name']!r}: {stripped!r}")
+                f"line {line_no}: unrecognized line in step {cur['name']!r}: {stripped!r}"
+            )
 
     finalize()
     if not steps:
-        raise SkillError(f"line 1: skill {name!r} has no steps ('## step: <name>' blocks)")
+        raise SkillError(
+            f"line 1: skill {name!r} has no steps ('## step: <name>' blocks)"
+        )
     return Skill(name=name, description=description, steps=tuple(steps))
 
 
@@ -230,8 +262,9 @@ def _first_url(text: str) -> str | None:
     return match.group(0).rstrip(_URL_TRAILING)
 
 
-def _render_template(template: str, *, input_text: str,
-                     step_outputs: Mapping[str, str]) -> str:
+def _render_template(
+    template: str, *, input_text: str, step_outputs: Mapping[str, str]
+) -> str:
     """渲染 ``{input}`` 与 ``{steps.<step>.text|first_url}``；未知引用抛 SkillError。"""
 
     def repl(match: re.Match[str]) -> str:
@@ -239,19 +272,23 @@ def _render_template(template: str, *, input_text: str,
         if expr == "input":
             return input_text
         if expr.startswith("steps."):
-            parts = expr[len("steps."):].split(".")
+            parts = expr[len("steps.") :].split(".")
             if len(parts) != 2 or not all(parts):
                 raise SkillError(f"malformed step reference {{{expr}}}")
             step_name, field_name = parts
             if step_name not in step_outputs:
-                raise SkillError(f"unknown or not-yet-executed step reference {step_name!r}")
+                raise SkillError(
+                    f"unknown or not-yet-executed step reference {step_name!r}"
+                )
             output = step_outputs[step_name]
             if field_name == "text":
                 return output
             if field_name == "first_url":
                 url = _first_url(output)
                 if url is None:
-                    raise SkillError(f"step {step_name!r} output contains no http(s) URL")
+                    raise SkillError(
+                        f"step {step_name!r} output contains no http(s) URL"
+                    )
                 return url
             raise SkillError(f"unknown field {field_name!r} in {{{expr}}}")
         raise SkillError(f"unknown placeholder {{{expr}}}")
@@ -262,8 +299,15 @@ def _render_template(template: str, *, input_text: str,
 # ---------- 执行 ----------
 
 
-def run_skill(skill: Skill, tools: ToolRegistry, *, gateway: ActionGatewayLike | None = None,
-              input_text: str = "", output_chars: int = SKILL_OUTPUT_CHARS) -> SkillResult:
+def run_skill(
+    skill: Skill,
+    tools: ToolRegistry,
+    *,
+    gateway: ActionGatewayLike | None = None,
+    input_text: str = "",
+    output_chars: int = SKILL_OUTPUT_CHARS,
+    cancel=None,
+) -> SkillResult:
     """逐步串行执行 Skill，返回如实结局（任何异常都不炸，落在 status/receipts）。
 
     - 每步先把 args 模板渲染成纯字符串，再按 ``ToolRegistry`` 门控：
@@ -283,14 +327,22 @@ def run_skill(skill: Skill, tools: ToolRegistry, *, gateway: ActionGatewayLike |
     step_outputs: dict[str, str] = {}
 
     def finish(status: str) -> SkillResult:
-        return SkillResult(status=status, outputs=dict(outputs), receipts=tuple(receipts))
+        return SkillResult(
+            status=status, outputs=dict(outputs), receipts=tuple(receipts)
+        )
 
+    if len(skill.steps) > 16:
+        return SkillResult(status="failed", receipts=("skill:step-limit",))
     for step in skill.steps:
+        if cancel is not None and cancel.is_set():
+            return finish("failed")
         tag = f"skill:{skill.name}:step:{step.name}:tool:{step.tool}"
         # 1. 模板渲染（执行期才发现的引用错误 → failed）
         try:
             rendered = {
-                key: _render_template(value, input_text=input_text, step_outputs=step_outputs)
+                key: _render_template(
+                    value, input_text=input_text, step_outputs=step_outputs
+                )
                 for key, value in step.args.items()
             }
         except SkillError as exc:
@@ -310,15 +362,17 @@ def run_skill(skill: Skill, tools: ToolRegistry, *, gateway: ActionGatewayLike |
                 receipts.append(f"{tag}:denied:no-gateway")
                 return finish("denied")
             intent = PluginAction(
-                plugin_id=spec.plugin_id, action=spec.action,
-                target=rendered.get("target", ""), args=dict(rendered),
+                plugin_id=spec.plugin_id,
+                action=spec.action,
+                target=rendered.get("target", ""),
+                args=dict(rendered),
             ).to_intent()
             try:
                 receipt = str(gateway.dispatch(intent))
             except Exception as exc:
                 receipts.append(f"{tag}:fail:gateway-{type(exc).__name__}")
                 return finish("failed")
-            if receipt.startswith("plugin:") and ":ok:" in receipt:
+            if receipt.startswith(f"plugin:{spec.plugin_id}:{spec.action}:ok:"):
                 output = receipt.split(":ok:", 1)[-1]
             elif receipt.startswith(("plugin-hold:", "plugin-denied:")):
                 receipts.append(f"{tag}:denied:{receipt[:200]}")

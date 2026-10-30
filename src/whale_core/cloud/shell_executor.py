@@ -12,6 +12,7 @@
 审计：调用方应把 ``policy.audit(command, verdict)`` 落台账；本模块不记日志、
 不回显密钥；命令输出可能含敏感信息，由调用方决定展示范围（回执截断）。
 """
+
 from __future__ import annotations
 
 import os
@@ -30,7 +31,9 @@ DEFAULT_OUTPUT_CHARS = 4000
 
 # 环境变量：先取最小 allowlist，再剔除密钥样式的键
 _ENV_ALLOW = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "TZ", "TMPDIR")
-_ENV_SECRET_RE = re.compile(r"(?:_KEY|_TOKEN|_SECRET|_PASSWORD|_CREDENTIAL|API_?KEY)", re.IGNORECASE)
+_ENV_SECRET_RE = re.compile(
+    r"(?:_KEY|_TOKEN|_SECRET|_PASSWORD|_CREDENTIAL|API_?KEY)", re.IGNORECASE
+)
 
 
 @dataclass(frozen=True)
@@ -44,8 +47,10 @@ class ExecutionResult:
 
     def as_dict(self) -> dict:
         return {
-            "status": self.status, "exit_code": self.exit_code,
-            "stdout": self.stdout, "stderr": self.stderr,
+            "status": self.status,
+            "exit_code": self.exit_code,
+            "stdout": self.stdout,
+            "stderr": self.stderr,
             "duration_s": round(self.duration_s, 3),
             "verdict_reason": self.verdict_reason,
         }
@@ -99,59 +104,59 @@ class ShellExecutor:
     def verdict(self, command: str, *, is_owner: bool) -> ShellVerdict:
         return self.policy.command_verdict(command, is_owner=is_owner)
 
-    def run(self, command: str, *, is_owner: bool, cwd: str | None = None) -> ExecutionResult:
+    def run(
+        self, command: str, *, is_owner: bool, cwd: str | None = None
+    ) -> ExecutionResult:
         started = time.monotonic()
         verdict = self.policy.command_verdict(command, is_owner=is_owner)
         if not verdict.allowed:
-            return ExecutionResult("denied", None, "", "",
-                                   time.monotonic() - started, verdict.reason)
+            return ExecutionResult(
+                "denied", None, "", "", time.monotonic() - started, verdict.reason
+            )
         cwd_resolved = self._resolve_cwd(cwd)
         if cwd_resolved is None:
-            return ExecutionResult("denied", None, "", "",
-                                   time.monotonic() - started,
-                                   f"cwd not in whitelist: {cwd!r}")
-        preexec = None
-        if self.drop_to_user:
-            try:
-                preexec = _demote_fn(self.drop_to_user)
-            except KeyError:
-                return ExecutionResult("error", None, "", "",
-                                       time.monotonic() - started,
-                                       f"unknown drop user: {self.drop_to_user!r}")
-        try:
-            proc = subprocess.Popen(
-                ["/bin/sh", "-c", command],
-                cwd=cwd_resolved,
-                env=_scrub_env(self.env),
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                errors="replace",  # 非法字节替换——解码异常不得逃逸 run() 契约
-                start_new_session=True,  # 独立进程组，超时整组强杀
-                preexec_fn=preexec,
+            return ExecutionResult(
+                "denied",
+                None,
+                "",
+                "",
+                time.monotonic() - started,
+                f"cwd not in whitelist: {cwd!r}",
             )
-        except OSError as exc:
-            return ExecutionResult("error", None, "", "",
-                                   time.monotonic() - started, type(exc).__name__)
-        try:
-            out, err = proc.communicate(timeout=self.timeout_s)
-        except subprocess.TimeoutExpired:
+        kwargs = {}
+        if self.drop_to_user:
+            import pwd
+
             try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-            try:
-                out, err = proc.communicate(timeout=5)  # 强杀后收集残余输出
-            except subprocess.TimeoutExpired:
-                out, err = "", ""
-            return ExecutionResult("timeout", None,
-                                   (out or "")[: self.output_chars],
-                                   (err or "")[: self.output_chars],
-                                   time.monotonic() - started, f"killed after {self.timeout_s}s")
-        duration = time.monotonic() - started
-        status = "success" if proc.returncode == 0 else "failed"
-        return ExecutionResult(status, proc.returncode,
-                               (out or "")[: self.output_chars],
-                               (err or "")[: self.output_chars],
-                               duration)
+                pw = pwd.getpwnam(self.drop_to_user)
+                kwargs = {"user": pw.pw_uid, "group": pw.pw_gid, "extra_groups": []}
+            except KeyError:
+                return ExecutionResult(
+                    "error",
+                    None,
+                    "",
+                    "",
+                    time.monotonic() - started,
+                    "unknown drop user",
+                )
+        from whale_core.cloud.container_executor import bounded_process
+
+        result = bounded_process(
+            ["/bin/sh", "-c", command],
+            cwd=cwd_resolved,
+            env=_scrub_env(self.env),
+            timeout=self.timeout_s,
+            output_bytes=self.output_chars * 4,
+            **kwargs,
+        )
+        return ExecutionResult(
+            result["status"],
+            result["exit_code"],
+            result["stdout"][: self.output_chars],
+            result["stderr"][: self.output_chars],
+            result["duration_s"],
+            result.get("error", ""),
+        )
 
     def _resolve_cwd(self, cwd: str | None) -> str | None:
         """cwd 为空 → 临时目录；给了 cwd 时必须落在白名单内（未配白名单一律拒）。"""

@@ -1,0 +1,12 @@
+.git
+**/node_modules
+**/dist
+**/__pycache__
+.pytest_cache
+.venv
+.env
+.env.*
+*.sqlite3*
+*.db*
+*.pcm
+*.log

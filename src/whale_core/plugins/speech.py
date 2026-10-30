@@ -15,6 +15,7 @@
 错误分类（``SpeechError.kind``）：config / auth / quota / server / network /
 bad_response——与 core.deepseek.ModelError 同款思路，供宿主做可理解报错与回退。
 """
+
 from __future__ import annotations
 
 import json
@@ -24,6 +25,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Protocol
+from whale_core.core.network import open_provider_request, validate_provider_config
 
 from whale_core.plugins.manifest import PluginManifest
 from whale_core.plugins.registry import PluginRegistry
@@ -62,6 +64,7 @@ def _is_local_or_private_http(url: str) -> bool:
     if host == "localhost":
         return True
     import ipaddress
+
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
@@ -72,15 +75,13 @@ def _is_local_or_private_http(url: str) -> bool:
 class ASRProvider(Protocol):
     """语音识别能力契约：音频字节 → 文本。"""
 
-    def transcribe(self, audio: bytes, *, lang: str = "zh") -> str:
-        ...
+    def transcribe(self, audio: bytes, *, lang: str = "zh") -> str: ...
 
 
 class TTSProvider(Protocol):
     """语音合成能力契约：文本 → 音频字节。"""
 
-    def synthesize(self, text: str, *, voice: str = "", rate: float = 1.0) -> bytes:
-        ...
+    def synthesize(self, text: str, *, voice: str = "", rate: float = 1.0) -> bytes: ...
 
 
 def _classify_http_error(exc: urllib.error.HTTPError) -> SpeechError:
@@ -95,14 +96,15 @@ def _classify_http_error(exc: urllib.error.HTTPError) -> SpeechError:
     return SpeechError("bad_response", f"speech HTTP error ({status})", status=status)
 
 
-def _multipart_form_data(fields: dict[str, str],
-                         file_field: str, filename: str, data: bytes,
-                         boundary: str) -> bytes:
+def _multipart_form_data(
+    fields: dict[str, str], file_field: str, filename: str, data: bytes, boundary: str
+) -> bytes:
     """手搓 multipart/form-data 请求体（stdlib 无现成构造器）。
 
     安全审查修正：字段值做 CR/LF/引号白名单过滤（防表单部件注入）。
     """
     import re as _re
+
     _safe = _re.compile(r"^[A-Za-z0-9._\-]+$")
     crlf = b"\r\n"
     out = bytearray()
@@ -117,8 +119,9 @@ def _multipart_form_data(fields: dict[str, str],
     out += b"--" + boundary.encode() + crlf
     if not _re.compile(r"^[A-Za-z0-9._\-]+$").fullmatch(str(filename)):
         raise ValueError("multipart filename contains unsafe characters")
-    out += (f'Content-Disposition: form-data; name="{file_field}"; '
-            f'filename="{filename}"').encode() + crlf
+    out += (
+        f'Content-Disposition: form-data; name="{file_field}"; filename="{filename}"'
+    ).encode() + crlf
     out += b"Content-Type: application/octet-stream" + crlf + crlf
     out += data + crlf
     out += b"--" + boundary.encode() + b"--" + crlf
@@ -133,15 +136,35 @@ class _OpenAICompatibleBase:
     SpeechError(config)（与 DeepSeekCompanion 同款延迟失败）。
     """
 
-    def __init__(self, *, api_key: str = "", base_url: str = _DEFAULT_BASE,
-                 model: str, timeout: float = 30.0):
+    def __init__(
+        self,
+        *,
+        api_key: str = "",
+        base_url: str = _DEFAULT_BASE,
+        model: str,
+        timeout: float = 30.0,
+    ):
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
         self.base_url = (base_url or _DEFAULT_BASE).rstrip("/")
-        if not (self.base_url.startswith("https://")
-                or _is_local_or_private_http(self.base_url)):
-            raise ValueError("speech provider requires HTTPS (or loopback/private HTTP)")
+        if not (
+            self.base_url.startswith("https://")
+            or _is_local_or_private_http(self.base_url)
+        ):
+            raise ValueError(
+                "speech provider requires HTTPS (or loopback/private HTTP)"
+            )
         self.model = model
         self.timeout = timeout
+        validate_provider_config(
+            self.base_url, timeout, allow_http=_is_local_or_private_http(self.base_url)
+        )
+
+    def healthcheck(self):
+        return (
+            True
+            if self.api_key or _is_local_or_private_http(self.base_url)
+            else "missing credentials"
+        )
 
     def _require_key(self) -> None:
         if not self.api_key and not _is_local_or_private_http(self.base_url):
@@ -160,33 +183,51 @@ class OpenAICompatibleASR(_OpenAICompatibleBase):
     音频字节上限 25MB（超限 ValueError）；响应取 JSON 的 ``text`` 字段。
     """
 
-    def __init__(self, *, api_key: str = "", base_url: str = _DEFAULT_BASE,
-                 model: str = "whisper-1", timeout: float = 30.0):
-        super().__init__(api_key=api_key, base_url=base_url, model=model, timeout=timeout)
+    def __init__(
+        self,
+        *,
+        api_key: str = "",
+        base_url: str = _DEFAULT_BASE,
+        model: str = "whisper-1",
+        timeout: float = 30.0,
+    ):
+        super().__init__(
+            api_key=api_key, base_url=base_url, model=model, timeout=timeout
+        )
 
     def transcribe(self, audio: bytes, *, lang: str = "zh") -> str:
         if not isinstance(audio, (bytes, bytearray)):
             raise TypeError("audio must be bytes")
         if len(audio) > _MAX_AUDIO_BYTES:
             raise ValueError(
-                f"audio too large: {len(audio)} bytes > {_MAX_AUDIO_BYTES} (25MB)")
+                f"audio too large: {len(audio)} bytes > {_MAX_AUDIO_BYTES} (25MB)"
+            )
         self._require_key()
         boundary = "----whale" + secrets.token_hex(16)
         body = _multipart_form_data(
             {"model": self.model, "language": lang},
-            "file", "audio.wav", bytes(audio), boundary)
+            "file",
+            "audio.wav",
+            bytes(audio),
+            boundary,
+        )
         req = urllib.request.Request(
-            self.base_url + "/audio/transcriptions", data=body,
+            self.base_url + "/audio/transcriptions",
+            data=body,
             headers=self._headers(f"multipart/form-data; boundary={boundary}"),
-            method="POST")
+            method="POST",
+        )
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as response:
-                raw = response.read()
+            with open_provider_request(req, timeout=self.timeout) as response:
+                raw = response.read(1024 * 1024 + 1)
+                if len(raw) > 1024 * 1024:
+                    raise SpeechError("bad_response", "ASR response too large")
         except urllib.error.HTTPError as exc:
             raise _classify_http_error(exc) from exc
         except (urllib.error.URLError, TimeoutError) as exc:
-            raise SpeechError("network",
-                              f"speech network error: {type(exc).__name__}") from exc
+            raise SpeechError(
+                "network", f"speech network error: {type(exc).__name__}"
+            ) from exc
         try:
             data = json.loads(raw.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -205,9 +246,18 @@ class OpenAICompatibleTTS(_OpenAICompatibleBase):
     application/octet-stream）→ SpeechError(bad_response)。
     """
 
-    def __init__(self, *, api_key: str = "", base_url: str = _DEFAULT_BASE,
-                 model: str = "tts-1", voice: str = "alloy", timeout: float = 30.0):
-        super().__init__(api_key=api_key, base_url=base_url, model=model, timeout=timeout)
+    def __init__(
+        self,
+        *,
+        api_key: str = "",
+        base_url: str = _DEFAULT_BASE,
+        model: str = "tts-1",
+        voice: str = "alloy",
+        timeout: float = 30.0,
+    ):
+        super().__init__(
+            api_key=api_key, base_url=base_url, model=model, timeout=timeout
+        )
         self.voice = voice
 
     def synthesize(self, text: str, *, voice: str = "", rate: float = 1.0) -> bytes:
@@ -215,34 +265,49 @@ class OpenAICompatibleTTS(_OpenAICompatibleBase):
             raise ValueError(f"text too long: {len(text)} chars > {_MAX_TTS_CHARS}")
         self._require_key()
         rate = max(_RATE_MIN, min(_RATE_MAX, float(rate)))
-        body = json.dumps({
-            "model": self.model,
-            "input": text,
-            "voice": voice or self.voice,
-            "speed": rate,
-        }, ensure_ascii=False).encode("utf-8")
+        body = json.dumps(
+            {
+                "model": self.model,
+                "input": text,
+                "voice": voice or self.voice,
+                "speed": rate,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
         req = urllib.request.Request(
-            self.base_url + "/audio/speech", data=body,
-            headers=self._headers("application/json"), method="POST")
+            self.base_url + "/audio/speech",
+            data=body,
+            headers=self._headers("application/json"),
+            method="POST",
+        )
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as response:
-                content_type = (response.headers.get("Content-Type") or "").split(";")[0]
-                audio = response.read()
+            with open_provider_request(req, timeout=self.timeout) as response:
+                content_type = (response.headers.get("Content-Type") or "").split(";")[
+                    0
+                ]
+                audio = response.read(32 * 1024 * 1024 + 1)
+                if not audio or len(audio) > 32 * 1024 * 1024:
+                    raise SpeechError("bad_response", "invalid TTS response size")
         except urllib.error.HTTPError as exc:
             raise _classify_http_error(exc) from exc
         except (urllib.error.URLError, TimeoutError) as exc:
-            raise SpeechError("network",
-                              f"speech network error: {type(exc).__name__}") from exc
+            raise SpeechError(
+                "network", f"speech network error: {type(exc).__name__}"
+            ) from exc
         media = content_type.strip().lower()
         if not (media.startswith("audio/") or media == "application/octet-stream"):
             raise SpeechError(
-                "bad_response", f"tts returned non-audio content-type: {media or '?'}")
+                "bad_response", f"tts returned non-audio content-type: {media or '?'}"
+            )
         return audio
 
 
-def register_speech(registry: PluginRegistry, *,
-                    asr: ASRProvider | None = None,
-                    tts: TTSProvider | None = None) -> dict:
+def register_speech(
+    registry: PluginRegistry,
+    *,
+    asr: ASRProvider | None = None,
+    tts: TTSProvider | None = None,
+) -> dict:
     """注册 ASR/TTS 两个 model 插件（plugin_id="speech_asr"/"speech_tts"）。
 
     provider 必须由宿主显式注入（**没有 mock 默认**——mock 模式已按 owner
@@ -256,16 +321,22 @@ def register_speech(registry: PluginRegistry, *,
         )
     registry.register(
         PluginManifest(
-            plugin_id="speech_asr", name="ASR（语音识别）", version="1.0.0",
-            kind="model", provides=(ASR_TRANSCRIBE,),
+            plugin_id="speech_asr",
+            name="ASR（语音识别）",
+            version="1.0.0",
+            kind="model",
+            provides=(ASR_TRANSCRIBE,),
             description="语音识别端点（OpenAI 兼容 /v1/audio/transcriptions）",
         ),
         provider=asr,
     )
     registry.register(
         PluginManifest(
-            plugin_id="speech_tts", name="TTS（语音合成）", version="1.0.0",
-            kind="model", provides=(TTS_SYNTHESIZE,),
+            plugin_id="speech_tts",
+            name="TTS（语音合成）",
+            version="1.0.0",
+            kind="model",
+            provides=(TTS_SYNTHESIZE,),
             description="语音合成端点（OpenAI 兼容 /v1/audio/speech）",
         ),
         provider=tts,

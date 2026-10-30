@@ -12,6 +12,7 @@ config/network 错误，绝不用罐装结果冒充真实能力。
 装配只组合已有组件（store/registry/manager/tools/companion/orchestrator），
 不发明新逻辑。
 """
+
 from __future__ import annotations
 
 import os
@@ -54,7 +55,7 @@ class RuntimeBundle:
 def _default_store(config_dir: str | None) -> MemoryStore:
     if config_dir:
         path = Path(config_dir)
-        path.mkdir(parents=True, exist_ok=True)
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
         return SqliteMemoryStore(path / "memory.sqlite3")
     return InMemoryStore()
 
@@ -68,54 +69,89 @@ def assemble_runtime(
 ) -> RuntimeBundle:
     """按配置档装配运行时。profile 非法 → ValueError。"""
     if profile not in PROFILE_NAMES:
-        raise ValueError(f"unknown profile {profile!r}（可选：{', '.join(PROFILE_NAMES)}）")
-    env = os.environ if env is None else env
+        raise ValueError(
+            f"unknown profile {profile!r}（可选：{', '.join(PROFILE_NAMES)}）"
+        )
+    env = dict(os.environ if env is None else env)
+    # Keep the existing QQ runner's opt-in provider variable names compatible.
+    for legacy, current in (
+        ("WHALE_IMAGE_BASE_URL", "IMAGE_BASE_URL"),
+        ("WHALE_IMAGE_API_KEY", "IMAGE_API_KEY"),
+        ("WHALE_IMAGE_MODEL", "IMAGE_MODEL"),
+        ("WHALE_SPEECH_BASE_URL", "ASR_BASE_URL"),
+        ("WHALE_SPEECH_BASE_URL", "TTS_BASE_URL"),
+        ("WHALE_SPEECH_API_KEY", "ASR_API_KEY"),
+        ("WHALE_SPEECH_API_KEY", "TTS_API_KEY"),
+    ):
+        if legacy in env and current not in env:
+            env[current] = env[legacy]
     store = store or _default_store(config_dir)
     registry = PluginRegistry()
-    manager = PluginManager(registry, store,
-                            secret_dir=(Path(config_dir) / 'secrets') if config_dir else None)
-    tools = ToolRegistry()
-    notes: list[str] = []
+    manager = PluginManager(
+        registry,
+        store,
+        secret_dir=(Path(config_dir) / "secrets") if config_dir else None,
+    )
+    import json
 
-    if profile == "cloud":
-        model = register_openai_compatible(
-            registry, api_key=env.get("DEEPSEEK_API_KEY"),
-            base_url=env.get("DEEPSEEK_BASE_URL"),
-            model=env.get("DEEPSEEK_MODEL"),
-        )
-        notes.append("cloud 档：DeepSeek（OpenAI 兼容）模型已注册（llm.chat）")
-        if not (env.get("DEEPSEEK_API_KEY") or "").strip():
-            notes.append("[warn] DEEPSEEK_API_KEY 未配置——模型调用会以 config 错误失败")
-    else:  # local
-        base_url = env.get("LOCAL_MODEL_BASE_URL", "http://127.0.0.1:11434/v1")
-        model_name = env.get("LOCAL_MODEL_NAME", "")
-        model = register_openai_compatible(
-            registry, plugin_id="local_model", name="本地模型端点",
-            api_key="", base_url=base_url,   # 回环端点允许空 key（deepseek.py R3）
-            model=model_name or None,
-        )
-        notes.append(f"local 档：本地端点 {model.base_url}（模型 {model.model}）")
+    config = {}
+    if config_dir:
+        path = Path(config_dir) / "config.json"
+        if path.exists():
+            config = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(config, dict):
+                raise ValueError("config.json must be an object")
+    from whale_core.plugins.builtin import wire_builtins
 
-    # 搜索/抓取与模型档位正交：两档都按 key 可用性挂载
-    if (env.get("TAVILY_API_KEY") or env.get("BRAVE_API_KEY")):
-        from whale_core.plugins.web_fetch import register_web_fetch
-        from whale_core.plugins.web_search import register_web_search, select_provider
-        register_web_search(registry, tools, provider=select_provider(env))
-        register_web_fetch(registry, tools)
-        notes.append("搜索/抓取工具已挂载（web.search / web.fetch）")
-    else:
-        notes.append("[warn] 无 TAVILY_API_KEY/BRAVE_API_KEY——搜索工具未挂载")
+    tools, model, notes = wire_builtins(manager, store, env, profile, config)
+    if config_dir:
+        manager.load_dir(Path(config_dir) / "manifests")
+    from whale_core.memory.hybrid import HybridCurator
 
-    companion = WhaleCompanion(store, model, curator=MemoryCurator(store))
-    # Explicit searches route to web.search; arbitrary LLM tool planning is opt-in.
-    # Safe if no search provider is installed: runtime reports capability unavailable.
-    llm_intent = env.get("WHALE_INTENT_MODEL_ENABLED", "") == "1"
-    intent_model = SearchIntentRouter(model=model, enable_llm=llm_intent)
-    if llm_intent:
-        notes.append("LLM 意图识别已启用（WHALE_INTENT_MODEL_ENABLED=1）")
-    orchestrator = ConversationOrchestrator(store, companion, tools=tools,
-                                            intent_model=intent_model)
+    class DynamicEmbedding:
+        def embed(self, texts):
+            provider = registry.provider_of("embedding")
+            if provider is None:
+                raise LookupError("embedding disabled")
+            return provider.embed(texts)
+
+    # Enable optional semantic retrieval only when explicitly selected.
+    class DynamicCurator(MemoryCurator):
+        def recall(self, query, *, limit=5):
+            if registry.provider_of("embedding") is not None:
+                return HybridCurator(store, embedder=DynamicEmbedding()).recall(
+                    query, limit=limit
+                )
+            return super().recall(query, limit=limit)
+
+    manager.watch_current()
+    companion = WhaleCompanion(store, model, curator=DynamicCurator(store))
+    llm_intent = env.get("WHALE_INTENT_MODEL_ENABLED", "") == "1" or bool(
+        store.get("settings:intent_model_enabled")
+        if store.get("settings:intent_model_enabled") is not None
+        else config.get("intent_model_enabled")
+    )
+
+    class IntentModelProxy:
+        def reply(self, text, **kwargs):
+            provider = registry.provider_of("intent_model")
+            if provider is not None:
+                from whale_core.core.budget import reserve
+
+                reserve(store, "model_calls")
+            return (provider or model).reply(text, **kwargs)
+
+    intent_model = SearchIntentRouter(model=IntentModelProxy(), enable_llm=llm_intent)
+    orchestrator = ConversationOrchestrator(
+        store, companion, tools=tools, intent_model=intent_model
+    )
     return RuntimeBundle(
-        profile=profile, store=store, registry=registry, manager=manager,
-        tools=tools, companion=companion, orchestrator=orchestrator, notes=notes,
+        profile=profile,
+        store=store,
+        registry=registry,
+        manager=manager,
+        tools=tools,
+        companion=companion,
+        orchestrator=orchestrator,
+        notes=notes,
     )

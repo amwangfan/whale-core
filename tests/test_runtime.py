@@ -20,8 +20,14 @@ class FakeBrain:
         self.reply_text = reply_text
 
     def reply(self, text, *, persona="", memories=(), history=()):
-        self.calls.append({"text": text, "memories": list(memories),
-                           "history": list(history), "persona": persona})
+        self.calls.append(
+            {
+                "text": text,
+                "memories": list(memories),
+                "history": list(history),
+                "persona": persona,
+            }
+        )
         return self.reply_text
 
 
@@ -53,6 +59,7 @@ def _plan_text(**kw):
 
 # ---------- 纯对话与捷径 ----------
 
+
 def test_plain_chat_without_intent_model():
     store, brain = InMemoryStore(), FakeBrain()
     orch = _orch(store, brain)
@@ -80,9 +87,12 @@ def test_empty_message():
 
 # ---------- 意图分流 ----------
 
+
 def test_chat_plan_goes_plain_chat():
     store, brain = InMemoryStore(), FakeBrain()
-    orch = _orch(store, brain, intent_model=ScriptedIntentModel(_plan_text(kind="chat")))
+    orch = _orch(
+        store, brain, intent_model=ScriptedIntentModel(_plan_text(kind="chat"))
+    )
     result = orch.handle_message("c", "聊聊")
     assert result.status == "answered"
     assert result.plan is not None and result.plan.kind == "chat"
@@ -91,15 +101,20 @@ def test_chat_plan_goes_plain_chat():
 def test_clarify_plan_voiced_through_persona():
     """澄清回复必须经陪伴人格产出（不直发意图模型原文——owner 报告的 AI 味 bug）。"""
     store, brain = InMemoryStore(), FakeBrain()
-    orch = _orch(store, brain, intent_model=ScriptedIntentModel(
-        _plan_text(kind="clarify", clarification_question="你想查哪个城市的天气？")))
+    orch = _orch(
+        store,
+        brain,
+        intent_model=ScriptedIntentModel(
+            _plan_text(kind="clarify", clarification_question="你想查哪个城市的天气？")
+        ),
+    )
     result = orch.handle_message("c", "帮我查天气")
     assert result.status == "clarify"
     assert result.reply == "好的呀"  # 回复来自陪伴模型（替身）
     assert brain.calls, "澄清必须调陪伴模型"
     sent = brain.calls[-1]["text"]
-    assert "你想查哪个城市的天气？" in sent   # 澄清要点作为数据注入
-    assert "人格语气" in sent                 # 带人格化指令
+    assert "你想查哪个城市的天气？" in sent  # 澄清要点作为数据注入
+    assert "人格语气" in sent  # 带人格化指令
     assert "系统提示" in sent
     # 澄清轮写入历史，后续对话有上下文
     orch2 = _orch(store, brain)  # 无意图模型走纯对话
@@ -119,6 +134,7 @@ def test_intent_parse_failure_falls_back_to_chat():
 def test_intent_model_error_falls_back_to_chat():
     def boom(text):
         raise RuntimeError("模型挂了")
+
     store, brain = InMemoryStore(), FakeBrain()
     orch = _orch(store, brain, intent_model=ScriptedIntentModel(boom))
     result = orch.handle_message("c", "你好")
@@ -128,15 +144,23 @@ def test_intent_model_error_falls_back_to_chat():
 
 # ---------- 任务执行 ----------
 
+
 def test_task_with_read_only_tool_executes_and_summarizes():
     store, brain = InMemoryStore(), FakeBrain()
     tools = ToolRegistry()
-    tools.register(ToolSpec(
-        name="search_web", capability="web.search",
-        handler=lambda args: "上海明天晴，26°C（来源：example.com）",
-    ))
-    orch = _orch(store, brain, intent_model=ScriptedIntentModel(
-        _plan_text(capabilities=["web.search"])), tools=tools)
+    tools.register(
+        ToolSpec(
+            name="search_web",
+            capability="web.search",
+            handler=lambda args: "上海明天晴，26°C（来源：example.com）",
+        )
+    )
+    orch = _orch(
+        store,
+        brain,
+        intent_model=ScriptedIntentModel(_plan_text(capabilities=["web.search"])),
+        tools=tools,
+    )
     result = orch.handle_message("c", "查一下上海明天天气")
     assert result.status == "answered"
     assert result.receipts[0].startswith("tool:search_web:ok:")
@@ -147,8 +171,13 @@ def test_task_with_read_only_tool_executes_and_summarizes():
 
 def test_unknown_capability_is_honest_failure():
     store, brain = InMemoryStore(), FakeBrain()
-    orch = _orch(store, brain, intent_model=ScriptedIntentModel(
-        _plan_text(capabilities=["media.video.generate"])))
+    orch = _orch(
+        store,
+        brain,
+        intent_model=ScriptedIntentModel(
+            _plan_text(capabilities=["media.video.generate"])
+        ),
+    )
     result = orch.handle_message("c", "给我生成视频")
     assert result.status == "failed"
     assert result.receipts == ("capability-unavailable:media.video.generate",)
@@ -158,11 +187,17 @@ def test_unknown_capability_is_honest_failure():
 def test_tool_handler_exception_does_not_crash():
     store, brain = InMemoryStore(), FakeBrain()
     tools = ToolRegistry()
+
     def bad(args):
         raise OSError("网络断了")
+
     tools.register(ToolSpec(name="search_web", capability="web.search", handler=bad))
-    orch = _orch(store, brain, intent_model=ScriptedIntentModel(
-        _plan_text(capabilities=["web.search"])), tools=tools)
+    orch = _orch(
+        store,
+        brain,
+        intent_model=ScriptedIntentModel(_plan_text(capabilities=["web.search"])),
+        tools=tools,
+    )
     result = orch.handle_message("c", "查天气")
     assert result.status == "failed"
     assert result.receipts[0] == "tool-fail:search_web:OSError"
@@ -171,10 +206,20 @@ def test_tool_handler_exception_does_not_crash():
 def test_risky_tool_without_plugin_mapping_denied():
     store, brain = InMemoryStore(), FakeBrain()
     tools = ToolRegistry()
-    tools.register(ToolSpec(name="send_mail", capability="email.send",
-                            risk_class="communicate", handler=lambda a: "sent"))
-    orch = _orch(store, brain, intent_model=ScriptedIntentModel(
-        _plan_text(capabilities=["email.send"])), tools=tools)
+    tools.register(
+        ToolSpec(
+            name="send_mail",
+            capability="email.send",
+            risk_class="communicate",
+            handler=lambda a: "sent",
+        )
+    )
+    orch = _orch(
+        store,
+        brain,
+        intent_model=ScriptedIntentModel(_plan_text(capabilities=["email.send"])),
+        tools=tools,
+    )
     result = orch.handle_message("c", "帮我发邮件")
     assert result.status == "denied"
     assert result.receipts == ("tool-denied:send_mail:risk-without-plugin-mapping",)
@@ -183,15 +228,28 @@ def test_risky_tool_without_plugin_mapping_denied():
 def test_risky_tool_via_gateway_hold_becomes_pending_approval():
     store, brain = InMemoryStore(), FakeBrain()
     tools = ToolRegistry()
-    tools.register(ToolSpec(name="send_mail", capability="email.send",
-                            risk_class="communicate",
-                            plugin_id="email", action="send_email"))
+    tools.register(
+        ToolSpec(
+            name="send_mail",
+            capability="email.send",
+            risk_class="communicate",
+            plugin_id="email",
+            action="send_email",
+        )
+    )
+
     class HoldGateway:
         def dispatch(self, intent):
             assert intent.kind == "plugin_action"
             return "plugin-hold:email:send_email"
-    orch = _orch(store, brain, intent_model=ScriptedIntentModel(
-        _plan_text(capabilities=["email.send"])), tools=tools, gateway=HoldGateway())
+
+    orch = _orch(
+        store,
+        brain,
+        intent_model=ScriptedIntentModel(_plan_text(capabilities=["email.send"])),
+        tools=tools,
+        gateway=HoldGateway(),
+    )
     result = orch.handle_message("c", "发邮件给老板")
     assert result.status == "pending_approval"
     assert result.reply == "好的呀"  # 人格化回复来自陪伴模型
@@ -201,14 +259,27 @@ def test_risky_tool_via_gateway_hold_becomes_pending_approval():
 def test_risky_tool_via_gateway_ok():
     store, brain = InMemoryStore(), FakeBrain()
     tools = ToolRegistry()
-    tools.register(ToolSpec(name="send_mail", capability="email.send",
-                            risk_class="communicate",
-                            plugin_id="email", action="send_email"))
+    tools.register(
+        ToolSpec(
+            name="send_mail",
+            capability="email.send",
+            risk_class="communicate",
+            plugin_id="email",
+            action="send_email",
+        )
+    )
+
     class OkGateway:
         def dispatch(self, intent):
             return "plugin:email:send_email:ok:已投递"
-    orch = _orch(store, brain, intent_model=ScriptedIntentModel(
-        _plan_text(capabilities=["email.send"])), tools=tools, gateway=OkGateway())
+
+    orch = _orch(
+        store,
+        brain,
+        intent_model=ScriptedIntentModel(_plan_text(capabilities=["email.send"])),
+        tools=tools,
+        gateway=OkGateway(),
+    )
     result = orch.handle_message("c", "发邮件")
     assert result.status == "answered"
     assert "plugin:email:send_email:ok" in result.receipts[0]
@@ -218,14 +289,28 @@ def test_model_self_approval_field_is_dropped_and_ignored():
     """模型输出 approved=true 不得产生任何授权效果（roadmap §6.1）。"""
     store, brain = InMemoryStore(), FakeBrain()
     tools = ToolRegistry()
-    tools.register(ToolSpec(name="pay", capability="shop.pay", risk_class="transaction",
-                            plugin_id="shop", action="pay"))
+    tools.register(
+        ToolSpec(
+            name="pay",
+            capability="shop.pay",
+            risk_class="transaction",
+            plugin_id="shop",
+            action="pay",
+        )
+    )
+
     class DenyGateway:
         def dispatch(self, intent):
             return "plugin-denied:shop:pay:not-approved"
+
     plan = _plan_text(capabilities=["shop.pay"], approved=True, risk_hint="safe")
-    orch = _orch(store, brain, intent_model=ScriptedIntentModel(plan),
-                 tools=tools, gateway=DenyGateway())
+    orch = _orch(
+        store,
+        brain,
+        intent_model=ScriptedIntentModel(plan),
+        tools=tools,
+        gateway=DenyGateway(),
+    )
     result = orch.handle_message("c", "买下这个")
     assert result.plan is not None
     assert not hasattr(result.plan, "approved")  # 未定义字段被丢弃
@@ -235,10 +320,15 @@ def test_model_self_approval_field_is_dropped_and_ignored():
 def test_tool_output_truncated():
     store, brain = InMemoryStore(), FakeBrain()
     tools = ToolRegistry()
-    tools.register(ToolSpec(name="fetch", capability="web.fetch",
-                            handler=lambda a: "x" * 5000))
-    orch = _orch(store, brain, intent_model=ScriptedIntentModel(
-        _plan_text(capabilities=["web.fetch"])), tools=tools)
+    tools.register(
+        ToolSpec(name="fetch", capability="web.fetch", handler=lambda a: "x" * 5000)
+    )
+    orch = _orch(
+        store,
+        brain,
+        intent_model=ScriptedIntentModel(_plan_text(capabilities=["web.fetch"])),
+        tools=tools,
+    )
     result = orch.handle_message("c", "读这个网页")
     assert result.status == "answered"
     assert len(result.receipts[0]) <= 1200 + len("tool:fetch:ok:")
@@ -246,8 +336,9 @@ def test_tool_output_truncated():
 
 def test_task_id_propagates():
     store, brain = InMemoryStore(), FakeBrain()
-    orch = _orch(store, brain, intent_model=ScriptedIntentModel(
-        _plan_text(task_id="task-42")))
+    orch = _orch(
+        store, brain, intent_model=ScriptedIntentModel(_plan_text(task_id="task-42"))
+    )
     result = orch.handle_message("c", "做事")
     assert result.task_id == "task-42"
 
@@ -274,10 +365,19 @@ def test_task_turn_is_recorded_for_console():
     """任务轨迹落库（roadmap §5.2-6：区分模型提出与实际执行）。"""
     store, brain = InMemoryStore(), FakeBrain()
     tools = ToolRegistry()
-    tools.register(ToolSpec(name="search_web", capability="web.search",
-                            handler=lambda a: "结果文本"))
-    orch = _orch(store, brain, intent_model=ScriptedIntentModel(
-        _plan_text(capabilities=["web.search"], task_id="t-99")), tools=tools)
+    tools.register(
+        ToolSpec(
+            name="search_web", capability="web.search", handler=lambda a: "结果文本"
+        )
+    )
+    orch = _orch(
+        store,
+        brain,
+        intent_model=ScriptedIntentModel(
+            _plan_text(capabilities=["web.search"], task_id="t-99")
+        ),
+        tools=tools,
+    )
     result = orch.handle_message("c", "查一下")
     assert result.task_id == "t-99"
     record = store.get("task:t-99")
@@ -288,6 +388,7 @@ def test_task_turn_is_recorded_for_console():
 
 
 # ---------- 意图上下文与澄清克制（owner 反馈修复） ----------
+
 
 def test_intent_model_receives_context_with_history_and_memory():
     """意图模型不再瞎问：上下文摘要含近期历史与相关记忆。"""
@@ -300,17 +401,18 @@ def test_intent_model_receives_context_with_history_and_memory():
             return '{"goal":"闲聊","kind":"chat"}'
 
     orch = _orch(store, brain, intent_model=CapturingIntent())
-    orch.handle_message("c1", "我在成都")          # 写入历史
-    orch.handle_message("c1", "明天有雨吗")        # 第二轮应带上轮上下文
+    orch.handle_message("c1", "我在成都")  # 写入历史
+    orch.handle_message("c1", "明天有雨吗")  # 第二轮应带上轮上下文
     ctx = captured["context"]
-    assert "我在成都" in ctx          # 近期历史进入意图上下文
-    assert "用户：" in ctx            # 角色前缀
+    assert "我在成都" in ctx  # 近期历史进入意图上下文
+    assert "用户：" in ctx  # 角色前缀
 
     # 记忆也进入
     orch2 = _orch(store, brain, intent_model=CapturingIntent())
     store_curator = MemoryCurator(store)
-    store_curator.remember("用户在成都", source="t", evidence_id="e",
-                           stable_fact=True, consent=True)
+    store_curator.remember(
+        "用户在成都", source="t", evidence_id="e", stable_fact=True, consent=True
+    )
     orch2.handle_message("c1", "明天天气怎么样")
     assert "用户在成都" in captured["context"]
 
@@ -334,3 +436,63 @@ def test_clarify_prompt_guides_defaults():
     assert "默认用户所在地" in prompt
     assert "确实无法推断才" in prompt
     assert "用户在成都" in prompt  # 上下文进提示词
+
+
+def test_partial_task_does_not_claim_success():
+    store, brain = InMemoryStore(), FakeBrain()
+    tools = ToolRegistry()
+    tools.register(ToolSpec(name="first", capability="first", handler=lambda _: "done"))
+    orch = _orch(
+        store,
+        brain,
+        intent_model=ScriptedIntentModel(_plan_text(capabilities=["first", "missing"])),
+        tools=tools,
+    )
+    result = orch.handle_message("c", "do both")
+    assert result.status == "failed"
+    assert len(result.receipts) == 2
+
+
+def test_tool_round_budget_is_enforced():
+    store, brain = InMemoryStore(), FakeBrain()
+    tools = ToolRegistry()
+    ran = []
+    for name in ("first", "second"):
+        tools.register(
+            ToolSpec(
+                name=name,
+                capability=name,
+                handler=lambda _, n=name: ran.append(n) or "done",
+            )
+        )
+    orch = _orch(
+        store,
+        brain,
+        intent_model=ScriptedIntentModel(_plan_text(capabilities=["first", "second"])),
+        tools=tools,
+    )
+    orch.max_tool_rounds = 1
+    assert orch.handle_message("c", "do both").status == "failed"
+    assert ran == ["first"]
+
+
+def test_tool_augmented_prompt_is_not_stored_as_user_speech():
+    store, brain = InMemoryStore(), FakeBrain()
+    tools = ToolRegistry()
+    tools.register(
+        ToolSpec(
+            name="first",
+            capability="first",
+            handler=lambda _: "untrusted tool material",
+        )
+    )
+    orch = _orch(
+        store,
+        brain,
+        intent_model=ScriptedIntentModel(_plan_text(capabilities=["first"])),
+        tools=tools,
+    )
+    orch.handle_message("c", "original message")
+    from whale_core.memory.history import load_history
+
+    assert load_history(store, "c")[0]["content"] == "original message"

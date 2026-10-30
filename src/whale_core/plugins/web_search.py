@@ -12,6 +12,7 @@ provider 选择链（调研依据见 docs/gap-analysis-2026-10-30.md 与调研�
 所有 provider：stdlib urllib + JSON/HTMLParser；api_key 只从构造参数或 env 读，
 **永不进入日志与异常文本**。
 """
+
 from __future__ import annotations
 
 import json
@@ -52,8 +53,7 @@ class SearchResult:
 
 
 class SearchProvider(Protocol):
-    def search(self, query: str, *, limit: int = 5) -> list[SearchResult]:
-        ...
+    def search(self, query: str, *, limit: int = 5) -> list[SearchResult]: ...
 
 
 def _clamp(query: str, limit: int) -> tuple[str, int]:
@@ -82,11 +82,15 @@ def _no_redirect_opener():
     return _NO_REDIRECT_OPENER
 
 
-def _http_json(req: urllib.request.Request, *, timeout: float, kind_map_auth: bool = True) -> Any:
+def _http_json(
+    req: urllib.request.Request, *, timeout: float, kind_map_auth: bool = True
+) -> Any:
     """共享 HTTP+JSON 调用与错误分类；响应体/异常文本永不回显 Authorization 内容。"""
     try:
         with _no_redirect_opener().open(req, timeout=timeout) as resp:
-            return json.loads(resp.read(_MAX_RESPONSE_BYTES).decode("utf-8", errors="replace"))
+            return json.loads(
+                resp.read(_MAX_RESPONSE_BYTES).decode("utf-8", errors="replace")
+            )
     except urllib.error.HTTPError as exc:
         status = exc.code
         if status in (401, 403) and kind_map_auth:
@@ -96,10 +100,14 @@ def _http_json(req: urllib.request.Request, *, timeout: float, kind_map_auth: bo
         if 500 <= status < 600:
             raise SearchError("network", f"search server error ({status})") from exc
         if 300 <= status < 400:
-            raise SearchError("bad_response", f"search endpoint redirect refused ({status})") from exc
+            raise SearchError(
+                "bad_response", f"search endpoint redirect refused ({status})"
+            ) from exc
         raise SearchError("bad_response", f"search HTTP error ({status})") from exc
     except (urllib.error.URLError, TimeoutError) as exc:
-        raise SearchError("network", f"search network error: {type(exc).__name__}") from exc
+        raise SearchError(
+            "network", f"search network error: {type(exc).__name__}"
+        ) from exc
     except json.JSONDecodeError as exc:
         raise SearchError("bad_response", "search returned invalid JSON") from exc
 
@@ -107,8 +115,13 @@ def _http_json(req: urllib.request.Request, *, timeout: float, kind_map_auth: bo
 class TavilyProvider:
     """Tavily 搜索（默认档；免费额度 1000 credits/月）。key: 构造或 TAVILY_API_KEY。"""
 
-    def __init__(self, *, api_key: str | None = None, timeout: float = 10.0,
-                 env: Mapping[str, str] | None = None):
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        timeout: float = 10.0,
+        env: Mapping[str, str] | None = None,
+    ):
         env = os.environ if env is None else env
         self.api_key = api_key if api_key is not None else env.get("TAVILY_API_KEY", "")
         self.timeout = timeout
@@ -119,9 +132,15 @@ class TavilyProvider:
         q, n = _clamp(query, limit)
         body = json.dumps({"query": q, "max_results": n}).encode()
         req = urllib.request.Request(
-            TAVILY_URL, data=body, method="POST",
-            headers={"Authorization": f"Bearer {self.api_key}",
-                     "Content-Type": "application/json", "User-Agent": USER_AGENT})
+            TAVILY_URL,
+            data=body,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "User-Agent": USER_AGENT,
+            },
+        )
         data = _http_json(req, timeout=self.timeout)
         results = data.get("results") if isinstance(data, dict) else None
         if not isinstance(results, list):
@@ -130,20 +149,27 @@ class TavilyProvider:
         for item in results[:n]:
             if not isinstance(item, dict):
                 continue
-            out.append(SearchResult(
-                title=str(item.get("title") or "")[:300],
-                url=str(item.get("url") or "")[:2000],
-                snippet=str(item.get("content") or "")[:500],
-                source="tavily",
-            ))
+            out.append(
+                SearchResult(
+                    title=str(item.get("title") or "")[:300],
+                    url=str(item.get("url") or "")[:2000],
+                    snippet=str(item.get("content") or "")[:500],
+                    source="tavily",
+                )
+            )
         return out
 
 
 class BraveProvider:
     """Brave 搜索。key: 构造或 BRAVE_API_KEY。"""
 
-    def __init__(self, *, api_key: str | None = None, timeout: float = 10.0,
-                 env: Mapping[str, str] | None = None):
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        timeout: float = 10.0,
+        env: Mapping[str, str] | None = None,
+    ):
         env = os.environ if env is None else env
         self.api_key = api_key if api_key is not None else env.get("BRAVE_API_KEY", "")
         self.timeout = timeout
@@ -153,9 +179,14 @@ class BraveProvider:
             raise SearchError("config", "BRAVE_API_KEY not configured")
         q, n = _clamp(query, limit)
         url = BRAVE_URL + "?q=" + urllib.parse.quote(q) + f"&count={n}"
-        req = urllib.request.Request(url, headers={
-            "X-Subscription-Token": self.api_key,
-            "Accept": "application/json", "User-Agent": USER_AGENT})
+        req = urllib.request.Request(
+            url,
+            headers={
+                "X-Subscription-Token": self.api_key,
+                "Accept": "application/json",
+                "User-Agent": USER_AGENT,
+            },
+        )
         data = _http_json(req, timeout=self.timeout)
         web = data.get("web") if isinstance(data, dict) else None
         results = (web or {}).get("results")
@@ -165,12 +196,14 @@ class BraveProvider:
         for item in results[:n]:
             if not isinstance(item, dict):
                 continue
-            out.append(SearchResult(
-                title=str(item.get("title") or "")[:300],
-                url=str(item.get("url") or "")[:2000],
-                snippet=str(item.get("description") or "")[:500],
-                source="brave",
-            ))
+            out.append(
+                SearchResult(
+                    title=str(item.get("title") or "")[:300],
+                    url=str(item.get("url") or "")[:2000],
+                    snippet=str(item.get("description") or "")[:500],
+                    source="brave",
+                )
+            )
         return out
 
 
@@ -189,7 +222,10 @@ class _DdgParser(HTMLParser):
         cls = attrs_d.get("class", "") or ""
         if tag == "a" and "result__a" in cls:
             self._in_a = True
-            self._cur = {"url": self._unwrap(attrs_d.get("href", "") or ""), "title": ""}
+            self._cur = {
+                "url": self._unwrap(attrs_d.get("href", "") or ""),
+                "title": "",
+            }
         elif "result__snippet" in cls and tag in ("a", "td", "div"):
             self._in_snippet = True
             self._cur.setdefault("snippet", "")
@@ -237,32 +273,39 @@ class DuckDuckGoHtmlProvider:
     def search(self, query: str, *, limit: int = 5) -> list[SearchResult]:
         q, n = _clamp(query, limit)
         url = DDG_URL + "?q=" + urllib.parse.quote(q)
-        req = urllib.request.Request(url, headers={
-            "User-Agent": USER_AGENT, "Accept": "text/html"})
+        req = urllib.request.Request(
+            url, headers={"User-Agent": USER_AGENT, "Accept": "text/html"}
+        )
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 status = getattr(resp, "status", 200)
                 html = resp.read(1024 * 1024).decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
             if exc.code == 202:
-                raise SearchError("blocked", "duckduckgo rate-limited (202 anomaly page)") from exc
+                raise SearchError(
+                    "blocked", "duckduckgo rate-limited (202 anomaly page)"
+                ) from exc
             if exc.code == 429:
                 raise SearchError("blocked", "duckduckgo rate limited (429)") from exc
             raise SearchError("network", f"duckduckgo HTTP error ({exc.code})") from exc
         except (urllib.error.URLError, TimeoutError) as exc:
-            raise SearchError("network", f"duckduckgo network error: {type(exc).__name__}") from exc
+            raise SearchError(
+                "network", f"duckduckgo network error: {type(exc).__name__}"
+            ) from exc
         if status == 202 or "anomaly" in html.lower() and "result__a" not in html:
             raise SearchError("blocked", "duckduckgo rate-limited (202 anomaly page)")
         parser = _DdgParser()
         parser.feed(html)
         out = []
         for item in parser.results[:n]:
-            out.append(SearchResult(
-                title=item.get("title", "").strip()[:300],
-                url=item.get("url", "")[:2000],
-                snippet=item.get("snippet", "")[:500],
-                source="duckduckgo",
-            ))
+            out.append(
+                SearchResult(
+                    title=item.get("title", "").strip()[:300],
+                    url=item.get("url", "")[:2000],
+                    snippet=item.get("snippet", "")[:500],
+                    source="duckduckgo",
+                )
+            )
         return [r for r in out if r.url]
 
 
@@ -289,7 +332,13 @@ class _SearchExecutor:
     def __init__(self, provider: SearchProvider):
         self.provider = provider
 
-    def execute(self, action: str, target: str, args: Mapping[str, Any]) -> tuple[bool, str]:
+    def healthcheck(self):
+        key = getattr(self.provider, "api_key", None)
+        return "missing credentials" if key == "" else True
+
+    def execute(
+        self, action: str, target: str, args: Mapping[str, Any]
+    ) -> tuple[bool, str]:
         query = str(args.get("query") or target or "")
         try:
             results = self.provider.search(query, limit=int(args.get("limit", 5) or 5))
@@ -311,7 +360,9 @@ def register_web_search(
     provider = provider if provider is not None else select_provider()
 
     def _handler(args: Mapping[str, Any]) -> str:
-        results = provider.search(str(args.get("query") or ""), limit=int(args.get("limit", 5) or 5))
+        results = provider.search(
+            str(args.get("query") or ""), limit=int(args.get("limit", 5) or 5)
+        )
         if not results:
             return "没有找到结果"
         lines = [f"{r.title} — {r.snippet}（{r.url}）" for r in results[:5]]
@@ -319,19 +370,27 @@ def register_web_search(
 
     registry.register(
         PluginManifest(
-            plugin_id="web_search", name="网页搜索", version="1.0.0",
-            kind="output", actions=("search",), action_risk={"search": "read_only"},
+            plugin_id="web_search",
+            name="网页搜索",
+            version="1.0.0",
+            kind="output",
+            actions=("search",),
+            action_risk={"search": "read_only"},
             description="可插拔搜索 provider（tavily/brave/duckduckgo 回退链）",
         ),
         executor=_SearchExecutor(provider),
     )
     if tools is not None:
         from whale_core.core.runtime import ToolRegistry, ToolSpec
+
         if not isinstance(tools, ToolRegistry):
             raise TypeError("tools must be a ToolRegistry")
-        tools.register(ToolSpec(
-            name="search_web", capability="web.search",
-            description="搜索网页并返回带来源的结果",
-            handler=_handler,
-        ))
+        tools.register(
+            ToolSpec(
+                name="search_web",
+                capability="web.search",
+                description="搜索网页并返回带来源的结果",
+                handler=_handler,
+            )
+        )
     return provider

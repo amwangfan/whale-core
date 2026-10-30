@@ -1,4 +1,5 @@
 """Unifies text companionship and realtime transcripts without blocking the audio loop."""
+
 from __future__ import annotations
 import queue
 import threading
@@ -10,18 +11,32 @@ from whale_core.memory.curation import MemoryCurator
 from whale_core.memory.continuity import remember_episode, build_continuity_context
 from whale_core.memory.history import append_turn, load_history
 
+
 class TextCompanion(Protocol):
-    def reply(self, text: str, *, persona: str = "", memories=(), history=()) -> str: ...
+    def reply(
+        self, text: str, *, persona: str = "", memories=(), history=()
+    ) -> str: ...
+
 
 class WhaleCompanion:
-    def __init__(self, store: MemoryStore, model: TextCompanion, *, curator: MemoryCurator | None = None):
+    def __init__(
+        self,
+        store: MemoryStore,
+        model: TextCompanion,
+        *,
+        curator: MemoryCurator | None = None,
+    ):
         self.store, self.model, self.curator = store, model, curator
 
-    def chat(self, text: str, *, conversation_id: str = "") -> str:
+    def chat(
+        self, text: str, *, conversation_id: str = "", original_text: str | None = None
+    ) -> str:
         ctx = build_continuity_context(self.store)
         if self.curator is not None:
-            memories = [str(hit.record.content.get("summary", ""))
-                        for hit in self.curator.recall(text)]
+            memories = [
+                str(hit.record.content.get("summary", ""))
+                for hit in self.curator.recall(text)
+            ]
             # 修复「只写不读」断层：近期对话情节作为会话记忆补充注入——
             # curated 事实在前（证据语义优先），近期聊天情节在后，去重封顶 8 条。
             for record in ctx.recent_episodes:
@@ -37,24 +52,35 @@ class WhaleCompanion:
             memories = [str(r.content.get("summary", "")) for r in ctx.recent_episodes]
         # 多轮历史：显式传 conversation_id 才启用（默认保持单轮行为，兼容旧调用方）。
         history = load_history(self.store, conversation_id) if conversation_id else ()
-        response = self.model.reply(text, persona=ctx.persona_summary, memories=memories,
-                                    history=history)
-        remember_episode(self.store, summary=f"用户：{text[:500]}\n鲸鱼：{response[:500]}",
-                         key=f"ep:chat:{uuid4().hex}", tags=("chat",))
+        response = self.model.reply(
+            text, persona=ctx.persona_summary, memories=memories, history=history
+        )
+        stored_text = text if original_text is None else original_text
+        remember_episode(
+            self.store,
+            summary=f"用户：{stored_text[:500]}\n鲸鱼：{response[:500]}",
+            key=f"ep:chat:{uuid4().hex}",
+            tags=("chat",),
+            extra={"conversation_id": conversation_id},
+        )
         if conversation_id:
-            append_turn(self.store, conversation_id, text, response)
+            append_turn(self.store, conversation_id, stored_text, response)
         return response
+
 
 class RealtimeTranscriptRecorder:
     """Bounded, nonblocking queue for transcripts; no audio and no DeepSeek call.
     Events dropped on overload rather than delaying realtime sound.
     """
+
     def __init__(self, store: MemoryStore, capacity: int = 64):
         self.store = store
         self.events: queue.Queue[tuple[str, str, str]] = queue.Queue(maxsize=capacity)
         self._stop = threading.Event()
         self.failed_count = 0
-        self._worker = threading.Thread(target=self._run, daemon=True, name="whale-memory")
+        self._worker = threading.Thread(
+            target=self._run, daemon=True, name="whale-memory"
+        )
         self._worker.start()
 
     def offer(self, session_id: str, role: str, text: str) -> bool:
@@ -73,9 +99,13 @@ class RealtimeTranscriptRecorder:
             except queue.Empty:
                 continue
             try:
-                remember_episode(self.store, summary=text, key=f"ep:call:{uuid4().hex}",
-                                 tags=("call", role, f"session:{sid}"),
-                                 extra={"role": role, "session_id": sid})
+                remember_episode(
+                    self.store,
+                    summary=text,
+                    key=f"ep:call:{uuid4().hex}",
+                    tags=("call", role, f"session:{sid}"),
+                    extra={"role": role, "session_id": sid},
+                )
             except Exception:
                 # A failed disk write must not kill the consumer thread and
                 # leave close() blocked on unfinished queue items.

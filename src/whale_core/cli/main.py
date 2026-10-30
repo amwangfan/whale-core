@@ -74,7 +74,6 @@ token/key/secret/password 的值一律以 *** 脱敏。
 """
 
 
-
 # ---------------------------------------------------------------------------
 # 公共小工具
 # ---------------------------------------------------------------------------
@@ -89,7 +88,7 @@ def _config_dir(args: argparse.Namespace) -> Path:
 
 def _ensure_layout(config_dir: Path) -> None:
     """确保 config-dir 与 manifests/ 存在（不触碰 config.json）。"""
-    config_dir.mkdir(parents=True, exist_ok=True)
+    config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     (config_dir / MANIFESTS_DIRNAME).mkdir(exist_ok=True)
 
 
@@ -112,10 +111,12 @@ def _load_config(config_dir: Path) -> dict[str, Any] | None:
 def _build_manager(config_dir: Path) -> PluginManager:
     """默认装配：SqliteMemoryStore + PluginRegistry + 显式清单目录加载。"""
     _ensure_layout(config_dir)
-    store = _open_store(config_dir)
-    manager = PluginManager(PluginRegistry(), store, secret_dir=config_dir / 'secrets')
-    manager.load_dir(config_dir / MANIFESTS_DIRNAME)
-    return manager
+    from whale_core.profiles import assemble_runtime
+
+    config = _load_config(config_dir) or {}
+    return assemble_runtime(
+        str(config.get("profile") or "local"), config_dir=str(config_dir)
+    ).manager
 
 
 def _print_load_errors(manager: PluginManager) -> None:
@@ -128,7 +129,9 @@ def _print_load_errors(manager: PluginManager) -> None:
 API_TOKEN_FILENAME = "api_token"
 
 
-def _resolve_api_token(config_dir: Path, env: Mapping[str, str] | None = None) -> tuple[str, str]:
+def _resolve_api_token(
+    config_dir: Path, env: Mapping[str, str] | None = None
+) -> tuple[str, str]:
     """解析 API token，返回 (token, 来源说明)。优先级：env > 持久化文件 > 新生成。
 
     新生成只发生一次：token 打印一次后写入 config-dir/api_token（0600）复用。
@@ -136,26 +139,35 @@ def _resolve_api_token(config_dir: Path, env: Mapping[str, str] | None = None) -
     import secrets as _secrets
 
     env = os.environ if env is None else env
-    if (tok := (env.get("WHALE_API_TOKEN") or "").strip()):
+    if tok := (env.get("WHALE_API_TOKEN") or "").strip():
         return tok, "环境变量 WHALE_API_TOKEN"
     token_path = config_dir / API_TOKEN_FILENAME
     try:
         existing = token_path.read_text(encoding="utf-8").strip()
         if existing:
+            os.chmod(token_path, 0o600)
             return existing, f"配置文件 {token_path}"
     except OSError:
         pass
     token = _secrets.token_hex(24)
     _ensure_layout(config_dir)
-    token_path.write_text(token + "\n", encoding="utf-8")
-    os.chmod(token_path, 0o600)
+    try:
+        fd = os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        # Another startup won the token creation race.
+        return _resolve_api_token(config_dir, env)
+    with os.fdopen(fd, "w", encoding="utf-8") as output:
+        output.write(token + "\n")
     return token, f"新生成（已存入 {token_path}，权限 600）"
 
 
 def _repo_static_dir() -> Path | None:
     """仓库内 web/dist 构建产物（存在才托管）。"""
     dist = Path(__file__).resolve().parents[3] / "web" / "dist"
-    return dist if (dist / "index.html").is_file() else None
+    if (dist / "index.html").is_file():
+        return dist
+    packaged = Path(__file__).resolve().parents[1] / "web_dist"
+    return packaged if (packaged / "index.html").is_file() else None
 
 
 def _build_api_server(args: argparse.Namespace) -> tuple[Any, str, str]:
@@ -169,12 +181,19 @@ def _build_api_server(args: argparse.Namespace) -> tuple[Any, str, str]:
     bundle = assemble_runtime(profile, config_dir=str(config_dir))
     token, token_source = _resolve_api_token(config_dir)
     ctx = ApiContext(
-        store=bundle.store, manager=bundle.manager,
-        orchestrator=bundle.orchestrator, curator=bundle.companion.curator,
+        store=bundle.store,
+        manager=bundle.manager,
+        orchestrator=bundle.orchestrator,
+        curator=bundle.companion.curator,
         profile=profile,
+        bundle=bundle,
+        config_dir=str(config_dir),
     )
     server = WhaleApiServer(
-        ctx, host=args.host, port=args.port, token=token,
+        ctx,
+        host=args.host,
+        port=args.port,
+        token=token,
         static_dir=str(_repo_static_dir() or "") or None,
     )
     for note in bundle.notes:
@@ -189,7 +208,9 @@ def _cmd_api(args: argparse.Namespace) -> int:
     if token_source.startswith("新生成"):
         print(f"[api] 新 token（只显示这一次）：{token}")
     if _repo_static_dir() is None:
-        print("[api] 提示：web/dist 未构建（pnpm -C web build），控制台静态页不可用，API 正常")
+        print(
+            "[api] 提示：web/dist 未构建（pnpm -C web build），控制台静态页不可用，API 正常"
+        )
     if args.host not in ("127.0.0.1", "localhost", "::1"):
         print("[api] ⚠️ 监听非回环地址——请确认有 TLS 反代与鉴权前置（roadmap §5.4）")
     print("[api] Ctrl+C 停止")
@@ -197,8 +218,10 @@ def _cmd_api(args: argparse.Namespace) -> int:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\n[api] 已停止")
+    finally:
+        server.stop()
+        server.ctx.store.close()
     return 0
-
 
 
 def _status_row(manager: PluginManager, plugin_id: str) -> dict[str, Any] | None:
@@ -252,7 +275,7 @@ def _cmd_setup(args: argparse.Namespace) -> int:
             )
             return 2
 
-    config_dir.mkdir(parents=True, exist_ok=True)
+    config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     manifests_dir = config_dir / MANIFESTS_DIRNAME
     manifests_dir.mkdir(exist_ok=True)
     readme = manifests_dir / "README.txt"
@@ -266,7 +289,9 @@ def _cmd_setup(args: argparse.Namespace) -> int:
     print(f"记忆库：{config_dir / MEMORY_FILENAME}")
     print(f"插件清单目录：{manifests_dir}（格式见 README.txt）")
     if profile == "local":
-        print("local 档无需 API key；`whale run` 连接本地模型端点（默认 127.0.0.1:11434，先确认它在跑）。")
+        print(
+            "local 档无需 API key；`whale run` 连接本地模型端点（默认 127.0.0.1:11434，先确认它在跑）。"
+        )
     elif profile == "cloud":
         env_name = config["model"]["api_key_env"]
         print(f"cloud 档将从环境变量 {env_name} 读取 key（不会写入配置文件）。")
@@ -333,6 +358,17 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         except Exception as exc:
             rep.fail(f"记忆库不可用：{type(exc).__name__}")
 
+    runtime_bundle = None
+    if store is not None and config and config.get("profile") in ("local", "cloud"):
+        from whale_core.profiles import assemble_runtime
+
+        try:
+            runtime_bundle = assemble_runtime(
+                config["profile"], store=store, config_dir=str(config_dir)
+            )
+        except ValueError:
+            rep.fail("运行时配置无效")
+
     # 4. 模型 provider 配置状态（绝不回显 key 本体）
     if config is None:
         rep.warn("模型 provider 状态未知（config.json 不可用）")
@@ -341,12 +377,24 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         model = config.get("model") or {}
         if profile == "cloud":
             env_name = str(model.get("api_key_env") or "DEEPSEEK_API_KEY")
-            if os.environ.get(env_name):
+            managed = (
+                runtime_bundle.manager.runtime_config("deepseek")
+                if runtime_bundle
+                else {}
+            )
+            if managed.get("api_key") or os.environ.get(env_name):
                 rep.ok(f"模型 provider：cloud 档 key 已配置（env {env_name}）")
             else:
-                rep.fail(f"模型 provider：cloud 档 key 未配置（请设置环境变量 {env_name}）")
+                rep.fail(
+                    f"模型 provider：cloud 档 key 未配置（请设置环境变量 {env_name}）"
+                )
         elif profile == "local":
-            base_url = str(model.get("base_url") or "")
+            managed = (
+                runtime_bundle.manager.runtime_config("local_model")
+                if runtime_bundle
+                else {}
+            )
+            base_url = str(managed.get("base_url") or model.get("base_url") or "")
             if base_url:
                 rep.ok(f"模型 provider：local 档端点 {base_url}")
             else:
@@ -363,8 +411,13 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 
     # 6. 已加载插件健康状态
     if store is not None and manifests_dir.is_dir():
-        manager = PluginManager(PluginRegistry(), store)
-        manager.load_dir(manifests_dir)
+        manager = (
+            runtime_bundle.manager
+            if runtime_bundle
+            else PluginManager(PluginRegistry(), store)
+        )
+        if runtime_bundle is None:
+            manager.load_dir(manifests_dir)
         for err in manager.errors:
             rep.warn(f"插件清单 {err.get('path', '?')}: {err.get('error', '?')}")
         rows = manager.status()
@@ -381,6 +434,8 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             else:
                 rep.fail(msg)
 
+    if store is not None:
+        store.close()
     return 1 if rep.failures else 0
 
 
@@ -393,6 +448,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     config_dir = _config_dir(args)
     _ensure_layout(config_dir)
     from whale_core.profiles import assemble_runtime
+
     config = _load_config(config_dir) or {}
     profile = str(config.get("profile") or "local")
     try:
@@ -505,9 +561,7 @@ def _cmd_plugins_doctor(args: argparse.Namespace) -> int:
     manager = _build_manager(_config_dir(args))
     _print_load_errors(manager)
     health = manager.healthcheck(args.plugin_id)
-    print(
-        f"插件 {health['plugin_id']}：{health['status']}（{health['detail']}）"
-    )
+    print(f"插件 {health['plugin_id']}：{health['status']}（{health['detail']}）")
     return 0 if health["status"] in ("healthy", "unknown", "disabled") else 1
 
 
@@ -543,9 +597,7 @@ def _cmd_memory_import(args: argparse.Namespace) -> int:
     store = _open_store(config_dir)
     try:
         with in_path.open("r", encoding="utf-8") as file_obj:
-            imported, skipped = import_jsonl(
-                store, file_obj, overwrite=args.overwrite
-            )
+            imported, skipped = import_jsonl(store, file_obj, overwrite=args.overwrite)
     finally:
         store.close()
     print(f"imported {imported}, skipped {skipped}")
@@ -565,6 +617,35 @@ def _add_config_dir(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _cmd_backup(args):
+    from whale_core.memory.backup import create_backup, restore_backup
+
+    config_dir = _config_dir(args)
+    try:
+        if args.command == "restore":
+            if not args.offline:
+                print(
+                    "恢复前必须停止 API、QQ 和音频桥等所有写入进程，再加 --offline。",
+                    file=sys.stderr,
+                )
+                return 2
+            from whale_core.core.lease import RuntimeLease
+
+            with RuntimeLease(config_dir):
+                restore_backup(args.path, config_dir / MEMORY_FILENAME)
+        else:
+            store = _open_store(config_dir)
+            try:
+                create_backup(store, args.path)
+            finally:
+                store.close()
+        print("已完成；密钥文件需另行私密备份。")
+        return 0
+    except (OSError, ValueError, __import__("sqlite3").DatabaseError) as exc:
+        print("备份/恢复失败：" + type(exc).__name__, file=sys.stderr)
+        return 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="whale",
@@ -574,11 +655,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_setup = sub.add_parser("setup", help="初始化配置目录与 config.json")
     p_setup.add_argument(
-        "--profile", choices=sorted(PROFILE_CONFIGS), default=None,
+        "--profile",
+        choices=sorted(PROFILE_CONFIGS),
+        default=None,
         help="档位：cloud（DeepSeek，需 env key）/ local（本地端点，默认）",
     )
     p_setup.add_argument(
-        "--non-interactive", action="store_true",
+        "--non-interactive",
+        action="store_true",
         help="非交互模式：不提问，直接写默认值（stdin 非 tty 时自动生效）",
     )
     p_setup.add_argument(
@@ -611,7 +695,9 @@ def build_parser() -> argparse.ArgumentParser:
         _add_config_dir(p)
         p.set_defaults(func=func)
 
-    p_api = sub.add_parser("api", help="启动管理 API + 控制台静态托管（默认 127.0.0.1）")
+    p_api = sub.add_parser(
+        "api", help="启动管理 API + 控制台静态托管（默认 127.0.0.1）"
+    )
     p_api.add_argument("--host", default="127.0.0.1", help="监听地址（默认 127.0.0.1）")
     p_api.add_argument("--port", type=int, default=8080, help="监听端口（默认 8080）")
     _add_config_dir(p_api)
@@ -631,6 +717,18 @@ def build_parser() -> argparse.ArgumentParser:
     _add_config_dir(mi)
     mi.set_defaults(func=_cmd_memory_import)
 
+    for command in ("backup", "restore"):
+        bp = sub.add_parser(
+            command,
+            help="SQLite 一致快照" if command == "backup" else "离线恢复并保留原库快照",
+        )
+        bp.add_argument("path")
+        if command == "restore":
+            bp.add_argument(
+                "--offline", action="store_true", help="确认已停止全部数据库写入进程"
+            )
+        _add_config_dir(bp)
+        bp.set_defaults(func=_cmd_backup)
     return parser
 
 
@@ -638,7 +736,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     """CLI 入口：解析参数并分派，返回退出码（不自行 sys.exit）。"""
     parser = build_parser()
     args = parser.parse_args(argv)
-    return int(args.func(args))
+    from whale_core.core.lease import RuntimeBusy
+
+    try:
+        return int(args.func(args))
+    except RuntimeBusy:
+        print(
+            "此配置目录已有运行中的服务，请先停止再启动第二个服务或恢复数据。",
+            file=sys.stderr,
+        )
+        return 2
 
 
 if __name__ == "__main__":

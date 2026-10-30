@@ -19,6 +19,8 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
+from functools import wraps
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,13 +49,24 @@ _MANIFEST_KEYS = (
     "api_version",
 )
 _WIRING_KEYS = ("executor", "input_adapter", "provider")  # 对齐 PluginRegistry.register
-_SECRET_HINTS = ("token", "key", "secret", "password", "passwd",
-                 "credential", "auth", "session", "cookie", "private")
+_SECRET_HINTS = (
+    "token",
+    "key",
+    "secret",
+    "password",
+    "passwd",
+    "credential",
+    "auth",
+    "session",
+    "cookie",
+    "private",
+)
 
 # config_schema 最小子集的 type → Python 类型
 _CONFIG_TYPES: dict[str, tuple[type, ...]] = {
     "string": (str,),
-    "number": (int, float),  # bool 另行排除
+    "number": (int, float),
+    "integer": (int,),  # bool 另行排除
     "boolean": (bool,),
     "object": (dict,),
     "array": (list,),
@@ -74,6 +87,15 @@ class PluginState:
     error: str = ""  # status=error 时的原因（异常类型名，不含敏感参数）
 
 
+def _synchronized(method):
+    @wraps(method)
+    def call(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return call
+
+
 class PluginManager:
     """显式清单加载 + 启停生命周期 + 健康检查 + 配置管理。
 
@@ -91,6 +113,8 @@ class PluginManager:
         factories: Mapping[str, Callable[[], Mapping[str, Any] | None]] | None = None,
         secret_dir: str | Path | None = None,
     ) -> None:
+        self._lock = threading.RLock()
+        self._seen = {}
         self._registry = registry
         self._store = store
         self._factories = dict(factories or {})
@@ -101,6 +125,76 @@ class PluginManager:
         self._secret_dir = Path(secret_dir) if secret_dir is not None else None
         self._secret_cache: dict[str, dict[str, Any]] = {}
         self.errors: list[dict[str, str]] = []
+
+    def configure_factory(
+        self,
+        plugin_id: str,
+        factory: Callable,
+        *,
+        defaults: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Trusted host wiring, installed before loading its manifest."""
+        self._factories[plugin_id] = factory
+        if (
+            defaults is not None
+            and self._store.get(self._config_key(plugin_id)) is None
+        ):
+            # Loading the manifest is necessary for schema-aware secret splitting.
+            self._initial_defaults = getattr(self, "_initial_defaults", {})
+            self._initial_defaults[plugin_id] = dict(defaults)
+
+    def schema(self, plugin_id: str) -> dict:
+        if plugin_id not in self._states:
+            raise KeyError(plugin_id)
+        import copy
+
+        value = copy.deepcopy(self._schemas.get(plugin_id) or {})
+        for name, spec in (value.get("properties") or {}).items():
+            if isinstance(spec, dict) and (
+                spec.get("format") == "secret"
+                or any(h in name.lower() for h in _SECRET_HINTS)
+            ):
+                spec.pop("default", None)
+                spec["format"] = "secret"
+        return value
+
+    @_synchronized
+    def restart(self, plugin_id: str) -> None:
+        state = self._states[plugin_id]
+        if state.status == "enabled":
+            self._registry.unregister(plugin_id)
+            self._activate(plugin_id)
+
+    def _fingerprint(self, plugin_id):
+        return json.dumps(
+            [
+                self._store.get(self._state_key(plugin_id)),
+                self._store.get(self._config_key(plugin_id)),
+            ],
+            sort_keys=True,
+        )
+
+    @_synchronized
+    def refresh(self):
+        """Apply state/config changes made by another CLI process at call boundaries."""
+        for pid, state in self._states.items():
+            fingerprint = self._fingerprint(pid)
+            previous = self._seen.get(pid)
+            self._seen[pid] = fingerprint
+            if previous is None or previous == fingerprint:
+                continue
+            persisted = self._store.get(self._state_key(pid)) or {}
+            if persisted.get("enabled"):
+                if state.status == "enabled":
+                    self.restart(pid)
+                else:
+                    self.enable(pid)
+            elif state.status == "enabled":
+                self.disable(pid)
+            self._seen[pid] = self._fingerprint(pid)
+
+    def watch_current(self):
+        self._seen = {pid: self._fingerprint(pid) for pid in self._states}
 
     @property
     def registry(self) -> PluginRegistry:
@@ -123,6 +217,7 @@ class PluginManager:
     # 清单加载
     # ------------------------------------------------------------------
 
+    @_synchronized
     def load_dir(self, path: str | Path) -> list[str]:
         """读目录下全部 ``*.json``（按文件名排序），逐个解析为 PluginManifest。
 
@@ -156,12 +251,34 @@ class PluginManager:
                     {"path": str(file), "error": f"{type(exc).__name__}: {exc}"}
                 )
                 continue
+            transport = raw.get("transport")
+            if transport is not None:
+                if transport != "http" or not manifest.actions:
+                    self.errors.append(
+                        {
+                            "path": str(file),
+                            "error": "only explicit HTTP action transport is supported",
+                        }
+                    )
+                    continue
+                from whale_core.plugins.bridge import HttpPluginExecutor
+
+                self.configure_factory(
+                    manifest.plugin_id,
+                    lambda pid=manifest.plugin_id: {
+                        "executor": HttpPluginExecutor(pid, self.runtime_config(pid))
+                    },
+                )
             if self._load(manifest, schema, source=str(file)):
                 loaded.append(manifest.plugin_id)
         return loaded
 
+    @_synchronized
     def load_manifest(
-        self, manifest: PluginManifest, *, config_schema: Mapping[str, Any] | None = None
+        self,
+        manifest: PluginManifest,
+        *,
+        config_schema: Mapping[str, Any] | None = None,
     ) -> None:
         """同 load_dir 的单条加载（供代码侧直接用）；失败记 self.errors 不抛出。"""
         self._load(manifest, config_schema, source=f"manifest:{manifest.plugin_id}")
@@ -197,22 +314,32 @@ class PluginManager:
             self._schemas.pop(pid, None)
         state = PluginState(plugin_id=pid, status="loaded", manifest=manifest)
         self._states[pid] = state
+        defaults = getattr(self, "_initial_defaults", {}).pop(pid, None)
+        if defaults is not None:
+            self.set_config(pid, defaults)
         # Upgrade legacy configs which stored plain secret values in SQLite.
         # A missing/unwritable private directory is reported as an error rather
         # than silently leaving tokens in the ordinary kv.
         previous = self._store.get(self._config_key(pid))
         if isinstance(previous, Mapping):
             properties = (schema or {}).get("properties") or {}
-            names = {name for name, spec in properties.items()
-                     if isinstance(spec, Mapping) and spec.get("format") == "secret"}
+            names = {
+                name
+                for name, spec in properties.items()
+                if isinstance(spec, Mapping) and spec.get("format") == "secret"
+            }
             sanitized, _ = self._partition_secrets(previous, names)
             # Do NOT write markers back to the private file on reload.
             if sanitized != dict(previous):
                 try:
                     self.set_config(pid, previous)
                 except (OSError, ValueError) as exc:
-                    self.errors.append({"path": source,
-                                        "error": "secret migration failed: " + type(exc).__name__})
+                    self.errors.append(
+                        {
+                            "path": source,
+                            "error": "secret migration failed: " + type(exc).__name__,
+                        }
+                    )
         # 回放持久化启停状态：enabled 的插件重新注册，disabled 的保持禁用
         persisted = self._store.get(self._state_key(pid))
         if isinstance(persisted, Mapping):
@@ -259,8 +386,10 @@ class PluginManager:
         self._store.put(
             self._state_key(plugin_id), {"enabled": True, "at": _utc_now_iso()}
         )
+        self._seen[plugin_id] = self._fingerprint(plugin_id)
         return True
 
+    @_synchronized
     def enable(self, plugin_id: str) -> None:
         """启用已加载插件（loaded/disabled/error → enabled）。
 
@@ -274,6 +403,7 @@ class PluginManager:
             return
         self._activate(plugin_id)
 
+    @_synchronized
     def disable(self, plugin_id: str) -> None:
         """注销 + 状态 disabled + kv 持久化。幂等（未加载时静默返回）。"""
         state = self._states.get(plugin_id)
@@ -285,11 +415,13 @@ class PluginManager:
         self._store.put(
             self._state_key(plugin_id), {"enabled": False, "at": _utc_now_iso()}
         )
+        self._seen[plugin_id] = self._fingerprint(plugin_id)
 
     # ------------------------------------------------------------------
     # 状态与健康检查
     # ------------------------------------------------------------------
 
+    @_synchronized
     def status(self) -> list[dict[str, Any]]:
         """每个已加载插件一行的状态视图。"""
         out: list[dict[str, Any]] = []
@@ -307,10 +439,15 @@ class PluginManager:
                     "provides": list(m.provides),
                     "actions": list(m.actions),
                     "inputs": list(m.inputs),
+                    "error": state.error,
+                    "description": m.description,
+                    "action_risk": dict(m.action_risk),
+                    "wired": pid in self._factories,
                 }
             )
         return out
 
+    @_synchronized
     def healthcheck(self, plugin_id: str) -> dict[str, str]:
         """{"plugin_id","status","detail"}。
 
@@ -332,8 +469,22 @@ class PluginManager:
                 "status": "disabled",
                 "detail": f"plugin status: {state.status}",
             }
-        executor = self._registry.executor(plugin_id)
+        executor = self._registry.provider_of(plugin_id) or self._registry.executor(
+            plugin_id
+        )
         check = getattr(executor, "healthcheck", None)
+        if (
+            not callable(check)
+            and executor is not None
+            and callable(getattr(executor, "info", None))
+        ):
+            return {
+                "plugin_id": plugin_id,
+                "status": "healthy"
+                if executor.info().get("configured")
+                else "unhealthy",
+                "detail": "configuration checked; network not tested",
+            }
         if not callable(check):
             return {
                 "plugin_id": plugin_id,
@@ -382,9 +533,16 @@ class PluginManager:
             if types is None:
                 continue  # 未声明 type 或未知 type：宽容放行
             value = config[name]
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                import math
+
+                if not math.isfinite(value):
+                    raise ValueError(f"config field {name!r} must be finite")
+            if "enum" in spec and value not in spec["enum"]:
+                raise ValueError(f"config field {name!r} is not an allowed option")
             # bool 是 int 子类，number 不得接受布尔
             if not isinstance(value, types) or (
-                spec.get("type") == "number" and isinstance(value, bool)
+                spec.get("type") in ("number", "integer") and isinstance(value, bool)
             ):
                 raise ValueError(
                     f"plugin {plugin_id!r} config field {name!r} "
@@ -424,8 +582,9 @@ class PluginManager:
                 os.unlink(name)
 
     @classmethod
-    def _partition_secrets(cls, data: Any, secret_fields: set[str],
-                           *, private: bool = False) -> tuple[Any, Any]:
+    def _partition_secrets(
+        cls, data: Any, secret_fields: set[str], *, private: bool = False
+    ) -> tuple[Any, Any]:
         """Return (nonsecret config, secrets) with the original shape preserved.
 
         A secret leaf becomes a marker in normal config. Store encrypted secrets
@@ -436,10 +595,14 @@ class PluginManager:
             plain, secrets = {}, {}
             for key, value in data.items():
                 key = str(key)
-                child_private = private or key in secret_fields or any(
-                    hint in key.lower() for hint in _SECRET_HINTS)
+                child_private = (
+                    private
+                    or key in secret_fields
+                    or any(hint in key.lower() for hint in _SECRET_HINTS)
+                )
                 sanitized, sensitive = cls._partition_secrets(
-                    value, secret_fields, private=child_private)
+                    value, secret_fields, private=child_private
+                )
                 plain[key] = sanitized
                 if sensitive is not None:
                     secrets[key] = sensitive
@@ -448,7 +611,8 @@ class PluginManager:
             plain, secrets = [], []
             for value in data:
                 sanitized, sensitive = cls._partition_secrets(
-                    value, secret_fields, private=private)
+                    value, secret_fields, private=private
+                )
                 plain.append(sanitized)
                 secrets.append(sensitive)
             return plain, secrets if any(x is not None for x in secrets) else None
@@ -461,12 +625,17 @@ class PluginManager:
         if sensitive is None:
             return plain
         if isinstance(plain, Mapping) and isinstance(sensitive, Mapping):
-            return {k: cls._restore_secrets(v, sensitive.get(k)) for k, v in plain.items()}
+            return {
+                k: cls._restore_secrets(v, sensitive.get(k)) for k, v in plain.items()
+            }
         if isinstance(plain, list) and isinstance(sensitive, list):
-            return [cls._restore_secrets(v, sensitive[i] if i < len(sensitive) else None)
-                    for i, v in enumerate(plain)]
+            return [
+                cls._restore_secrets(v, sensitive[i] if i < len(sensitive) else None)
+                for i, v in enumerate(plain)
+            ]
         return sensitive
 
+    @_synchronized
     def runtime_config(self, plugin_id: str) -> dict[str, Any]:
         """Trusted-host-only view; NEVER return this through the management API."""
         if plugin_id not in self._states:
@@ -474,6 +643,7 @@ class PluginManager:
         plain = self._store.get(self._config_key(plugin_id)) or {}
         return self._restore_secrets(plain, self._load_secrets(plugin_id))
 
+    @_synchronized
     def set_config(self, plugin_id: str, config: Mapping[str, Any]) -> None:
         """Validate and split secrets out of ordinary SQLite/kv configuration."""
         if plugin_id not in self._states:
@@ -482,11 +652,15 @@ class PluginManager:
         if schema is not None:
             self._validate_config(plugin_id, schema, config)
         properties = (schema or {}).get("properties") or {}
-        names = {name for name, spec in properties.items()
-                 if isinstance(spec, Mapping) and spec.get("format") == "secret"}
+        names = {
+            name
+            for name, spec in properties.items()
+            if isinstance(spec, Mapping) and spec.get("format") == "secret"
+        }
         plain, secrets = self._partition_secrets(dict(config), names)
         self._save_secrets(plugin_id, secrets or {})
         self._store.put(self._config_key(plugin_id), plain)
+        self._seen[plugin_id] = self._fingerprint(plugin_id)
 
     @classmethod
     def _apply_patch(cls, current: dict, changes: Mapping[str, Any]) -> None:
@@ -509,6 +683,7 @@ class PluginManager:
             else:
                 current[key] = value
 
+    @_synchronized
     def patch_config(self, plugin_id: str, changes: Mapping[str, Any]) -> None:
         """PATCH semantics: absent keys stay; null deletes; *** preserves secrets."""
         if not isinstance(changes, Mapping):
@@ -516,7 +691,13 @@ class PluginManager:
         current = self.runtime_config(plugin_id)
         self._apply_patch(current, changes)
         self.set_config(plugin_id, current)
+        self.restart(plugin_id)
+        if self._states[plugin_id].status == "error":
+            raise ValueError(
+                "configuration saved but activation failed; correct the provider settings"
+            )
 
+    @_synchronized
     def config_view(self, plugin_id: str) -> dict[str, Any]:
         """配置脱敏视图：secret 字段值替换为 "***"（存在）或 ""（未配置）。
 
@@ -547,8 +728,14 @@ class PluginManager:
         if key in schema_secrets or any(hint in lowered for hint in _SECRET_HINTS):
             return "***" if value not in (None, "") else ""
         if isinstance(value, Mapping):
-            return {k: cls._mask_value(str(k), v, schema_secrets) for k, v in value.items()}
+            return {
+                k: cls._mask_value(str(k), v, schema_secrets) for k, v in value.items()
+            }
         if isinstance(value, (list, tuple)):
-            return [cls._mask_value(key, item, schema_secrets) if isinstance(item, (Mapping, list, tuple)) else item
-                    for item in value]
+            return [
+                cls._mask_value(key, item, schema_secrets)
+                if isinstance(item, (Mapping, list, tuple))
+                else item
+                for item in value
+            ]
         return value

@@ -17,7 +17,6 @@ from _doubles import MockASR, MockTTS
 from whale_core.plugins.speech import (
     ASR_TRANSCRIBE,
     TTS_SYNTHESIZE,
-
     OpenAICompatibleASR,
     OpenAICompatibleTTS,
     SpeechError,
@@ -27,13 +26,16 @@ from whale_core.plugins.speech import (
 
 # ---------- 测试工装：假 urlopen ----------
 
+
 class _FakeResponse:
     def __init__(self, body: bytes, *, content_type: str = "application/json"):
         self._body = body
         self.headers = {"Content-Type": content_type}
 
-    def read(self) -> bytes:
-        return self._body
+    def read(self, size=-1) -> bytes:
+        data = self._body if size < 0 else self._body[:size]
+        self._body = self._body[len(data) :]
+        return data
 
     def __enter__(self):
         return self
@@ -56,7 +58,7 @@ def _capture_urlopen(monkeypatch, response=None, *, error: Exception | None = No
             raise error
         return response
 
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr("whale_core.plugins.speech.open_provider_request", fake_urlopen)
     return captured
 
 
@@ -75,10 +77,12 @@ def _asr_ok(monkeypatch, text: str = "你好，鲸鱼"):
 
 def _tts_ok(monkeypatch, audio: bytes = b"\xff\xfbFAKEAUDIO"):
     return _capture_urlopen(
-        monkeypatch, _FakeResponse(audio, content_type="audio/mpeg"))
+        monkeypatch, _FakeResponse(audio, content_type="audio/mpeg")
+    )
 
 
 # ---------- ASR ----------
+
 
 def test_asr_multipart_construction(monkeypatch):
     captured = _asr_ok(monkeypatch)
@@ -103,8 +107,9 @@ def test_asr_multipart_construction(monkeypatch):
 
 def test_asr_parses_text_and_sends_lang(monkeypatch):
     captured = _asr_ok(monkeypatch, text="transcribed words")
-    asr = OpenAICompatibleASR(api_key="k", base_url="https://api.openai.com/v1",
-                              model="whisper-9")
+    asr = OpenAICompatibleASR(
+        api_key="k", base_url="https://api.openai.com/v1", model="whisper-9"
+    )
     assert asr.transcribe(b"\x00\x01", lang="en") == "transcribed words"
     assert b'name="model"\r\n\r\nwhisper-9' in captured["body"]
     assert b'name="language"\r\n\r\nen' in captured["body"]
@@ -118,6 +123,7 @@ def test_asr_rejects_oversized_audio(monkeypatch):
 
 
 # ---------- TTS ----------
+
 
 def test_tts_returns_audio_bytes(monkeypatch):
     captured = _tts_ok(monkeypatch)
@@ -137,8 +143,9 @@ def test_tts_voice_empty_falls_back_to_default(monkeypatch):
     assert json.loads(captured["body"].decode())["voice"] == "alloy"
 
 
-@pytest.mark.parametrize("given,clamped", [(0.1, 0.25), (0.25, 0.25), (1.0, 1.0),
-                                           (4.0, 4.0), (99.0, 4.0)])
+@pytest.mark.parametrize(
+    "given,clamped", [(0.1, 0.25), (0.25, 0.25), (1.0, 1.0), (4.0, 4.0), (99.0, 4.0)]
+)
 def test_tts_rate_clamped(monkeypatch, given, clamped):
     captured = _tts_ok(monkeypatch)
     tts = OpenAICompatibleTTS(api_key="k")
@@ -147,8 +154,9 @@ def test_tts_rate_clamped(monkeypatch, given, clamped):
 
 
 def test_tts_rejects_non_audio_content_type(monkeypatch):
-    _capture_urlopen(monkeypatch, _FakeResponse(b"<html>nope</html>",
-                                                content_type="text/html"))
+    _capture_urlopen(
+        monkeypatch, _FakeResponse(b"<html>nope</html>", content_type="text/html")
+    )
     tts = OpenAICompatibleTTS(api_key="k")
     with pytest.raises(SpeechError) as ei:
         tts.synthesize("hi")
@@ -156,8 +164,9 @@ def test_tts_rejects_non_audio_content_type(monkeypatch):
 
 
 def test_tts_accepts_octet_stream(monkeypatch):
-    _capture_urlopen(monkeypatch, _FakeResponse(b"\x00raw",
-                                                content_type="application/octet-stream"))
+    _capture_urlopen(
+        monkeypatch, _FakeResponse(b"\x00raw", content_type="application/octet-stream")
+    )
     assert OpenAICompatibleTTS(api_key="k").synthesize("hi") == b"\x00raw"
 
 
@@ -169,8 +178,11 @@ def test_tts_rejects_overlong_text():
 
 # ---------- 错误分类与凭据安全 ----------
 
-@pytest.mark.parametrize("status,kind", [(401, "auth"), (403, "auth"), (429, "quota"),
-                                         (500, "server"), (503, "server")])
+
+@pytest.mark.parametrize(
+    "status,kind",
+    [(401, "auth"), (403, "auth"), (429, "quota"), (500, "server"), (503, "server")],
+)
 def test_http_error_classification(monkeypatch, status, kind):
     err = urllib.error.HTTPError("https://x", status, "boom", {}, None)
     _capture_urlopen(monkeypatch, error=err)
@@ -210,20 +222,24 @@ def test_error_text_never_contains_api_key(monkeypatch):
 
 # ---------- base_url / key 策略 ----------
 
-@pytest.mark.parametrize("url,ok", [
-    ("https://api.openai.com/v1", True),
-    ("https://my-proxy.example.com/v1", True),
-    ("http://api.openai.com/v1", False),   # 公网 http 拒绝
-    ("http://example.com", False),
-    ("http://127.0.0.1:11434/v1", True),   # 回环放行
-    ("http://localhost:8080", True),
-    ("http://[::1]:9000", True),
-    ("http://192.168.1.10:8000", True),    # 私网放行
-    ("http://10.0.0.2", True),
-    ("http://172.16.0.5", True),
-    ("http://172.31.255.1", True),
-    ("http://172.32.0.1", False),          # 172.32 已出私网段
-])
+
+@pytest.mark.parametrize(
+    "url,ok",
+    [
+        ("https://api.openai.com/v1", True),
+        ("https://my-proxy.example.com/v1", True),
+        ("http://api.openai.com/v1", False),  # 公网 http 拒绝
+        ("http://example.com", False),
+        ("http://127.0.0.1:11434/v1", True),  # 回环放行
+        ("http://localhost:8080", True),
+        ("http://[::1]:9000", True),
+        ("http://192.168.1.10:8000", True),  # 私网放行
+        ("http://10.0.0.2", True),
+        ("http://172.16.0.5", True),
+        ("http://172.31.255.1", True),
+        ("http://172.32.0.1", False),  # 172.32 已出私网段
+    ],
+)
 def test_base_url_policy(url, ok):
     if ok:
         OpenAICompatibleASR(api_key="k", base_url=url)
@@ -262,6 +278,7 @@ def test_env_key_fallback(monkeypatch):
 
 # ---------- Mock 替身 ----------
 
+
 def test_mocks_deterministic_and_marked():
     asr, tts = MockASR(), MockTTS()
     a1, a2 = asr.transcribe(b"\x01\x02\x03"), asr.transcribe(b"\x01\x02\x03")
@@ -273,6 +290,7 @@ def test_mocks_deterministic_and_marked():
 
 
 # ---------- register_speech ----------
+
 
 def test_register_speech_registers_both_and_resolves():
     registry = PluginRegistry()

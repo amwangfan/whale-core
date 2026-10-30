@@ -22,22 +22,26 @@ from whale_core.plugins.registry import PluginRegistry
 
 # ---------- http/https 基址策略（R3 放宽：回环/私网 http 放行，公网 http 仍拒） ----------
 
-@pytest.mark.parametrize("url,ok", [
-    ("https://api.deepseek.com", True),
-    ("https://platform.agentscope.io/v1", True),
-    ("http://example.com", False),          # 公网 http 拒绝
-    ("http://api.deepseek.com", False),
-    ("http://127.0.0.1:11434", True),       # 回环本地模型
-    ("http://localhost:8080", True),
-    ("http://192.168.1.10:8000", True),     # 私网
-    ("http://10.0.0.2", True),
-    ("http://172.16.0.5", True),
-    ("http://172.31.255.1", True),
-    ("http://172.32.0.1", False),           # 172.32 已出私网段
-    ("http://[::1]:11434", True),
-    ("ftp://127.0.0.1", False),
-    ("not-a-url", False),
-])
+
+@pytest.mark.parametrize(
+    "url,ok",
+    [
+        ("https://api.deepseek.com", True),
+        ("https://platform.agentscope.io/v1", True),
+        ("http://example.com", False),  # 公网 http 拒绝
+        ("http://api.deepseek.com", False),
+        ("http://127.0.0.1:11434", True),  # 回环本地模型
+        ("http://localhost:8080", True),
+        ("http://192.168.1.10:8000", True),  # 私网
+        ("http://10.0.0.2", True),
+        ("http://172.16.0.5", True),
+        ("http://172.31.255.1", True),
+        ("http://172.32.0.1", False),  # 172.32 已出私网段
+        ("http://[::1]:11434", True),
+        ("ftp://127.0.0.1", False),
+        ("not-a-url", False),
+    ],
+)
 def test_base_url_policy(url, ok):
     if ok:
         DeepSeekCompanion(api_key="k", base_url=url)
@@ -48,9 +52,11 @@ def test_base_url_policy(url, ok):
 
 # ---------- 错误分类与重试 ----------
 
+
 def _fake_urlopen(monkeypatch, script):
     """script: 列表，元素为 HTTPError/URLError 实例或 'ok'。返回调用次数。"""
     calls = {"n": 0, "timeouts": []}
+
     def fake(req, *, timeout=None):
         calls["n"] += 1
         calls["timeouts"].append(timeout)
@@ -59,7 +65,8 @@ def _fake_urlopen(monkeypatch, script):
             raise item
         payload = json.dumps({"choices": [{"message": {"content": "回了"}}]}).encode()
         return io.BytesIO(payload)
-    monkeypatch.setattr("urllib.request.urlopen", fake)
+
+    monkeypatch.setattr("whale_core.core.deepseek.open_provider_request", fake)
     return calls
 
 
@@ -105,8 +112,10 @@ def test_network_error_retryable(monkeypatch):
 
 
 def test_bad_response_shape(monkeypatch):
-    monkeypatch.setattr("urllib.request.urlopen",
-                        lambda req, *, timeout=None: io.BytesIO(b'{"choices": []}'))
+    monkeypatch.setattr(
+        "whale_core.core.deepseek.open_provider_request",
+        lambda req, *, timeout=None: io.BytesIO(b'{"choices": []}'),
+    )
     d = DeepSeekCompanion(api_key="k", base_url="https://api.deepseek.com")
     with pytest.raises(ModelError) as ei:
         d.reply("hi")
@@ -136,13 +145,16 @@ def test_timeout_flows_through(monkeypatch):
 
 
 def test_info_never_contains_key():
-    d = DeepSeekCompanion(api_key="super-secret-key", base_url="https://api.deepseek.com")
+    d = DeepSeekCompanion(
+        api_key="super-secret-key", base_url="https://api.deepseek.com"
+    )
     info = d.info()
     assert info["configured"] is True
     assert "super-secret-key" not in json.dumps(info)
 
 
 # ---------- 能力注册与解析 ----------
+
 
 def test_register_and_resolve_chat_model():
     registry = PluginRegistry()
@@ -163,8 +175,12 @@ def test_resolve_empty_returns_none_and_require_raises():
 def test_register_custom_endpoint():
     registry = PluginRegistry()
     companion = register_openai_compatible(
-        registry, plugin_id="local-ollama", name="本地 Ollama",
-        api_key="x", base_url="http://127.0.0.1:11434", model="qwen3.8",
+        registry,
+        plugin_id="local-ollama",
+        name="本地 Ollama",
+        api_key="x",
+        base_url="http://127.0.0.1:11434",
+        model="qwen3.8",
     )
     assert companion.base_url == "http://127.0.0.1:11434"
     assert resolve_chat_model(registry) is companion

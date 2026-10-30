@@ -61,3 +61,6 @@ NOTES.private.md
 # ---------- web console ----------
 web/node_modules
 web/dist
+src/whale_core/web_dist/
+*.sqlite3-wal
+*.sqlite3-shm

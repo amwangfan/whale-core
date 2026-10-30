@@ -20,6 +20,7 @@ def _executor(**kw) -> ShellExecutor:
 
 # ---------- 策略前置 ----------
 
+
 def test_policy_denied_before_spawn():
     result = _executor().run("rm -rf /", is_owner=True)
     assert result.status == "denied"
@@ -40,6 +41,7 @@ def test_managed_tier_denies_free_command():
 
 
 # ---------- 真实执行 ----------
+
 
 def test_echo_success():
     result = _executor().run("echo hello-whale", is_owner=True)
@@ -75,6 +77,7 @@ def test_output_truncated():
 
 # ---------- 环境擦洗 ----------
 
+
 def test_env_scrubbed_of_secrets():
     env = dict(os.environ)
     env["MY_API_KEY"] = "should-not-leak"
@@ -87,11 +90,14 @@ def test_env_scrubbed_of_secrets():
 
 
 def test_scrub_env_allowlist():
-    cleaned = _scrub_env({"PATH": "/bin", "HOME": "/root", "SECRET_X": "s", "OTHER": "x"})
+    cleaned = _scrub_env(
+        {"PATH": "/bin", "HOME": "/root", "SECRET_X": "s", "OTHER": "x"}
+    )
     assert cleaned == {"PATH": "/bin", "HOME": "/root"}
 
 
 # ---------- cwd 白名单 ----------
+
 
 def test_cwd_whitelist(tmp_path):
     ex = _executor(allowed_cwds=(str(tmp_path),))
@@ -108,9 +114,25 @@ def test_default_cwd_is_tmpdir():
 
 # ---------- 降权 ----------
 
-@pytest.mark.skipif(os.geteuid() != 0 or shutil.which("id") is None,
-                    reason="需要 root 演示降权")
+
+@pytest.mark.skipif(
+    os.geteuid() != 0 or shutil.which("id") is None, reason="需要 root 演示降权"
+)
 def test_drop_to_nobody():
+    # Container UID 0 may lack SETUID/SETGID; being root alone is not proof
+    # of permission. Exercise this runtime's failure path separately below.
+    cap_path = __import__("pathlib").Path("/proc/self/status")
+    if cap_path.exists():
+        cap = next(
+            (
+                line.split()[1]
+                for line in cap_path.read_text().splitlines()
+                if line.startswith("CapEff:")
+            ),
+            "0",
+        )
+        if int(cap, 16) & 0xC0 != 0xC0:
+            pytest.skip("host lacks CAP_SETUID/CAP_SETGID")
     result = _executor(drop_to_user="nobody").run("id -un", is_owner=True)
     assert result.status == "success"
     assert result.stdout.strip() == "nobody"
@@ -127,3 +149,16 @@ def test_invalid_bytes_in_output_do_not_escape():
     result = _executor().run("printf '\\377\\376abc'", is_owner=True)
     assert result.status == "success"
     assert "abc" in result.stdout
+
+
+def test_drop_permission_failure_is_classified(monkeypatch):
+    import subprocess
+
+    def denied(*args, **kwargs):
+        raise PermissionError("private details")
+
+    monkeypatch.setattr(subprocess, "Popen", denied)
+    result = _executor(drop_to_user="nobody").run("id", is_owner=True)
+    assert result.status == "error"
+    assert result.verdict_reason == "PermissionError"
+    assert "private details" not in result.stderr

@@ -54,7 +54,7 @@ class VideoTask:
     task_id: str
     status: str  # "pending" | "running" | "succeeded" | "failed" | "cancelled"
     prompt: str
-    url: str = ""          # 产物 URL（succeeded 时）
+    url: str = ""  # 产物 URL（succeeded 时）
     error: str = ""
     created_at: float = 0.0
     updated_at: float = 0.0
@@ -95,15 +95,17 @@ class VideoProvider(Protocol):
     实现方抛出的异常由 manager 分类兜底（见 :class:`VideoTaskManager`）。
     """
 
-    def submit(self, prompt: str, *, duration_s: int = DEFAULT_DURATION_S,
-               size: str = DEFAULT_SIZE) -> str:
-        ...
+    def submit(
+        self,
+        prompt: str,
+        *,
+        duration_s: int = DEFAULT_DURATION_S,
+        size: str = DEFAULT_SIZE,
+    ) -> str: ...
 
-    def poll(self, task_id: str) -> tuple[str, str, str]:
-        ...
+    def poll(self, task_id: str) -> tuple[str, str, str]: ...
 
-    def cancel(self, task_id: str) -> bool:
-        ...
+    def cancel(self, task_id: str) -> bool: ...
 
 
 def _validate_prompt(prompt: str) -> str:
@@ -146,8 +148,13 @@ class VideoTaskManager:
 
     # ---- 生命周期 ----
 
-    def submit(self, prompt: str, *, duration_s: int = DEFAULT_DURATION_S,
-               size: str = DEFAULT_SIZE) -> VideoTask:
+    def submit(
+        self,
+        prompt: str,
+        *,
+        duration_s: int = DEFAULT_DURATION_S,
+        size: str = DEFAULT_SIZE,
+    ) -> VideoTask:
         """校验参数 → provider.submit → 落库为 pending 任务。
 
         provider 抛出的非 VideoError 异常一律上抛为 ``VideoError(kind="network")``
@@ -162,15 +169,21 @@ class VideoTaskManager:
             raise
         except Exception as exc:
             raise VideoError(  # 不回显异常原文（脱敏纪律）
-                "network", f"video submit failed: {type(exc).__name__}",
+                "network",
+                f"video submit failed: {type(exc).__name__}",
                 retryable=True,
             ) from exc
         task_id = str(task_id or "").strip()
         if not task_id:
             raise VideoError("bad_response", "provider returned an empty task_id")
         now = time.time()
-        task = VideoTask(task_id=task_id, status=STATUS_PENDING, prompt=prompt,
-                         created_at=now, updated_at=now)
+        task = VideoTask(
+            task_id=task_id,
+            status=STATUS_PENDING,
+            prompt=prompt,
+            created_at=now,
+            updated_at=now,
+        )
         self._save(task)
         return task
 
@@ -186,13 +199,19 @@ class VideoTaskManager:
         try:
             status, url, error = self._provider.poll(task_id)
         except Exception as exc:
-            task = replace(task, error=f"transient:{type(exc).__name__}",
-                           updated_at=time.time())
+            task = replace(
+                task, error=f"transient:{type(exc).__name__}", updated_at=time.time()
+            )
             self._save(task)
             return task
         status = str(status or "").strip() or task.status
-        task = replace(task, status=status, url=str(url or task.url),
-                       error=str(error or ""), updated_at=time.time())
+        task = replace(
+            task,
+            status=status,
+            url=str(url or task.url),
+            error=str(error or ""),
+            updated_at=time.time(),
+        )
         self._save(task)
         return task
 
@@ -244,8 +263,9 @@ class VideoTaskManager:
         return VideoTask.from_dict(data)
 
 
-def register_video_gen(registry: PluginRegistry, *,
-                       provider: VideoProvider | None = None) -> VideoProvider:
+def register_video_gen(
+    registry: PluginRegistry, *, provider: VideoProvider | None = None
+) -> VideoProvider:
     """注册 ``media.video.generate`` 能力为 model 插件（plugin_id="media_video"）。
 
     ``provider`` 必须由宿主显式注入——**没有 mock 默认**（mock 模式已按
@@ -269,3 +289,130 @@ def register_video_gen(registry: PluginRegistry, *,
         provider=provider,
     )
     return provider
+
+
+class HttpVideoProvider:
+    """HTTP bridge adapter (not a claim of compatibility with every vendor).
+
+    POST /jobs {prompt,model,duration_s,size} -> {task_id};
+    GET /jobs/{id} -> {status,url,error}; POST /jobs/{id}/cancel -> {cancelled}.
+    No retry of a submission with unknown outcome. See service-bridges.md.
+    """
+
+    def __init__(self, **kwargs):
+        from whale_core.plugins.http_provider import JsonProvider
+
+        self.client = JsonProvider(**kwargs)
+
+    def healthcheck(self):
+        return self.client.healthcheck()
+
+    @staticmethod
+    def _id(task_id):
+        from urllib.parse import quote
+
+        if not isinstance(task_id, str) or not task_id or len(task_id) > 200:
+            raise VideoError("bad_response", "invalid video task id")
+        return quote(task_id, safe="")
+
+    def submit(self, prompt, *, duration_s=DEFAULT_DURATION_S, size=DEFAULT_SIZE):
+        data = self.client.request(
+            "/jobs",
+            {
+                "prompt": _validate_prompt(prompt),
+                "duration_s": _clamp_duration(duration_s),
+                "size": _validate_size(size),
+                "model": self.client.model,
+            },
+        )
+        self._id(data.get("task_id"))
+        return data["task_id"]
+
+    def poll(self, task_id):
+        data = self.client.request("/jobs/" + self._id(task_id), method="GET")
+        if data.get("status") not in (
+            STATUS_PENDING,
+            STATUS_RUNNING,
+            *TERMINAL_STATUSES,
+        ):
+            raise VideoError("bad_response", "invalid video status")
+        return (
+            data["status"],
+            str(data.get("url") or ""),
+            str(data.get("error") or "")[:120],
+        )
+
+    def cancel(self, task_id):
+        data = self.client.request("/jobs/" + self._id(task_id) + "/cancel", {})
+        return data.get("cancelled") is True
+
+
+class DashScopeVideoProvider:
+    """Wan text-to-video asynchronous HTTP API (legacy 2.1--2.6 protocol).
+
+    Primary reference: help.aliyun.com/zh/model-studio/legacy-wan-text-to-video-api-reference
+    Region/model/key must match. Cancellation is only supported while pending.
+    """
+
+    poll_interval_s = 15
+
+    def __init__(self, **kwargs):
+        from whale_core.plugins.http_provider import JsonProvider
+
+        self.client = JsonProvider(**kwargs)
+
+    def healthcheck(self):
+        return self.client.healthcheck()
+
+    def submit(self, prompt, *, duration_s=5, size=DEFAULT_SIZE):
+        if size not in ("1280x720", "720x1280") or duration_s not in (5, 10, 15):
+            raise ValueError("Wan adapter accepts 720p and 5/10/15 second clips")
+        data = self.client.request(
+            "/services/aigc/video-generation/video-synthesis",
+            {
+                "model": self.client.model,
+                "input": {"prompt": _validate_prompt(prompt)[:1500]},
+                "parameters": {
+                    "size": size.replace("x", "*"),
+                    "duration": duration_s,
+                    "prompt_extend": True,
+                },
+            },
+            extra_headers={"X-DashScope-Async": "enable"},
+        )
+        task_id = (data.get("output") or {}).get("task_id")
+        HttpVideoProvider._id(task_id)
+        return task_id
+
+    def poll(self, task_id):
+        data = self.client.request(
+            "/tasks/" + HttpVideoProvider._id(task_id), method="GET"
+        )
+        output = data.get("output") or {}
+        status = {
+            "PENDING": "pending",
+            "QUEUED": "pending",
+            "RUNNING": "running",
+            "SUCCEEDED": "succeeded",
+            "FAILED": "failed",
+            "CANCELED": "cancelled",
+        }.get(output.get("task_status"))
+        if not status:
+            raise VideoError(
+                "bad_response", "unknown vendor task state; check external task id"
+            )
+        url = output.get("video_url", "")
+        if not isinstance(url, str) or status == "succeeded" and not url:
+            raise VideoError("bad_response", "video output is missing")
+        return status, url, "vendor_failed" if status == "failed" else ""
+
+    def cancel(self, task_id):
+        from whale_core.plugins.http_provider import ProviderError
+
+        try:
+            data = self.client.request(
+                "/tasks/" + HttpVideoProvider._id(task_id) + "/cancel", {}
+            )
+            return bool(data.get("request_id")) and not data.get("code")
+        except ProviderError:
+            return False  # running tasks cannot be cancelled; preserve unknown
