@@ -40,4 +40,5 @@ class OwnerChannelRegistry:
             return None
         return OwnerEvent(owner_id=self.owner_id, channel=message.channel,
                           conversation=message.conversation,
-                          message_id=message.message_id, text=message.text)
+                          message_id=message.message_id, text=message.text,
+                          attachments=tuple(message.attachments or ()))

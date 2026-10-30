@@ -212,6 +212,7 @@ class WeQSsePushListener:
                         conversation=owner_event.conversation,
                         account=incoming.account,
                         text=owner_event.text,
+                        attachments=list(owner_event.attachments or ()),
                     )
                     self._emit_wake(owner_event.message_id)
                     self._mark_seen(incoming.message_id)
@@ -264,6 +265,9 @@ class WeQSsePushListener:
                 conversation=job.conversation,
                 message_id=job.message_id,
                 text=job.text,
+                attachments=tuple(
+                    a for a in (job.attachments or ())
+                    if isinstance(a, dict) and a.get("kind") == "pic"),
             )
             try:
                 self.on_owner_event(event)
