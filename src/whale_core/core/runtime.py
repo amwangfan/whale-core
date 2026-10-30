@@ -260,6 +260,8 @@ class ConversationOrchestrator:
             evidence_id=f"{source}:{conversation_id}:{uuid4().hex}",
         )
         if command is not None:
+            if conversation_id:
+                append_turn(self.store, conversation_id, text, command)
             return TurnResult(reply=command, status="answered", receipts=("memory-command",))
 
         # 2. 无意图模型 → 纯对话
@@ -563,7 +565,7 @@ class ConversationOrchestrator:
                      + "\n".join(_scrub_untrusted(r) for r in results)
                      + "\n===== 不可信工具输出结束 =====\n" + note)
         try:
-            reply = self.companion.chat(augmented, conversation_id=cid)
+            reply = self.companion.chat(augmented, conversation_id=cid, user_text=text)
         except Exception:
             # Journal survives even if the response model fails after an action.
             reply = note
@@ -639,7 +641,7 @@ class ConversationOrchestrator:
             f"{note}\n"
             "===== 系统提示结束 ====="
         )
-        return self.companion.chat(augmented, conversation_id=conversation_id)
+        return self.companion.chat(augmented, conversation_id=conversation_id, user_text=text)
 
     def _run_tool(self, spec: ToolSpec, plan: IntentPlan, *, action: ActionIntent | None = None) -> tuple[bool, str]:
         """执行单个工具，返回 (ok, receipt)。风险门控：非只读必经插件网关。"""
