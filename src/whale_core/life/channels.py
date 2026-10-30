@@ -24,6 +24,9 @@ class OwnerEvent:
     text: str
     # 附件（图片等）：{"kind": "pic", "file_path"|"url"} 元组——宿主负责取字节
     attachments: tuple = ()
+    # S1（Whale Studio）：保留真实发送者。群聊中 sender 是说话成员本人，
+    # 不等于全群身份；下游禁止用 owner_id 推断群里其他成员的权限。
+    sender_id: str = ""
 
 
 class OwnerChannelRegistry:
@@ -41,4 +44,5 @@ class OwnerChannelRegistry:
         return OwnerEvent(owner_id=self.owner_id, channel=message.channel,
                           conversation=message.conversation,
                           message_id=message.message_id, text=message.text,
-                          attachments=tuple(message.attachments or ()))
+                          attachments=tuple(message.attachments or ()),
+                          sender_id=message.account)

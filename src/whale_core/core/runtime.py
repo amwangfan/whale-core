@@ -88,6 +88,32 @@ def _action_fingerprint(intent: ActionIntent) -> str:
                                      sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def _authz_snapshot(context) -> dict | None:
+    """S1：从 ResolvedContext 提取可持久化的授权快照（INV-09）。
+
+    只存主体/会话/scope/策略版本等元数据——不存任何正文或秘密。
+    非 ResolvedContext（或缺失字段）返回 None，保持旧行为。
+    """
+    if context is None:
+        return None
+    try:
+        conversation = context.conversation
+        principal = context.principal
+        return {
+            "principal_id": principal.principal_id,
+            "paired": bool(principal.paired),
+            "conversation_key": conversation.as_key(),
+            "scopes": sorted(context.capability_scopes),
+            "memory_spaces": sorted(
+                s.space_id for s in context.allowed_memory_spaces),
+            "grant_ids": sorted(g.grant_id for g in context.grants),
+            "persona_id": context.persona_id,
+            "policy_version": context.policy_version,
+        }
+    except AttributeError:
+        return None
+
+
 def runtime_owner_verifier(store: MemoryStore) -> Callable[[ActionIntent], bool]:
     """Recognize actions originating in the authenticated local host runtime.
 
@@ -231,6 +257,11 @@ class InputEnvelope:
     owner_id: str = ""
     images: tuple = ()
     request_id: str = ""
+    # S1（Whale Studio）：真实发送者与服务端授权上下文。
+    # sender_id 由可信渠道适配器填写；context 只接受服务端解析产物，
+    # 编排器注入 resolver 后会自行重解析并覆盖任何调用方提供的值。
+    sender_id: str = ""
+    context: object | None = None
 
 
 # 任务生命周期（G1-B）：pending → acknowledged → running(leased) →
@@ -272,10 +303,12 @@ class ConversationOrchestrator:
         tool_output_chars: int = TOOL_OUTPUT_MAX_CHARS,
         max_tool_rounds: int = MAX_TOOL_ROUNDS,
         executor_model=None,  # G1-C：可选多轮工具执行模型（llm.tool_executor 角色）
+        context_resolver=None,  # S1：服务端会话上下文解析器（life.context_resolver）
     ) -> None:
         self.store = store
         self.companion = companion
         self.intent_model = intent_model
+        self.context_resolver = context_resolver
         self.tools = tools or ToolRegistry()
         self.gateway = gateway
         self.executor_model = executor_model
@@ -301,24 +334,42 @@ class ConversationOrchestrator:
 
     # ---- G1-A：统一入口（InputEnvelope）与唯一规划点 ----
 
+    def _ensure_context(self, env: InputEnvelope) -> InputEnvelope:
+        """S1：服务端重解析授权上下文。
+
+        注入 resolver 时，任何调用方随信封携带的 ``context`` 都被覆盖——
+        权限上下文只能来自服务端解析（INV-04/06/08）；未注入 resolver 的
+        旧宿主保持原行为（兼容期）。
+        """
+        if self.context_resolver is None:
+            return env
+        channel = env.channel or ("api" if env.source == "api" else env.source)
+        ctx = self.context_resolver.resolve(
+            channel=channel,
+            sender_id=env.sender_id,
+            conversation_id=env.conversation_id,
+        )
+        return replace(env, context=ctx)
+
     def handle_message(self, conversation_id: str, text: str, *, source: str = "runtime",
-                       images: Sequence = ()) -> TurnResult:
+                       images: Sequence = (), sender_id: str = "") -> TurnResult:
         return self.handle_envelope(InputEnvelope(
             conversation_id=conversation_id, text=text, source=source,
-            images=tuple(images)))
+            images=tuple(images), sender_id=sender_id))
 
     def handle_envelope(self, env: InputEnvelope) -> TurnResult:
         """同步入口：一次请求至多一次规划，Decision 直接消费。"""
+        env = self._ensure_context(env)
         with conversation_lock(self.store, env.conversation_id):
             return self._finish_decision(env, self._decide(env))
 
     def handle_message_async(
         self, conversation_id: str, text: str, *, source: str = "runtime",
-        on_complete=None, images: Sequence = (),
+        on_complete=None, images: Sequence = (), sender_id: str = "",
     ) -> TurnResult:
         return self.handle_envelope_async(InputEnvelope(
             conversation_id=conversation_id, text=text, source=source,
-            images=tuple(images)), on_complete=on_complete)
+            images=tuple(images), sender_id=sender_id), on_complete=on_complete)
 
     def handle_envelope_async(self, env: InputEnvelope, *, on_complete=None) -> TurnResult:
         """两段式慢任务回复（owner 决策 2026-10-31；G1-A/B 重构）：
@@ -332,6 +383,7 @@ class ConversationOrchestrator:
           宿主补发；送达回执经 ``mark_delivered`` / ``mark_delivery_failed``
           落到任务台账（delivery 子状态）。
         """
+        env = self._ensure_context(env)
         with conversation_lock(self.store, env.conversation_id):
             decision = self._decide(env)
             if decision.route != "task" or not decision.slow:
@@ -346,7 +398,7 @@ class ConversationOrchestrator:
             task_id, plan = self._persist_task(
                 plan, conversation_id=env.conversation_id, text=env.text,
                 source=env.source, channel=env.channel, owner_id=env.owner_id,
-                async_delivery=True)
+                async_delivery=True, context=env.context)
             try:
                 attach_note = (
                     "用户的消息带有图片附件且已成功读取（你在生成这句占位回复时"
@@ -475,7 +527,7 @@ class ConversationOrchestrator:
                               task_id=plan.task_id or plan.intent_id)
         return self._start_plan(decision.plan, env.conversation_id, text,
                                 source=env.source, channel=env.channel,
-                                owner_id=env.owner_id)
+                                owner_id=env.owner_id, context=env.context)
 
     def recover_interrupted_tasks(self, *, on_complete=None) -> list[str]:
         """进程重启后恢复被掐断的在途任务（G1-B phase 感知）。
@@ -565,16 +617,20 @@ class ConversationOrchestrator:
     def _persist_task(self, plan: IntentPlan, *, conversation_id: str, text: str,
                       source: str, channel: str = "", owner_id: str = "",
                       tool_name: str = "",
-                      async_delivery: bool = False) -> tuple[str, IntentPlan]:
+                      async_delivery: bool = False,
+                      context=None) -> tuple[str, IntentPlan]:
         """G1-B：在任何外部效果（含 ack）之前持久化任务台账。
 
         返回 (task_id, 带 task_id 的 plan)。台账 phase=pending，
         journal 记录渠道/来源/原文供恢复与补发。
+        S1：携带 ResolvedContext 时落一份**授权快照**（主体/会话/scope/
+        策略版本），供恢复与敏感动作前重验（INV-09）。
         """
         import re
         task_id = plan.task_id or plan.intent_id
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", task_id):
             task_id = uuid4().hex
+        authz = _authz_snapshot(context)
         with self._task_lock:
             if self.store.get(f"task:{task_id}") is not None:
                 task_id = uuid4().hex
@@ -591,6 +647,7 @@ class ConversationOrchestrator:
                 "channel": channel, "owner_id": owner_id,
                 "text": text, "next_step": 0, "results": [],
                 "receipts": [], "tool_name": tool_name, "async": async_delivery,
+                **({"authz": authz} if authz else {}),
             })
             self._save_task(task_id, plan, "pending", (), owner_id=owner_id)
             self._append_event(task_id, "planned",
@@ -614,10 +671,11 @@ class ConversationOrchestrator:
 
     def _start_plan(self, plan: IntentPlan, conversation_id: str, text: str, *,
                     source: str, tool_name: str = "", channel: str = "",
-                    owner_id: str = "") -> TurnResult:
+                    owner_id: str = "", context=None) -> TurnResult:
         task_id, _plan = self._persist_task(
             plan, conversation_id=conversation_id, text=text, source=source,
-            channel=channel, owner_id=owner_id, tool_name=tool_name)
+            channel=channel, owner_id=owner_id, tool_name=tool_name,
+            context=context)
         return self._execute_task(task_id)
 
     # ---- G1-B：phase 状态机、事件流水与送达回执 ----

@@ -285,6 +285,11 @@ def cmd_run(args) -> int:
         print("[配对] [!] 观察模式：OWNER_QQ 未配置，所有来件只报告不处理（不会喂 AI）。")
     else:
         print(f"[配对] owner 绑定：(qq, {owner_qq}) → owner")
+    # S1：服务端会话上下文解析器——群里主人不提权、未配对即普通主体。
+    from whale_core.life.context_resolver import (
+        ConversationContextResolver, pairing_lookup_from_mapping)
+    context_resolver = ConversationContextResolver(
+        pairing_lookup=pairing_lookup_from_mapping(bindings), owner_id="owner")
 
     store = build_store(args.store)
     prefs = risk_prefs()
@@ -407,7 +412,7 @@ def cmd_run(args) -> int:
         workflow.orchestrator = ConversationOrchestrator(
             store, workflow.companion,
             intent_model=SearchIntentRouter(model=intent_brain, enable_llm=True, tools=tools),
-            tools=tools)
+            tools=tools, context_resolver=context_resolver)
         print(f"[意图] 模型={intent_model_id}（规则优先+LLM 规划；{tool_note}）")
 
     # 安全审核模型（可选，默认关）：QQ_SAFETY_MODEL=<模型 id> 开启——

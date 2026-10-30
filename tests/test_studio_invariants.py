@@ -80,9 +80,26 @@ def test_inv03_owner_in_group_gets_no_extra_spaces():
     assert ctx_group.allows_memory_read(GROUP_SPACE) is True
 
 
-@pytest.mark.skip(reason="S1：ConversationContextResolver 集成")
 def test_inv03_resolver_group_owner_matrix():
-    raise AssertionError
+    """S1 已点亮：resolver 层保证群里主人不提权。"""
+    from whale_core.life.context_resolver import (
+        ConversationContextResolver, pairing_lookup_from_mapping)
+
+    class B:
+        def persona_for(self, key):
+            return None
+
+        def memory_spaces_for(self, key):
+            # 绑定层被错误配置：群里挂了主人副本 + vault
+            return (OWNER_COPY, VAULT, GROUP_SPACE)
+
+    r = ConversationContextResolver(
+        pairing_lookup=pairing_lookup_from_mapping({("qq", "10001"): "owner"}),
+        bindings=B())
+    ctx = r.resolve(channel="qq", sender_id="10001", conversation_id="group:9")
+    assert ctx.principal.is_owner  # 身份识别正常
+    assert [s.space_id for s in ctx.allowed_memory_spaces] == ["g-space-a"]
+    assert "outbox.submit" not in ctx.capability_scopes
 
 
 # ---------------------------------------------------------------------------

@@ -462,7 +462,10 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(400, _error("bad_request", "empty text"))
             return
         try:
-            result = self.ctx.orchestrator.handle_message(conversation_id, text, source="api")
+            # S1：控制台持有本地 token = 已认证管理通道，固定 sender 标识；
+            # 身份解析与权限仍由服务端 resolver 决定（INV-04）。
+            result = self.ctx.orchestrator.handle_message(
+                conversation_id, text, source="api", sender_id="console")
         except Exception as exc:
             from whale_core.core.deepseek import ModelError
             kind = exc.kind if isinstance(exc, ModelError) else 'unavailable'

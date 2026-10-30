@@ -207,7 +207,8 @@ class QqInboundWorkflow:
             images = self._attachment_images(event) if event.attachments else ()
             envelope = InputEnvelope(
                 conversation_id=event.conversation, text=text, source="qq:owner",
-                channel="qq", owner_id=event.owner_id, images=images)
+                channel="qq", owner_id=event.owner_id, images=images,
+                sender_id=event.sender_id)
             if self._completion_sender is not None:
                 result = self.orchestrator.handle_envelope_async(
                     envelope,

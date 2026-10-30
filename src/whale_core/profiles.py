@@ -266,9 +266,18 @@ def assemble_runtime(
     if env.get('WHALE_EXECUTOR_ENABLED', '') == '1':
         executor_model = _ManagedRoleModel(registry, store, 'executor')
         notes.append('多轮工具执行模型已启用（WHALE_EXECUTOR_ENABLED=1）')
+    # S1：服务端会话上下文解析器。本地控制台/CLI 持 token 即主人通道；
+    # 其他渠道由各自宿主注入自己的 resolver（如 qq_live_workflow 的配对表）。
+    from whale_core.life.context_resolver import (
+        ConversationContextResolver, pairing_lookup_from_mapping)
+    context_resolver = ConversationContextResolver(
+        pairing_lookup=pairing_lookup_from_mapping(
+            {("api", "console"): "owner", ("cli", "local"): "owner"}),
+        owner_id="owner")
     orchestrator = ConversationOrchestrator(store, companion, tools=tools,
                                             intent_model=intent_model, gateway=gateway,
-                                            executor_model=executor_model)
+                                            executor_model=executor_model,
+                                            context_resolver=context_resolver)
     return RuntimeBundle(
         profile=profile, store=store, registry=registry, manager=manager,
         tools=tools, companion=companion, orchestrator=orchestrator, notes=notes, optional=optional,
