@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Mapping
 from urllib.parse import urlsplit
 
-SERVICE_FIELDS = frozenset('WHALE_EMBEDDING_BASE_URL WHALE_EMBEDDING_API_KEY WHALE_EMBEDDING_MODEL WHALE_SHELL_ENABLED WHALE_SHELL_TIER WHALE_SEARCH_PROVIDER TAVILY_API_KEY BRAVE_API_KEY WHALE_IMAGE_BASE_URL WHALE_IMAGE_API_KEY WHALE_IMAGE_MODEL WHALE_SPEECH_BASE_URL WHALE_SPEECH_API_KEY WHALE_ASR_MODEL WHALE_TTS_MODEL WHALE_TTS_VOICE WHALE_VIDEO_BASE_URL WHALE_VIDEO_API_KEY DASHSCOPE_API_KEY WHALE_VIDEO_MODEL WHALE_REALTIME_URL WHALE_REALTIME_API_KEY WHALE_REALTIME_MODEL WHALE_REALTIME_VOICE'.split())
+SERVICE_FIELDS = frozenset('WHALE_EMBEDDING_BASE_URL WHALE_EMBEDDING_API_KEY WHALE_EMBEDDING_MODEL WHALE_SHELL_ENABLED WHALE_SHELL_TIER WHALE_SEARCH_PROVIDER TAVILY_API_KEY BRAVE_API_KEY WHALE_IMAGE_BASE_URL WHALE_IMAGE_API_KEY WHALE_IMAGE_MODEL WHALE_SPEECH_BASE_URL WHALE_SPEECH_API_KEY WHALE_ASR_MODEL WHALE_TTS_MODEL WHALE_TTS_VOICE WHALE_VIDEO_BASE_URL WHALE_VIDEO_API_KEY DASHSCOPE_API_KEY WHALE_VIDEO_MODEL WHALE_REALTIME_URL WHALE_REALTIME_API_KEY WHALE_REALTIME_MODEL WHALE_REALTIME_VOICE WHALE_REALTIME_PROTOCOL'.split())
 SECRET_FIELDS = frozenset(k for k in SERVICE_FIELDS if k.endswith('API_KEY'))
 
 
@@ -201,6 +201,8 @@ class SettingsController:
             if not isinstance(services, dict) or set(services) - SERVICE_FIELDS:
                 raise ValueError('unknown service setting')
             for name, value in services.items():
+                if name == 'WHALE_REALTIME_PROTOCOL' and value not in ('ga', 'legacy', '', None):
+                    raise ValueError('realtime protocol must be ga or legacy')
                 if name == 'WHALE_SHELL_TIER' and value not in ('managed', 'safe', 'personal', '', None):
                     raise ValueError('invalid shell tier')
                 if value is not None and not isinstance(value, str):

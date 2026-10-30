@@ -54,6 +54,7 @@ const SERVICES = [
       ["WHALE_REALTIME_API_KEY", "API Key"],
       ["WHALE_REALTIME_MODEL", "模型名称"],
       ["WHALE_REALTIME_VOICE", "音色"],
+      ["WHALE_REALTIME_PROTOCOL", "会话协议（ga / legacy，默认 ga）"],
     ],
   },
 ];

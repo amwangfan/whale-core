@@ -30,7 +30,7 @@
 
 最终本地验证：
 
-- `python -m pytest tests -q`：**929 passed**（基线为807 passed / 1 failed）。
+- `python -m pytest tests -q`：**932 passed**（基线为807 passed / 1 failed）。
 - `pnpm -C web test`：**32 passed**。
 - `pnpm -C web build`：TypeScript检查和Vite生产构建通过。
 - Python源码/脚本编译、`git diff --check`通过。
@@ -83,7 +83,7 @@ GitHub首轮安装发行检查（run 41050096142）已通过Docker、Linux/macOS
 1. `记住：…`/`忘掉：…`虽返回成功，但没有追加会话历史，刷新后这轮对话消失。捷径现在也写入原话与回复，仍不调用模型。
 2. 工具正文及澄清提示曾作为增强后的“用户消息”进入历史和聊天情节。新增`user_text`数据通道，模型本轮仍获得工具/系统上下文，持久化与记忆召回查询使用真实用户原话。
 
-新增4项回归覆盖SQLite重启、工具结果、澄清与召回查询边界。补丁后的全量Python为929 passed，前端32 passed；不修改provider协议或审批范围。
+新增4项会话回归覆盖SQLite重启、工具结果、澄清与召回查询边界。补丁后的全量Python为932 passed，前端32 passed；不修改provider协议或审批范围。
 
 使用真实Chromium打开实际Python API托管的构建资源，1440px和390px下逐个导航10个页面；20项均无文档横向溢出，没有页面脚本错误。实际点击发送记忆指令，刷新页面后成功恢复这轮历史。截图环境仅为字体显示注入了本地CJK字体，没有改变产品布局或网络功能。
 
@@ -92,3 +92,8 @@ GitHub首轮安装发行检查（run 41050096142）已通过Docker、Linux/macOS
 ![手机设置](screenshots/console-mobile-settings.png)
 
 这项检查不等于真实麦克风、供应商或macOS原生窗口联调。
+
+
+原生Realtime协议也补充明确选择：默认采用当前GA的`session.type`/`output_modalities`/嵌套`audio.input/output`配置；需要旧Omni事件配置的兼容服务可在设置页填`WHALE_REALTIME_PROTOCOL=legacy`。两种协议均显式禁用模型工具。避免把旧beta会话字段直接发给GA服务。字段依据[官方客户端事件文档](https://developers.openai.com/api/reference/resources/realtime/client-events)，外部模型仍待凭据联调。
+
+协议追加的3项回归覆盖GA字段、legacy兼容与非法协议拒绝；最终Python共932项通过。

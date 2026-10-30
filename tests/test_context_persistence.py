@@ -70,3 +70,43 @@ def test_recall_uses_user_query_without_augmented_tool_data():
     companion = WhaleCompanion(InMemoryStore(), Recorder(), curator=Curator())
     companion.chat("用户原话 + 系统提示 + 工具正文", conversation_id="c", user_text="用户原话")
     assert queries == ["用户原话"]
+
+
+def test_realtime_ga_configuration_matches_current_event_schema():
+    from whale_core.plugins.realtime_voice import OpenAICompatibleRealtime
+    class Connection:
+        def __init__(self): self.sent=[]
+        def send(self, raw): self.sent.append(json.loads(raw))
+        def close(self): pass
+    connection=Connection()
+    provider=OpenAICompatibleRealtime(url='wss://voice.example/realtime',api_key='test-key',model='test-model',connector=lambda *a,**kw:connection)
+    session=provider.open_session()
+    configuration=connection.sent[0]['session']
+    assert configuration['type']=='realtime'
+    assert configuration['output_modalities']==['audio']
+    assert configuration['audio']['input']['format']=={'type':'audio/pcm','rate':24000}
+    assert configuration['audio']['input']['turn_detection'] is None
+    assert configuration['audio']['output']['voice']=='alloy'
+    assert configuration['tools']==[]
+    assert 'input_audio_format' not in configuration
+    session.close()
+
+
+def test_realtime_legacy_remains_explicitly_available():
+    from whale_core.plugins.realtime_voice import OpenAICompatibleRealtime
+    class Connection:
+        def __init__(self): self.sent=[]
+        def send(self, raw): self.sent.append(json.loads(raw))
+        def close(self): pass
+    connection=Connection()
+    provider=OpenAICompatibleRealtime(url='wss://voice.example/realtime',api_key='test-key',model='omni',protocol='legacy',connector=lambda *a,**kw:connection)
+    provider.open_session().close()
+    assert connection.sent[0]['session']['input_audio_format']=='pcm16'
+    assert connection.sent[0]['session']['tools']==[]
+
+
+def test_realtime_invalid_protocol_is_not_ignored():
+    import pytest
+    from whale_core.plugins.realtime_voice import OpenAICompatibleRealtime
+    with pytest.raises(ValueError):
+        OpenAICompatibleRealtime(url='wss://voice.example/realtime',api_key='test-key',model='omni',protocol='unknown')

@@ -91,7 +91,8 @@ def configure_optional_capabilities(registry, tools, store, *, env: Mapping[str,
     if realtime_url:
         register_realtime_voice(registry, OpenAICompatibleRealtime(url=realtime_url,
             api_key=env.get("WHALE_REALTIME_API_KEY", ""), model=env.get("WHALE_REALTIME_MODEL", ""),
-            voice=env.get("WHALE_REALTIME_VOICE") or "alloy"))
+            voice=env.get("WHALE_REALTIME_VOICE") or "alloy",
+            protocol=env.get("WHALE_REALTIME_PROTOCOL") or "ga"))
         out.notes.append("原生实时语音已配置；音频客户端独立连接，不经过文本模型")
     embedding_base = env.get("WHALE_EMBEDDING_BASE_URL", "").strip()
     if embedding_base:
