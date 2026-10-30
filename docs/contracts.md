@@ -51,7 +51,7 @@ Gateway 协议：`ActionGateway.dispatch(ActionIntent) → str`。
 
 ## QQ 渠道（W09 · OneBot v11 外部适配器 + WeQ SSE 入站，默认关闭）
 
-实现在 `life/qq_onebot.py`（OneBot/NapCat 传输）、`life/wq_push.py`（WeQ SSE 推送入站桥）与
+实现在 `life/qq_onebot.py`（OneBot/NapCat 传输）、`plugins/weq_channel/wq_push.py`（WeQ SSE 推送入站桥——已拆分为独立插件包）与
 `life/qq_workflow.py`（入站 AI 工作流），纯 stdlib；协议端为 NapCat / LLOneBot 等 OneBot v11
 实现或 WeQ 桌面端（离线模式可用），地址与 token 只经本机配置注入（宿主机 `secrets/` 目录，
 已 gitignore），本仓不存任何真实凭据。实况运行器：`examples/qq_live_workflow.py`。
@@ -63,7 +63,7 @@ Gateway 协议：`ActionGateway.dispatch(ActionIntent) → str`。
 | `WeQSsePushListener` | 接收 WeQ「SSE 消息推送」（`{events:[...]}`，至少一次投递）：Bearer 鉴权、msgId 有界去重、自发消息过滤、立即 ACK + 单工作线程串行消费 | 未配对来件只暴露元数据；过载丢弃计数可见不静默 |
 | `QqInboundWorkflow` | `OwnerEvent` → 记忆指令捷径（记住/忘掉，不调模型）→ WhaleCompanion（人格 + 多轮历史 `chat:history:{会话}` + 记忆召回 + DeepSeek + 情节回写）→ 回复草稿进 `ProactiveOutbox` 裁决 | **不发送任何消息**；策略闸门未过不调用 AI；direct_message 逐条人工批准 |
 | `OneBotOutboundPort` | `direct_message` 草稿 → 绑定对端的 `send_private_msg`（默认 `enabled=False`） | 不群发、不换目标；受理 ≠ 送达，失败记 unknown 不重试 |
-| `WeQWebSendPort`（`life/weq_send.py`） | `direct_message` 草稿 → WeQ 内置 Web 服务 tRPC（`account.sendElements`）真实发送；登录 token 由用户从 WeQ 设置复制注入 | 不破解、不复用助手令牌；需 WeQ 完整模式；ok=true 仅代表服务端受理 |
+| `WeQWebSendPort`（`plugins/weq_channel/weq_send.py`） | `direct_message` 草稿 → WeQ 内置 Web 服务 tRPC（`account.sendElements`）真实发送；登录 token 由用户从 WeQ 设置复制注入 | 不破解、不复用助手令牌；需 WeQ 完整模式；ok=true 仅代表服务端受理 |
 | `qq_weq_plugin`（`life/qq_weq_plugin.py`） | QQ/WeQ channel 插件：`qq.message` 输入适配、`send_message` communicate 动作、宿主台账 verifier 与共享 Outbox | 真实无人值守发送经 `PluginGateway`；`--auto-approve` 仍是隔离 dry-run；固定目标与被动回复预算沿用既有端口/账本 |
 | `NullOneBotTransport` / `HttpOneBotTransport` | 默认 stub 只记拟调用不触网 / 真实 HTTP API 客户端（注入本机配置） | 不读环境变量自动连接；token 不进日志与异常文本 |
 

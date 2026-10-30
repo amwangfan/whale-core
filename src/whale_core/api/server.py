@@ -40,6 +40,7 @@ class ApiContext:
     transcript_recorder: Any = None
     transcript_ids: Any = field(default_factory=set)
     voice_bridge: Any = None
+    pcm_voice_gateway: Any = None  # api.voice.VoiceGateway（懒创建，可选 websockets）
     workflows: Any = None
     optional: Any = None       # OptionalCapabilities
     lock: Any = field(default_factory=threading.RLock)
@@ -206,6 +207,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._tasks(method, parts)
         elif head == "approvals":
             self._approvals(method, parts)
+        elif head == "life":
+            self._life(method, parts)
         elif parts == ["events"] and method == "GET":
             self._events_sse()
         else:
@@ -463,6 +466,9 @@ class _Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             from whale_core.core.deepseek import ModelError
             kind = exc.kind if isinstance(exc, ModelError) else 'unavailable'
+            if kind == 'budget':
+                self._send(429, _error('budget', '今日预算已用完，可在设置页提高请求预算限额（0 表示禁用该能力）'))
+                return
             self._send(503, _error(str(kind), 'model or tool unavailable; check settings and diagnostics'))
             return
         self.ctx.log_event("chat", conversation_id)
@@ -515,6 +521,11 @@ class _Handler(BaseHTTPRequestHandler):
         self._send(404, _error('not_found', 'unknown endpoint'))
 
     def _voice(self, method: str, parts: list[str]) -> None:
+        # POST /voice/session（单数）：whale-io PCM 低延迟通话的一次性票据（PR#4 移植），
+        # 与下方 /voice/sessions（base64 chunk/poll 会话）并存、互不影响。
+        if parts == ['voice', 'session'] and method == 'POST':
+            self._voice_session()
+            return
         if method != 'POST' or len(parts) not in (2, 4) or parts[1] != 'sessions':
             self._send(404, _error('not_found', 'unknown endpoint'))
             return
@@ -577,6 +588,44 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(404 if exc.kind == 'not_found' else 400 if exc.kind == 'bad_request' else 429 if exc.kind == 'quota' else 503, _error(exc.kind, 'voice operation unavailable'))
             return
         self._send(200, _json_bytes({'result': result}))
+
+    def _voice_session(self) -> None:
+        """POST /voice/session：签发 whale-io PCM 中继的一次性 60 秒票据。
+
+        票据只经响应体交给已鉴权的调用方，浏览器再走 WebSocket subprotocol
+        出示；票据与桥 token 一律不进日志（日志只记 session_id）。
+        """
+        registry = getattr(self.ctx.manager, 'registry', None)
+        provider = registry.provider_of('voice_bridge') if registry else None
+        if provider is None:
+            self._send(503, _error('unavailable', 'PCM voice bridge disabled or not configured'))
+            return
+        with self.ctx.lock:
+            gateway = self.ctx.pcm_voice_gateway
+            if gateway is None:
+                try:
+                    import websockets  # noqa: F401
+                    from whale_core.api.voice import VoiceGateway
+                except ImportError:
+                    self._send(503, _error('unavailable',
+                        "install whale-core[voice] to enable browser audio"))
+                    return
+                host = getattr(self.server, 'voice_relay_host', '127.0.0.1')
+                port = getattr(self.server, 'voice_relay_port', 0)
+                try:
+                    gateway = VoiceGateway(self.ctx, host=host, port=port)
+                except OSError:
+                    # 首选端口被占用时退到临时端口；票据里的 URL 总是真实端口
+                    gateway = VoiceGateway(self.ctx, host=host, port=0)
+                    self.ctx.log_event('voice:relay', 'ephemeral port fallback')
+                self.ctx.pcm_voice_gateway = gateway
+            try:
+                ticket = gateway.ticket(provider)
+            except ValueError:
+                self._send(429, _error('quota', 'voice session limit reached'))
+                return
+        self.ctx.log_event('voice:ticket', ticket['session_id'])
+        self._send(200, _json_bytes({'result': ticket}))
 
     def _workflows(self, method: str, parts: list[str]) -> None:
         if self.ctx.workflows is None and self.ctx.orchestrator:
@@ -830,6 +879,86 @@ class _Handler(BaseHTTPRequestHandler):
             return
         self._send(404, _error("not_found", "unknown endpoint"))
 
+    _LIFE_DIARY_DAYS = 7
+    _LIFE_INTEREST_MAX = 20
+    _LIFE_TOPIC_MAX = 100
+
+    def _life(self, method: str, parts: list[str]) -> None:
+        """主动生活的只读面貌与兴趣反馈。
+
+        兴趣台账与探索日记由 life.exploration（InterestTracker/ExplorationManager）
+        持久化；本路由只做展示与调权，**不触发探索、不发送任何消息**——探索走
+        /workflows/explore，草稿审批走 /approvals。
+        """
+        from dataclasses import asdict
+
+        from whale_core.life.exploration import (
+            DIARY_KEY_PREFIX,
+            ExplorationManager,
+            InterestTracker,
+        )
+
+        store = self.ctx.store
+        if parts == ["life"] and method == "GET":
+            days = sorted(
+                k for k in store.keys() if k.startswith(DIARY_KEY_PREFIX)
+            )[-self._LIFE_DIARY_DAYS:]
+            diary = []
+            for key in days:
+                for entry in store.get(key) or []:
+                    if isinstance(entry, dict):
+                        diary.append({
+                            "day": str(entry.get("day", "")),
+                            "note": str(entry.get("note", "")),
+                            "sources": [str(u) for u in entry.get("sources", ())],
+                        })
+            self._send(200, _json_bytes({"result": {
+                "interests": [asdict(i) for i in InterestTracker(store).topics()],
+                "diary": diary,
+            }}))
+            return
+        if parts == ["life", "interests"] and method == "POST":
+            body = self._body_json()
+            topic = (body or {}).get("topic")
+            if not isinstance(topic, str) or not topic.strip() \
+                    or len(topic) > self._LIFE_TOPIC_MAX:
+                self._send(422, _error("bad_request", "topic must be 1..100 characters"))
+                return
+            with self.ctx.lock:
+                tracker = InterestTracker(store)
+                if (body or {}).get("remove") is True:
+                    result = {"removed": tracker.remove(topic)}
+                else:
+                    known = tracker.as_interest_list()
+                    if len(known) >= self._LIFE_INTEREST_MAX \
+                            and topic.strip().lower() not in {t.lower() for t in known}:
+                        self._send(422, _error("bad_request", "at most 20 interests"))
+                        return
+                    interest = tracker.add(topic)
+                    result = {"topic": interest.topic, "weight": interest.weight}
+            self.ctx.log_event("life:interest", topic[:80])
+            self._send(200, _json_bytes({"result": result}))
+            return
+        if parts == ["life", "feedback"] and method == "POST":
+            body = self._body_json()
+            topic, signal = (body or {}).get("topic"), (body or {}).get("signal")
+            if not isinstance(topic, str) or not isinstance(signal, str):
+                self._send(422, _error("bad_request", "topic and signal required"))
+                return
+            from whale_core.life.discovery import DiscoveryPlanner
+            manager = ExplorationManager(
+                store, planner=DiscoveryPlanner(allowed_hosts=frozenset()))
+            try:
+                with self.ctx.lock:
+                    manager.feedback(topic, signal)
+            except ValueError:
+                self._send(422, _error("bad_request", "unsupported feedback signal"))
+                return
+            self.ctx.log_event("life:feedback", f"{signal}:{topic[:80]}")
+            self._send(200, _json_bytes({"result": {"saved": True}}))
+            return
+        self._send(404, _error("not_found", "unknown endpoint"))
+
     def _events_sse(self) -> None:
         """Keep an authenticated SSE stream open, replaying buffered events."""
         self.send_response(200)
@@ -904,6 +1033,10 @@ class WhaleApiServer:
         self._httpd = _BoundedServer((host, port), _Handler)
         self._httpd.ctx = ctx       # type: ignore[attr-defined]
         self._httpd.token = token   # type: ignore[attr-defined]
+        # PCM 语音中继（可选 websockets 依赖）懒监听在 API 端口 + 1（沿用 PR#4
+        # 约定：8080 → 8081）；port=0（临时端口）时中继也用临时端口。
+        self._httpd.voice_relay_host = host                    # type: ignore[attr-defined]
+        self._httpd.voice_relay_port = port + 1 if port else 0  # type: ignore[attr-defined]
         # 静态目录词法归一 + resolve，供穿越校验
         from pathlib import Path
         self._httpd.static_dir = (  # type: ignore[attr-defined]
@@ -951,6 +1084,9 @@ class WhaleApiServer:
             self.ctx.worker.stop()
         if self.ctx.voice_bridge is not None:
             self.ctx.voice_bridge.shutdown()
+        if self.ctx.pcm_voice_gateway is not None:
+            self.ctx.pcm_voice_gateway.close()
+            self.ctx.pcm_voice_gateway = None
         if self.ctx.transcript_recorder is not None:
             self.ctx.transcript_recorder.close()
             self.ctx.transcript_recorder = None

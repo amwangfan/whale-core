@@ -6,12 +6,13 @@ from whale_core.ui.persona_cards import (
     AIGENGTU_CATALOG,
     BUILTIN_CARDS,
     DEFAULT_CARD_ID,
-    GLOBAL_TABOOS,
     PersonaCard,
     PersonaCardLibrary,
     active_card,
     catalog_entries,
+    get_custom_taboos,
     import_external_card,
+    set_custom_taboos,
     switch_card,
 )
 from whale_core.ui.voice import VoiceStyle
@@ -27,11 +28,12 @@ __all__ = [
     "PersonaCardLibrary",
     "BUILTIN_CARDS",
     "AIGENGTU_CATALOG",
-    "GLOBAL_TABOOS",
     "DEFAULT_CARD_ID",
     "ACTIVE_CARD_KEY",
     "active_card",
     "switch_card",
     "import_external_card",
     "catalog_entries",
+    "get_custom_taboos",
+    "set_custom_taboos",
 ]

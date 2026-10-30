@@ -36,7 +36,7 @@
 
 - **插件四件套**：`plugins/manifest.py`（六分类+风险级+校验）、`registry.py`（显式注册+kind 唯一归属）、`gateway.py`（fail-closed 单一执行点）、`policy.py`（门控矩阵+交易限额带锁预占）；`processing.py`（ProcessorRouter 摘要截断+DelegatingIntentProcessor 工具循环参考实现）。
 - **主动性与账本**：`life/initiative.py` ProactiveOutbox（草稿/裁决/台账/反馈/双配额/unknown 不重试）——生产验证。
-- **QQ 生产链**：`life/wq_push.py`（SSE 监听）、`life/inbox.py`（幂等队列+租约恢复）、`life/qq_weq_plugin.py`（channel 插件范例）、`life/weq_send.py`（真实 tRPC 发送）、`life/full_mode_window.py`（按需开窗）。
+- **QQ 生产链**：`plugins/weq_channel/wq_push.py`（SSE 监听，已拆分为独立插件）、`life/inbox.py`（幂等队列+租约恢复）、`plugins/weq_channel/qq_weq_plugin.py`（channel 插件，已拆分独立）、`plugins/weq_channel/weq_send.py`（真实 tRPC 发送，已拆分独立）、`plugins/weq_channel/full_mode_window.py`（按需开窗，已拆分独立）。
 - **人格**：`ui/persona_cards.py`（内置+导入+切换+全局禁忌硬前缀）——生产在用。
 - **API 层技术先例**：wq_push/qq_onebot 的 stdlib `http.server.ThreadingHTTPServer` + token 模式，离线可测。
 - **云端闭环骨架**：`cloud/loop.py`（规则选择器+门控裁决真实，派发端 stub）——PR-2 的 Runtime 可与之合流。

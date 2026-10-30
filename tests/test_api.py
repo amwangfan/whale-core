@@ -326,3 +326,37 @@ def test_plugin_test_fallback_healthcheck(api):
     status, raw = _req(api, "POST", "/api/v1/plugins/web_search/test")
     result = _json(raw)["result"]
     assert result["via"] == "healthcheck"
+
+
+def test_settings_persona_taboos_roundtrip(api, tmp_path, monkeypatch):
+    """persona_taboos 设置项：读写 + 立即重渲当前卡快照 + 校验拒绝。"""
+    import os
+    monkeypatch.setenv("WHALE_CONFIG_DIR", str(tmp_path))
+    from whale_core.configuration import SettingsController
+    from whale_core.profiles import assemble_runtime
+    from whale_core.ui.persona_cards import get_custom_taboos
+
+    bundle = assemble_runtime("local", env={}, store=api.ctx.store)
+    controller = SettingsController(tmp_path, bundle, env={})
+    api.ctx.settings = controller
+
+    # 初始为空
+    status, raw = _req(api, "GET", "/api/v1/settings")
+    assert _json(raw)["result"]["persona_taboos"] == []
+
+    # 设置
+    status, raw = _req(api, "POST", "/api/v1/settings",
+                       body={"persona_taboos": ["不说脏话", "早点睡"]})
+    assert status == 200
+    assert _json(raw)["result"]["persona_taboos"] == ["不说脏话", "早点睡"]
+    assert get_custom_taboos(api.ctx.store) == ("不说脏话", "早点睡")
+    # 快照已含新禁忌
+    snapshot = api.ctx.store.get_persona_continuity()
+    assert "不说脏话" in snapshot.taboos
+
+    # 非法形状 422
+    status, _ = _req(api, "POST", "/api/v1/settings",
+                     body={"persona_taboos": "not-a-list"})
+    assert status == 422
+
+    api.ctx.settings = None  # 还原，别影响其它用例

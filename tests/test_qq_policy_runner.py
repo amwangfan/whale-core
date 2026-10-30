@@ -18,7 +18,7 @@ import pytest
 from whale_core.life.channels import OwnerEvent
 from whale_core.life.initiative import ProactiveDraft, ProactiveOutbox, ProactivePrefs
 from whale_core.memory.store import InMemoryStore
-from whale_core.life.weq_send import WeQWebSendPort
+from weq_channel.weq_send import WeQWebSendPort
 
 RUNNER_PATH = Path(__file__).resolve().parents[1] / "examples" / "qq_live_workflow.py"
 

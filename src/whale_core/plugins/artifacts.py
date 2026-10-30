@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from uuid import uuid4
 
-from whale_core.plugins.web_fetch import WebFetcher, _get_header, _read_limited
+from search_web.web_fetch import WebFetcher, _get_header, _read_limited
 
 _TYPES = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp",
           "image/gif": ".gif", "audio/mpeg": ".mp3", "audio/wav": ".wav",

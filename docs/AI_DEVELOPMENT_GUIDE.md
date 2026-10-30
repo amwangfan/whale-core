@@ -1,115 +1,148 @@
 # Whale Core · 开发者与 AI 协作指南
 
-> 本文件保留早期审阅快照。本轮最终状态以 [完成记录](completion-report-2026-10-30.md)、当前源码及测试为准；Shell、媒体接线、后台探索、桌面入口和控制台均已继续实现，不应把下面的旧缺口当作当前结论。
-
-> 面向维护者、贡献者与编程 AI。**面向普通使用者的入口是 [README](../README.md)**。本文件是代码导航与工作约定，不替代源码、测试和契约文档。
+> 面向维护者、贡献者与编程 AI。**面向普通使用者的入口是 [README](../README.md)**。
+> 本文件是代码导航、运行链路和工作约定，不替代源码、测试与契约文档。
 >
-> 更新范围：2026-10-30 的代码审阅快照。仓库可能继续快速变化，实施任何修改前必须以目标分支的最新代码为准。
+> 快照：2026-10-31，`main @ be7a2ee`，Python 测试 **1115 passed**，前端 **38 passed**。
+> 代码变化快：动手前以目标分支最新代码、测试和[完成记录](completion-report-2026-10-30.md)为准；
+> [差距表](gap-analysis-2026-10-30.md)和[路线图](roadmap-2026-10-30.md)是历史快照，不要把其中的旧缺口当成当前结论。
 
-## 1. 当前定位与边界
+## 1. 定位与边界
 
-Whale Core 是独立的 Python 智能层及初步可运行的管理服务，核心原则是 **事件输入、意图输出；能力由 provider/插件实现，授权由宿主策略决定**。它不是手机、雷鸟眼镜和 VoIP 设备代码的总仓库；基础设施分别见 [whale-io](https://github.com/amwangfan/whale-io)。
+whale-core 是鲸鱼项目的 Python 智能层与本地管理服务：**事件输入、意图输出；能力由插件/provider 实现，授权由宿主策略决定**。设备、网络桥接和硬件适配在 [whale-io](https://github.com/amwangfan/whale-io)。
 
-- 当前核心使用 Python 3.11+；网页前端使用 React + TypeScript + Vite。
-- 管理 API 当前基于 Python 标准库 HTTP server 与 SSE，并非 FastAPI。
-- 项目不设 demo/mock 档（owner 决策 2026-10-30）：对话永远来自真实模型端点；缺凭据时诚实报错。测试替身集中在 `tests/_doubles.py`。
-- 真实模型在 cloud/local 档可配置；`whale run` 使用当前配置档。默认 `SearchIntentRouter` 对明确搜索指令进行只读路由；更复杂的 LLM 意图识别仅在 `WHALE_INTENT_MODEL_ENABLED=1` 时启用。
-- QQ/WeQ 相关适配代码、主动行为策略、音频桥契约已经存在，但具体生产部署与设备联调状态应另行核实。
-- ASR/TTS、图像/视频生成提供契约与 provider 接口；对未接实际凭据的服务，不得称为真实联调完成。
-- 项目根目录在本次审阅时尚无项目 LICENSE；`licenses/` 中第三方人设许可不是整个 whale-core 的许可。对外发行或复用代码前须由维护者确定许可证。
+- Python 3.11+，运行时只依赖标准库（Windows 额外装 `tzdata`）。可选依赖：`voice`（websockets，实时语音）、`desktop`（pywebview，原生窗口）。
+- 管理 API 是标准库 `ThreadingHTTPServer` + SSE，不是 FastAPI；前端是 React 18 + TypeScript + Vite。
+- 单 owner 部署：一个数据目录同一时刻只允许一个服务实例（`core/lease.py` 的 `RuntimeLease`），canonical 数据在 SQLite。多 owner/多宿主机同步不在当前范围。
+- 没有生产用 mock/demo 档。对话只走真实模型端点，缺凭据是显式错误；测试替身集中在 `tests/_doubles.py`。
+- Linux/macOS 是目标平台；Windows 桌面与 Shell 不在本轮实现范围。
+- 项目级 LICENSE 仍由 owner 暂缓；`licenses/` 只有第三方通知，不能据此宣称整体开源许可。
 
-## 2. 代码地图（从职责而非文件名理解）
+## 2. 运行链路
 
-| 模块 | 代码入口 | 边界说明 |
+```
+CLI / API / desktop
+  → configuration.py：私密 settings.json（密钥+地址，单代原子快照）+ 非敏感投影
+  → profiles.assemble_runtime()：按 profile 组装 store / registry / manager / tools / companion / orchestrator
+  → 插件注册（官方拆分包 + 显式目录插件）、分角色模型、可选媒体/语音能力、预算与租约
+  → ConversationOrchestrator：会话历史、规则意图、可选 LLM 规划、有界工具循环
+  → ToolRegistry / PluginGateway：策略门控、逐次审批、风险分级、回执
+  → SQLite：记忆、会话、任务、审批、台账、产物元数据
+  → API/SSE → 网页控制台；life/ 与 plugins/weq_channel 负责渠道收发和主动行为账本
+```
+
+几条容易误判的规则：
+
+- 插件注册 ≠ 插件启用。`PluginManager` 有清单和启停状态；每次模型/工具/向量调用都按当前注册表解析，禁用立即撤销，不靠缓存开关。
+- 分角色模型（`chat` / `intent` / `executor` / `safety`）未单独配置时回落 `llm.chat`；默认装配里 `intent` 同时提供 `llm.intent` 与 `llm.safety`（发送前复核）。设置页看到的是环境变量与持久配置合并后的有效值。
+- 每日请求预算在 `core/budget.py`：模型调用与媒体任务分开计数，默认 200 / 50，0 表示禁用；名额先预留再调用，失败照样占额，防重试风暴。
+- 慢任务两段式：先回执占位，后台执行完再补发；进程重启后能恢复在途任务，不会被部署中断静默丢弃。
+- 审批与执行分离。审批绑定任务、步骤、插件版本和参数摘要；`resume` 不重放已完成步骤；`unknown` 不自动重试。
+
+## 3. 代码地图
+
+| 区域 | 入口 | 边界与现状 |
 | --- | --- | --- |
-| 对话与工具编排 | `core/runtime.py`, `core/intent_plan.py`, `core/intent_router.py`, `core/companion.py` | 会话、意图（规则优先+可选 LLM）和工具结果；与事件驱动的 `WhaleAgent` 并存 |
-| 模型端点 | `core/deepseek.py`, `plugins/model_provider.py`, `profiles.py` | 供应商接口可换；不能把某个提供商硬编码成授权层 |
-| 记忆 | `memory/store.py`, `sqlite_store.py`, `history.py`, `curation.py`, `hybrid.py`, `export.py` | 会话历史、情节/偏好/人格、召回和导出；避免把未经确认的推断升级为事实 |
-| 插件运行机制 | `plugins/manifest.py`, `registry.py`, `manager.py`, `gateway.py`, `policy.py` | 六类插件、注册、启停、配置、策略；配置正确不等于执行器已接线 |
-| 工具与媒体接口 | `plugins/web_search.py`, `web_fetch.py`, `speech.py`, `media_image.py`, `media_video.py`, `processing.py` | Provider/Tool 具体实现应可替换，长任务和真实媒资独立处理 |
-| 行动与云端执行 | `actions/`, `cloud/shell_policy.py`, `shell_executor.py`, `cloud/loop.py` | 模型只提议动作；Shell 策略不能代替 OS 沙箱 |
-| 主动行为和消息渠道 | `initiative/`, `life/` | 身份绑定、打扰策略、QQ/WeQ、持久化收件箱、探索和台账 |
-| API、CLI、Web | `api/server.py`, `cli/main.py`, `web/src/` | API 默认回环监听、Bearer 鉴权；React 前端不得直接操作核心数据库 |
-| Skill | `skills.py` | 工作流组合层；Skill 文本不应具有高于工具策略的权限 |
+| 组合根 | `profiles.py`、`configuration.py` | 统一 CLI/API/桌面装配；设置与密钥单代原子保存、热切换；角色模型、预算、租约在这里接入 |
+| 对话编排 | `core/runtime.py`、`core/intent_plan.py`、`core/intent_router.py`、`core/companion.py` | 记忆指令捷径、规则意图、可选 LLM 规划、工具循环、两段式慢任务、在途任务恢复 |
+| 模型访问 | `core/deepseek.py`、`plugins/model_provider.py`、`core/diagnostics.py` | OpenAI 兼容端点；错误六分类、有限重试、回环/私网 http 放行；角色能力解析；调用统计与健康报告 |
+| 预算与租约 | `core/budget.py`、`core/lease.py` | 每日请求预算；单数据目录单实例的进程锁（不是鉴权或沙箱边界） |
+| 记忆 | `memory/store.py`、`sqlite_store.py`、`history.py`、`continuity.py`、`curation.py`、`hybrid.py`、`semantic.py`、`export.py`、`backup.py` | 会话历史、情节/偏好/人格、词项召回、可选 embedding 融合、JSONL 导出、完整 SQLite 备份恢复 |
+| 插件机制 | `plugins/manifest.py`、`registry.py`、`manager.py`、`gateway.py`、`policy.py`、`loader.py` | 六类插件、清单校验、显式加载（不做自动发现）、启停与配置、fail-closed 执行网关、风险策略 |
+| 官方插件包 | `plugins/search_web/`、`plugins/weq_channel/` | 搜索/抓取与 QQ/WeQ 渠道；随 wheel/frozen/Docker 打包，宿主按包名导入 |
+| 可选能力 | `plugins/capability_setup.py`、`dashscope_media.py`、`provider_http.py`、`embedding.py`、`artifacts.py` | 媒体与 embedding 只在显式配置端点时注册；DashScope/OpenAI 两种协议；三层配置回退；私有产物存储 |
+| 语音 | `plugins/realtime_voice.py`、`realtime_bridge.py`、`api/voice.py`、`pcm_voice.py`、`bridge.py`、`whale_io.py` | 原生 Realtime WSS 会话与 whale-io PCM 中继两条路径；原始音频只在内存；桥接骨架明确标注未联调 |
+| 工具与终端 | `plugins/shell_tool.py`、`cloud/shell_policy.py`、`cloud/shell_executor.py` | 命令分档、逐次审批、Bubblewrap 命名空间与资源限额；沙箱不可用时拒绝，不降级到宿主 |
+| 任务与后台 | `core/runtime.py`、`service/workflows.py`、`service/worker.py`、`workflow_skills/` | 任务轨迹、审批恢复、工作流组合执行；定期探索默认关闭，只产出草稿，不直接外发 |
+| 主动行为与渠道 | `life/`、`actions/`、`initiative/` | 收件箱、台账、额度/静默/退避、QQ/OneBot 适配、设备事件与动作契约 |
+| 人格与展示 | `ui/persona.py`、`persona_cards.py`、`hud.py`、`voice.py` | 人格卡与用户自设禁忌；防注入提示保留；展示层不持有授权能力 |
+| API 与 CLI | `api/server.py`、`api/voice.py`、`cli/main.py`、`cli/desktop.py` | Bearer 鉴权、回环默认、SSE、静态控制台；CLI 子命令与桌面入口 |
+| 前端 | `web/src/`（10 个页签组件） | 页面按需加载、错误与空态、移动布局；所有写操作以服务端结果为准 |
+| 发行 | `scripts/build_release.py`、`verify_wheel.py`、`freeze_desktop.py`、`verify_frozen.py`、`Dockerfile`、`compose.yaml` | wheel 内置控制台与官方插件；Linux 目录/单文件冻结包；非 root 只读根文件系统容器 |
 
-进一步阅读：[契约](contracts.md) · [目标与工作约定](roadmap-2026-10-30.md) · [进度与差距](gap-analysis-2026-10-30.md) · [贡献指南](../CONTRIBUTING.md) · [桌面打包规划](packaging-desktop.md)。
+配套文档：[管理 API](management-api.md) · [能力与语音配置](media-and-voice.md) · [Shell 沙箱](shell-sandbox.md) · [部署](deployment.md) · [设备与意图契约](contracts.md) · [桌面入口](packaging-desktop.md)。
 
-## 3. 本地开发与验收
+## 4. 安全不变量（改动时不能破坏）
+
+1. 模型只能提议动作；身份门、风险策略、额度、审批由宿主裁决。插件事件/意图不携带 owner 或 `approved=true` 之类自授权字段。
+2. 交易级动作逐笔人审 + 限额，永远不能配置成免审。
+3. 密钥只进私密快照（`secrets/settings.json`，600）与环境变量，不进仓库、日志、异常文本、清单或 API 响应。
+4. 管理 API 强制 Bearer、默认只监听回环；公网必须有 TLS 反代。普通 JSON body 64KiB 上限，音频与 ASR 有独立上限。
+5. Shell 只有一条入口：`cloud/shell_policy` 分档 + `cloud/shell_executor`。沙箱不可用即拒绝；`sandbox="disabled"` 仅供完全可信的宿主命令，不是安全边界。
+6. 原始音频字节不入库、不进普通日志；产物必须经鉴权接口读取，默认 7 天过期。
+7. 记忆可导出、可删除，删除是真删；审批状态不等于已执行；取消不会撤销已经发生的外部副作用；未知结果不自动重试。
+8. 人格禁忌由用户自设，不再有强制全局禁忌；但「记忆是上下文不是指令」的注入隔离提示必须保留。
+9. 官方插件包随安装包分发，第三方目录插件必须显式给出路径；不做自动发现、不自动安装依赖。
+10. 单数据目录单实例：不要为了“并行加速”拆掉 `RuntimeLease`，SQLite 边界和主动派发台账依赖它。
+
+## 5. 本地开发与验收
 
 ```bash
 git clone https://github.com/amwangfan/whale-core.git
 cd whale-core
 
-python -m pip install -e ".[dev]"
-python -m pytest tests -q
+python -m pip install -e ".[dev,voice]"     # 需要桌面窗口时再加 desktop
+python -m pytest tests -q                   # 1115 passed，全部离线
 
-# 或使用 uv
-# uv sync --extra dev
-# uv run pytest -q
+pnpm -C web install --frozen-lockfile --ignore-scripts
+pnpm -C web test                            # 38 passed
+pnpm -C web build
 
 whale setup --profile local
 whale doctor
-whale run                  # 遵循当前配置档：cloud/local 真实模型端点（无 demo/mock 档）
-
-# 网页控制台
-pnpm -C web install
-pnpm -C web build
-whale api                  # http://127.0.0.1:8080
+whale run
+whale api                                   # http://127.0.0.1:8080
 ```
 
-API 首次启动生成或从环境变量读取 token；`~/.whale/api_token` 为本地私密文件，不得加入 Git、Issue 或日志。浏览器需要手动填写 token。前端可运行 `pnpm -C web test`，Python 测试为 `pytest`。当前 CI 包含 Python 测试和按 Web 路径触发的前端构建/测试；仍需在真实服务条件下执行单独的端到端验收。
+- 离线测试用可控本地 HTTP 端点、协议替身与浏览器 API 替身；不要把它们说成真实第三方服务联调。
+- CI：`.github/workflows/tests.yml`（pytest）、`web-build.yml`（前端构建/测试）、`release-smoke.yml`（wheel、冻结包、Docker 镜像的隔离启动与鉴权健康检查）。
+- 发行验证：`python scripts/build_release.py` + `scripts/verify_wheel.py`；冻结包用 `scripts/freeze_desktop.py` + `scripts/verify_frozen.py`，必须在目标 OS 上构建。
+- 配置目录默认 `~/.whale`；token 在 `api_token`（600），首次启动打印一次，不要放进 URL、Issue 或日志。
 
-`cloud` 设置时须先配置 `DEEPSEEK_API_KEY`；`local` 使用 OpenAI 兼容的本地模型端点，需要正确设置 `LOCAL_MODEL_BASE_URL` 和 `LOCAL_MODEL_NAME`。无法连接实际服务时按失败处理，不静默降成真实回答。
+## 6. 常见改动的落点
 
-## 4. 插件、Tool 与 Skill 不要混淆
+| 想改什么 | 先看哪里 |
+| --- | --- |
+| 新增插件/provider | `plugins/manifest.py` 的六类与风险级 → `registry.py` → `manager.py` 接线 → `gateway.py` 执行；新增官方包放 `plugins/<name>/` 并随发行打包 |
+| 改对话/工具编排 | `core/runtime.py`（计划、循环、超时、两段式）、`core/companion.py`（人设与记忆注入）、`core/intent_router.py`（规则与可选 LLM 规划） |
+| 改设置或密钥 | `configuration.py`（快照、投影、白名单、校验）→ `api/server.py` 的 `/settings` → `web/src/components/Settings.tsx` |
+| 改记忆语义 | `memory/`（store/sqlite 双后端保持 parity）、`curation.py`（事实与证据）、`semantic.py`（动态融合与回退） |
+| 改渠道或主动行为 | `life/`（inbox/ledger/runner）、`plugins/weq_channel/`（发送端口）、`initiative/policy.py`（额度/静默） |
+| 改审批或任务状态 | `core/runtime.py` 的任务记录与审批绑定、`api/server.py` 的 `/tasks/*`、`tests/test_runtime_lifecycle.py` |
+| 改 Shell | `cloud/shell_policy.py` 白名单/黑名单、`cloud/shell_executor.py` 命名空间与限额；负向测试优先 |
+| 改前端页面 | `web/src/App.tsx` 的页签 → `web/src/components/` 对应组件 → `web/src/api.ts` 的类型与请求 |
+| 改发行 | `scripts/build_release.py`（静态资源与官方插件）、`Dockerfile`、`compose.yaml`、`release-smoke.yml` |
 
-- **PluginKind：** `input` / `output` / `channel` / `processor` / `model` / `memory`。这是实现/接入类别。
-- **Capability：** `llm.chat`、`web.search`、`asr.transcribe` 等可被选择的能力。一个插件可提供多个能力。
-- **Tool：** 模型/执行器可以调用的具体函数，需要参数校验、超时、回执和风险策略。
-- **Skill：** 跨工具的可复用流程，不应天然拥有新的系统权限。
+## 7. 已知限制与未联调项
 
-`PluginManager` 能加载显式 JSON manifest、保存启停状态并连接宿主提供的 factories。**不是安装了 manifest 就自动下载/安装依赖或接通执行器**。仓库中实现的内置 provider 也不代表它们已经被 `~/.whale/manifests/` 自动配置、启用。插件是否可用应检查：声明、配置、工厂接线、健康检查与真实联调。
+这些是当前代码的真实边界，写文档或回答用户时不要越过：
 
-风险由核心插件策略决定。普通插件不能替代 owner 身份门、ShellPolicy、审批与额度。
+- 供应商侧：生图在 DashScope 兼容平台实测出图；TTS 对齐协议后真机合出 119KB WAV（此前的 502 实为非法音色参数）；Bing 免 key 搜索校园网实测可用并已切生产；ASR 在 AgentScope 平台侧暂不可用；视频与 embedding 未用付费额度联调。
+- 渠道侧：QQ 语音消息与图文混排按真实端点实现（sendVoice / sendImage），以自动化测试验收；本轮未重新做真实账号复验，手机、眼镜、VoIP 真机与 PCM 中继和真实音频桥也未复验。
+- 实时语音：真实麦克风实听未完成；GA/legacy 协议差异只在契约层处理，接新服务前必须核对会话字段。
+- Shell 沙箱：当前容器不能建用户命名空间，只验证了 fail-closed；成功隔离需在目标 Linux 主机点验。
+- 桌面与发行：macOS 签名/公证与真实 GUI 未做；Windows 排除；wheel/冻结包已过 CI 隔离启动。
+- 许可：项目级 LICENSE 未定，正式对外发行前必须解决。
+- `gap-analysis-2026-10-30.md` 与 `roadmap-2026-10-30.md` 保留历史快照，状态以代码、测试和完成记录为准。
 
-## 5. 已确认需要继续处理的问题（2026-10-30 代码审阅）
+## 8. 与 AI 协作的约定
 
-以下是进一步实现时应优先复查的具体风险，属于**代码层面的发现或限制**，不是对已发生事故的判断：
+用户已明确：**编程 Token 不计费**。不要为了省 Token 省略必要的代码阅读、调研、测试、独立审查和修正；也不要为了消耗 Token 堆砌依赖或无端抽象。
 
-1. **已修复：`whale run` 与当前配置档不一致。** CLI 现在通过 `assemble_runtime(profile)` 装配；真实模型联调仍需独立验证。
-2. **部分修复：默认搜索意图接线。** 明确搜索请求被规则路由至 `web.search`；可选 LLM 意图规划现在会收到上下文摘要（查询相关记忆+稳定事实+近期历史），并按「能推断就默认、确实不行才澄清」的规矩走（地点缺省=用户所在地）；澄清/待批/拒绝等系统结局一律经陪伴人格产出，不直发意图模型原文。不要将规则识别等同于完整意图模型。
-3. **已改善，但没有加密：敏感配置。** 凭据从普通 SQLite/kv 配置分离到权限受限的私有文件（或仅进程内存），Web 采用 PATCH 保留未修改的遮蔽值。私有文件仍是明文，生产可接系统密钥库。
-4. **部分修复：审批与派发分离。** Web 审批记录会由 `ProactiveOutbox.inspect/dispatch` 消费，拒绝阻止派发；API 返回 `execution_status=not_dispatched`。尚需有运行中的 worker 负责后续派发。
-5. **已修复持续 SSE。** API 长连接推送事件与心跳，但事件内存环并非持久化台账；长期离线可能丢失历史事件。
-6. **Shell 不是完整沙箱。** `shell_executor.py` 有超时、输出截断、环境过滤和可选降权，但不自带完整的 OS 容器/系统资源隔离；`ShellPolicy` 字符串黑名单不能当作不可绕过的安全边界。
-7. **发行许可仍未确定。** 未明确项目级 LICENSE 前，不能向下载者承诺某个开源许可证或自由再分发权限。
-8. **已修复：系统结局曾绕过人格（AI 味回复）。** 澄清曾直接透出意图模型的 `clarification_question` 原文；现 `ConversationOrchestrator._voiced()` 统一让陪伴人格措辞（2026-10-30，owner 反馈修复）。 未明确项目级 LICENSE 前，不能向下载者承诺某个开源许可证或自由再分发权限。
+- 跨模块任务用子智能体并行（研究、后端、前端、安全审查、测试、发行文档），主智能体统一接口、文件范围与集成验收。
+- 每轮流程：审查分支与未提交改动 → 明确验收标准 → 研究与拆任务 → 冻结共享契约 → 实施 → 独立审查 → 跑测试 → 修正 → 报告。
+- 改动前先读代码和测试，不要只按旧文档或文件名推断现状。
+- 不得未经授权部署生产、切换账号、执行破坏性 Shell 或删除用户数据。
+- 不得把测试替身、CI 绿、真实硬件/付费服务联调混为一谈；状态标注用「有代码 / 有测试 / 已接入运行链路 / 真实联调 / 未联调」。
+- 完成后报告：改了哪些文件、为什么、跑了哪些测试、真实联调到哪一层、剩余风险。
 
-改进上述问题时优先增加回归测试，明确区分“代码实现”“mock 通过”“真实链路联通”。不要只在 README 中更改措辞来掩盖缺口。
+## 9. 文档维护约定
 
-## 6. 与 AI 协作的约定
+- `README.md` / `README_EN.md`：面向第一次访问的人，写用途、可用能力、安装和当前限制；保持双语同步。
+- 本文件：代码地图、运行链路、安全不变量与协作规则；模块或目录变化时同步更新。
+- `docs/completion-report-2026-10-30.md`：本轮的完成证据与验收边界，新增验收先补证据再改结论。
+- `docs/management-api.md`、`media-and-voice.md`、`shell-sandbox.md`、`deployment.md`、`packaging-desktop.md`：面向具体操作，改接口、环境变量或默认值时同步。
+- `docs/contracts.md`：事件与动作的长期精确契约，改动前先确认兼容。
+- `gap-analysis-2026-10-30.md` / `roadmap-2026-10-30.md`：历史目标与证据快照，不追着现状改，但要在页首标注快照属性。
 
-用户已经明确：**编程 Token 不计费**。因此不要为了省 Token 省略必要的代码阅读、开源调研、测试、独立审查和反复修正；同样也不要为了消耗 Token 无端堆砌依赖和抽象。
-
-**推荐使用子智能体**，尤其是跨模块任务：架构研究、后端实现、前端实现、安全审查、测试验证、发布文档可以并行分工。主智能体统一接口、文件修改范围、权限边界和集成验收，不直接拼接未经审查的补丁。适合持续推进的大型目标也可以采用 **Goal 模式**；是否实际启用取决于工作环境支持情况和当前任务需要。
-
-建议每轮工作流程：审查当前分支与未提交改动 → 明确目标与验收标准 → 分任务/子智能体研究 → 冻结共享契约 → 实施 → 独立审查 → 运行测试 → 修正 → 报告。
-
-不得：
-
-- 无需核查就假定先前的差距报告仍然准确；
-- 未经授权部署生产、切换账号、执行破坏性 Shell 或删除用户数据；
-- 将测试替身、CI 绿色与真实硬件/服务联调混为一谈；
-- 为追求“完全依照旧任务书”而覆盖已经正确的新实现。
-
-完成后应报告：修改了哪些文件、为什么如此选择、实际运行了哪些测试、真实联通到哪一层、还有什么风险。
-
-## 7. 文档维护约定
-
-- `README.md` 和 `README_EN.md`：写给第一次访问项目的人；介绍用途、可体验功能、安装和当前限制。避免把内部类型枚举直接堆到首页。
-- 本文：面向开发者和 AI 的代码地图、实现边界、协作规则和审阅发现。
-- `docs/contracts.md`：长期维护事件与动作的精确接口。
-- `docs/roadmap-2026-10-30.md` 与 `docs/gap-analysis-2026-10-30.md`：分别保留目标与阶段证据；代码变动时及时更新状态。
-- `CONTRIBUTING.md`：简明贡献流程与不可突破的底线。
-
-README 中展示的每条安装命令必须与当前实际 CLI 相符；任何“可用”说法都应标注需要额外凭据、已接线或已联调的边界。
+README 与本文中出现的每条命令都必须能在当前代码上执行；任何“可用”说法都要标出凭据、接线和联调边界。

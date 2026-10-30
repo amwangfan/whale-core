@@ -10,7 +10,7 @@ import pytest
 
 from whale_core.core.runtime import ToolRegistry
 from whale_core.plugins.registry import PluginRegistry
-from whale_core.plugins.web_search import (
+from search_web.web_search import (
     BraveProvider,
     DuckDuckGoHtmlProvider,
     SearchError,
@@ -54,7 +54,7 @@ def _fake_urlopen(monkeypatch, *, status=200, payload=None, text=None):
             return fake(req, timeout=timeout)
 
     monkeypatch.setattr("urllib.request.urlopen", fake)
-    import whale_core.plugins.web_search as ws
+    import search_web.web_search as ws
     monkeypatch.setattr(ws, "_no_redirect_opener", lambda: FakeOpener())
     return captured
 
@@ -168,7 +168,7 @@ def test_register_manifest_and_executor():
 
     class StubProvider:
         def search(self, query, *, limit=5):
-            from whale_core.plugins.web_search import SearchResult
+            from search_web.web_search import SearchResult
             return [SearchResult("t", "https://a.com", "s", "stub")]
 
     register_web_search(registry, provider=StubProvider())
@@ -187,7 +187,7 @@ def test_register_tool_into_registry():
 
     class StubProvider:
         def search(self, query, *, limit=5):
-            from whale_core.plugins.web_search import SearchResult
+            from search_web.web_search import SearchResult
             return [SearchResult("标题", "https://a.com", "摘要", "stub")]
 
     register_web_search(registry, tools, provider=StubProvider())
@@ -225,3 +225,54 @@ def test_redirect_refused_as_bad_response(monkeypatch):
     with pytest.raises(SearchError) as ei:
         TavilyProvider(api_key="k").search("x")
     assert ei.value.kind == "bad_response"
+
+
+def test_bing_provider_parses_and_unwraps(monkeypatch):
+    """Bing HTML：b_algo 结果解析 + /ck/a 重定向解包（u=a1<base64>）。"""
+    import base64 as b64
+    real = "https://example.com/real-page"
+    wrapped = "https://www.bing.com/ck/a?u=a1" + b64.urlsafe_b64encode(real.encode()).decode().rstrip("=")
+    html = ('<li class="b_algo"><h2><a href="' + wrapped + '">标题一</a></h2>'
+            '<div><p>这是摘要</p></div></li>')
+    from search_web.web_search import BingHtmlProvider
+    import urllib.request
+
+    class Resp:
+        def read(self, n=-1):
+            return html.encode()
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: Resp())
+    results = BingHtmlProvider().search("查询", limit=3)
+    assert len(results) == 1
+    assert results[0].title == "标题一"
+    assert results[0].url == real  # 解包成功
+    assert results[0].source == "bing"
+
+
+def test_bing_provider_no_results_raises_blocked(monkeypatch):
+    import urllib.request
+    from search_web.web_search import BingHtmlProvider, SearchError
+
+    class Resp:
+        def read(self, n=-1):
+            return b"<html>no results</html>"
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: Resp())
+    try:
+        BingHtmlProvider().search("x")
+    except SearchError as e:
+        assert e.kind == "blocked"
+        return
+    raise AssertionError("expected blocked")
+
+
+def test_select_provider_bing():
+    from search_web.web_search import BingHtmlProvider, select_provider
+    p = select_provider({"WHALE_SEARCH_PROVIDER": "bing"})
+    assert isinstance(p, BingHtmlProvider)

@@ -380,6 +380,9 @@ class DashScopeWanVideoProvider:
         status = {"PENDING": STATUS_PENDING, "RUNNING": STATUS_RUNNING, "SUCCEEDED": STATUS_SUCCEEDED,
                   "FAILED": STATUS_FAILED, "CANCELED": STATUS_CANCELLED}.get(output.get("task_status"))
         if status is None:
+            # 手册外形状态（如 UNKNOWN=任务过期/不存在）：诚实标失败，不抛错
+            if str(output.get("task_status") or "") == "UNKNOWN":
+                return STATUS_FAILED, "", "task unknown or expired on platform"
             raise VideoError("bad_response", "unknown video job state")
         url = str(output.get("video_url") or "")
         if status == STATUS_SUCCEEDED and not url.startswith("https://"):
@@ -390,3 +393,38 @@ class DashScopeWanVideoProvider:
     def cancel(self, task_id: str) -> bool:
         self._request("/tasks/"+self._task_id(task_id)+"/cancel", method="POST")
         return True
+
+
+class DashScopeHappyHorseVideoProvider(DashScopeWanVideoProvider):
+    """AgentScope 平台 happyhorse 视频模型（手册 §2）：参数为 resolution/ratio
+    （与 Wan 的 size 不同）；duration 3-15 秒；其余 submit/poll/cancel 复用父类。"""
+
+    _RESOLUTIONS = ("720P", "1080P")
+    _RATIOS = ("16:9", "9:16", "1:1", "4:3", "3:4", "4:5", "5:4", "9:21", "21:9")
+
+    def submit(self, prompt: str, *, duration_s: int = 5, size: str = "1280x720") -> str:
+        prompt = _validate_prompt(prompt)
+        if not (3 <= int(duration_s) <= 15):
+            raise ValueError("happyhorse video duration must be 3-15 seconds")
+        w, _, h = size.partition("x")
+        try:
+            ratio = f"{int(w)}/{int(h)}" and _ratio_of(int(w), int(h))
+        except ValueError:
+            ratio = "16:9"
+        resolution = "1080P" if (h and int(h) >= 1000) else "720P"
+        payload = {"model": self.model, "input": {"prompt": prompt[:1500]},
+                   "parameters": {"resolution": resolution, "duration": duration_s,
+                                  "ratio": ratio, "watermark": False}}
+        data = self._request("/services/aigc/video-generation/video-synthesis", payload, method="POST")
+        output = data.get("output") or {}
+        if not isinstance(output, dict):
+            raise VideoError("bad_response", "invalid video output")
+        return self._task_id(str(output.get("task_id") or ""))
+
+
+def _ratio_of(w: int, h: int) -> str:
+    if w == h:
+        return "1:1"
+    from math import gcd
+    g = gcd(w, h)
+    return f"{w // g}:{h // g}"

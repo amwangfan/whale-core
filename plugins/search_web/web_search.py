@@ -266,6 +266,75 @@ class DuckDuckGoHtmlProvider:
         return [r for r in out if r.url]
 
 
+BING_URL = "https://www.bing.com/search"
+
+
+class BingHtmlProvider:
+    """Bing 搜索 HTML 免 key 档。
+
+    N100 校园网实测 200 可达（2026-10-30）。结果链接是 Bing /ck/a 重定向
+    包装——解包 u=a1<base64> 参数还原目标 URL；解不出就原样返回（能跳）。
+    """
+
+    def __init__(self, *, timeout: float = 10.0):
+        self.timeout = timeout
+
+    @staticmethod
+    def _unwrap_bing_redirect(url: str) -> str:
+        if "/ck/a" not in url:
+            return url
+        try:
+            qs = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+            u = qs.get("u", [""])[0]
+            if u.startswith("a1"):
+                import base64 as _b64
+                padded = u[2:] + "=" * (-len(u[2:]) % 4)
+                decoded = _b64.urlsafe_b64decode(padded).decode("utf-8", "ignore")
+                if decoded.startswith("http"):
+                    return decoded
+        except Exception:
+            pass
+        return url
+
+    def search(self, query: str, *, limit: int = 5) -> list[SearchResult]:
+        q, n = _clamp(query, limit)
+        url = BING_URL + "?q=" + urllib.parse.quote(q)
+        # Bing 对爬虫 UA 会降级成无结果页；必须用浏览器 UA（实测验证 2026-10-30）
+        req = urllib.request.Request(url, headers={
+            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"),
+            "Accept": "text/html", "Accept-Language": "zh-CN,zh;q=0.9"})
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                html = resp.read(1024 * 1024).decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429:
+                raise SearchError("blocked", "bing rate limited (429)") from exc
+            raise SearchError("network", f"bing HTTP error ({exc.code})") from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            raise SearchError("network", f"bing network error: {type(exc).__name__}") from exc
+        import html as _html
+        out = []
+        for m in re.finditer(
+                r'<li class="b_algo".*?<h2[^>]*>.*?<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>(.*?)</li>',
+                html, re.S):
+            link, title_html, rest = m.group(1), m.group(2), m.group(3)
+            snippet_m = re.search(r'<p[^>]*>(.*?)</p>', rest, re.S)
+            snippet = re.sub(r"<[^>]+>", "", snippet_m.group(1)) if snippet_m else ""
+            title = _html.unescape(re.sub(r"<[^>]+>", "", title_html)).strip()
+            out.append(SearchResult(
+                title=title[:300],
+                url=self._unwrap_bing_redirect(_html.unescape(link))[:2000],
+                snippet=_html.unescape(snippet).strip()[:500],
+                source="bing",
+            ))
+            if len(out) >= n:
+                break
+        if not out:
+            raise SearchError("blocked", "bing returned no parseable results")
+        return out
+
+
 def select_provider(env: Mapping[str, str] | None = None) -> SearchProvider:
     """显式 env 选择优先；否则按 key 存在性 tavily → brave → duckduckgo 回退。"""
     env = os.environ if env is None else env
@@ -276,6 +345,8 @@ def select_provider(env: Mapping[str, str] | None = None) -> SearchProvider:
         return BraveProvider(env=env)
     if explicit in ("duckduckgo", "ddg"):
         return DuckDuckGoHtmlProvider()
+    if explicit == "bing":
+        return BingHtmlProvider()
     if (env.get("TAVILY_API_KEY") or "").strip():
         return TavilyProvider(env=env)
     if (env.get("BRAVE_API_KEY") or "").strip():

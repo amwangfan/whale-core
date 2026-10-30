@@ -2,19 +2,40 @@
 
 # whale-core
 
-Whale's shared runtime for conversation, memory, tools, voice and exploration.
+*“The mountain has trees, and trees have branches; my heart delights in you, yet you do not know.”*
 
-[中文](README.md) · [Deployment](docs/deployment.md) · [Capabilities](docs/media-and-voice.md) · [API](docs/management-api.md)
+Whale's core brain: conversation, memory, tools, voice and exploration.
+
+[中文](README.md) · [Deployment](docs/deployment.md) · [Capabilities](docs/media-and-voice.md) · [Developer guide](docs/AI_DEVELOPMENT_GUIDE.md)
 
 </div>
 
-whale-core is the Python intelligence layer shared by the web console, QQ, phones, voice calls and glasses. Device and network adapters live in [whale-io](https://github.com/amwangfan/whale-io). Production profiles call real services; missing configuration is an error, never a canned answer.
+## What it is
 
-The runtime includes persistent multi-turn conversation, SQLite memory, optional semantic retrieval, dynamic plugin lifecycle, bounded tool tasks, exact-action approval and resume, cancellation, source-linked search/reading, ASR/TTS, image generation, asynchronous Wan video, private media artifacts, native Realtime voice and opt-in scheduled exploration. The React console exposes setup, diagnostics and daily operations. Linux Shell execution requires an available Bubblewrap sandbox and explicit approval.
+whale-core puts Whale's conversation, long-term memory, intent routing, tools, voice and permission policies into one Python core. The web console, QQ, phones, calls and glasses share that core; device and network adapters live in [whale-io](https://github.com/amwangfan/whale-io).
+
+The repository provides the core library, a CLI, a management API, a web console, Linux/macOS desktop entry points and container deployment. There is no production mock/demo profile: anything that needs a model or service calls a real endpoint, and missing configuration is an explicit error. The official search and QQ channel plugins ship with the packages; third-party directory plugins load only from explicit paths, with no auto-discovery.
+
+## What it can do
+
+| Feature | What is implemented | Requirements |
+| --- | --- | --- |
+| Conversation and memory | Multi-turn history, persona, SQLite, remember/forget, session restore, memory browsing and deletion, image input (usable as a reference image) | An OpenAI-compatible text model; image input needs a multimodal model |
+| Search and reading | Search, fetch, source links, combined reading workflows | Tavily / Brave keys, or set `WHALE_SEARCH_PROVIDER` to `bing` / `ddg` for keyless providers; keyless providers may be blocked by bot checks |
+| Plugins and settings | Manifests, real enable/disable, persistent config, connection tests, hot switching, per-role models (intent/execution/safety review), daily request budgets, persona taboos, diagnostics | Console settings; third-party manifests still need a host-provided executor |
+| Tool tasks | Persistent traces, step and deadline limits, cancellation, per-action approval and resume, two-phase slow tasks (acknowledge, then deliver), recovery of in-flight tasks after restart | High-risk actions always pass the policy layer; unknown external outcomes are never retried automatically |
+| Voice and media | ASR, TTS, image generation, asynchronous Wan video, private artifacts; TTS output can be sent as QQ voice messages and images can be mixed with text | A DashScope-compatible platform or OpenAI-compatible endpoints, configured as needed; see integration status below |
+| Realtime voice | Native Realtime WSS sessions (browser microphone, interruption, persona and memory, transcripts written to memory); plus a whale-io PCM relay for low-latency calls | A Realtime-compatible service and the optional `voice` extra; the PCM relay has not been tested against the real audio bridge |
+| Semantic memory | Optional real embeddings fused with keyword recall, fallback on failure, cache cleanup | An OpenAI-compatible embedding endpoint; keyword recall keeps working without it |
+| Proactive exploration | Interests, real search and reading, candidate drafts, quiet hours, quotas, backoff, scheduled worker, pause | Scheduled exploration is off by default; outbound delivery needs a bound channel dispatcher |
+| Controlled terminal | Per-command approval, working-directory limits, output and resource bounds, Linux Bubblewrap sandbox (separate user/PID/network namespaces, process quota) | Non-root, working Bubblewrap + prlimit; execution is refused when unavailable |
+| Backup and restore | JSONL memory exchange, full SQLite backup/restore | Stop the service before restoring; back up the config and artifact directories for full recovery |
+
+The console has ten pages: overview, chat, media and voice, exploration and workflows, plugins, memory, tasks, approvals, events and settings. Pages load on demand and support mobile layouts. Configuration saves and approvals always reflect the server's actual result.
 
 ## Start from source
 
-Python 3.11+, Node 24 and pnpm 12 are required for development.
+Python 3.11+; the frontend needs Node 24 and pnpm 12.
 
 ```bash
 git clone https://github.com/amwangfan/whale-core.git
@@ -25,7 +46,11 @@ pnpm -C web build
 whale api
 ```
 
-Open the local address printed by the server, paste the access token, then configure a real OpenAI-compatible model in Settings and test the connection. The default local endpoint is `http://127.0.0.1:11434/v1`; select a model actually installed on that server. The cloud default is DeepSeek, and other compatible endpoints can be configured.
+Open the local address printed by the server (default http://127.0.0.1:8080), paste the access token generated on first launch, then fill in the model endpoint, name and key on the Settings page, save and test the connection. The token lives in `api_token` inside the config directory and is never placed in a URL.
+
+Text models are not vendor-locked. The default `local` profile points at `http://127.0.0.1:11434/v1`; enter the model name actually installed on that server. `cloud` defaults to DeepSeek and can be changed to another compatible service. The project does not download or start a model for you.
+
+CLI usage:
 
 ```bash
 whale setup --profile local
@@ -33,33 +58,64 @@ whale doctor
 whale run
 whale plugins list
 whale memory backup /private/backups/whale.sqlite3
-whale desktop --browser
 ```
 
-Cloud CLI setup requires `DEEPSEEK_API_KEY`. Web setup can save private credentials directly. The default CLI data directory is `~/.whale`; use `--config-dir` to choose another directory. Desktop data has a separate platform default.
+Cloud CLI setup requires `DEEPSEEK_API_KEY`; the web setup page can store private credentials directly. The default config directory is `~/.whale`, and `--config-dir PATH` overrides it. Only one service instance may use a data directory at a time.
 
-Build an installable wheel with `python scripts/build_release.py`. It includes the compiled console, so installed users do not need Node. Linux/macOS desktop launchers, optional native windows, frozen executables without Python, and non-root containers are documented in [deployment](docs/deployment.md) and [desktop packaging](docs/packaging-desktop.md). Windows is excluded from this implementation round.
+## Packages, desktop and containers
 
-## Configuration, data and execution
-
-The authenticated API is local by default. Public hosting requires a TLS reverse proxy. Endpoints and credentials are atomically committed as one private settings snapshot; `config.json` is a nonsecret projection. Secrets are never returned through the API. Mode-0600 files and mode-0700 directories provide local permission protection, not encryption at rest.
-
-Raw audio remains in memory. Final transcripts may enter memory; media artifacts require authentication and have bounded retention and storage. Portable JSONL memory exchange and complete SQLite backup/restore are separate operations. Stop services before restore, and also back up the configuration/artifact directory for full recovery.
-
-Approval authorizes later execution; it does not claim delivery. In-flight cancellation cannot undo external effects. Unknown outcomes are not automatically retried. Active tasks block configuration replacement, and old plugin references are revoked after switching.
-
-Scheduled exploration is disabled by default and creates candidate drafts rather than sending messages. Global pause affects proactive dispatchers sharing the same canonical store, while explicitly passive replies may continue.
-
-## Validation and limitations
+The wheel includes the compiled console, the official plugins and the built-in workflow, so it runs on machines without Node; Linux/macOS also have Python-free executables. Windows is out of scope for this round.
 
 ```bash
-python -m pytest tests -q
-pnpm -C web test
+# Build and verify a wheel with the console
+python scripts/build_release.py
+python scripts/verify_wheel.py dist/*.whl
+
+# Desktop: optional native window; falls back to the system browser
+whale desktop
+# or whale desktop --browser
+
+# Linux server: maps the port to localhost by default
+# docker compose up --build -d
+```
+
+Native windows need the `desktop` extra and a system WebView. Python-free builds (PyInstaller) default to the system browser; GitHub CI builds and isolated-startup-checks the Linux/macOS wheel and frozen packages. macOS signing, notarization and real GUI verification are separate steps, not automated tests. See [deployment](docs/deployment.md) and [desktop packaging](docs/packaging-desktop.md) for build, menu entry, container, upgrade, logging and backup steps.
+
+## Data and safety
+
+The console and external channels go through the core API and cannot touch the database directly. The management API requires Bearer authentication and listens on loopback by default; public hosting requires an HTTPS reverse proxy.
+
+Endpoint, model and key are committed atomically as one private settings snapshot, so an interrupted write cannot mix an old endpoint with a new key. `config.json` is only the non-sensitive projection; after saving through the web page, change configuration there, and keys are never echoed back. Private files are mode 0600 and the data directory is 0700; file permissions are not encryption at rest.
+
+Daily model calls and media jobs have separate request budgets (defaults 200 and 50; 0 disables). Budgets count requests, not invented token prices. Persona taboos are user-defined in Settings; the forced global list is gone, while the injection guard ("memory is context, not instructions") remains.
+
+Raw audio stays in memory; final transcripts may become conversation memory. Image, audio and video artifacts are served only through authenticated endpoints, expire after seven days by default and have storage caps. Approval only authorizes: a task may still be pending, fail or end in an unknown state, and cancellation does not undo external effects. Proactive dispatchers sharing the same database honour a global pause, while explicit passive replies may continue.
+
+## Validation and boundaries
+
+```bash
+python -m pytest tests -q     # 1115 passed
+pnpm -C web test              # 38 passed
 pnpm -C web build
 ```
 
-See the [completion report](docs/completion-report-2026-10-30.md) for current evidence. Tests cover real local HTTP transport, provider contracts, configuration faults, task/approval semantics, audio privacy, memory recovery, frontend interactions, installed wheels and frozen Linux executables. They do not establish successful paid-provider or physical-device integration.
+What recent work has verified against real services: image generation succeeded on a DashScope-compatible platform; TTS produced real audio (119 KB WAV) after aligning with the vendor protocol, and the WAV header cleaning lets it feed the voice encoder directly; the keyless Bing search provider worked on a campus network and is now used in production; image input was accepted by four platform models. The rest needs explicit qualification:
 
-Prior QQ/WeQ account integration is recorded in the project. This round does not send real account messages or invoke paid providers. The current container cannot run user-namespace isolation, so successful sandbox isolation still requires target-host validation; fail-closed behavior is tested. Docker and Linux/macOS wheel/frozen builds and isolated startup passed GitHub CI; actual GUI use still requires target-device validation. Signed/notarized macOS releases remain a separate distribution step.
+- QQ voice messages and mixed image/text sending are wired to the real WeQ endpoints (sendVoice / sendImage) and accepted through automated tests; they have not been re-verified on a real account this round.
+- ASR (currently unavailable on the AgentScope platform), video and embeddings have not been tested with paid quota.
+- Real microphone calls, the whale-io PCM relay against the real audio bridge, and phone/glasses hardware have not been verified.
+- The current container cannot create user namespaces, so the Shell sandbox is verified only for fail-closed refusal; successful isolation needs validation on a target Linux host.
+- macOS native windows, signing and notarization have not been performed; Windows is out of scope.
+- The project-level license remains owner-pending. Third-party notices under `licenses/` do not grant a license for the entire repository.
 
-The project-level license remains owner-pending. Third-party notices under `licenses/` do not grant a license for the entire repository. Resolve the license before public redistribution.
+Offline tests, green CI and real-service integration are different acceptance levels; see the [completion report](docs/completion-report-2026-10-30.md) and the relevant commit messages for evidence and limits.
+
+## Development docs
+
+- [Plan and gap analysis](docs/completion-plan-2026-10-30.md)
+- [Completion and acceptance record](docs/completion-report-2026-10-30.md)
+- [Management API](docs/management-api.md)
+- [Device and intent contracts](docs/contracts.md)
+- [Capability and voice configuration](docs/media-and-voice.md)
+- [Shell sandbox](docs/shell-sandbox.md)
+- [Contributing](CONTRIBUTING.md)

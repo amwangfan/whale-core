@@ -33,7 +33,7 @@ def main() -> int:
         stage = Path(temporary)
         for name in ("pyproject.toml", "README.md", "README_EN.md", "CONTRIBUTING.md"):
             shutil.copy2(ROOT / name, stage / name)
-        for name in ("src", "licenses", "docs"):
+        for name in ("src", "licenses", "docs", "plugins"):
             shutil.copytree(ROOT / name, stage / name,
                             ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "static"))
         shutil.copytree(web, stage / "src" / "whale_core" / "static")

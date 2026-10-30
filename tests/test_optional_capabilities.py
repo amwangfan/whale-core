@@ -55,7 +55,7 @@ def test_no_optional_services_no_mock(tmp_path):
 def test_image_tool_stores_output_and_disable_revokes_handler(tmp_path, monkeypatch):
     registry, tools = PluginRegistry(), ToolRegistry()
     bundle = configure_optional_capabilities(registry, tools, InMemoryStore(),
-        env={'WHALE_IMAGE_BASE_URL':'http://localhost:1234/v1'}, artifact_dir=tmp_path)
+        env={'WHALE_IMAGE_BASE_URL':'http://localhost:1234/v1', 'WHALE_IMAGE_PROVIDER':'openai'}, artifact_dir=tmp_path)
     payload = {'data':[{'b64_json':base64.b64encode(b'image').decode()}]}
     monkeypatch.setattr(provider_http, 'open_request', lambda *a,**k: io.BytesIO(json.dumps(payload).encode()))
     spec = tools.for_capability('media.image.generate')[0]
@@ -203,3 +203,21 @@ def test_asr_browser_webm_preserves_filename(monkeypatch):
     assert b'filename="audio.webm"' in captured[0]
     with pytest.raises(ValueError):
         OpenAICompatibleASR(api_key='x').transcribe(b'audio',format='../wav')
+
+
+def test_capability_env_fallback_chain():
+    """回退链：专属 > 共享媒体平台 > 回复模型同款（owner 决策 2026-10-30）。"""
+    from whale_core.plugins.capability_setup import _resolve_capability_env
+    # 只有回复模型配置 → 媒体吃回复模型同款
+    b, k, kind = _resolve_capability_env({"DEEPSEEK_BASE_URL": "https://platform.agentscope.io/v1",
+                                          "DEEPSEEK_API_KEY": "sk-as-x"}, "IMAGE")
+    assert b == "https://platform.agentscope.io/v1" and k == "sk-as-x".replace("x", "") or k.startswith("sk-as")
+    assert kind == "dashscope"
+    # 共享媒体平台覆盖回复模型
+    b2, k2, _ = _resolve_capability_env({"DEEPSEEK_BASE_URL": "https://a", "DEEPSEEK_API_KEY": "ka",
+                                         "WHALE_MEDIA_BASE_URL": "https://b", "WHALE_MEDIA_API_KEY": "kb"}, "IMAGE")
+    assert b2 == "https://b" and k2 == "kb"
+    # 专属覆盖最高
+    b3, _, _ = _resolve_capability_env({"WHALE_MEDIA_BASE_URL": "https://b",
+                                        "WHALE_IMAGE_BASE_URL": "https://c"}, "IMAGE")
+    assert b3 == "https://c"

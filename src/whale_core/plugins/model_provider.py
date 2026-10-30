@@ -16,24 +16,27 @@ def register_openai_compatible(
     registry: PluginRegistry,
     *,
     plugin_id: str = "deepseek",
-    name: str = "DeepSeek（OpenAI 兼容端点）",
+    name: str = "回复模型（互动对话）",
     api_key: str | None = None,
     base_url: str | None = None,
     model: str | None = None,
     timeout: float = 25.0,
+    capability: str | tuple[str, ...] = LLM_CHAT,
 ) -> DeepSeekCompanion:
-    """注册一个 OpenAI 兼容 chat 端点为 model 插件（provides llm.chat）。
+    """注册一个 OpenAI 兼容 chat 端点为 model 插件。
 
     凭据缺省走 DEEPSEEK_API_KEY/DEEPSEEK_BASE_URL/DEEPSEEK_MODEL 环境变量
     （DeepSeekCompanion 既有约定）；返回接线好的 provider 对象。
+    ``capability`` 默认 llm.chat；可传 tuple 同时声明多个能力
+    （如意图模型同时提供 llm.intent + llm.safety）。
     """
     companion = DeepSeekCompanion(api_key=api_key, base_url=base_url,
                                   model=model, timeout=timeout)
     registry.register(
         PluginManifest(
             plugin_id=plugin_id, name=name, version="1.0.0", kind="model",
-            provides=(LLM_CHAT,),
-            description="OpenAI 兼容 chat completions 端点（默认 DeepSeek）",
+            provides=(capability,) if isinstance(capability, str) else tuple(capability),
+            description=f"当前接线 OpenAI 兼容端点（{capability}）；供应商/端点/模型/密钥可在设置页或插件配置中更换",
         ),
         provider=companion,
     )
@@ -57,3 +60,14 @@ def require_chat_model(registry: PluginRegistry):
             "(e.g. register_openai_compatible) or set up a local endpoint"
         )
     return provider
+
+
+def resolve_role_model(registry: PluginRegistry, role: str):
+    """按角色解析模型 provider（llm.intent / llm.tool_executor / llm.safety 等）；
+    未注册该角色时回落 llm.chat；都没有返回 None。"""
+    for _pid, provider in registry.providers_for(f"llm.{role}"):
+        if provider is not None:
+            return provider
+    if role != "chat":
+        return resolve_chat_model(registry)
+    return None

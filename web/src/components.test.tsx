@@ -43,6 +43,10 @@ vi.mock("./api", async (importOriginal) => {
       skills: vi.fn(),
       workflowSettings: vi.fn(),
       saveWorkflowSettings: vi.fn(),
+      life: vi.fn(),
+      addInterest: vi.fn(),
+      removeInterest: vi.fn(),
+      lifeFeedback: vi.fn(),
     },
   };
 });
@@ -66,6 +70,7 @@ beforeEach(() => {
   vi.mocked(api.tasks).mockResolvedValue([]);
   vi.mocked(api.plugins).mockResolvedValue([]);
   vi.mocked(api.diagnostics).mockResolvedValue({ checks: [], summary: {} });
+  vi.mocked(api.life).mockResolvedValue({ interests: [], diary: [] });
   Element.prototype.scrollIntoView = vi.fn();
 });
 afterEach(() => {
@@ -128,36 +133,61 @@ describe("console user flows", () => {
   it("retains untouched masked plugin secrets while saving configuration", async () => {
     vi.mocked(api.plugins).mockResolvedValue([
       {
-        plugin_id: "model",
-        name: "模型",
-        kind: "model",
+        plugin_id: "search_web",
+        name: "网页搜索",
+        kind: "output",
         version: "1",
         status: "enabled",
         enabled: true,
       },
     ]);
     vi.mocked(api.plugin).mockResolvedValue({
-      plugin_id: "model",
-      name: "模型",
-      kind: "model",
+      plugin_id: "search_web",
+      name: "网页搜索",
+      kind: "output",
       version: "1",
       status: "enabled",
       enabled: true,
       config: { api_key: "***", limit: 2 },
     });
     vi.mocked(api.setPluginConfig).mockResolvedValue({
-      plugin_id: "model",
+      plugin_id: "search_web",
       saved: true,
     });
     render(<Plugins />);
-    fireEvent.click(await screen.findByRole("button", { name: "配置" }));
+    fireEvent.click(await screen.findByText("网页搜索"));  // 点卡片进详情页
     const key = await screen.findByLabelText("配置值 api_key");
     expect(key.getAttribute("type")).toBe("password");
     expect((key as HTMLInputElement).value).toBe("");
     fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
     await waitFor(() =>
-      expect(api.setPluginConfig).toHaveBeenCalledWith("model", { limit: 2 }),
+      expect(api.setPluginConfig).toHaveBeenCalledWith("search_web", { limit: 2 }),
     );
+  });
+
+  it("model 插件配置走专用界面（供应商/端点/模型/密钥）", async () => {
+    vi.mocked(api.plugins).mockResolvedValue([
+      {
+        plugin_id: "deepseek",
+        name: "回复模型（互动对话）",
+        kind: "model",
+        version: "1",
+        status: "enabled",
+        enabled: true,
+      },
+    ]);
+    vi.mocked(api.settings).mockResolvedValue({
+      profile: "cloud",
+      model: { base_url: "https://api.deepseek.com", model: "deepseek-chat", api_key_configured: true },
+      intent_model_enabled: false,
+      capabilities: [],
+      notes: [],
+      models: {},
+    });
+    render(<Plugins />);
+    fireEvent.click(await screen.findByText("回复模型（互动对话）"));  // 点卡片进详情页
+    expect(await screen.findByText(/供应商与模型由你决定/)).toBeTruthy();
+    expect(screen.getByPlaceholderText(/api.deepseek.com/)).toBeTruthy();
   });
 
   it("records approval before resuming a pending task", async () => {
@@ -315,6 +345,74 @@ describe("media and workflow operations", () => {
         schedule_enabled: true,
         interval_s: 1800,
       }),
+    );
+  });
+
+  it("manages life interests and renders the exploration diary", async () => {
+    vi.mocked(api.skills).mockResolvedValue([]);
+    vi.mocked(api.workflowSettings).mockResolvedValue({
+      paused: false,
+      daily_limit: 5,
+      quiet_start: "22:00",
+      quiet_end: "07:00",
+      timezone: "Asia/Shanghai",
+      schedule_enabled: false,
+      interval_s: 3600,
+    });
+    vi.mocked(api.life).mockResolvedValue({
+      interests: [{ topic: "AR 眼镜", weight: 1.2 }],
+      diary: [
+        {
+          day: "2026-10-30",
+          note: "探索窗口：审查外部供给内容 2 条。",
+          sources: ["https://example.com/a"],
+        },
+      ],
+    });
+    vi.mocked(api.addInterest).mockResolvedValue({ topic: "机器人", weight: 1 });
+    vi.mocked(api.lifeFeedback).mockResolvedValue({ saved: true });
+    render(<Workflows />);
+    await screen.findByText("AR 眼镜");
+    expect(screen.getByText("兴趣权重 1.2")).toBeTruthy();
+    expect(screen.getByText("探索窗口：审查外部供给内容 2 条。")).toBeTruthy();
+    expect(
+      screen.getByRole("link", { name: "阅读来源 ↗" }).getAttribute("href"),
+    ).toBe("https://example.com/a");
+    fireEvent.click(screen.getByRole("button", { name: "喜欢" }));
+    await waitFor(() =>
+      expect(api.lifeFeedback).toHaveBeenCalledWith("AR 眼镜", "liked"),
+    );
+    fireEvent.change(screen.getByLabelText("兴趣话题"), {
+      target: { value: "机器人" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "添加" }));
+    await waitFor(() =>
+      expect(api.addInterest).toHaveBeenCalledWith("机器人"),
+    );
+  });
+
+  it("removes a life interest through the same endpoint with the remove flag", async () => {
+    vi.mocked(api.skills).mockResolvedValue([]);
+    vi.mocked(api.workflowSettings).mockResolvedValue({
+      paused: false,
+      daily_limit: 5,
+      quiet_start: "22:00",
+      quiet_end: "07:00",
+      timezone: "Asia/Shanghai",
+      schedule_enabled: false,
+      interval_s: 3600,
+    });
+    vi.mocked(api.life).mockResolvedValue({
+      interests: [{ topic: "电子音乐", weight: 0.8 }],
+      diary: [],
+    });
+    vi.mocked(api.removeInterest).mockResolvedValue({ removed: true });
+    render(<Workflows />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "移除" }),
+    );
+    await waitFor(() =>
+      expect(api.removeInterest).toHaveBeenCalledWith("电子音乐"),
     );
   });
 });

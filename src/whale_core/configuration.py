@@ -9,8 +9,38 @@ from pathlib import Path
 from typing import Mapping
 from urllib.parse import urlsplit
 
-SERVICE_FIELDS = frozenset('WHALE_EMBEDDING_BASE_URL WHALE_EMBEDDING_API_KEY WHALE_EMBEDDING_MODEL WHALE_SHELL_ENABLED WHALE_SHELL_TIER WHALE_SEARCH_PROVIDER TAVILY_API_KEY BRAVE_API_KEY WHALE_IMAGE_BASE_URL WHALE_IMAGE_API_KEY WHALE_IMAGE_MODEL WHALE_SPEECH_BASE_URL WHALE_SPEECH_API_KEY WHALE_ASR_MODEL WHALE_TTS_MODEL WHALE_TTS_VOICE WHALE_VIDEO_BASE_URL WHALE_VIDEO_API_KEY DASHSCOPE_API_KEY WHALE_VIDEO_MODEL WHALE_REALTIME_URL WHALE_REALTIME_API_KEY WHALE_REALTIME_MODEL WHALE_REALTIME_VOICE'.split())
+SERVICE_FIELDS = frozenset('WHALE_MEDIA_BASE_URL WHALE_MEDIA_API_KEY WHALE_MEDIA_PROVIDER WHALE_IMAGE_PROVIDER WHALE_SPEECH_PROVIDER WHALE_VIDEO_PROVIDER WHALE_EMBEDDING_BASE_URL WHALE_EMBEDDING_API_KEY WHALE_EMBEDDING_MODEL WHALE_SHELL_ENABLED WHALE_SHELL_TIER WHALE_SEARCH_PROVIDER TAVILY_API_KEY BRAVE_API_KEY WHALE_IMAGE_BASE_URL WHALE_IMAGE_API_KEY WHALE_IMAGE_MODEL WHALE_SPEECH_BASE_URL WHALE_SPEECH_API_KEY WHALE_ASR_MODEL WHALE_TTS_MODEL WHALE_TTS_VOICE WHALE_VIDEO_BASE_URL WHALE_VIDEO_API_KEY DASHSCOPE_API_KEY WHALE_VIDEO_MODEL WHALE_REALTIME_URL WHALE_REALTIME_API_KEY WHALE_REALTIME_MODEL WHALE_REALTIME_VOICE WHALE_REALTIME_PROTOCOL'.split())
 SECRET_FIELDS = frozenset(k for k in SERVICE_FIELDS if k.endswith('API_KEY'))
+
+MODEL_ROLES = frozenset({'chat', 'intent', 'executor', 'safety'})
+
+
+def read_models_view(config_dir, env: Mapping[str, str] | None = None) -> dict:
+    """分角色模型配置的脱敏视图（key 只报已配置与否）。
+
+    配置文件为空时回落到环境变量派生的有效配置（WHALE_<ROLE>_* 或
+    runner 侧 QQ_INTENT_MODEL 经启动器投影）——视图永远反映实际生效值。
+    """
+    import os
+    env = os.environ if env is None else env
+    config, private = read_settings_pair(config_dir)
+    models = config.get('models') or {}
+    out = {}
+    for role in sorted(MODEL_ROLES):
+        cfg = dict(models.get(role) or {})
+        prefix = f'WHALE_{role.upper()}'
+        if not cfg.get('model') and env.get(f'{prefix}_MODEL'):
+            cfg['model'] = env[f'{prefix}_MODEL']
+        if not cfg.get('base_url') and env.get(f'{prefix}_BASE_URL'):
+            cfg['base_url'] = env[f'{prefix}_BASE_URL']
+        # 角色 key 未单独配置时继承回复模型的 key（profiles 的回退逻辑同款）——
+        # 视图要反映「实际能用」，不是「单独配过」。
+        inherited = bool(env.get('DEEPSEEK_API_KEY')) if cfg.get('model') else False
+        cfg['api_key_configured'] = bool(
+            private.get(f'models_{role}_api_key') or env.get(f'{prefix}_API_KEY')
+            or inherited)
+        out[role] = cfg
+    return out
 
 
 def atomic_json(path: Path, value: dict) -> None:
@@ -130,6 +160,8 @@ class SettingsController:
 
     def view(self) -> dict:
         from whale_core.plugins.model_provider import resolve_chat_model
+        from whale_core.ui.persona_cards import get_custom_taboos
+        from whale_core.core.budget import view as budget_view
         bundle = self.bundle
         model = resolve_chat_model(bundle.registry)
         env = configured_env(bundle.profile, self.config_dir, self.env)
@@ -138,6 +170,9 @@ class SettingsController:
             'model': {'base_url': getattr(model, 'base_url', ''), 'model': getattr(model, 'model', ''),
                       'api_key_configured': bool(getattr(model, 'api_key', ''))},
             'intent_model_enabled': env.get('WHALE_INTENT_MODEL_ENABLED') == '1',
+            'persona_taboos': list(get_custom_taboos(bundle.store)),
+            'budget': budget_view(bundle.store),
+            'models': read_models_view(self.config_dir, env=self.env),
             'capabilities': sorted({s.capability for s in bundle.tools.specs()} | {c for m in bundle.registry.manifests() for c in m.provides}),
             'services': {key: (bool(env.get(key)) if key in SECRET_FIELDS else env.get(key, ''))
                          for key in sorted(SERVICE_FIELDS)},
@@ -159,7 +194,7 @@ class SettingsController:
 
     def _update_locked(self, patch: dict):
         from whale_core.profiles import assemble_runtime
-        if set(patch) - {'profile', 'model', 'intent_model_enabled', 'services'}:
+        if set(patch) - {'profile', 'model', 'models', 'intent_model_enabled', 'services', 'persona_taboos', 'budget'}:
             raise ValueError('unknown setting')
         with self.lock:
             if any(isinstance(r := self.bundle.store.get(k), dict) and (r.get('status') == 'running' or r.get('in_flight'))
@@ -197,10 +232,46 @@ class SettingsController:
                 if not isinstance(patch['intent_model_enabled'], bool):
                     raise ValueError('intent_model_enabled must be boolean')
                 config['intent_model_enabled'] = patch['intent_model_enabled']
+            if 'persona_taboos' in patch:
+                # 存 store（persona:* 约定），立即重渲当前卡快照；不落配置文件
+                from whale_core.ui.persona_cards import set_custom_taboos
+                set_custom_taboos(self.bundle.store, patch['persona_taboos'])
+            if 'budget' in patch:
+                # 请求预算：存 store kv（settings:budget），不落配置文件；
+                # 校验先于写入，非法值整体拒绝。
+                from whale_core.core.budget import SETTINGS_KEY, validate as validate_budget
+                self.bundle.store.put(SETTINGS_KEY, validate_budget(patch['budget']))
+            models_patch = patch.get('models', {})
+            if not isinstance(models_patch, dict) or set(models_patch) - MODEL_ROLES:
+                raise ValueError('unknown model role')
+            for role, mcfg in models_patch.items():
+                if not isinstance(mcfg, dict) or set(mcfg) - {'base_url', 'model', 'api_key'}:
+                    raise ValueError(f'invalid model settings for role {role}')
+                role_cfg = dict((config.setdefault('models', {})).get(role) or {})
+                for key in ('base_url', 'model'):
+                    if key in mcfg:
+                        value = mcfg[key]
+                        if not isinstance(value, str) or len(value) > 2000:
+                            raise ValueError(f'invalid {role} {key}')
+                        if key == 'base_url' and value.strip():
+                            validate_endpoint(value)
+                        if value.strip():
+                            role_cfg[key] = value.strip()
+                if 'api_key' in mcfg:
+                    k = mcfg['api_key']
+                    if k is not None and not isinstance(k, str):
+                        raise ValueError(f'{role} api_key must be a string or null')
+                    if k is None:
+                        private[f'models_{role}_api_key'] = ''
+                    elif k:
+                        private[f'models_{role}_api_key'] = k
+                config['models'][role] = role_cfg
             services = patch.get('services', {})
             if not isinstance(services, dict) or set(services) - SERVICE_FIELDS:
                 raise ValueError('unknown service setting')
             for name, value in services.items():
+                if name == 'WHALE_REALTIME_PROTOCOL' and value not in ('ga', 'legacy', '', None):
+                    raise ValueError('realtime protocol must be ga or legacy')
                 if name == 'WHALE_SHELL_TIER' and value not in ('managed', 'safe', 'personal', '', None):
                     raise ValueError('invalid shell tier')
                 if value is not None and not isinstance(value, str):
@@ -220,6 +291,16 @@ class SettingsController:
                 projected['DEEPSEEK_MODEL' if profile == 'cloud' else 'LOCAL_MODEL_NAME'] = model['model']
             if 'model_api_key' in private:
                 projected['DEEPSEEK_API_KEY' if profile == 'cloud' else 'LOCAL_MODEL_API_KEY'] = private['model_api_key']
+            for role, mcfg in (config.get('models') or {}).items():
+                if role == 'chat':
+                    continue  # chat 由既有 model 键投影
+                prefix = f'WHALE_{role.upper()}'
+                if mcfg.get('base_url'):
+                    projected[f'{prefix}_BASE_URL'] = mcfg['base_url']
+                if mcfg.get('model'):
+                    projected[f'{prefix}_MODEL'] = mcfg['model']
+                if private.get(f'models_{role}_api_key') is not None:
+                    projected[f'{prefix}_API_KEY'] = private[f'models_{role}_api_key']
             projected.update(config.get('services') or {})
             projected.update(private.get('services') or {})
             if 'intent_model_enabled' in config:

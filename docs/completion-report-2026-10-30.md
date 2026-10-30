@@ -20,7 +20,7 @@
 | 原生实时语音 | WSS音频provider、有限会话/闲置回收、独立输入输出、人格/短记忆、最终文本转写去重记录 | `realtime_voice.py`, `realtime_bridge.py`, API；真实回环API验证文字模型调用为0、原始音频不落库 |
 | 浏览器语音 | 用户点击才申请麦克风，24k单声道PCM16、分块/提交、音频事件播放、打断/退出清理 | `RealtimeVoice.tsx`, `voice.test.tsx`；浏览器API替身测试，未用真实麦克风通话 |
 | 受控Shell | 显式personal档+逐次审批、非root、Bubblewrap命名空间、资源/输出上限、超时清理 | `shell_executor.py`, `shell_tool.py`，正/负路径测试；本容器命名空间不可用，已验证fail closed |
-| 可视操作台 | 新响应式侧栏/连接页/总览/聊天/媒体/工作流/插件/记忆/任务/审批/事件/设置；真实操作与错误反馈 | 32项前端测试、TypeScript、生产构建；原生浏览器像素检查受本地端口不可达限制 |
+| 可视操作台 | 新响应式侧栏/连接页/总览/聊天/媒体/工作流/插件/记忆/任务/审批/事件/设置；真实操作与错误反馈 | 32项前端测试、TypeScript、生产构建；追加Chromium桌面/手机点验通过（见文末） |
 | wheel安装 | 包含当前控制台和内置Skill；离开源码目录安装仍可启动 | `build_release.py`, `verify_wheel.py`实际隔离安装验证 |
 | 非Windows桌面 | Linux/macOS原生窗口或浏览器入口、生命周期、平台数据/日志目录、菜单入口 | desktop与launcher测试；GUI使用替身，无真实图形显示环境 |
 | 免Python发行本体 | PyInstaller目录版/单文件版、内置运行时与控制台/Skill、Linux菜单和macOS.app包装 | Linux两种模式实际构建；空PATH/移除Python变量独立启动通过；GitHub macOS ARM64冻结与独立启动亦通过，GUI待目标设备 |
@@ -30,7 +30,7 @@
 
 最终本地验证：
 
-- `python -m pytest tests -q`：**925 passed**（基线为807 passed / 1 failed）。
+- `python -m pytest tests -q`：**932 passed**（基线为807 passed / 1 failed）。
 - `pnpm -C web test`：**32 passed**。
 - `pnpm -C web build`：TypeScript检查和Vite生产构建通过。
 - Python源码/脚本编译、`git diff --check`通过。
@@ -60,7 +60,7 @@ GitHub首轮安装发行检查（run 41050096142）已通过Docker、Linux/macOS
 - 手机、雷鸟眼镜、VoIP与QQ/WeQ真机/真实账号未在本轮重新联调；设备适配继续由whale-io承担。先前真实QQ链路记录不等于新版本已重新验收。
 - 当前Linux容器不允许所需用户命名空间，未完成Bubblewrap成功隔离的目标机正向验收。
 - GitHub Actions已实际通过Docker镜像/非root健康检查，以及Linux/macOS的wheel和免Python包构建/独立启动。macOS原生窗口与真实GUI点验、签名/公证仍未执行。
-- 云端浏览器不能访问本地开发端口，未完成真实页面截图和麦克风实听；前端行为测试、类型与构建已通过。
+- 已通过同一执行环境中的headless Chromium完成1440px桌面/390px手机的真实页面截图与20项页面导航检查；真实麦克风实听仍未完成。
 - 项目级LICENSE按owner先前决定暂缓；第三方通知已随包保留，正式对外发行仍需确定项目许可。
 - Windows排除在本轮范围。多owner/多宿主机同步是路线图中“确有需要再做”的条件性扩展，本轮维持单owner canonical SQLite边界。
 
@@ -74,3 +74,26 @@ GitHub首轮安装发行检查（run 41050096142）已通过Docker、Linux/macOS
 4. 在目标Linux非root主机安装bwrap/prlimit，明确启用personal档，审批一次无害命令并完成文件/网络隔离负向验收。
 5. 将whale-io设备/渠道适配器接同一个核心与数据库，核对绑定、被动回复、主动暂停、审批与发送回执。
 6. 先备份并恢复演练，再启用所需定期探索与正式部署。
+
+
+## 追加审阅：会话持久化与实际页面检查
+
+在当前提交上进一步实测，发现并修复两个遗漏：
+
+1. `记住：…`/`忘掉：…`虽返回成功，但没有追加会话历史，刷新后这轮对话消失。捷径现在也写入原话与回复，仍不调用模型。
+2. 工具正文及澄清提示曾作为增强后的“用户消息”进入历史和聊天情节。新增`user_text`数据通道，模型本轮仍获得工具/系统上下文，持久化与记忆召回查询使用真实用户原话。
+
+新增4项会话回归覆盖SQLite重启、工具结果、澄清与召回查询边界。补丁后的全量Python为932 passed，前端32 passed；不修改provider协议或审批范围。
+
+使用真实Chromium打开实际Python API托管的构建资源，1440px和390px下逐个导航10个页面；20项均无文档横向溢出，没有页面脚本错误。实际点击发送记忆指令，刷新页面后成功恢复这轮历史。截图环境仅为字体显示注入了本地CJK字体，没有改变产品布局或网络功能。
+
+![桌面总览](screenshots/console-overview.png)
+
+![手机设置](screenshots/console-mobile-settings.png)
+
+这项检查不等于真实麦克风、供应商或macOS原生窗口联调。
+
+
+原生Realtime协议也补充明确选择：默认采用当前GA的`session.type`/`output_modalities`/嵌套`audio.input/output`配置；需要旧Omni事件配置的兼容服务可在设置页填`WHALE_REALTIME_PROTOCOL=legacy`。两种协议均显式禁用模型工具。避免把旧beta会话字段直接发给GA服务。字段依据[官方客户端事件文档](https://developers.openai.com/api/reference/resources/realtime/client-events)，外部模型仍待凭据联调。
+
+协议追加的3项回归覆盖GA字段、legacy兼容与非法协议拒绝；最终Python共932项通过。

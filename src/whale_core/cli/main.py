@@ -191,6 +191,16 @@ def _build_api_server(args: argparse.Namespace) -> tuple[Any, str, str]:
 
 
 def _cmd_api(args: argparse.Namespace) -> int:
+    from whale_core.core.lease import RuntimeBusy, RuntimeLease
+    try:
+        with RuntimeLease(_config_dir(args)):
+            return _cmd_api_owned(args)
+    except RuntimeBusy:
+        print("已有 Whale 服务正在使用该配置目录；请停止它或使用其他目录。", file=sys.stderr)
+        return 2
+
+
+def _cmd_api_owned(args: argparse.Namespace) -> int:
     server, token, token_source = _build_api_server(args)
     print(f"[api] 监听 http://{server.host}:{server.port}/api/v1")
     print(f"[api] token 来源：{token_source}")
@@ -409,6 +419,16 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
+    from whale_core.core.lease import RuntimeBusy, RuntimeLease
+    try:
+        with RuntimeLease(_config_dir(args)):
+            return _cmd_run_owned(args)
+    except RuntimeBusy:
+        print("已有 Whale 服务正在使用该配置目录；请停止它或使用其他目录。", file=sys.stderr)
+        return 2
+
+
+def _cmd_run_owned(args: argparse.Namespace) -> int:
     config_dir = _config_dir(args)
     _ensure_layout(config_dir)
     from whale_core.profiles import assemble_runtime
@@ -572,6 +592,19 @@ def _cmd_memory_import(args: argparse.Namespace) -> int:
 
 
 def _cmd_memory_backup(args: argparse.Namespace) -> int:
+    """Restores require exclusive host ownership; SQLite backups remain online-safe."""
+    from contextlib import nullcontext
+    from whale_core.core.lease import RuntimeBusy, RuntimeLease
+    try:
+        lock = RuntimeLease(_config_dir(args)) if args.memory_command == "restore" else nullcontext()
+        with lock:
+            return _cmd_memory_backup_owned(args)
+    except RuntimeBusy:
+        print("恢复前请先停止使用此目录的 Whale 服务。", file=sys.stderr)
+        return 2
+
+
+def _cmd_memory_backup_owned(args: argparse.Namespace) -> int:
     from whale_core.memory.backup import create_backup, restore_backup
     config_dir = _config_dir(args)
     _ensure_layout(config_dir)

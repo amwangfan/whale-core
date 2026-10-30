@@ -97,7 +97,41 @@ class _ManagedModel:
 
     def reply(self, text, **kwargs):
         model = require_chat_model(self.registry)
+        # 预算预留先于真实调用：拿到名额后失败照样占额度（防重试风暴）。
+        from whale_core.core.budget import reserve
+        reserve(self.store, "model_calls")
         return InstrumentedProvider('llm.chat', model, self.store).reply(text, **kwargs)
+
+
+# 分角色模型能力映射（设置页/环境变量可配；未配置的角色回落 llm.chat）
+# 分角色模型能力映射（设置页/环境变量可配；未配置的角色回落 llm.chat）。
+# owner 决策（2026-10-30）：意图与安全审核合并为一个角色「意图」
+# （同一模型既做规划也做发送前复核），executor 仍独立。
+ROLE_CAPABILITIES = {
+    "intent": ("llm.intent", "llm.safety"),  # 意图规划 + 发送前安全审核（同一插件）
+    "executor": ("llm.tool_executor",),      # 任务执行（委托工具循环）
+}
+
+
+class _ManagedRoleModel:
+    """角色模型的动态解析代理：每次调用按当前注册表解析 llm.<role>（热切换跟随），
+    未配置该角色时回落 llm.chat。与 _ManagedModel 同款插桩。"""
+
+    def __init__(self, registry, store, role: str):
+        self.registry, self.store, self.role = registry, store, role
+
+    def __getattr__(self, name):
+        from whale_core.plugins.model_provider import resolve_role_model
+        return getattr(resolve_role_model(self.registry, self.role), name)
+
+    def reply(self, text, **kwargs):
+        from whale_core.plugins.model_provider import resolve_role_model
+        model = resolve_role_model(self.registry, self.role)
+        if model is None:
+            raise LookupError(f"no model for role {self.role!r} and no llm.chat fallback")
+        from whale_core.core.budget import reserve
+        reserve(self.store, "model_calls")
+        return InstrumentedProvider(f'llm.{self.role}', model, self.store).reply(text, **kwargs)
 
 
 def _default_store(config_dir: str | None) -> MemoryStore:
@@ -151,8 +185,8 @@ def assemble_runtime(
 
     # 搜索/抓取与模型档位正交：两档都按 key 可用性挂载
     if (env.get("TAVILY_API_KEY") or env.get("BRAVE_API_KEY") or env.get("WHALE_SEARCH_PROVIDER")):
-        from whale_core.plugins.web_fetch import register_web_fetch
-        from whale_core.plugins.web_search import register_web_search, select_provider
+        from search_web.web_fetch import register_web_fetch
+        from search_web.web_search import register_web_search, select_provider
         register_web_search(registry, tools, provider=select_provider(env))
         register_web_fetch(registry, tools)
         tools.owners.update(search_web="web_search", fetch_url="web_fetch")
@@ -162,7 +196,7 @@ def assemble_runtime(
 
     # Fetching is useful independently of paid search configuration.
     if registry.manifest('web_fetch') is None:
-        from whale_core.plugins.web_fetch import register_web_fetch
+        from search_web.web_fetch import register_web_fetch
         register_web_fetch(registry, tools)
         tools.owners['fetch_url'] = 'web_fetch'
     from whale_core.plugins.capability_setup import configure_optional_capabilities
@@ -176,11 +210,30 @@ def assemble_runtime(
         else:
             register_shell(registry, tools, Path(config_dir) / 'workspace', env=env)
             notes.append('受控终端已挂载；自由命令需WHALE_SHELL_TIER=personal、逐次审批和可用Linux系统沙箱')
+    # 分角色模型注册（可选）：WHALE_INTENT_* / WHALE_EXECUTOR_* / WHALE_SAFETY_*
+    # 只配 MODEL 名时复用主端点与凭据（同平台换模型）；配 BASE_URL 则独立供应商。
+    for role, capability in ROLE_CAPABILITIES.items():
+        r_base = env.get(f"WHALE_{role.upper()}_BASE_URL", "").strip()
+        r_model = env.get(f"WHALE_{role.upper()}_MODEL", "").strip()
+        r_key = env.get(f"WHALE_{role.upper()}_API_KEY", "")
+        if not (r_base or r_model):
+            continue
+        if not r_base:
+            r_base = model.base_url          # 复用主端点
+            r_key = r_key or model.api_key   # 复用主凭据
+            r_model = r_model or model.model
+        register_openai_compatible(
+            registry, plugin_id=f"llm_{role}",
+            name={"intent": "意图模型（规划+审核）", "executor": "任务执行模型",
+                  "safety": "安全审核模型"}.get(role, f"{role} 模型"),
+            api_key=r_key, base_url=r_base, model=r_model, capability=capability)
+        notes.append(f"角色模型已注册：{role} → {r_model}（{r_base}）")
     manager.adopt_registered()
     if config_dir:
         manifest_dir = Path(config_dir) / 'manifests'
         manifest_dir.mkdir(parents=True, exist_ok=True)
         manager.load_dir(manifest_dir)
+
     tools.guard()
     managed_model = _ManagedModel(registry, store)
     from whale_core.memory.semantic import DynamicHybridCurator
@@ -188,7 +241,9 @@ def assemble_runtime(
     # Explicit searches route to web.search; arbitrary LLM tool planning is opt-in.
     # Safe if no search provider is installed: runtime reports capability unavailable.
     llm_intent = env.get("WHALE_INTENT_MODEL_ENABLED", "") == "1"
-    intent_model = SearchIntentRouter(model=managed_model, enable_llm=llm_intent, tools=tools)
+    # 意图模型按角色解析：llm.intent 未配置时回落 llm.chat（热切换跟随注册表）
+    intent_router_model = _ManagedRoleModel(registry, store, "intent") if llm_intent else managed_model
+    intent_model = SearchIntentRouter(model=intent_router_model, enable_llm=llm_intent, tools=tools)
     if llm_intent:
         notes.append("LLM 意图识别已启用（WHALE_INTENT_MODEL_ENABLED=1）")
     from whale_core.plugins.gateway import PluginGateway

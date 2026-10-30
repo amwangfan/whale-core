@@ -12,7 +12,7 @@ from whale_core.actions.gateway import CompositeActionGateway
 from whale_core.core.types import ActionIntent
 from whale_core.life.channels import Incoming, OwnerChannelRegistry
 from whale_core.life.initiative import ProactiveDraft, ProactiveOutbox, ProactivePrefs
-from whale_core.life.qq_weq_plugin import (
+from weq_channel.qq_weq_plugin import (
     QQ_MESSAGE_KIND,
     QQ_WEQ_PLUGIN_ID,
     SEND_ACTION,

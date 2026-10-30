@@ -102,7 +102,10 @@ def run_desktop(config_dir: str | Path | None = None, *, browser_only: bool = Fa
     logger = _logger(desktop_log_dir())
     server = store = None
     previous_sigterm = None
+    lease = None
     try:
+        from whale_core.core.lease import RuntimeLease
+        lease = RuntimeLease(data_dir)
         token = secrets.token_urlsafe(36)
         server, store = _create_server(data_dir, token, static_dir)
         server.start()
@@ -158,6 +161,8 @@ def run_desktop(config_dir: str | Path | None = None, *, browser_only: bool = Fa
                 if store is not None:
                     store.close()
             finally:
+                if lease is not None:
+                    lease.close()
                 logger.info("desktop stopped")
                 for handler in tuple(logger.handlers):
                     handler.close()

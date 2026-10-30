@@ -178,6 +178,74 @@ class WeQWebSendPort:
                 return
         raise WeQSendError("weq web login returned no session cookie")
 
+    def send_image(self, image_bytes: bytes, *, filename: str = "image.png",
+                   width: int = 0, height: int = 0) -> bool:
+        """发图片消息（/trpc/account.sendImage，weq-web 侧的媒体上传发送）。
+
+        字节经 {type:'Buffer', data:[...]} JSON 形态传给 WeQ web（它落临时文件
+        后走 NTV2 上传发送）。失败返回 False（调用方兜底成文本链接）。
+        """
+        if not image_bytes or len(image_bytes) > 20 * 1024 * 1024:
+            return False
+        payload = {
+            "json": {
+                "peerType": "c2c",
+                "targetId": self.target_uid,
+                "image": {"type": "Buffer", "data": list(image_bytes)},
+                "fileName": filename[:100] or "image.png",
+            }
+        }
+        if width > 0 and height > 0:
+            payload["json"]["width"] = width
+            payload["json"]["height"] = height
+        if self.expected_account_uin:
+            payload["json"]["expectedAccountUin"] = self.expected_account_uin
+        if self.expected_account_config_id:
+            payload["json"]["expectedAccountConfigId"] = self.expected_account_config_id
+        try:
+            if self._cookie is None:
+                self.login()
+            status, body, _ = self._post("/trpc/account.sendImage", payload, auth=True)
+            if status == 401:
+                self.login()
+                status, body, _ = self._post("/trpc/account.sendImage", payload, auth=True)
+        except WeQSendError:
+            return False
+        if status != 200 or not isinstance(body, dict):
+            return False
+        outcome = (((body.get("result") or {}).get("data") or {}).get("json"))
+        return isinstance(outcome, dict) and bool(outcome.get("ok"))
+
+    def send_voice(self, wav_bytes: bytes, *, filename: str = "voice.wav") -> bool:
+        """发语音消息（/trpc/account.sendVoice，weq-web 侧 WAV→SILK 转换发送）。"""
+        if not wav_bytes or len(wav_bytes) > 20 * 1024 * 1024:
+            return False
+        payload = {
+            "json": {
+                "peerType": "c2c",
+                "targetId": self.target_uid,
+                "wav": {"type": "Buffer", "data": list(wav_bytes)},
+                "fileName": filename[:100] or "voice.wav",
+            }
+        }
+        if self.expected_account_uin:
+            payload["json"]["expectedAccountUin"] = self.expected_account_uin
+        if self.expected_account_config_id:
+            payload["json"]["expectedAccountConfigId"] = self.expected_account_config_id
+        try:
+            if self._cookie is None:
+                self.login()
+            status, body, _ = self._post("/trpc/account.sendVoice", payload, auth=True)
+            if status == 401:
+                self.login()
+                status, body, _ = self._post("/trpc/account.sendVoice", payload, auth=True)
+        except WeQSendError:
+            return False
+        if status != 200 or not isinstance(body, dict):
+            return False
+        outcome = (((body.get("result") or {}).get("data") or {}).get("json"))
+        return isinstance(outcome, dict) and bool(outcome.get("ok"))
+
     # ── OutboundPort ─────────────────────────────────────────
 
     def send(self, draft: ProactiveDraft) -> bool:
@@ -186,6 +254,14 @@ class WeQWebSendPort:
         text = draft.text
         if not text.strip() or len(text) > MAX_TEXT_CHARS:
             return False
+        # 图文混排（owner 决策 2026-10-31）：文本里的图片链接拆出来真发图片，
+        # 前后文字分段按序发送；图片下载失败兜底回文字链接（不静默丢内容）。
+        parts = _split_image_parts(text)
+        if any(kind == "image" for kind, _ in parts):
+            return _send_mixed_impl(self, parts)
+        return self._send_text_payload(text)
+
+    def _send_text_payload(self, text: str) -> bool:
         payload = {
             "json": {
                 "peerType": "c2c",
@@ -214,3 +290,74 @@ class WeQWebSendPort:
             return False
         self.last_receipt = outcome
         return bool(outcome.get("ok"))
+
+
+# markdown 图片；模型有时写成不带 ! 的链接形态——也认（生产实证）
+_MARKDOWN_IMG_RE = re.compile(r"!?\[[^\]]*\]\((https?://[^)\s]+\.(?:png|jpe?g|webp|gif)[^)\s]*)\)", re.IGNORECASE)
+_IMAGE_URL_RE = re.compile(
+    r"https?://[^\s)\]<>'\"]+\.(?:png|jpe?g|webp|gif)(?:\?[^\s)\]<>'\"]*)?",
+    re.IGNORECASE)
+_IMAGE_MAX_BYTES = 20 * 1024 * 1024
+
+
+def _split_image_parts(text: str) -> list[tuple[str, str]]:
+    """把文本拆成 [('text',...)|('image',url)] 按序分段。markdown 图片和裸图片
+    链接都识别；链接本身从文本里摘除（图片单独发，不留重复链接）。"""
+    spans: list[tuple[int, int, str]] = []
+    for m in _MARKDOWN_IMG_RE.finditer(text):
+        spans.append((m.start(), m.end(), m.group(1)))
+    covered = [(s, e) for s, e, _ in spans]
+    for m in _IMAGE_URL_RE.finditer(text):
+        if any(s <= m.start() < e for s, e in covered):
+            continue
+        spans.append((m.start(), m.end(), m.group(0)))
+    if not spans:
+        return [("text", text)]
+    spans.sort()
+    parts: list[tuple[str, str]] = []
+    cursor = 0
+    for s, e, url in spans:
+        before = text[cursor:s].strip()
+        if before:
+            parts.append(("text", before))
+        parts.append(("image", url))
+        cursor = e
+    tail = text[cursor:].strip()
+    if tail:
+        parts.append(("text", tail))
+    return parts
+
+
+def _download_image(url: str, *, timeout: float = 30.0) -> bytes | None:
+    """下载图片字节：仅 https、不跟重定向（防把凭据/会话带给第三方）、限 20MB。"""
+    if not url.startswith("https://"):
+        return None
+    req = urllib.request.Request(url, headers={"User-Agent": "whale-core/0.1"})
+    try:
+        with urllib.request.build_opener(_NoRedirect()).open(req, timeout=timeout) as resp:
+            data = resp.read(_IMAGE_MAX_BYTES + 1)
+            if len(data) > _IMAGE_MAX_BYTES:
+                return None
+            return data
+    except Exception:
+        return None
+
+
+class _MixedSend:
+    """挂到 WeQWebSendPort 上：分段发送（text→sendElements, image→下载+sendImage）。"""
+
+
+def _send_mixed_impl(self, parts: list[tuple[str, str]]) -> bool:
+    ok_all = True
+    for kind, content in parts:
+        if kind == "text":
+            if not self._send_text_payload(content):
+                ok_all = False
+        else:
+            data = _download_image(content)
+            if data and self.send_image(data, filename=content.rsplit("/", 1)[-1][:60] or "image.png"):
+                continue
+            # 图片失败兜底回文字链接（不丢内容）
+            if not self._send_text_payload(content):
+                ok_all = False
+    return ok_all

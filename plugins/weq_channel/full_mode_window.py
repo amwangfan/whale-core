@@ -34,7 +34,7 @@ import urllib.request
 from pathlib import Path
 from typing import Callable
 
-from whale_core.life.weq_send import _NoRedirect, validate_base_url
+from .weq_send import _NoRedirect, validate_base_url
 
 STATE_FILE_DEFAULT = "/opt/whale/state/fullmode_window.ts"
 LOGIN_PATH = "/_auth/login"

@@ -94,7 +94,8 @@ class DeepSeekCompanion:
                 "configured": bool(self.api_key) or _is_local_or_private_http(self.base_url)}
 
     def reply(self, text: str, *, persona: str = "", memories: Sequence[str] = (),
-              history: Sequence[Mapping[str, str]] = ()) -> str:
+              history: Sequence[Mapping[str, str]] = (),
+              images: Sequence[bytes] = ()) -> str:
         if not self.api_key and not _is_local_or_private_http(self.base_url):
             # 回环/私网 http 端点（如本地 Ollama）允许无 key；云端端点必须配置
             raise ModelError("config", "DEEPSEEK_API_KEY not configured")
@@ -104,8 +105,19 @@ class DeepSeekCompanion:
                   f"人格：{persona[:4000]}\n近期记忆：{json.dumps(list(memories)[-8:], ensure_ascii=False)[:3000]}")
         clean_history = [{"role": m["role"], "content": m["content"][:2000]}
                          for m in list(history)[-12:] if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)]
+        # 附带图片时用户消息转多模态 parts（OpenAI image_url data URI 形态）
+        if images:
+            parts: list = [{"type": "text", "text": text[:4000]}]
+            for img in list(images)[:4]:  # 至多 4 张，单张 ≤10MB
+                if isinstance(img, (bytes, bytearray)) and 0 < len(img) <= 10 * 1024 * 1024:
+                    b64 = base64.b64encode(bytes(img)).decode("ascii")
+                    parts.append({"type": "image_url",
+                                  "image_url": {"url": f"data:image/png;base64,{b64}"}})
+            user_content: object = parts
+        else:
+            user_content = text[:4000]
         body = json.dumps({"model": self.model, "messages": [{"role": "system", "content": system}, *clean_history,
-                                                               {"role": "user", "content": text[:4000]}],
+                                                               {"role": "user", "content": user_content}],
                            "stream": False}, ensure_ascii=False).encode()
         last: ModelError | None = None
         for attempt in (0, 1):  # 瞬时错误重试一次

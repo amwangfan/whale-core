@@ -17,7 +17,7 @@ import pytest
 
 from whale_core.core.runtime import ToolRegistry
 from whale_core.plugins import PluginKind, PluginRegistry, RiskClass
-from whale_core.plugins.web_fetch import (
+from search_web.web_fetch import (
     FetchError,
     FetchResult,
     WebFetcher,
@@ -430,7 +430,7 @@ def test_register_duplicate_plugin_id_raises():
 def test_nat64_addresses_blocked():
     """64:ff9b::/96 的 is_global 在 Python 3.13 误判为 True——显式拒绝。"""
     import ipaddress
-    from whale_core.plugins.web_fetch import _ip_allowed
+    from search_web.web_fetch import _ip_allowed
     assert not _ip_allowed(ipaddress.ip_address("64:ff9b::a9fe:a9fe"))  # =169.254.169.254
     assert not _ip_allowed(ipaddress.ip_address("64:ff9b::7f00:1"))    # =127.0.0.1
     assert not _ip_allowed(ipaddress.ip_address("64:ff9b:1::1"))       # local-use 段
@@ -442,7 +442,7 @@ def test_peer_checked_connection_blocks_loopback():
     """TOCTOU/rebinding 防线：连接后对端非公网即断（真实回环服务实证）。"""
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     import threading
-    from whale_core.plugins.web_fetch import FetchError, _PeerCheckedHTTP
+    from search_web.web_fetch import FetchError, _PeerCheckedHTTP
 
     class H(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -471,7 +471,7 @@ def test_peer_checked_connection_blocks_loopback():
 
 def test_peer_check_positive_path(monkeypatch):
     """peer 复核放行时请求正常完成（_ip_allowed 打桩为放行）。"""
-    import whale_core.plugins.web_fetch as wf
+    import search_web.web_fetch as wf
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     import threading
 
@@ -497,7 +497,7 @@ def test_peer_check_positive_path(monkeypatch):
 
 
 def test_read_limited_deadline():
-    from whale_core.plugins.web_fetch import FetchError, _read_limited
+    from search_web.web_fetch import FetchError, _read_limited
     import time
 
     class Trickle:

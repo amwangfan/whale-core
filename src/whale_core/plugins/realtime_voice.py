@@ -70,12 +70,15 @@ class RealtimeVoiceSession:
 
 class OpenAICompatibleRealtime:
     def __init__(self, *, url: str, api_key: str, model: str, voice: str = "alloy",
-                 connector: Callable | None = None):
+                 connector: Callable | None = None, protocol: str = "ga"):
         parts = urllib.parse.urlsplit(url)
         if parts.scheme != "wss" or not parts.hostname or parts.username or parts.password or parts.fragment:
             raise ValueError("realtime endpoint must be wss without embedded credentials")
         if not model.strip():
             raise ValueError("realtime model is required")
+        if protocol not in ("ga", "legacy"):
+            raise ValueError("realtime protocol must be ga or legacy")
+        self.protocol = protocol
         self.url, self.api_key, self.model, self.voice = url, api_key, model, voice
         self._connector = connector
 
@@ -93,13 +96,23 @@ class OpenAICompatibleRealtime:
         query["model"] = self.model
         url = urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(query)))
         try:
-            connection = connect(url, additional_headers={"Authorization": "Bearer "+self.api_key},
+            headers = {"Authorization": "Bearer " + self.api_key}
+            if self.protocol == "legacy":
+                headers["OpenAI-Beta"] = "realtime=v1"
+            connection = connect(url, additional_headers=headers,
                                  open_timeout=10, max_size=2*1024*1024)
             session = RealtimeVoiceSession(connection)
-            session._send({"type": "session.update", "session": {
-                "modalities": ["text", "audio"], "voice": self.voice,
-                "input_audio_format": "pcm16", "output_audio_format": "pcm16",
-                "turn_detection": None, "instructions": instructions[:20000]}})
+            if self.protocol == "ga":
+                configuration = {
+                    "type": "realtime", "output_modalities": ["audio"],
+                    "audio": {"input": {"format": {"type": "audio/pcm", "rate": 24000}, "turn_detection": None},
+                              "output": {"format": {"type": "audio/pcm", "rate": 24000}, "voice": self.voice}},
+                }
+            else:
+                configuration = {"modalities": ["text", "audio"], "voice": self.voice,
+                    "input_audio_format": "pcm16", "output_audio_format": "pcm16", "turn_detection": None}
+            configuration.update(instructions=instructions[:20000], tools=[])
+            session._send({"type": "session.update", "session": configuration})
             return session
         except Exception as exc:
             # A failed initial session.update happens after connecting but before

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api, type WorkflowSettings } from "../api";
 import { useApi } from "../hooks";
 import Icon from "./Icon";
+import Life from "./Life";
 
 export default function Workflows() {
   const loadSkills = useCallback(() => api.skills(), []);
@@ -159,6 +160,7 @@ export default function Workflows() {
               </button>
             </form>
           </section>
+          <Life />
         </div>
         <div>
           <section className="surface">

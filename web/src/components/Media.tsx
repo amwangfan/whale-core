@@ -3,6 +3,7 @@ import { api, type CapabilityResult, type VideoTask } from "../api";
 import { useApi } from "../hooks";
 import Icon from "./Icon";
 import RealtimeVoice from "./RealtimeVoice";
+import RealtimeCall from "./RealtimeCall";
 import ShellTerminal from "./ShellTerminal";
 
 const MODES = [
@@ -41,6 +42,12 @@ const MODES = [
     label: "实时语音",
     icon: "voice",
     description: "和鲸鱼直接说说话。",
+  },
+  {
+    id: "voice.pcm_bridge",
+    label: "低延迟通话",
+    icon: "voice",
+    description: "经 whale-io 音频桥的原生 PCM 通话（AudioWorklet + WebSocket）。",
   },
 ];
 
@@ -214,6 +221,8 @@ export default function Media() {
       )}
       {mode === "voice.realtime" ? (
         <RealtimeVoice available={available} />
+      ) : mode === "voice.pcm_bridge" ? (
+        <RealtimeCall available={available} />
       ) : mode === "shell.execute" ? (
         <ShellTerminal available={available} />
       ) : (

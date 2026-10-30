@@ -62,7 +62,7 @@ def test_intent_router_search_and_normal_chat(monkeypatch):
     """local 档（demo 档已移除）：规则路由搜索进 web.search，闲聊走 chat。"""
     monkeypatch.setattr(DeepSeekCompanion, "reply",
                         lambda self, text, **kwargs: "REAL-MODEL-FAKE-TRANSPORT")
-    from whale_core.plugins.web_search import TavilyProvider, SearchResult
+    from search_web.web_search import TavilyProvider, SearchResult
     monkeypatch.setattr(TavilyProvider, "search",
                         lambda self, query, **kwargs: [
                             SearchResult(title="Evidence", url="https://example.com",
@@ -82,7 +82,7 @@ def test_intent_router_search_and_normal_chat(monkeypatch):
 def test_cloud_profile_uses_passed_env_and_search_tool(monkeypatch):
     monkeypatch.setattr(DeepSeekCompanion, "reply",
                         lambda self, text, **kwargs: "REAL-MODEL-FAKE-TRANSPORT")
-    from whale_core.plugins.web_search import TavilyProvider, SearchResult
+    from search_web.web_search import TavilyProvider, SearchResult
     monkeypatch.setattr(TavilyProvider, "search",
                         lambda self, query, **kwargs: [
                             SearchResult(title="Evidence", url="https://example.com",

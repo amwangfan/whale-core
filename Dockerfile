@@ -11,6 +11,7 @@ FROM python:3.12-slim-bookworm AS wheel
 WORKDIR /build
 COPY pyproject.toml README.md README_EN.md CONTRIBUTING.md ./
 COPY src/ ./src/
+COPY plugins/ ./plugins/
 COPY licenses/ ./licenses/
 COPY docs/ ./docs/
 COPY --from=console /build/web/dist/ ./src/whale_core/static/

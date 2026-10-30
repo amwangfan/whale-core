@@ -1,6 +1,149 @@
-import { Fragment, useCallback, useEffect, useState } from "react";
-import { api, ApiError, PluginDetail, PluginHealth } from "../api";
+import { useCallback, useEffect, useState } from "react";
+import { api, ApiError, PluginDetail, PluginHealth, PluginInfo } from "../api";
 import { useApi } from "../hooks";
+
+const KIND_LABELS: Record<string, string> = {
+  input: "输入型",
+  output: "输出型",
+  channel: "渠道（双向收发）",
+  processor: "内部处理",
+  model: "模型供给",
+  memory: "记忆存储",
+};
+
+const PLUGIN_ROLE: Record<string, string> = {
+  deepseek: "chat",
+  local_model: "chat",
+  llm_intent: "intent",
+  llm_executor: "executor",
+  llm_safety: "safety",
+};
+
+const ROLE_LABELS: Record<string, string> = {
+  chat: "回复模型（互动对话）",
+  intent: "意图模型",
+  executor: "任务执行模型",
+  safety: "安全审核模型",
+};
+
+/** 模型插件专用配置界面：供应商/端点/模型/密钥由用户自行决定。 */
+function ModelConfigPanel({
+  pluginId,
+  onSaved,
+}: {
+  pluginId: string;
+  onSaved: () => void;
+}) {
+  const role = PLUGIN_ROLE[pluginId] ?? "chat";
+  const [endpoint, setEndpoint] = useState("");
+  const [modelName, setModelName] = useState("");
+  const [apiKey, setApiKey] = useState("");
+  const [busy, setBusy] = useState("");
+  const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let alive = true;
+    api
+      .settings()
+      .then((s) => {
+        if (!alive) return;
+        const cfg = (s.models ?? {})[role];
+        // chat 角色的配置在主 model 键里；role 矩阵里的值优先，主键兜底。
+        // 端点/模型名正常回显；api_key 永不回显（只报「已配置」占位）。
+        const fallback = role === "chat" ? s.model : undefined;
+        setEndpoint((cfg?.base_url ?? "") || (fallback?.base_url ?? ""));
+        setModelName((cfg?.model ?? "") || (fallback?.model ?? ""));
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [role]);
+
+  const save = async () => {
+    setBusy("save");
+    setNotice("");
+    setError("");
+    try {
+      await api.saveSettings({
+        models: {
+          [role]: {
+            base_url: endpoint,
+            model: modelName,
+            ...(apiKey ? { api_key: apiKey } : {}),
+          },
+        },
+      });
+      setApiKey("");
+      setNotice("已保存并生效（装配已重建）。");
+      onSaved();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const test = async () => {
+    setBusy("test");
+    setNotice("");
+    setError("");
+    try {
+      const r = await api.testPlugin(pluginId);
+      if (r.ok)
+        setNotice(`连接正常${r.latency_ms != null ? ` · ${r.latency_ms} ms` : ""}`);
+      else setError(`测试失败：${r.error_kind ?? "未就绪"}`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  return (
+    <div className="model-config">
+      <div className="section-label">
+        {ROLE_LABELS[role] ?? "模型"} · 供应商与模型由你决定
+      </div>
+      <div className="form-field">
+        <label>API 端点（OpenAI 兼容）</label>
+        <input
+          value={endpoint}
+          onChange={(e) => setEndpoint(e.target.value)}
+          placeholder="如 https://api.deepseek.com 或 http://127.0.0.1:11434/v1"
+        />
+      </div>
+      <div className="form-field">
+        <label>模型名</label>
+        <input
+          value={modelName}
+          onChange={(e) => setModelName(e.target.value)}
+          placeholder="如 deepseek-v4.1-flash / qwen3.8-flash / kimi-k3"
+        />
+      </div>
+      <div className="form-field">
+        <label>API 密钥</label>
+        <input
+          type="password"
+          value={apiKey}
+          onChange={(e) => setApiKey(e.target.value)}
+          placeholder="留空=保持现状；本地回环端点可不需要"
+        />
+      </div>
+      <div className="plugin-card-actions">
+        <button disabled={Boolean(busy)} onClick={() => void save()}>
+          {busy === "save" ? "保存中…" : "保存并生效"}
+        </button>
+        <button disabled={Boolean(busy)} onClick={() => void test()}>
+          {busy === "test" ? "测试中…" : "测试连接"}
+        </button>
+      </div>
+      {notice && <div className="banner ok">{notice}</div>}
+      {error && <div className="banner error">{error}</div>}
+    </div>
+  );
+}
 
 type HealthState =
   | { kind: "loading" }
@@ -223,7 +366,7 @@ export default function Plugins() {
   const [health, setHealth] = useState<Record<string, HealthState>>({});
   const [notice, setNotice] = useState("");
   const [actionError, setActionError] = useState("");
-  const [configFor, setConfigFor] = useState<string | null>(null);
+  const [detailFor, setDetailFor] = useState<string | null>(null);
 
   const toggle = async (id: string, enabled: boolean) => {
     setBusy(id);
@@ -272,6 +415,84 @@ export default function Plugins() {
     }
   };
 
+  // 分组：回复模型独立；媒体生成聚合；其余按 kind 归组
+  const groups: [string, (p: PluginInfo) => boolean][] = [
+    ["回复模型", (p) => p.kind === "model" && (p.plugin_id === "deepseek" || p.plugin_id === "local_model")],
+    ["意图模型", (p) => p.plugin_id === "llm_intent"],
+    ["媒体生成", (p) => p.kind === "model" && !["deepseek", "local_model", "llm_intent"].includes(p.plugin_id)],
+    ["工具与输出", (p) => p.kind === "output"],
+    ["渠道", (p) => p.kind === "channel"],
+  ];
+  const grouped = (list: PluginInfo[]): [string, PluginInfo[]][] => {
+    const out: [string, PluginInfo[]][] = [];
+    const assigned = new Set<string>();
+    for (const [label, match] of groups) {
+      const items = list.filter((p) => !assigned.has(p.plugin_id) && match(p));
+      items.forEach((p) => assigned.add(p.plugin_id));
+      if (items.length) out.push([label, items]);
+    }
+    const rest = list.filter((p) => !assigned.has(p.plugin_id));
+    if (rest.length) out.push(["其他", rest]);
+    return out;
+  };
+
+  // 子页面：插件详情
+  if (detailFor) {
+    const p = plugins?.find((x) => x.plugin_id === detailFor);
+    if (p) {
+      const h = health[p.plugin_id];
+      return (
+        <div>
+          <div className="page-head">
+            <button className="text-button" onClick={() => setDetailFor(null)}>
+              ← 返回插件列表
+            </button>
+          </div>
+          <section className="surface plugin-detail">
+            <div className="plugin-card-head">
+              <h2 style={{ margin: 0 }}>{p.name}</h2>
+              <span className={p.enabled ? "badge ok" : "badge"}>{p.status}</span>
+            </div>
+            <div className="muted small mono" style={{ margin: "4px 0 10px" }}>
+              {p.plugin_id} · v{p.version} · {KIND_LABELS[p.kind] ?? p.kind}
+            </div>
+            {p.description && <p className="muted">{p.description}</p>}
+            <div className="muted small plugin-card-io" style={{ marginBottom: 10 }}>
+              {Array.isArray(p.inputs) && p.inputs.length > 0 && <div>输入：{p.inputs.join("、")}</div>}
+              {Array.isArray(p.actions) && p.actions.length > 0 && <div>输出：{p.actions.join("、")}</div>}
+              {Array.isArray(p.provides) && p.provides.length > 0 && <div>能力：{p.provides.join("、")}</div>}
+            </div>
+            <div className="plugin-card-health" style={{ marginBottom: 10 }}>
+              {h?.kind === "loading" && <span className="muted small">检查中…</span>}
+              {h?.kind === "ok" && (
+                <span className={h.health.status === "healthy" ? "badge ok" : "badge warn"}
+                      title={h.health.detail ?? ""}>
+                  {h.health.status}
+                </span>
+              )}
+              {h?.kind === "error" && <span className="badge bad">{h.message}</span>}
+            </div>
+            <div className="plugin-card-actions">
+              <button disabled={busy === p.plugin_id} onClick={() => void toggle(p.plugin_id, !p.enabled)}>
+                {p.enabled ? "禁用" : "启用"}
+              </button>
+              <button disabled={busy === p.plugin_id} onClick={() => void checkHealth(p.plugin_id)}>检查</button>
+              <button disabled={busy === p.plugin_id} onClick={() => void testConnection(p.plugin_id)}>测试连接</button>
+            </div>
+            <div className="plugin-card-config" style={{ marginTop: 14 }}>
+              <div className="section-label">配置</div>
+              {p.kind === "model" ? (
+                <ModelConfigPanel pluginId={p.plugin_id} onSaved={reload} />
+              ) : (
+                <PluginConfigPanel pluginId={p.plugin_id} onSaved={reload} />
+              )}
+            </div>
+          </section>
+        </div>
+      );
+    }
+  }
+
   return (
     <div>
       <div className="page-head">
@@ -295,107 +516,42 @@ export default function Plugins() {
         <div className="empty">没有已加载的插件。</div>
       )}
 
-      {plugins && plugins.length > 0 && (
-        <div className="table-scroll">
-          <table className="table">
-            <thead>
-              <tr>
-                <th>名称</th>
-                <th>ID</th>
-                <th>版本</th>
-                <th>类型</th>
-                <th>状态</th>
-                <th>启用</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {plugins.map((p) => {
-                const h = health[p.plugin_id];
-                const expanded = configFor === p.plugin_id;
-                return (
-                  <Fragment key={p.plugin_id}>
-                    <tr>
-                      <td>
-                        <strong>{p.name}</strong>
-                        <div className="muted small" style={{ marginTop: 5 }}>
-                          {Array.isArray(p.provides)
-                            ? p.provides.join(" · ")
-                            : ""}
-                        </div>
-                      </td>
-                      <td className="mono">{p.plugin_id}</td>
-                      <td className="mono">{p.version}</td>
-                      <td>{p.kind}</td>
-                      <td>
-                        <span className={p.enabled ? "badge ok" : "badge"}>
-                          {p.status}
-                        </span>
-                        {h?.kind === "loading" && (
-                          <span className="muted"> 检查中…</span>
-                        )}
-                        {h?.kind === "ok" && (
-                          <span
-                            className={
-                              h.health.status === "healthy"
-                                ? "badge ok"
-                                : "badge warn"
-                            }
-                            title={h.health.detail ?? ""}
-                          >
-                            {h.health.status}
-                          </span>
-                        )}
-                        {h?.kind === "error" && (
-                          <span className="badge bad">{h.message}</span>
-                        )}
-                      </td>
-                      <td>{p.enabled ? "是" : "否"}</td>
-                      <td className="actions">
-                        <button
-                          disabled={busy === p.plugin_id}
-                          onClick={() => void toggle(p.plugin_id, !p.enabled)}
-                        >
-                          {p.enabled ? "禁用" : "启用"}
-                        </button>
-                        <button
-                          disabled={busy === p.plugin_id}
-                          onClick={() => void checkHealth(p.plugin_id)}
-                        >
-                          检查
-                        </button>
-                        <button
-                          disabled={busy === p.plugin_id}
-                          onClick={() => void testConnection(p.plugin_id)}
-                        >
-                          测试连接
-                        </button>
-                        <button
-                          onClick={() =>
-                            setConfigFor(expanded ? null : p.plugin_id)
-                          }
-                        >
-                          {expanded ? "收起" : "配置"}
-                        </button>
-                      </td>
-                    </tr>
-                    {expanded && (
-                      <tr className="expand-row">
-                        <td colSpan={7}>
-                          <PluginConfigPanel
-                            pluginId={p.plugin_id}
-                            onSaved={reload}
-                          />
-                        </td>
-                      </tr>
+      {plugins && plugins.length > 0 && grouped(plugins).map(([label, items]) => (
+        <section key={label} className="plugin-group">
+          <div className="section-label">{label}</div>
+          <div className="plugin-grid">
+            {items.map((p) => {
+              const h = health[p.plugin_id];
+              return (
+                <div
+                  key={p.plugin_id}
+                  className="plugin-card clickable"
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => setDetailFor(p.plugin_id)}
+                  onKeyDown={(e) => { if (e.key === "Enter") setDetailFor(p.plugin_id); }}
+                >
+                  <div className="plugin-card-head">
+                    <strong>{p.name}</strong>
+                    <span className={p.enabled ? "badge ok" : "badge"}>{p.status}</span>
+                  </div>
+                  <div className="plugin-card-kind">{KIND_LABELS[p.kind] ?? p.kind}</div>
+                  {p.description && (
+                    <div className="muted small plugin-card-desc">{p.description}</div>
+                  )}
+                  <div className="plugin-card-health">
+                    {h?.kind === "ok" && (
+                      <span className={h.health.status === "healthy" ? "badge ok" : "badge warn"}>
+                        {h.health.status}
+                      </span>
                     )}
-                  </Fragment>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      ))}
     </div>
   );
 }

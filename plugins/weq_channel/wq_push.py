@@ -86,9 +86,24 @@ def sse_message_to_incoming(event: Mapping, *, self_uin: str,
         text = ""
     if len(text) > MAX_TEXT_CHARS:
         text = text[:MAX_TEXT_CHARS]
+    # 附件：pic 元素带本机缓存路径（filePath）与 CDN 链接（originalUrl）
+    attachments = []
+    elements = event.get("elements")
+    if isinstance(elements, list):
+        for el in elements[:8]:
+            if not isinstance(el, dict) or el.get("type") != "pic":
+                continue
+            data = el.get("data") or {}
+            attachments.append({
+                "kind": "pic",
+                "file_path": str(data.get("filePath") or "")[:500],
+                "url": str(data.get("originalUrl") or "")[:2000],
+                "name": str(data.get("fileName") or "image")[:100],
+            })
     return Incoming(channel="qq", account=sender,
                     conversation=f"{conversation_kind}:{conv_id}",
-                    message_id=msg_id, text=text, transport_authenticated=True)
+                    message_id=msg_id, text=text, transport_authenticated=True,
+                    attachments=tuple(attachments))
 
 
 def mass_event_metadata(event: Mapping) -> dict:

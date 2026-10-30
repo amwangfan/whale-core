@@ -6,13 +6,30 @@
 
 配置保存在控制台“设置”页，或通过下列环境变量传入。填了端点才会注册对应插件；配置端点不代表已完成真实调用。
 
+### 统一平台配置（推荐，2026-10-30 起）
+
+一套端点 + 密钥覆盖全部媒体能力（三级回退：专属 > 共享 > 回复模型）：
+
+| 层级 | 变量 | 说明 |
+| --- | --- | --- |
+| 专属覆盖 | `WHALE_IMAGE_*` / `WHALE_SPEECH_*` / `WHALE_VIDEO_*` | 单能力单独换供应商时 |
+| 共享媒体平台 | `WHALE_MEDIA_BASE_URL` / `WHALE_MEDIA_API_KEY` / `WHALE_MEDIA_PROVIDER` | 一个平台全覆盖（dashscope 兼容协议：阿里云百炼 / AgentScope 平台同路径） |
+| 回复模型兜底 | `DEEPSEEK_BASE_URL` / `DEEPSEEK_API_KEY` | 都不配时吃回复模型同款 |
+
+供应商类型（`WHALE_*_PROVIDER` 或共享 `WHALE_MEDIA_PROVIDER`）：`dashscope`（DashScope 兼容协议，默认）或 `openai`（OpenAI Images/Audio 兼容）。
+
+DashScope 兼容协议的实测模型（2026-10-30，AgentScope 平台）：生图 `qwen-image-3.0`（同步+异步轮询两形态都处理，尺寸见手册宽高比表，如 `1328*1328`）；视频 `happyhorse-1.1-t2v`（resolution/ratio 参数形态，时长 3–15 秒）；TTS `qwen-audio-3.0-tts-flash/-plus`；ASR `fun-asr-flash-2026-06-15`（默认走百炼主站——AgentScope 平台侧 ASR 当前不可用）。
+
+### 逐能力专属配置
+
 | 能力 | 端点 | 密钥 | 模型及其他参数 |
 | --- | --- | --- | --- |
-| 图片生成 | `WHALE_IMAGE_BASE_URL`，例如 `https://api.openai.com/v1` | `WHALE_IMAGE_API_KEY` | `WHALE_IMAGE_MODEL`，默认 `dall-e-3`；可换兼容模型 |
-| 识别与合成 | `WHALE_SPEECH_BASE_URL`，OpenAI Audio 兼容地址 | `WHALE_SPEECH_API_KEY` | `WHALE_ASR_MODEL=whisper-1`、`WHALE_TTS_MODEL=tts-1`、`WHALE_TTS_VOICE=alloy` |
-| 视频生成 | `WHALE_VIDEO_BASE_URL`，例如 `https://dashscope.aliyuncs.com/api/v1` | `WHALE_VIDEO_API_KEY`，缺省读取 `DASHSCOPE_API_KEY` | `WHALE_VIDEO_MODEL=wan2.6-t2v` |
+| 图片生成 | `WHALE_IMAGE_BASE_URL`，例如 `https://api.openai.com/v1` | `WHALE_IMAGE_API_KEY` | `WHALE_IMAGE_MODEL`，dashscope 默认 `qwen-image-3.0`、openai 默认 `dall-e-3` |
+| 识别与合成 | `WHALE_SPEECH_BASE_URL`，OpenAI Audio 兼容地址 | `WHALE_SPEECH_API_KEY` | dashscope 默认 `fun-asr-flash-2026-06-15` / `qwen-audio-3.0-tts-flash`；openai 默认 `whisper-1`/`tts-1` |
+| 视频生成 | `WHALE_VIDEO_BASE_URL`，例如 `https://dashscope.aliyuncs.com/api/v1` | `WHALE_VIDEO_API_KEY`，缺省读取 `DASHSCOPE_API_KEY` | `WHALE_VIDEO_MODEL`，默认 `happyhorse-1.1-t2v` |
 | 语义记忆嵌入 | `WHALE_EMBEDDING_BASE_URL`，OpenAI Embeddings 兼容地址 | `WHALE_EMBEDDING_API_KEY` | `WHALE_EMBEDDING_MODEL=text-embedding-3-small` |
 | 原生实时语音 | `WHALE_REALTIME_URL`，兼容 Realtime 事件协议的 `wss://…/realtime` 地址 | `WHALE_REALTIME_API_KEY` | `WHALE_REALTIME_MODEL` 必填；`WHALE_REALTIME_VOICE` 缺省 `alloy` |
+| whale-io PCM 语音桥 | `WHALE_PCM_BRIDGE_HOST`（填了才注册，默认端口 `WHALE_PCM_BRIDGE_PORT=18799`） | `WHALE_PCM_BRIDGE_TOKEN`（现有音频桥的桥 token） | `WHALE_PCM_BRIDGE_TLS=1`（公网桥必须 TLS）；`WHALE_PCM_BRIDGE_PUBLIC_WS_URL`（HTTPS 控制台的 WSS 反代地址） |
 
 文字模型的密钥与上述媒体服务密钥相互独立。公共 HTTP 端点被拒绝；可信回环/私网的图片、ASR、TTS、视频兼容服务可使用 HTTP。实时语音要求 WSS。端点不能携带 URL 用户名、密码或 fragment。
 
@@ -95,6 +112,28 @@ ASR 输入应是 WAV 等供应商支持的完整音频文件的标准 base64，�
 所有会话接口均需管理 token。至多同时打开四个会话，闲置 120 秒自动关闭，服务退出时关闭所有连接。浏览器退出通话时应显式关闭，不能只关闭 UI。禁止同一个 session 同时开启多个 receive 请求。
 
 原生事件使用所配端点的兼容协议。当前客户端发送 `session.update`、`input_audio_buffer.append/commit/clear`、`response.create/cancel`，消费供应商的 `response.audio.delta`、最终转写和结束事件。输入输出 PCM 采样率必须与端点约定匹配，客户端须按实际供应商协议处理重采样；Omni 电话桥已有对应音频处理。接 OpenAI 新版 GA 协议时应确认其 session/audio 参数结构是否兼容，而不能只替换 URL 后默认通过。
+
+## 浏览器低延迟通话（whale-io PCM 中继，移植自 PR#4）
+
+这是与上面 chunk/poll 会话**并存的第二种传输**：浏览器 AudioWorklet 采集/播放 PCM16 16 kHz，经 WebSocket 中继直达现有 whale-io 音频桥 TCP 帧，不经过文字模型，延迟显著低于 base64 轮询。控制台「媒体与语音」页的「低延迟通话」入口使用它；「实时语音」入口仍走上面的 `/voice/sessions`，两者互不影响。
+
+> **诚实声明：协议按 PR#4 契约实现（`uint32 BE 长度 + uint8 类型 + payload`，类型 0=PCM、1=控制文本，连接后先发 `AUTH <token>`、验证 `HELLO` 问候），离线回环测试验证了帧往返、AUTH、票据防重放与回环/TLS 约束；尚未与真实 whale-io 桥联调。** 真实桥联调通过前不要对owner 宣称浏览器原生电话能力已可用。
+
+配置（全部环境变量，填 `WHALE_PCM_BRIDGE_HOST` 才注册 `voice_bridge` 插件，能力名 `voice.pcm_bridge`）：
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `WHALE_PCM_BRIDGE_HOST` / `WHALE_PCM_BRIDGE_PORT` | — / `18799` | 现有音频桥 TCP 地址；公网地址必须同时 `WHALE_PCM_BRIDGE_TLS=1` |
+| `WHALE_PCM_BRIDGE_TOKEN` | 空 | 桥永久凭据，只留在服务端，不进 URL/日志/会话响应 |
+| `WHALE_PCM_BRIDGE_TLS` | 关 | 置 `1` 用系统默认 TLS 上下文包裹桥连接 |
+| `WHALE_PCM_BRIDGE_PUBLIC_WS_URL` | 空 | HTTPS 控制台下的 WSS 反代地址（`wss://`，禁止内嵌凭据/query/fragment；远程地址用 `ws://` 会被拒绝） |
+| `WHALE_PCM_BRIDGE_TIMEOUT` | `15` | 桥连接/读写超时（0–120 秒） |
+
+| API | 请求体 | 用途 |
+| --- | --- | --- |
+| `POST /api/v1/voice/session` | `{}` | 签发一次性票据，返回 `{protocol, url, ticket, session_id, sample_rate}` |
+
+票据设计：`secrets.token_urlsafe(32)` 随机值，**一次性**（WebSocket 握手出示即消费）、60 秒过期、只驻留内存不落盘；浏览器经 WebSocket subprotocol（`["whale", ticket]`）出示，绝不拼进 URL；票据与桥 token 都不进日志（日志只记 `session_id`）。票据+进行中会话合计最多 4 个，超过返回 429；每通会话最长 10 分钟。中继 WebSocket 在首次签票时懒监听于 API 端口 + 1（8080 → 8081，占用时退到临时端口，URL 里总是真实端口）；`websockets` 未安装时端点 503 并提示 `whale-core[voice]`。插件在会话期间被禁用或重装配时，活动会话立即关闭。
 
 ## 验收与限制
 

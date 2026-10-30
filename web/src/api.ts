@@ -33,6 +33,11 @@ export interface PluginInfo {
   kind: string;
   status: string;
   enabled: boolean;
+  /** 功能简介 / 输入事件 / 输出动作 / 提供能力（清单声明，缺失时为空数组）。 */
+  description?: string;
+  inputs?: string[];
+  actions?: string[];
+  provides?: string[];
   [key: string]: unknown;
 }
 
@@ -102,13 +107,27 @@ export interface WhaleEvent {
   detail: string;
 }
 
+export interface BudgetLimits {
+  model_calls: number;
+  media_jobs: number;
+}
+
+export interface BudgetView {
+  limits: BudgetLimits;
+  used: BudgetLimits;
+  day: string;
+}
+
 export interface RuntimeSettings {
   profile: "cloud" | "local";
   model: { base_url: string; model: string; api_key_configured: boolean };
   intent_model_enabled: boolean;
+  persona_taboos?: string[];
+  models?: Record<string, { base_url?: string; model?: string; api_key_configured?: boolean }>;
   capabilities: string[];
   notes: string[];
   services?: Record<string, string | boolean>;
+  budget?: BudgetView;
 }
 export interface DiagnosticReport {
   checks: { name: string; status: string; detail: string }[];
@@ -149,6 +168,19 @@ export interface SkillInfo {
   name: string;
   description: string;
   steps?: unknown[];
+}
+export interface LifeInterest {
+  topic: string;
+  weight: number;
+}
+export interface LifeDiaryEntry {
+  day: string;
+  note: string;
+  sources: string[];
+}
+export interface LifeState {
+  interests: LifeInterest[];
+  diary: LifeDiaryEntry[];
 }
 
 // ---------- 错误 ----------
@@ -320,6 +352,16 @@ export const api = {
       method: "POST",
       body: "{}",
     }),
+  /** whale-io PCM 低延迟通话：一次性 60 秒票据（PR#4 移植）。
+   *  票据经 WebSocket subprotocol 出示，绝不拼进 URL。 */
+  voiceSession: () =>
+    request<{
+      protocol: string;
+      url: string;
+      ticket: string;
+      session_id: string;
+      sample_rate: number;
+    }>("/voice/session", { method: "POST", body: "{}" }),
 
   runCapability: (capability: string, params: Record<string, unknown>) =>
     request<CapabilityResult>(
@@ -349,6 +391,23 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ topics }),
     }),
+  life: () => request<LifeState>("/life"),
+  addInterest: (topic: string) =>
+    request<LifeInterest>("/life/interests", {
+      method: "POST",
+      body: JSON.stringify({ topic }),
+    }),
+  removeInterest: (topic: string) =>
+    request<{ removed: boolean }>("/life/interests", {
+      method: "POST",
+      body: JSON.stringify({ topic, remove: true }),
+    }),
+  lifeFeedback: (topic: string, signal: "liked" | "disliked" | "ignored") =>
+    request<{ saved: boolean }>("/life/feedback", {
+      method: "POST",
+      body: JSON.stringify({ topic, signal }),
+    }),
+
   workflowSettings: () => request<WorkflowSettings>("/workflows/settings"),
   saveWorkflowSettings: (settings: WorkflowSettings) =>
     request<WorkflowSettings>("/workflows/settings", {
@@ -360,8 +419,11 @@ export const api = {
   saveSettings: (settings: {
     profile?: "cloud" | "local";
     model?: { base_url?: string; model?: string; api_key?: string | null };
-    intent_model_enabled?: boolean;
+  intent_model_enabled?: boolean;
+  persona_taboos?: string[];
+  models?: Record<string, { base_url?: string; model?: string; api_key?: string | null }>;
     services?: Record<string, string | null>;
+    budget?: BudgetLimits;
   }) =>
     request<RuntimeSettings>("/settings", {
       method: "POST",

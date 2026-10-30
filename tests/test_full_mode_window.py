@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from whale_core.life.full_mode_window import (
+from weq_channel.full_mode_window import (
     FullModeWindow,
     FullModeWindowError,
     WindowedSendPort,

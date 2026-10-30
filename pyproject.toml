@@ -13,7 +13,8 @@ dependencies = ["tzdata>=2024.1; sys_platform == 'win32'"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
-voice = ["websockets>=14,<17"]
+# websockets 17 已验证兼容（PCM 中继 sync server/client 离线索引测试通过）
+voice = ["websockets>=14,<18"]
 desktop = ["pywebview>=5,<7"]
 
 [project.scripts]
@@ -30,11 +31,11 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/whale_core"]
+packages = ["src/whale_core", "plugins/search_web", "plugins/weq_channel"]
 # Release builders stage the compiled console here; normal editable installs
 # can continue to use web/dist without committing generated JavaScript.
 artifacts = ["src/whale_core/static/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["src", "plugins"]

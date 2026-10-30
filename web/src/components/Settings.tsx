@@ -54,6 +54,7 @@ const SERVICES = [
       ["WHALE_REALTIME_API_KEY", "API Key"],
       ["WHALE_REALTIME_MODEL", "模型名称"],
       ["WHALE_REALTIME_VOICE", "音色"],
+      ["WHALE_REALTIME_PROTOCOL", "会话协议（ga / legacy，默认 ga）"],
     ],
   },
 ];
@@ -73,6 +74,14 @@ export default function Settings({
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [services, setServices] = useState<Record<string, string | null>>({});
+  const [taboosText, setTaboosText] = useState("");
+  const [budgetDraft, setBudgetDraft] = useState({
+    model_calls: 200,
+    media_jobs: 50,
+  });
+  const [roleModels, setRoleModels] = useState<
+    Record<string, { base_url?: string; model?: string; api_key?: string }>
+  >({});
   useEffect(() => {
     if (settings.data) {
       setDraft(settings.data);
@@ -84,6 +93,15 @@ export default function Settings({
           ]),
         ),
       );
+      setTaboosText((settings.data.persona_taboos ?? []).join("\n"));
+      if (settings.data.budget) {
+        setBudgetDraft({ ...settings.data.budget.limits });
+      }
+      const m: Record<string, { base_url?: string; model?: string; api_key?: string }> = {};
+      for (const [role, cfg] of Object.entries(settings.data.models ?? {})) {
+        m[role] = { base_url: cfg.base_url ?? "", model: cfg.model ?? "", api_key: "" };
+      }
+      setRoleModels(m);
     }
   }, [settings.data]);
   const save = async () => {
@@ -92,6 +110,15 @@ export default function Settings({
     setNotice("");
     setError("");
     try {
+      const validBudget = (n: number) =>
+        Number.isInteger(n) && n >= 0 && n <= 100000;
+      if (
+        !validBudget(budgetDraft.model_calls) ||
+        !validBudget(budgetDraft.media_jobs)
+      ) {
+        setError("请求预算必须是 0–100000 的整数（0 = 关闭该能力）。");
+        return;
+      }
       await api.saveSettings({
         profile: draft.profile,
         model: {
@@ -104,7 +131,25 @@ export default function Settings({
               : {}),
         },
         intent_model_enabled: draft.intent_model_enabled,
+        persona_taboos: taboosText
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean),
+        models: Object.fromEntries(
+          Object.entries(roleModels).map(([role, cfg]) => [
+            role,
+            {
+              base_url: cfg.base_url || "",
+              model: cfg.model || "",
+              ...(cfg.api_key ? { api_key: cfg.api_key } : {}),
+            },
+          ]),
+        ),
         services,
+        budget: {
+          model_calls: budgetDraft.model_calls,
+          media_jobs: budgetDraft.media_jobs,
+        },
       });
       setKey("");
       setClearKey(false);
@@ -272,6 +317,115 @@ export default function Settings({
               </label>
               <div className="muted small">
                 让模型辅助理解工具与复杂任务；会产生额外模型调用。
+              </div>
+              <div className="form-field">
+                <label>请求预算（每日限额，0 = 关闭该能力）</label>
+                <div className="form-field">
+                  <label htmlFor="budget-model-calls">模型调用（次/天）</label>
+                  <input
+                    id="budget-model-calls"
+                    type="number"
+                    min={0}
+                    max={100000}
+                    step={1}
+                    value={
+                      Number.isFinite(budgetDraft.model_calls)
+                        ? budgetDraft.model_calls
+                        : ""
+                    }
+                    onChange={(e) =>
+                      setBudgetDraft({
+                        ...budgetDraft,
+                        model_calls: e.target.valueAsNumber,
+                      })
+                    }
+                  />
+                </div>
+                <div className="form-field">
+                  <label htmlFor="budget-media-jobs">媒体生成（次/天）</label>
+                  <input
+                    id="budget-media-jobs"
+                    type="number"
+                    min={0}
+                    max={100000}
+                    step={1}
+                    value={
+                      Number.isFinite(budgetDraft.media_jobs)
+                        ? budgetDraft.media_jobs
+                        : ""
+                    }
+                    onChange={(e) =>
+                      setBudgetDraft({
+                        ...budgetDraft,
+                        media_jobs: e.target.valueAsNumber,
+                      })
+                    }
+                  />
+                </div>
+                <small>
+                  今日已用：模型 {settings.data?.budget?.used.model_calls ?? 0}{" "}
+                  次、媒体 {settings.data?.budget?.used.media_jobs ?? 0}{" "}
+                  次（预算日 {settings.data?.budget?.day ?? "—"}
+                  ，次日自动重置）。超限的请求会被拒绝；失败的请求也会占用额度。
+                </small>
+              </div>
+              <div className="form-field">
+                <label>分角色模型（可选覆盖）</label>
+                {(["intent", "executor", "safety"] as const).map((role) => (
+                  <div key={role} className="role-model-row">
+                    <div className="muted small">
+                      {role === "intent" ? "意图模型" : role === "executor" ? "任务执行模型" : "安全审核模型"}
+                    </div>
+                    <input
+                      placeholder="模型名（留空=跟随主回复模型）"
+                      value={roleModels[role]?.model ?? ""}
+                      onChange={(e) =>
+                        setRoleModels({
+                          ...roleModels,
+                          [role]: { ...roleModels[role], model: e.target.value },
+                        })
+                      }
+                    />
+                    <input
+                      placeholder="API 端点（留空=跟随主端点）"
+                      value={roleModels[role]?.base_url ?? ""}
+                      onChange={(e) =>
+                        setRoleModels({
+                          ...roleModels,
+                          [role]: { ...roleModels[role], base_url: e.target.value },
+                        })
+                      }
+                    />
+                    <input
+                      type="password"
+                      placeholder={settings.data?.models?.[role]?.api_key_configured ? "已配置（留空保持）" : "API key（可选）"}
+                      value={roleModels[role]?.api_key ?? ""}
+                      onChange={(e) =>
+                        setRoleModels({
+                          ...roleModels,
+                          [role]: { ...roleModels[role], api_key: e.target.value },
+                        })
+                      }
+                    />
+                  </div>
+                ))}
+                <small>
+                  意图/任务执行/安全审核模型可单独换端点与密钥；留空的项跟随主回复模型。
+                </small>
+              </div>
+              <div className="form-field">
+                <label htmlFor="persona-taboos">人格禁忌（用户自设）</label>
+                <textarea
+                  id="persona-taboos"
+                  rows={4}
+                  value={taboosText}
+                  onChange={(e) => setTaboosText(e.target.value)}
+                  placeholder={"每行一条，例如：\n不谈论政治\n23 点后提醒睡觉"}
+                />
+                <small>
+                  核心不预置任何强制禁忌——这里写的每条都会并入当前角色卡的边界，
+                  保存后立即生效。
+                </small>
               </div>
               <label className="check-row">
                 <input

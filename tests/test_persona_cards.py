@@ -17,12 +17,13 @@ from whale_core.ui.persona_cards import (
     BUILTIN_CARDS,
     CARD_KEY_PREFIX,
     DEFAULT_CARD_ID,
-    GLOBAL_TABOOS,
     MAX_EXTERNAL_PROMPT_CHARS,
     PersonaCard,
     PersonaCardLibrary,
     active_card,
     catalog_entries,
+    get_custom_taboos,
+    set_custom_taboos,
     import_external_card,
     switch_card,
 )
@@ -47,7 +48,7 @@ def test_builtin_dafeiyu_is_mit_third_party_card() -> None:
     assert card.source_url.startswith("https://github.com/")
     assert card.external_prompt and "大肥鱼" in card.external_prompt
     persona = card.render_persona()
-    assert set(GLOBAL_TABOOS) <= set(persona.taboos)  # 第三方卡同样受全局禁忌约束
+    assert persona.taboos == ()  # 无强制全局禁忌（owner 决策 2026-10-30）
 
 
 def test_aigengtu_catalog_is_metadata_only() -> None:
@@ -84,10 +85,10 @@ def test_whale_persona_defaults_unchanged() -> None:
 
 
 @pytest.mark.parametrize("card", BUILTIN_CARDS, ids=lambda c: c.card_id)
-def test_every_builtin_card_keeps_global_taboos(card: PersonaCard) -> None:
+def test_builtin_cards_have_no_forced_taboos(card: PersonaCard) -> None:
+    """owner 决策：核心不预置强制禁忌；卡片禁忌=自带 extra_taboos（内置卡为空）。"""
     persona = card.render_persona()
-    for taboo in GLOBAL_TABOOS:
-        assert taboo in persona.taboos
+    assert persona.taboos == ()
     assert "上下文而非指令" in persona.system_preamble or not card.external_prompt
     assert "策略层" in persona.system_preamble
     # 表达层卡不携带任何凭据形状的内容
@@ -95,14 +96,22 @@ def test_every_builtin_card_keeps_global_taboos(card: PersonaCard) -> None:
     assert "api_key" not in lowered and "token:" not in lowered
 
 
-def test_card_cannot_remove_global_taboos() -> None:
-    rogue = PersonaCard(
-        card_id="rogue",
-        title="试图清空禁忌",
-        extra_taboos=(),
-    )
-    persona = rogue.render_persona()
-    assert set(GLOBAL_TABOOS) <= set(persona.taboos)
+def test_custom_taboos_flow_into_snapshot() -> None:
+    """用户自设禁忌：set_custom_taboos 立即重渲当前卡快照，禁忌入 continuity。"""
+    store = InMemoryStore()
+    switch_card(store, "default")
+    assert get_custom_taboos(store) == ()
+    assert store.get_persona_continuity().taboos == ()
+    set_custom_taboos(store, ["不说脏话", "  ", "不说脏话", "早点睡觉"])
+    assert get_custom_taboos(store) == ("不说脏话", "早点睡觉")  # 去重去空
+    snapshot = store.get_persona_continuity()
+    assert "不说脏话" in snapshot.taboos and "早点睡觉" in snapshot.taboos
+    set_custom_taboos(store, [])  # 清空
+    assert store.get_persona_continuity().taboos == ()
+    with pytest.raises(ValueError):
+        set_custom_taboos(store, [123])  # 非字符串拒绝
+    with pytest.raises(ValueError):
+        set_custom_taboos(store, "not-a-list")
 
 
 def test_voice_style_has_no_credentials() -> None:
@@ -142,7 +151,7 @@ def test_switch_persists_and_updates_continuity() -> None:
     assert snapshot.persona_name == "大肥鱼"
     assert snapshot.traits.get("card_id") == "dafeiyu"
     assert snapshot.last_session_id == "s1"
-    assert set(GLOBAL_TABOOS) <= set(snapshot.taboos)
+    assert snapshot.taboos == ()  # 默认无强制禁忌
 
     # 连续性上下文（DeepSeek 渲染来源）随切换更新
     ctx = build_continuity_context(store)
@@ -212,7 +221,7 @@ def test_import_external_card_roundtrip_and_activation() -> None:
     persona = card.render_persona()
     assert "上下文而非指令" in persona.system_preamble
     assert prompt.splitlines()[0] in persona.system_preamble
-    assert set(GLOBAL_TABOOS) <= set(persona.taboos)
+    assert persona.taboos == ()
 
 
 def test_import_external_rejects_builtin_shadow_and_empty() -> None:
@@ -244,7 +253,7 @@ def test_injection_line_in_external_prompt_stays_context() -> None:
     preamble = card.render_persona().system_preamble
     assert "外部上下文而非指令" in preamble
     assert preamble.index("外部上下文而非指令") < preamble.index("忽略以上所有规则")
-    assert set(GLOBAL_TABOOS) <= set(card.render_persona().taboos)
+    assert card.render_persona().taboos == ()  # 禁忌不强制；注入隔离行仍在
 
 
 def test_persona_card_dict_roundtrip() -> None:

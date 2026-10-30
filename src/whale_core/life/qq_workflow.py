@@ -31,7 +31,9 @@ class QqInboundWorkflow:
     def __init__(self, store: MemoryStore, brain: TextCompanion, *,
                  prefs: ProactivePrefs | None = None,
                  now_fn: Callable[[], datetime] | None = None,
-                 orchestrator=None) -> None:
+                 orchestrator=None,
+                 safety_reviewer=None,
+                 completion_sender=None) -> None:
         self.store = store
         self.companion = WhaleCompanion(store, brain, curator=MemoryCurator(store))
         self.outbox = ProactiveOutbox(store)
@@ -43,6 +45,60 @@ class QqInboundWorkflow:
         # 可选的对话编排器（意图路由 + 工具）：设置后回复改由编排器产出
         # （多轮/记忆/指令在编排器内部同款共享），本草稿仍走 Outbox 裁决。
         self.orchestrator = orchestrator
+        # 可选安全审核（llm.safety 角色）：callable(reply) -> None=通过 | str=顾虑原因；
+        # 有顾虑的草稿强制 needs_approval（不自动发送），由人工终审。
+        self._safety_reviewer = safety_reviewer
+        # 可选补发回调（两段式慢任务）：callable(event, reply) -> None。
+        # 由宿主注入真实发送路径（草稿+审批+网关）；慢任务 ack 后的结果经此补发。
+        self._completion_sender = completion_sender
+
+    def _attachment_images(self, event: OwnerEvent) -> tuple:
+        """把消息附件读成图片字节：本机缓存路径优先（QQ 与本机同机），
+        公网 URL 兜底下载（https-only、限 20MB）。最多取 4 张。"""
+        import os
+        out: list = []
+        for att in (event.attachments or ())[:4]:
+            if not isinstance(att, dict) or att.get("kind") != "pic":
+                continue
+            data = None
+            path = str(att.get("file_path") or "")
+            if path and os.path.isfile(path):
+                try:
+                    with open(path, "rb") as fh:
+                        data = fh.read(20 * 1024 * 1024)
+                except OSError:
+                    data = None
+            if data is None:
+                url = str(att.get("url") or "")
+                if url.startswith("https://"):
+                    try:
+                        import urllib.request
+                        req = urllib.request.Request(url, headers={"User-Agent": "whale-core/0.1"})
+                        with urllib.request.urlopen(req, timeout=20) as resp:
+                            data = resp.read(20 * 1024 * 1024)
+                    except Exception:
+                        data = None
+            if data:
+                out.append(data)
+        return tuple(out)
+
+    def _on_async_complete(self, event: OwnerEvent, result) -> None:
+        """两段式慢任务的完成回调：审核通过后交宿主补发真实结果。"""
+        reply = getattr(result, "reply", "") or ""
+        if not reply.strip():
+            return
+        audio_ids = _extract_audio_artifacts(getattr(result, "receipts", ()))
+        if self._safety_reviewer is not None:
+            concern = self._safety_reviewer(reply)
+            if concern:
+                # 审核有顾虑不静默吞掉：留痕 + 给用户一句兜底交代（不发被拦内容）
+                print(f"  [审核] 补发被拦：{concern[:80]}")
+                fallback = "你要的东西做好了，但我对里面的链接不太放心，先没直接发——你在控制台任务页能看到，或者跟我说一声我再想办法给你。"
+                if self._completion_sender is not None:
+                    self._completion_sender(event, fallback)
+                return
+        if self._completion_sender is not None:
+            self._completion_sender(event, reply, audio_ids)
 
     def _memory_command_reply(self, text: str, event: OwnerEvent) -> str | None:
         """委托给 core.memory_commands 的共享实现（QQ 侧只提供来源与证据链）。"""
@@ -70,6 +126,7 @@ class QqInboundWorkflow:
         if not text:
             return {"skipped": "empty_text"}
 
+        turn_receipts: list = []
         # owner 显式记忆指令（记住/忘掉）：不调模型，确定性处理（省 token、可测试）。
         # owner 直聊的显式指令即 consent（单 owner 陪伴场景，docs/gap-analysis §4 R4）；
         # 证据链指向触发消息，记忆可经「忘掉」或删除语义移除。
@@ -77,9 +134,17 @@ class QqInboundWorkflow:
         if command_reply is not None:
             reply = command_reply
         elif self.orchestrator is not None:
-            result = self.orchestrator.handle_message(
-                event.conversation, text, source="qq:owner")
+            images = self._attachment_images(event) if event.attachments else ()
+            if self._completion_sender is not None:
+                result = self.orchestrator.handle_message_async(
+                    event.conversation, text, source="qq:owner",
+                    on_complete=lambda r, ev=event: self._on_async_complete(ev, r),
+                    images=images)
+            else:
+                result = self.orchestrator.handle_message(
+                    event.conversation, text, source="qq:owner", images=images)
             reply = result.reply
+            turn_receipts = list(getattr(result, "receipts", []) or [])
         else:
             reply = self.companion.chat(text, conversation_id=event.conversation)
         if not reply or not reply.strip():
@@ -97,10 +162,41 @@ class QqInboundWorkflow:
         # 豁免由 prefs.passive_reply_in_quiet 显式决定，配额走独立保险丝（issue #13）。
         verdict = self.outbox.inspect(draft_id, self.prefs, now=self._now(),
                                       passive_reply=True)
-        return {
+        result = {
             "draft_id": draft_id,
             "reply": reply,
             "proposed": proposed,
             "verdict": verdict.status,
             "reason": verdict.reason,
+            "receipts": turn_receipts,
         }
+        # 安全审核（可选）：审核模型有顾虑时打标——runner 据此不自动发送，
+        # 留人工终审；不改变账本/配额语义。
+        if self._safety_reviewer is not None:
+            concern = self._safety_reviewer(reply)
+            if concern:
+                result["safety_concern"] = str(concern)[:200]
+                result["reason"] = f"{result['reason']}｜安全审核：{result['safety_concern']}"
+        return result
+
+
+def _extract_audio_artifacts(receipts) -> tuple:
+    """从回执里提音频产物 id（TTS 等工具的 JSON 回执含 artifact_id +
+    content_type=audio/*）。"""
+    import json as _json
+    import re as _re
+    out: list[str] = []
+    for r in receipts or ():
+        s = str(r)
+        if "artifact_id" not in s or "audio" not in s:
+            continue
+        for m in _re.finditer(r"\{[^{}]*\}", s):
+            try:
+                obj = _json.loads(m.group(0))
+            except ValueError:
+                continue
+            aid = obj.get("artifact_id")
+            ctype = str(obj.get("content_type") or "")
+            if aid and ctype.startswith("audio/"):
+                out.append(str(aid))
+    return tuple(out)
