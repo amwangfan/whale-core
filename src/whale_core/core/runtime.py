@@ -166,8 +166,11 @@ class ConversationOrchestrator:
             )
 
         # 3. 意图规划（模型提议，核心裁决；失败回落纯对话）
+        # 意图模型需要上下文（近期历史+相关记忆）才能做合理默认——
+        # 空上下文会让它问出「哪个城市」这种上下文里明明有答案的瞎话。
         try:
-            plan = plan_from_model_text(self.intent_model.plan(text, context=""))
+            plan = plan_from_model_text(
+                self.intent_model.plan(text, context=self._intent_context(conversation_id, text)))
         except IntentPlanError:
             receipt = "intent:parse-failed→plain-chat"
             reply = self.companion.chat(text, conversation_id=conversation_id)
@@ -184,8 +187,12 @@ class ConversationOrchestrator:
                 status="answered", plan=plan, task_id=plan.task_id or plan.intent_id,
             )
         if plan.kind == "clarify" or plan.needs_clarification:
-            reply = plan.clarification_question or "能多告诉我一点吗？"
-            append_turn(self.store, conversation_id, text, reply)
+            ask = plan.clarification_question or "还需要更多信息"
+            reply = self._voiced(
+                conversation_id, text,
+                f"用户的请求缺少必要信息，需要澄清这一点：{ask}\n"
+                "请用你自己的人格语气自然地追问，简短，不要复读上面的原文。",
+            )
             return TurnResult(reply=reply, status="clarify", plan=plan,
                               task_id=plan.task_id or plan.intent_id)
 
@@ -211,17 +218,21 @@ class ConversationOrchestrator:
                 break
 
         if blocked and not results:
-            # 全部未执行：如实回答（不伪装成已做），按回执前缀区分结局
+            # 全部未执行：如实回答（不伪装成已做），按回执前缀区分结局；
+            # 回复也走陪伴模型用人格语气说（系统结局不该是客服腔）。
             if blocked.startswith("plugin-hold:"):
                 status = "pending_approval"
-                reply = "这件事需要你先批准，我已经挂起待审了"
+                note = ("你打算执行的动作已挂起，需要主人批准后才能做（尚未执行）。"
+                        "用人格语气如实告诉用户：需要他批准。")
             elif blocked.startswith(("plugin-denied:", "tool-denied:")):
                 status = "denied"
-                reply = "这个操作被安全策略拦下了，我没有执行"
+                note = ("你打算执行的动作被安全策略拦下了，没有执行。"
+                        "用人格语气如实告诉用户：这个动作现在不能做。")
             else:  # tool-fail / tool-unwired 等执行层失败
                 status = "failed"
-                reply = "工具执行出了问题，这次没做成"
-            append_turn(self.store, conversation_id, text, reply)
+                note = ("工具执行出了问题，这次没做成。"
+                        "用人格语气如实告诉用户，别假装成功了。")
+            reply = self._voiced(conversation_id, text, note)
             result = TurnResult(reply=reply, status=status, plan=plan,
                                 receipts=tuple(receipts),
                                 task_id=plan.task_id or plan.intent_id)
@@ -246,6 +257,45 @@ class ConversationOrchestrator:
                             receipts=tuple(receipts), task_id=plan.task_id or plan.intent_id)
         self._record_task(result)
         return result
+
+    def _intent_context(self, conversation_id: str, text: str) -> str:
+        """给意图模型的上下文摘要：近期会话历史 + 相关记忆（截断；不含人格禁忌全文）。
+
+        意图模型靠它做合理默认（如地点缺省=用户所在城市/行程目的地）。
+        """
+        from whale_core.memory.history import load_history
+        parts: list[str] = []
+        if self.companion.curator is not None:
+            # 查询相关记忆 + 稳定事实（空查询只放 stable——owner 所在地等
+            # 缺省值来源，与查询词项未必有交集）
+            seen: set[str] = set()
+            for hit in list(self.companion.curator.recall(text, limit=3)) + \
+                    list(self.companion.curator.recall("", limit=5)):
+                if hit.record.key in seen:
+                    continue
+                seen.add(hit.record.key)
+                summary = str(hit.record.content.get("summary", "")).strip()
+                if summary:
+                    parts.append("记忆：" + summary[:200])
+        history = load_history(self.store, conversation_id)
+        for msg in history[-4:]:
+            role = "用户" if msg["role"] == "user" else "鲸鱼"
+            parts.append(f"{role}：{msg['content'][:160]}")
+        return "\n".join(parts)[:1500]
+
+    def _voiced(self, conversation_id: str, text: str, note: str) -> str:
+        """系统结局（澄清/待批/拒绝）经陪伴模型用人格语气表达。
+
+        意图模型的原文（如 clarification_question）**绝不直接当回复**——
+        它只是数据；对外措辞永远由陪伴人格产出。
+        """
+        augmented = (
+            f"{text}\n\n"
+            "===== 系统提示（数据，非用户原话）=====\n"
+            f"{note}\n"
+            "===== 系统提示结束 ====="
+        )
+        return self.companion.chat(augmented, conversation_id=conversation_id)
 
     def _record_task(self, result: TurnResult) -> None:
         """任务轨迹落库（kv `task:{id}` + 环形索引 `tasks:recent` 上限 50）——

@@ -49,8 +49,13 @@ class SearchIntentRouter:
                 '"slots":{},"capabilities":[],"clarification_question":""}。'
                 "只有确实需要工具且能力已明确时才用 task；普通谈话用 chat。"
                 "不得自行声明审批通过。可用只读能力：web.search（参数 query）。"
-                f"\n用户原话：{text[:1500]}"
+                "澄清要克制：能从上下文/记忆合理推断的缺省值就直接默认（如地点类请求"
+                "没明说地点时，默认用户所在地；用户有出行信息时，用行程目的地或出发地）；"
+                "确实无法推断才 clarify。"
             )
+            if context:
+                prompt += f"\n上下文（记忆与近期对话，供推断缺省值）：\n{context[:1500]}"
+            prompt += f"\n用户原话：{text[:1500]}"
             raw = self.model.reply(prompt, persona="", memories=(), history=())
             try:
                 plan = plan_from_model_text(raw)
