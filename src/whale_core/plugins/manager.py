@@ -45,6 +45,7 @@ _MANIFEST_KEYS = (
     "provides",
     "process_model",
     "api_version",
+    "trust",
 )
 _WIRING_KEYS = ("executor", "input_adapter", "provider")  # 对齐 PluginRegistry.register
 _SECRET_HINTS = ("token", "key", "secret", "password", "passwd",
@@ -328,6 +329,7 @@ class PluginManager:
                     "status": state.status,
                     "enabled": state.status == "enabled",
                     "api_version": m.api_version,
+                    "trust": m.trust,
                     "provides": list(m.provides),
                     "actions": list(m.actions),
                     "inputs": list(m.inputs),

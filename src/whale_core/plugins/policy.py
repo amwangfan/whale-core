@@ -15,6 +15,10 @@ transaction  denied      needs_approval         ready（且过限额/日限）
   与 ProactiveOutbox「call/direct_message 强制 needs_approval」同款语义；
 - 未注册插件 / 未声明动作 / 未声明风险级 → 一律 denied；
 - 台账（audit）只记动作与裁决，不记 args 全文（可能含隐私 / 凭据形状）。
+
+信任级别钩子（G4，manifest.trust）：``trust="external"`` 的插件执行
+**非 read_only** 动作时强制 needs_approval——宿主的 auto_approve_risks
+放宽对 external 插件不生效；显式批准后仍走原有 ready 路径（不新造状态机）。
 """
 
 from __future__ import annotations
@@ -113,6 +117,16 @@ class PluginActionPolicy:
 
         if risk is RiskClass.READ_ONLY:
             return PluginVerdict("ready", "read-only action", risk.value, plugin_id, action)
+
+        # G4 信任钩子：external 插件的非 read_only 动作强制人审，
+        # 宿主级 auto_approve 放宽对其不适用（approval 通道不变）。
+        external = getattr(manifest, "trust", "bundled") == "external"
+        if external and not explicitly_approved:
+            return PluginVerdict(
+                "needs_approval",
+                "external-trust plugin requires explicit approval for non-read-only action",
+                risk.value, plugin_id, action,
+            )
 
         if risk is RiskClass.COMMUNICATE:
             if explicitly_approved:
