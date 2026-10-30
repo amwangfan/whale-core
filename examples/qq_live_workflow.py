@@ -338,6 +338,7 @@ def cmd_run(args) -> int:
     # 识别零额外调用），LLM 规划用于其余消息。实测选型记录见 gap-analysis。
     intent_model_id = os.environ.get("QQ_INTENT_MODEL", "").strip()
     if intent_model_id:
+        from whale_core.core.deepseek import DeepSeekCompanion  # build_brain 同款局部导入
         from whale_core.core.intent_router import SearchIntentRouter
         from whale_core.core.runtime import ConversationOrchestrator, ToolRegistry
         intent_brain = DeepSeekCompanion(model=intent_model_id)  # 同平台不同模型
