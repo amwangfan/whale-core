@@ -22,6 +22,8 @@
   最终回退 utf-8（errors="replace"）；
 - 错误一律 ``FetchError``：消息含状态码 / 错误类型，除 URL 外不含其它信息。
 
+默认不读取 HTTP(S)_PROXY：转发代理隐藏实际目标 peer，不能维持同等 SSRF
+保证。需要代理的部署须提供经过独立审查的 opener；默认抓取与产物下载仅直连。
 网络层全部可注入（``opener`` / ``resolver``），测试不触网。
 """
 
@@ -291,11 +293,12 @@ class WebFetcher:
         if opener is not None:
             self._opener = opener
         elif self._allow_private:
-            self._opener = urllib.request.build_opener(_NoRedirectHandler())
+            self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirectHandler())
         else:
             # 默认 opener：不跟跳转 + 连接层 peer 复核（TOCTOU/rebinding 防线）
             self._opener = urllib.request.build_opener(
-                _NoRedirectHandler(), _PeerCheckedHTTPHandler(), _PeerCheckedHTTPSHandler()
+                urllib.request.ProxyHandler({}), _NoRedirectHandler(),
+                _PeerCheckedHTTPHandler(), _PeerCheckedHTTPSHandler()
             )
         self._resolver = resolver if resolver is not None else _default_resolver
 

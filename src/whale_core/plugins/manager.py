@@ -107,6 +107,30 @@ class PluginManager:
         """只读访问底层注册表（供宿主/API 层查询 provider）。"""
         return self._registry
 
+    def adopt_registered(self, *, default_enabled: bool = True) -> None:
+        """Bring explicitly wired official plugins under lifecycle management.
+
+        Wiring is retained for re-enable; persisted disabled state is applied before
+        any request can observe the bundle. This does not import or discover code.
+        """
+        for manifest in list(self._registry.manifests()):
+            pid = manifest.plugin_id
+            if pid in self._states:
+                continue
+            registration = self._registry._items[pid]
+            wiring = {}
+            if registration.provider is not None:
+                wiring['provider'] = registration.provider
+            if manifest.actions:
+                wiring['executor'] = registration.executor
+            if registration.input_adapter is not None:
+                wiring['input_adapter'] = registration.input_adapter
+            self._factories[pid] = lambda wiring=wiring: dict(wiring)
+            self._registry.unregister(pid)
+            self.load_manifest(manifest)
+            if self._store.get(self._state_key(pid)) is None and default_enabled:
+                self.enable(pid)
+
     # ------------------------------------------------------------------
     # kv 键
     # ------------------------------------------------------------------
@@ -307,6 +331,9 @@ class PluginManager:
                     "provides": list(m.provides),
                     "actions": list(m.actions),
                     "inputs": list(m.inputs),
+                    "error": state.error,
+                    "description": m.description,
+                    "config_schema": dict(self._schemas.get(pid) or {}),
                 }
             )
         return out
@@ -332,7 +359,7 @@ class PluginManager:
                 "status": "disabled",
                 "detail": f"plugin status: {state.status}",
             }
-        executor = self._registry.executor(plugin_id)
+        executor = self._registry.provider_of(plugin_id) or self._registry.executor(plugin_id)
         check = getattr(executor, "healthcheck", None)
         if not callable(check):
             return {

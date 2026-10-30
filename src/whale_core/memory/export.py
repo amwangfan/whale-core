@@ -115,6 +115,8 @@ def _record_from_payload(
             created_at = None
     if created_at is None:
         created_at = datetime.now(timezone.utc)
+    elif created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
     tags_raw = payload.get("tags")
     if isinstance(tags_raw, (list, tuple)) and all(isinstance(t, str) for t in tags_raw):
         tags = tuple(tags_raw)

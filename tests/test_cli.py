@@ -180,7 +180,7 @@ def test_plugins_list_empty_dir(tmp_path, capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert "ID" in out and "STATUS" in out
-    assert "(no plugins loaded)" in out
+    assert "local_model" in out and "web_fetch" in out
 
 
 def test_plugins_list_tolerates_bad_manifest(tmp_path, capsys):

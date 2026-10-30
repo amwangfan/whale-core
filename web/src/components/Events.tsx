@@ -1,12 +1,12 @@
-import { useEffect, useRef, useState } from 'react';
-import { streamEvents, WhaleEvent } from '../api';
+import { useEffect, useRef, useState } from "react";
+import { streamEvents, WhaleEvent } from "../api";
 
-type ConnState = 'connecting' | 'open' | 'error';
+type ConnState = "connecting" | "open" | "error";
 
 const MAX_EVENTS = 500;
 
 function formatAt(at: number | string): string {
-  if (typeof at === 'number') {
+  if (typeof at === "number") {
     // 后端事件 at 为 epoch 秒
     return new Date(at * 1000).toLocaleTimeString();
   }
@@ -15,19 +15,21 @@ function formatAt(at: number | string): string {
 
 export default function Events() {
   const [events, setEvents] = useState<WhaleEvent[]>([]);
-  const [conn, setConn] = useState<ConnState>('connecting');
-  const [errMsg, setErrMsg] = useState('');
+  const [conn, setConn] = useState<ConnState>("connecting");
+  const [errMsg, setErrMsg] = useState("");
+  const [filter, setFilter] = useState("");
   const [retry, setRetry] = useState(0);
   const logRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    setConn('connecting');
-    setErrMsg('');
+    setConn("connecting");
+    setErrMsg("");
     const stream = streamEvents({
-      onOpen: () => setConn('open'),
-      onEvent: e => setEvents(prev => [...prev.slice(-(MAX_EVENTS - 1)), e]),
-      onError: err => {
-        setConn('error');
+      onOpen: () => setConn("open"),
+      onEvent: (e) =>
+        setEvents((prev) => [...prev.slice(-(MAX_EVENTS - 1)), e]),
+      onError: (err) => {
+        setConn("error");
         setErrMsg(err.message);
       },
     });
@@ -46,25 +48,49 @@ export default function Events() {
         <div className="actions">
           <span
             className={
-              conn === 'open' ? 'badge ok' : conn === 'connecting' ? 'badge' : 'badge bad'
+              conn === "open"
+                ? "badge ok"
+                : conn === "connecting"
+                  ? "badge"
+                  : "badge bad"
             }
           >
-            {conn === 'open' ? '已连接' : conn === 'connecting' ? '连接中…' : `断开：${errMsg}`}
+            {conn === "open"
+              ? "已连接"
+              : conn === "connecting"
+                ? "连接中…"
+                : `断开：${errMsg}`}
           </span>
-          {conn === 'error' && <button onClick={() => setRetry(r => r + 1)}>重连</button>}
+          {conn === "error" && (
+            <button onClick={() => setRetry((r) => r + 1)}>重连</button>
+          )}
           <button onClick={() => setEvents([])}>清空</button>
         </div>
       </div>
 
-      <div className="event-log" ref={logRef}>
+      <div className="searchbar">
+        <input
+          aria-label="筛选运行日志"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="按事件类型或内容筛选…"
+        />
+      </div>
+      <div className="event-log" role="log" aria-live="polite" ref={logRef}>
         {events.length === 0 && <div className="empty">暂无事件。</div>}
-        {events.map((e, i) => (
-          <div key={i} className="event-row">
-            <span className="muted mono">{formatAt(e.at)}</span>
-            <span className="badge">{e.kind}</span>
-            <span className="event-detail">{e.detail}</span>
-          </div>
-        ))}
+        {events
+          .filter((e) =>
+            `${e.kind} ${e.detail}`
+              .toLowerCase()
+              .includes(filter.toLowerCase()),
+          )
+          .map((e, i) => (
+            <div key={i} className="event-row">
+              <span className="muted mono">{formatAt(e.at)}</span>
+              <span className="badge">{e.kind}</span>
+              <span className="event-detail">{e.detail}</span>
+            </div>
+          ))}
       </div>
     </div>
   );

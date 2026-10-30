@@ -45,7 +45,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-from whale_core.core.runtime import ActionGatewayLike, ToolRegistry
+from whale_core.core.runtime import ActionGatewayLike, ToolRegistry, validate_tool_manifest
 from whale_core.plugins.intents import PluginAction
 from whale_core.plugins.manifest import RiskClass
 
@@ -56,7 +56,7 @@ _STEP_HEADER = "## step:"
 _DESCRIPTION_KEY = "description:"
 
 _PLACEHOLDER_RE = re.compile(r"\{([^{}]+)\}")
-_URL_RE = re.compile(r"https?://[^\s\"'<>\]\)]+")
+_URL_RE = re.compile(r"https?://[^\s\"'<>\]\)（）]+")
 _URL_TRAILING = ".,;:!?。，；：！？"
 
 
@@ -301,6 +301,9 @@ def run_skill(skill: Skill, tools: ToolRegistry, *, gateway: ActionGatewayLike |
         if spec is None:
             receipts.append(f"{tag}:fail:unknown-tool")
             return finish("failed")
+        if risk_error := validate_tool_manifest(spec, gateway):
+            receipts.append(f"{tag}:denied:{risk_error}")
+            return finish("denied")
         # 3. 风险门控（与 ConversationOrchestrator 同款语义，执行器不能自批）
         if spec.risk_class != RiskClass.READ_ONLY.value:
             if not (spec.plugin_id and spec.action):
@@ -318,7 +321,7 @@ def run_skill(skill: Skill, tools: ToolRegistry, *, gateway: ActionGatewayLike |
             except Exception as exc:
                 receipts.append(f"{tag}:fail:gateway-{type(exc).__name__}")
                 return finish("failed")
-            if receipt.startswith("plugin:") and ":ok:" in receipt:
+            if receipt.startswith(f"plugin:{spec.plugin_id}:{spec.action}:ok:"):
                 output = receipt.split(":ok:", 1)[-1]
             elif receipt.startswith(("plugin-hold:", "plugin-denied:")):
                 receipts.append(f"{tag}:denied:{receipt[:200]}")

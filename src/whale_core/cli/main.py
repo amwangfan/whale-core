@@ -89,7 +89,8 @@ def _config_dir(args: argparse.Namespace) -> Path:
 
 def _ensure_layout(config_dir: Path) -> None:
     """确保 config-dir 与 manifests/ 存在（不触碰 config.json）。"""
-    config_dir.mkdir(parents=True, exist_ok=True)
+    config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(config_dir, 0o700)
     (config_dir / MANIFESTS_DIRNAME).mkdir(exist_ok=True)
 
 
@@ -99,23 +100,24 @@ def _open_store(config_dir: Path) -> SqliteMemoryStore:
 
 def _load_config(config_dir: Path) -> dict[str, Any] | None:
     """读取 config.json；缺失或不可解析返回 None（调用方自行报告）。"""
-    path = config_dir / CONFIG_FILENAME
-    if not path.is_file():
+    from whale_core.configuration import read_config
+    if not (config_dir / CONFIG_FILENAME).is_file() and not (config_dir / 'secrets' / 'settings.json').is_file():
         return None
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        return read_config(config_dir)
     except (OSError, ValueError):
         return None
-    return data if isinstance(data, dict) else None
+
 
 
 def _build_manager(config_dir: Path) -> PluginManager:
     """默认装配：SqliteMemoryStore + PluginRegistry + 显式清单目录加载。"""
     _ensure_layout(config_dir)
-    store = _open_store(config_dir)
-    manager = PluginManager(PluginRegistry(), store, secret_dir=config_dir / 'secrets')
-    manager.load_dir(config_dir / MANIFESTS_DIRNAME)
-    return manager
+    from whale_core.configuration import read_config
+    from whale_core.profiles import assemble_runtime
+    config = read_config(config_dir)
+    return assemble_runtime(str(config.get('profile') or 'local'), config_dir=str(config_dir)).manager
+
 
 
 def _print_load_errors(manager: PluginManager) -> None:
@@ -142,6 +144,7 @@ def _resolve_api_token(config_dir: Path, env: Mapping[str, str] | None = None) -
     try:
         existing = token_path.read_text(encoding="utf-8").strip()
         if existing:
+            os.chmod(token_path, 0o600)
             return existing, f"配置文件 {token_path}"
     except OSError:
         pass
@@ -154,6 +157,9 @@ def _resolve_api_token(config_dir: Path, env: Mapping[str, str] | None = None) -
 
 def _repo_static_dir() -> Path | None:
     """仓库内 web/dist 构建产物（存在才托管）。"""
+    package_static = Path(__file__).resolve().parents[1] / 'static'
+    if (package_static / 'index.html').is_file():
+        return package_static
     dist = Path(__file__).resolve().parents[3] / "web" / "dist"
     return dist if (dist / "index.html").is_file() else None
 
@@ -164,14 +170,16 @@ def _build_api_server(args: argparse.Namespace) -> tuple[Any, str, str]:
     from whale_core.profiles import assemble_runtime
 
     config_dir = _config_dir(args)
-    config = _load_config(config_dir) or {}
+    from whale_core.configuration import read_config
+    config = read_config(config_dir)
     profile = str(config.get("profile") or "local")
     bundle = assemble_runtime(profile, config_dir=str(config_dir))
     token, token_source = _resolve_api_token(config_dir)
+    from whale_core.configuration import SettingsController
     ctx = ApiContext(
         store=bundle.store, manager=bundle.manager,
         orchestrator=bundle.orchestrator, curator=bundle.companion.curator,
-        profile=profile,
+        profile=profile, settings=SettingsController(config_dir, bundle), optional=bundle.optional,
     )
     server = WhaleApiServer(
         ctx, host=args.host, port=args.port, token=token,
@@ -197,6 +205,9 @@ def _cmd_api(args: argparse.Namespace) -> int:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\n[api] 已停止")
+    finally:
+        server.stop()
+        server.ctx.store.close()
     return 0
 
 
@@ -232,7 +243,7 @@ def _cmd_setup(args: argparse.Namespace) -> int:
             profile = "local"
 
     config_path = config_dir / CONFIG_FILENAME
-    if config_path.exists() and not args.force:
+    if (config_path.exists() or (config_dir / 'secrets' / 'settings.json').exists()) and not args.force:
         if interactive:
             answer = input(f"{config_path} 已存在，覆盖？[y/N] ").strip().lower()
             if answer not in ("y", "yes"):
@@ -252,15 +263,21 @@ def _cmd_setup(args: argparse.Namespace) -> int:
             )
             return 2
 
-    config_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_layout(config_dir)
     manifests_dir = config_dir / MANIFESTS_DIRNAME
     manifests_dir.mkdir(exist_ok=True)
     readme = manifests_dir / "README.txt"
     if not readme.exists():
         readme.write_text(MANIFESTS_README, encoding="utf-8")
-    config_path.write_text(
-        json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
+    from whale_core.configuration import atomic_json, private_settings, read_config
+    previous = read_config(config_dir)
+    private = private_settings(config_dir)
+    if previous.get('profile') != profile:
+        private.pop('model_api_key', None)
+    if (config_dir / 'secrets' / 'settings.json').exists():
+        atomic_json(config_dir / 'secrets' / 'settings.json', {
+            'schema_version': 1, 'config': config, 'private': private})
+    atomic_json(config_path, config)
     _open_store(config_dir).close()  # 建库（含表结构），setup 后即可用
     print(f"已写入 {config_path}（profile={profile}）")
     print(f"记忆库：{config_dir / MEMORY_FILENAME}")
@@ -341,7 +358,9 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         model = config.get("model") or {}
         if profile == "cloud":
             env_name = str(model.get("api_key_env") or "DEEPSEEK_API_KEY")
-            if os.environ.get(env_name):
+            from whale_core.configuration import configured_env
+            effective = configured_env(profile, config_dir, os.environ)
+            if effective.get('DEEPSEEK_API_KEY'):
                 rep.ok(f"模型 provider：cloud 档 key 已配置（env {env_name}）")
             else:
                 rep.fail(f"模型 provider：cloud 档 key 未配置（请设置环境变量 {env_name}）")
@@ -552,6 +571,29 @@ def _cmd_memory_import(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_memory_backup(args: argparse.Namespace) -> int:
+    from whale_core.memory.backup import create_backup, restore_backup
+    config_dir = _config_dir(args)
+    _ensure_layout(config_dir)
+    store = _open_store(config_dir)
+    try:
+        if args.memory_command == 'backup':
+            path = create_backup(store, args.path)
+            print(f'backup created: {path}')
+        else:
+            # Preserve the previous data even when a local operator requests restore.
+            previous = Path(store.path).with_suffix('.before-restore.sqlite3')
+            create_backup(store, previous)
+            result = restore_backup(store, args.path)
+            print(f"restored {result['records']} records; previous state: {previous}")
+        return 0
+    except (OSError, ValueError, TypeError) as exc:
+        print(f'backup/restore failed: {type(exc).__name__}', file=sys.stderr)
+        return 1
+    finally:
+        store.close()
+
+
 # ---------------------------------------------------------------------------
 # parser 与入口
 # ---------------------------------------------------------------------------
@@ -611,6 +653,14 @@ def build_parser() -> argparse.ArgumentParser:
         _add_config_dir(p)
         p.set_defaults(func=func)
 
+    p_desktop = sub.add_parser('desktop', help='启动Linux/macOS桌面控制台')
+    _add_config_dir(p_desktop)
+    p_desktop.add_argument('--browser', action='store_true', help='使用系统浏览器')
+    def desktop(args):
+        from whale_core.cli.desktop import run_desktop
+        return run_desktop(args.config_dir, browser_only=args.browser)
+    p_desktop.set_defaults(func=desktop)
+
     p_api = sub.add_parser("api", help="启动管理 API + 控制台静态托管（默认 127.0.0.1）")
     p_api.add_argument("--host", default="127.0.0.1", help="监听地址（默认 127.0.0.1）")
     p_api.add_argument("--port", type=int, default=8080, help="监听端口（默认 8080）")
@@ -631,6 +681,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_config_dir(mi)
     mi.set_defaults(func=_cmd_memory_import)
 
+    for operation in ('backup', 'restore'):
+        p = msub.add_parser(operation, help='完整SQLite备份 / 恢复（恢复前停止服务）')
+        p.add_argument('path', help='SQLite备份文件路径')
+        _add_config_dir(p)
+        p.set_defaults(func=_cmd_memory_backup)
     return parser
 
 

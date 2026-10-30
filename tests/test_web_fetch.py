@@ -506,3 +506,15 @@ def test_read_limited_deadline():
 
     with pytest.raises(FetchError):
         _read_limited(Trickle(), 10 * 1024 * 1024, deadline=time.monotonic() - 1)
+
+
+def test_default_transport_does_not_use_environment_proxy(monkeypatch):
+    import urllib.request
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9999")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9999")
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:9999")
+    monkeypatch.setenv("https_proxy", "http://127.0.0.1:9999")
+    for allow_private in (False, True):
+        fetcher = WebFetcher(allow_private=allow_private)
+        assert not any(isinstance(h, urllib.request.ProxyHandler)
+                       for h in fetcher._opener.handlers)

@@ -24,6 +24,7 @@ from typing import Protocol
 
 from whale_core.plugins.manifest import PluginManifest
 from whale_core.plugins.registry import PluginRegistry
+from whale_core.plugins import provider_http
 
 PLUGIN_ID = "media_image"
 IMAGE_GENERATE = "media.image.generate"
@@ -156,7 +157,7 @@ class OpenAIImagesProvider:
         timeout: float = 60.0,
     ):
         self.api_key = api_key or ""
-        self.base_url = (base_url or _DEFAULT_BASE_URL).rstrip("/")
+        self.base_url = provider_http.validate_base_url(base_url or _DEFAULT_BASE_URL)
         if not (
             self.base_url.startswith("https://")
             or _is_local_or_private_http(self.base_url)
@@ -193,8 +194,8 @@ class OpenAIImagesProvider:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as response:
-                return json.loads(response.read(8 * 1024 * 1024).decode("utf-8", errors="replace"))
+            with provider_http.open_request(req, timeout=self.timeout) as response:
+                return json.loads(provider_http.read_response(response, 32 * 1024 * 1024).decode("utf-8", errors="replace"))
         except urllib.error.HTTPError as exc:
             status = exc.code
             if status in (401, 403):
@@ -209,7 +210,7 @@ class OpenAIImagesProvider:
         except (urllib.error.URLError, TimeoutError) as exc:
             # 消息只含异常类型名，不含 URL/凭据
             raise ImageError("network", f"image network error: {type(exc).__name__}") from exc
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, ValueError) as exc:
             raise ImageError("bad_response", "image endpoint returned invalid JSON") from exc
 
 

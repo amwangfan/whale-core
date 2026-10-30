@@ -15,6 +15,7 @@ PERSONAL = ShellPolicy(tier="personal")
 
 def _executor(**kw) -> ShellExecutor:
     kw.setdefault("timeout_s", 5.0)
+    kw.setdefault("sandbox", "disabled")
     return ShellExecutor(PERSONAL, **kw)
 
 
@@ -79,7 +80,7 @@ def test_env_scrubbed_of_secrets():
     env = dict(os.environ)
     env["MY_API_KEY"] = "should-not-leak"
     env["CUSTOM_TOKEN"] = "nope"
-    ex = ShellExecutor(PERSONAL, env=env)
+    ex = ShellExecutor(PERSONAL, env=env, sandbox="disabled")
     result = ex.run("env", is_owner=True)
     assert result.status == "success"
     assert "should-not-leak" not in result.stdout
@@ -112,8 +113,13 @@ def test_default_cwd_is_tmpdir():
                     reason="需要 root 演示降权")
 def test_drop_to_nobody():
     result = _executor(drop_to_user="nobody").run("id -un", is_owner=True)
-    assert result.status == "success"
-    assert result.stdout.strip() == "nobody"
+    if result.status == "error":
+        # Root in a restricted container may lack CAP_SETUID/SETGID.
+        assert result.verdict_reason == "credential transition unavailable"
+        assert not result.stdout
+    else:
+        assert result.status == "success"
+        assert result.stdout.strip() == "nobody"
 
 
 def test_drop_to_unknown_user_errors():
@@ -127,3 +133,64 @@ def test_invalid_bytes_in_output_do_not_escape():
     result = _executor().run("printf '\\377\\376abc'", is_owner=True)
     assert result.status == "success"
     assert "abc" in result.stdout
+
+
+def test_default_sandbox_fails_closed_without_bwrap(monkeypatch):
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    result = ShellExecutor(PERSONAL).run("echo should-not-run", is_owner=True)
+    assert result.status == "error"
+    assert "sandbox unavailable" in result.verdict_reason
+    assert result.stdout == ""
+
+
+def test_root_sandbox_needs_unprivileged_account(monkeypatch):
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/" + name)
+    result = ShellExecutor(PERSONAL).run("echo should-not-run", is_owner=True)
+    assert result.status == "error"
+    assert "non-root" in result.verdict_reason
+
+
+def test_sandbox_launcher_exposes_only_explicit_workspace(monkeypatch, tmp_path):
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/" + name)
+    ex = ShellExecutor(PERSONAL, allowed_cwds=(str(tmp_path),))
+    argv = ex._argv("echo safe", str(tmp_path))
+    assert "--unshare-all" in argv and "--cap-drop" in argv
+    assert "--as=536870912:536870912" in argv
+    assert "--bind" in argv and argv[argv.index("--bind") + 1] == str(tmp_path)
+    assert "/etc" not in argv and "/root" not in argv
+    assert argv[-3:] == ["/bin/sh", "-c", "echo safe"]
+
+
+def test_unbounded_output_is_killed_with_bounded_capture():
+    result = _executor(output_chars=100, max_output_bytes=2048).run(
+        "while :; do echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; done", is_owner=True)
+    assert result.status == "output_limit"
+    assert len(result.stdout) <= 100
+    assert result.duration_s < 3
+
+
+def test_no_cwd_uses_unique_private_directory():
+    result = _executor().run("pwd; stat -c %a .", is_owner=True)
+    assert result.status == "success"
+    assert "whale-shell-" in result.stdout and "700" in result.stdout
+    assert not os.path.exists(result.stdout.splitlines()[0])
+
+
+def test_invalid_execution_limits_are_rejected():
+    for kwargs in ({"timeout_s": 0}, {"timeout_s": float("nan")},
+                   {"output_chars": 0}, {"max_output_bytes": -1}, {"sandbox": "auto"}):
+        with pytest.raises(ValueError):
+            ShellExecutor(PERSONAL, **kwargs)
+
+
+def test_real_namespace_support_is_explicit():
+    # This CI container may forbid user namespaces; both outcomes must be honest.
+    result = ShellExecutor(PERSONAL).run("echo isolated-whale", is_owner=True)
+    if result.status == "success":
+        assert result.stdout.strip() == "isolated-whale"
+    else:
+        assert result.status in ("error", "failed")
+        assert "sandbox" in result.verdict_reason
+        assert "isolated-whale" not in result.stdout

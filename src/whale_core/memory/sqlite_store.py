@@ -1,6 +1,7 @@
 """Persistent local memory. Keep database on private disk, never commit it."""
 from __future__ import annotations
 import json
+import os
 import sqlite3
 import threading
 from datetime import datetime
@@ -19,6 +20,11 @@ class SqliteMemoryStore:
           (key TEXT PRIMARY KEY, kind TEXT NOT NULL, content TEXT NOT NULL,
            record_id TEXT NOT NULL, created_at TEXT NOT NULL, tags TEXT NOT NULL)""")
         self.db.commit()
+        if self.path != ':memory:':
+            for suffix in ('', '-wal', '-shm'):
+                candidate = Path(self.path + suffix)
+                if candidate.exists():
+                    os.chmod(candidate, 0o600)
 
     def get(self, key: str) -> Any | None:
         with self._lock:
