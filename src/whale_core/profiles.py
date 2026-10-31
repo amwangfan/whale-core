@@ -277,7 +277,14 @@ def assemble_runtime(
     _spaces = SpaceStore(store)
     _owner_space = ensure_owner_working_copy(store, owner="owner")
     _auth = TemporaryAuthService(store, owner_id="owner")
-    _bindings = BindingStore(store, _spaces)
+    def _owner_convs():
+        uid = os.environ.get("OWNER_UID", "").strip()
+        out = {"api:api:api", "cli:cli:local"}
+        if uid:
+            out.add(f"qq:qq_private:private:{uid}")
+        return frozenset(out)
+
+    _bindings = BindingStore(store, _spaces, owner_conversations=_owner_convs())
     context_resolver = ConversationContextResolver(
         pairing_lookup=pairing_lookup_from_mapping(
             {("api", "console"): "owner", ("cli", "local"): "owner",

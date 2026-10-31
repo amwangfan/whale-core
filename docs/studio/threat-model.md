@@ -39,3 +39,12 @@
 
 ## 红队测试映射（S0 空壳 → 点亮阶段）
 `tests/test_studio_invariants.py` 已建：INV-01/03/05 契约级 4 项现役绿；8 项 skip 占位随 S1-S5 点亮。goal-chain F2 的 N01-N17 逐项对应测试，发布前全绿是硬 Gate。
+
+## 政策修订（owner 决策 2026-11-01）
+- **MEM-02 修订**：成员记忆默认开启——成员与鲸鱼私聊即视为同意，无需显式授权；
+  「别记我了」持久退出（opt-out），撤销/删除仍可用。memories 只记本人自述，
+  敏感内容仍整条不抽，空间隔离与私聊归属校验不变。
+- **MEM-HARD-01 修订**：protected_original 允许连接**主人本人大号私聊/控制台**
+  （paired owner 且 QQ_PRIVATE/API 会话）；群聊/成员/陌生人/未配对依旧硬拒。
+  存储层 include_protected 默认 False，仅该路径显式开启（双钥匙）。
+- 群消息 sudo 明文不落时间线（先于截获的持久化已堵）。

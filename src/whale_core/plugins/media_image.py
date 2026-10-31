@@ -1,5 +1,7 @@
 """media.image.generate 能力契约 + 官方图像生成插件（PR-12，roadmap §8 P1-5）。
 
+分层：内置 provider 实现，非插件框架契约（builtin-provider，issue #31）。
+
 分层约定（与仓内既有约定一致：护栏在核心，落盘在宿主）：
 
 - 本层只返回产物**引用**（URL 或 ``data:`` base64 引用字符串）；**不落盘**——

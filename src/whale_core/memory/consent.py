@@ -2,10 +2,11 @@
 
 不变量（下一阶段计划 §4 / §11）：
 
-- **MEM-02**：member_private 默认不采集；必须成员**本人** consent。
-  群主/管理者不能替其他成员授权——``granted_by`` 必须等于 consent 主体
-  （``principal_id``），授权入口只能是本人已认证私聊流程或管理通道代为
-  提交本人意愿（API 层再做结构性校验）。
+- **MEM-02（owner 决策 2026-11-01 修订）**：member_private **默认开启**——
+  成员本人私聊即视为同意记录其个人记忆；「别记我了」持久退出（opt-out），
+  「恢复记录我」重新开启。consent 记录仍是显式证据，但**不再是写入门槛**；
+  退出状态（``member:optout:``）才是。群主/管理者不能替其他成员退出/恢复——
+  管理动作只在本人已认证私聊生效（群聊指令一律拒绝，不产生任何副作用）。
 - 授权按 ``(principal_id, source_group)`` 维度记录：允许来源群、用途
   scope、版本、授予/撤销时间、TTL。
 - 撤销与过期即时生效：``is_valid`` 失败即停止新写入与召回。
@@ -21,7 +22,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Optional, Tuple
 
-from whale_core.life.conversation_context import MemorySpaceRef, MemorySpaceType
+from whale_core.memory.types import MemorySpaceRef, MemorySpaceType
 from whale_core.memory.store import MemoryStore
 
 #: 授权默认有效期：180 天（0 = 不过期，需显式传入）。
@@ -130,6 +131,22 @@ class MemberConsentStore:
         consent = self.get(principal_id, source_group)
         return consent if self.is_valid(consent, now=now) else None
 
+    _OPTOUT_PREFIX = "member:optout:"
+
+    def opt_out(self, principal_id: str) -> None:
+        """owner 决策 2026-11-01：成员记忆默认开启（私聊即同意），
+        「别记我了」= 持久退出标记。"""
+        self.store.put(f"{self._OPTOUT_PREFIX}{principal_id}",
+                       {"opted_out": True, "at": _now().isoformat()})
+        self.revoke_all(principal_id)
+
+    def opt_in(self, principal_id: str) -> None:
+        self.store.delete(f"{self._OPTOUT_PREFIX}{principal_id}")
+
+    def is_opted_out(self, principal_id: str) -> bool:
+        rec = self.store.get(f"{self._OPTOUT_PREFIX}{principal_id}")
+        return isinstance(rec, dict) and bool(rec.get("opted_out"))
+
     def has_valid(self, principal_id: str, *,
                   now: Optional[datetime] = None) -> bool:
         """该成员是否存在任一有效授权（私聊召回的下发闸门）。"""
@@ -219,7 +236,9 @@ class MemberMemoryDirectory:
         ref = self._spaces.ref(str(binding.get("space_id") or ""))
         if ref is None or ref.type is not MemorySpaceType.MEMBER_PRIVATE:
             return None
-        if not self._consents.has_valid(principal_id, now=now):
+        # owner 决策 2026-11-01：私聊即同意，退出用「别记我了」；
+        # consent 仍是撤销/审计证据链，但不再作为默认门槛。
+        if self._consents.is_opted_out(principal_id):
             return None
         # 空间本身可写（提炼管道/本人管理操作），但 member_private 不在
         # spaces.WRITABLE_TYPES 中——会话闲聊的自动写回不会落进成员空间。

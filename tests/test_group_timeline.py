@@ -194,3 +194,85 @@ def test_companion_group_history_uses_timeline():
     import hashlib
     assert f"[bbbb|群友{hashlib.sha1(b'10001').hexdigest()[:6]}]" in history[0]["content"]
     assert "不可信" in history[0]["content"]
+
+
+# ---------------------------------------------------------------------------
+# issue #15：同一发送者标签稳定（不按消息条数重编号）+ 回复/@标注
+# ---------------------------------------------------------------------------
+
+
+def _render_labels(rendered: str) -> list[str]:
+    import re
+    return re.findall(r"\|([^\]]+)\]", rendered)
+
+
+def test_same_sender_keeps_one_label_across_messages():
+    """A 连发两条 → 两行同一「群友X」标签；B 独立（issue #15 验收样例）。"""
+    store = InMemoryStore()
+    tl = GroupTimelineStore(store)
+    conv = "group:stable"
+    tl.append(conv, message_id="m-0001", sender_id="10001", text="电脑坏了")
+    tl.append(conv, message_id="m-0002", sender_id="10002",
+              text="E6 88 91 十六进制")
+    tl.append(conv, message_id="m-0003", sender_id="10001", text="Windows 卡死")
+    rendered = tl.render_for_model(conv)
+    labels = _render_labels(rendered)
+    assert len(labels) == 3
+    assert labels[0] == labels[2]          # A 的两条消息同一标签
+    assert labels[1] != labels[0]          # B 独立
+
+
+def test_labels_stable_across_window_sizes():
+    """同一 sender 在不同窗口/不同 limit 下标签一致。"""
+    store = InMemoryStore()
+    tl = GroupTimelineStore(store)
+    conv = "group:window"
+    for i in range(6):
+        tl.append(conv, message_id=f"m-{i:04d}",
+                  sender_id="10001" if i % 2 == 0 else "10002",
+                  text=f"第{i}条")
+    wide = _render_labels(tl.render_for_model(conv, limit=6))
+    narrow = _render_labels(tl.render_for_model(conv, limit=2))
+    # 窄窗口最后两条 = 宽窗口最后两条（同一 sender → 同一标签）
+    assert wide[-2:] == narrow[-2:]
+
+
+def test_unique_hashes_collision_extends_prefix_deterministically():
+    """短哈希碰撞 → 确定性同步加长前缀；同一集合多次调用结果一致。"""
+    from whale_core.memory.timeline import _unique_hashes
+    digests = {"a": "abcdef01", "b": "abcdef02", "c": "12345600"}
+    fn = lambda s: digests[s]
+    first = _unique_hashes(["a", "b", "c"], digest_fn=fn)
+    second = _unique_hashes(["c", "b", "a"], digest_fn=fn)
+    assert first == second                          # 与输入顺序无关
+    assert first["a"] == "abcdef01" and first["b"] == "abcdef02"  # 碰撞者加长到 8
+    assert first["c"] == "123456"                   # 无碰撞者保持 6 位
+
+
+def test_render_marks_reply_target_and_at_me():
+    """模型可见「回复谁 / @我」；reply_to 指向窗口内消息时用其尾号。"""
+    store = InMemoryStore()
+    tl = GroupTimelineStore(store)
+    conv = "group:marks"
+    tl.append(conv, message_id="m-aaaa", sender_id="10001", text="怎么办")
+    tl.append(conv, message_id="m-bbbb", sender_id="10002",
+              text="同问", reply_to=("m-aaaa",))
+    tl.append(conv, message_id="m-cccc", sender_id="10002",
+              text="@鲸鱼 看看", mentions=("u_self",))
+    rendered = tl.render_for_model(conv, self_uid="u_self")
+    line2 = rendered.splitlines()[1]
+    line3 = rendered.splitlines()[2]
+    assert "↩回复#aaaa" in line2
+    assert "@我" in line3
+    # 不提供 self_uid → 不标注 @我
+    assert "@我" not in tl.render_for_model(conv)
+
+
+def test_labels_do_not_leak_uin():
+    """模型可见文本不含完整 QQ 号/UIN。"""
+    store = InMemoryStore()
+    tl = GroupTimelineStore(store)
+    tl.append("group:leak", message_id="m-1", sender_id="3563425362",
+              sender_uid="u_abcdefgh", text="hi")
+    rendered = tl.render_for_model("group:leak", self_uid="u_self")
+    assert "3563425362" not in rendered and "u_abcdefgh" not in rendered

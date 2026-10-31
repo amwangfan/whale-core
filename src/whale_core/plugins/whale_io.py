@@ -1,5 +1,7 @@
 """whale-io 原生渠道适配器骨架：dashboard 卡片 / ring-hub 呼叫 / WeQ 直发（PR#4 移植）。
 
+分层：内置 provider 实现，非插件框架契约（builtin-provider，issue #31）。
+
 **联调状态（诚实标注——未联调不得宣称真实发送能力）**：
 
 - dashboard 卡片契约（``POST dashboard_url``，``{title, body, layout_hint}``）

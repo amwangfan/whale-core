@@ -98,15 +98,18 @@ def _studio_req(server, method, path, *, body=None):
 
 
 def test_inv01_vault_never_readable_even_if_listed():
-    """即使 allowed_memory_spaces 被错误地包含 vault，契约层仍拒绝。"""
-    ctx = _ctx(OWNER, PRIVATE, spaces=[VAULT])  # 假设上游出错
+    """owner 决策 2026-11-01 修订：主人本人私聊可直连主库；其余一律拒绝。
+    本用例：陌生人在私聊（哪怕绑定表被污染）仍拒绝。"""
+    ctx = _ctx(STRANGER, PRIVATE, spaces=[VAULT])
     assert ctx.allows_memory_read(VAULT) is False
 
 
 def test_inv01_vault_denied_for_owner_private_and_group():
-    for principal in (OWNER, STRANGER):
-        for conv in (PRIVATE, GROUP):
-            assert _ctx(principal, conv).allows_memory_read(VAULT) is False
+    """主人私聊可读（owner 大号例外）；主人在群/陌生人在任何会话都拒。"""
+    assert _ctx(OWNER, PRIVATE).allows_memory_read(VAULT) is True
+    assert _ctx(OWNER, GROUP).allows_memory_read(VAULT) is False
+    assert _ctx(STRANGER, PRIVATE).allows_memory_read(VAULT) is False
+    assert _ctx(STRANGER, GROUP).allows_memory_read(VAULT) is False
 
 
 def test_inv01_api_bind_vault_returns_403():  # N01

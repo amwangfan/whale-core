@@ -15,8 +15,7 @@ from datetime import datetime, timezone
 from dataclasses import replace
 from typing import Optional, Tuple
 
-from whale_core.life.conversation_context import (
-    ConversationKind,
+from whale_core.memory.types import (
     MemorySpaceRef,
     MemorySpaceType,
     principal_matches_private_conversation,
@@ -49,14 +48,13 @@ def _assert_member_private_bindable(
     if len(parts) != 3:
         raise BindingError("member_private 绑定需要完整 conversation_key")
     channel, kind_s, cid = parts
-    try:
-        kind = ConversationKind(kind_s)
-    except ValueError:
-        raise BindingError(f"未知会话类型 {kind_s!r}")
-    if kind is ConversationKind.QQ_GROUP:
+    # issue #26：memory 不反向依赖 life.ConversationKind；会话类型按
+    # conversation_key 线值（ConversationKind.value，见 ConversationRef.as_key）
+    # 比较。未知类型不单独报错——交由下面的归属谓词 fail closed。
+    if kind_s == "qq_group":  # ConversationKind.QQ_GROUP.value
         raise BindingError("member_private 空间永不绑定群聊（MEM-03）")
     if not owner or not principal_matches_private_conversation(
-            channel, kind, cid, owner):
+            channel, kind_s, cid, owner, store=spaces.store):
         raise BindingError(
             "member_private 只能绑定空间所属成员本人的已认证私聊")
 
@@ -64,9 +62,13 @@ def _assert_member_private_bindable(
 class BindingStore:
     """会话绑定存储（同时充当 resolver 的 BindingLookup）。"""
 
-    def __init__(self, store: MemoryStore, spaces: SpaceStore):
+    def __init__(self, store: MemoryStore, spaces: SpaceStore,
+                 *, owner_conversations: frozenset | None = None):
         self.store = store
         self.spaces = spaces
+        # owner 决策 2026-11-01：这些会话（主人本人大号私聊/控制台）允许
+        # 直连 vault；其余会话绑 vault 仍拒绝。由宿主显式配置。
+        self.owner_conversations = frozenset(owner_conversations or ())
 
     # -- BindingLookup 协议（resolver 消费） -------------------------------
 
@@ -98,8 +100,12 @@ class BindingStore:
             ref = self.spaces.ref(str(row.get("space_id") or ""))
             if ref is None:
                 continue  # 空间不存在/已注销 → fail closed
-            # MEM-HARD-01 第二道墙：绑定表被污染也不下发 vault。
-            if ref.type is MemorySpaceType.PROTECTED_ORIGINAL:
+            # MEM-HARD-01 第二道墙（owner 决策 2026-11-01 修订，issue #14）：
+            # vault 只下发给 owner_conversations 里的主人本人私聊/管理会话；
+            # 其余会话即使绑定表被污染也不下发。resolver 侧另有
+            # allows_memory_read（is_owner + 会话类型）执行时复核——双闸。
+            if ref.type is MemorySpaceType.PROTECTED_ORIGINAL \
+                    and conversation_key not in self.owner_conversations:
                 continue
             out.append(replace(ref, can_write=row.get('can_write') is True))
         return tuple(out)
@@ -123,8 +129,9 @@ class BindingStore:
         if ref is None:
             raise BindingError(f"unknown or retired space: {space_id}")
         if ref.type is MemorySpaceType.PROTECTED_ORIGINAL:
-            raise BindingError(
-                "个人原始库不能直接连接任何会话；请先创建受控副本（Fork）")
+            if conversation_key not in self.owner_conversations:
+                raise BindingError(
+                    "个人原始库只能连接主人本人的私聊会话；其余会话请先创建受控副本（Fork）")
         # G2：member_private 只许本人私聊（群聊在这里一律被拒）。
         _assert_member_private_bindable(self.spaces, space_id, conversation_key)
         if can_write and not can_read:

@@ -60,7 +60,8 @@ class QqInboundWorkflow:
                  completion_sender=None,
                  media_validator=None,
                  auth_service=None,
-                 context_resolver=None) -> None:
+                 context_resolver=None,
+                 on_member_provisioned=None) -> None:
         self.store = store
         self.companion = WhaleCompanion(store, brain, curator=MemoryCurator(store))
         self.outbox = ProactiveOutbox(store)
@@ -78,6 +79,9 @@ class QqInboundWorkflow:
         # 可选补发回调（两段式慢任务）：callable(event, reply) -> None。
         # 由宿主注入真实发送路径（草稿+审批+网关）；慢任务 ack 后的结果经此补发。
         self._completion_sender = completion_sender
+        # issue #16：成员建档/恢复后的回调（宿主接回填管道）；
+        # callable(principal_id, reason)——reason ∈ {"auto", "optin"}。
+        self._on_member_provisioned = on_member_provisioned
         # S4：临时授权服务（一次性口令 sudo）；None = 未启用，口令消息按
         # 普通文本处理。
         self._auth_service = auth_service
@@ -321,17 +325,18 @@ class QqInboundWorkflow:
     STRANGER_DAILY_LIMIT = 20
 
     def _stranger_gate(self, sender: str, conversation: str) -> str | None:
-        """陌生人/群成员回复的预算+静默闸门（直发路径不经 Outbox，必须自带）。
+        """陌生人/群成员被动回复的滥用闸门（直发路径不经 Outbox，必须自带）。
 
-        返回 None 放行；否则返回跳过原因。静默时段对非 owner 一律生效
-        （被动豁免只属于主人对话的延续）。
-        注意：不查 prefs.enabled——那是主动外发总开关；陌生人/群成员回复
-        是对已收消息的被动回应，是否开门由宿主的陌生人开关决定。
+        返回 None 放行；否则返回跳过原因。
+
+        issue #22（owner 决策 2026-11-01）：本路径处理的都是「人类先发起」
+        的入站消息，属于被动回复——**静默时段不拦截**；静默只约束无请求
+        触发的主动打扰（ProactiveOutbox 的 unsolicited 判定）。这里保留的
+        是防滥用额度（每人每会话每日上限），与渠道白名单/去重/工具权限
+        各司其职。
+        注意：不查 prefs.enabled——那是主动外发总开关，与本路径无关。
         """
         now = self._now()
-        from whale_core.life.initiative import ProactiveOutbox
-        if ProactiveOutbox._is_quiet(now.astimezone().time(), self.prefs):
-            return "quiet_hours"
         day = now.strftime("%Y-%m-%d")
         key = f"rl:stranger:{day}:{conversation}:{sender}"
         count = self.store.get(key)
@@ -339,6 +344,108 @@ class QqInboundWorkflow:
         if count >= self.STRANGER_DAILY_LIMIT:
             return "stranger_budget"
         self.store.put(key, count + 1)
+        return None
+
+    # -- 成员自助记忆管理（私聊指令；G2.4 的渠道内流程） --------------------
+
+    #: 指令 → 处理器（在 handle_stranger_event 中优先于闲聊路径）
+    _MEMBER_CMDS = (
+        (("同意记录我", "同意记忆同步", "同意记住我", "恢复记录我"), "grant"),
+        (("撤销记忆同步", "不同意记录我", "取消记忆同步", "撤销记录授权",
+          "别记我了", "不要记录我"), "revoke"),
+        (("我的记忆", "我的记忆有什么", "你记得我什么"), "list"),
+        (("删掉我的记忆", "删除我的记忆", "忘掉我的一切"), "wipe"),
+    )
+
+    def _member_command_reply(self, text: str, *, principal_id: str,
+                              conversation_key: str) -> str | None:
+        """成员本人私聊的授权/记忆管理指令。非指令返回 None。
+
+        身份证据 = 当前私聊会话本身（只有本人能在这个会话里发消息）。
+        全部确定性处理，不调模型。
+        """
+        from whale_core.memory.consent import MemberConsentStore
+        from whale_core.memory.spaces import SpaceStore
+
+        matched = None
+        for prefixes, action in self._MEMBER_CMDS:
+            if text.strip() in prefixes:
+                matched = action
+                break
+        if matched is None:
+            return None
+
+        consents = MemberConsentStore(self.store)
+        spaces = SpaceStore(self.store)
+        from whale_core.memory.bindings import BindingStore
+        bindings = BindingStore(self.store, spaces)
+        timeline = getattr(self.companion, "timeline", None)
+
+        if matched == "grant":
+            # owner 决策 2026-11-01：私聊即同意，默认在记；此指令用于
+            # 「别记我了」之后的恢复。
+            if consents.is_opted_out(principal_id):
+                consents.opt_in(principal_id)
+                bindings.ensure_member_space(
+                    principal_id, conversation_key=conversation_key,
+                    granted_by=principal_id)
+                if self._on_member_provisioned is not None:
+                    try:
+                        self._on_member_provisioned(principal_id, "optin")
+                    except Exception:
+                        pass  # 回填失败不阻断指令回复
+                return "好，重新开始记啦。"
+            bindings.ensure_member_space(
+                principal_id, conversation_key=conversation_key,
+                granted_by=principal_id)
+            return ("我一直在记着呢（你说的和我聊的）。想停就说「别记我了」，"
+                    "想清光说「删掉我的记忆」。")
+
+        if matched == "revoke":
+            consents.opt_out(principal_id)
+            return ("好，我以后不记了。之前记下的还在你小本本里，"
+                    "说「删掉我的记忆」可以一并清掉。")
+
+        if matched == "list":
+            binding = bindings.member_binding_for(principal_id)
+            if not binding:
+                return "还没有你的个人记忆空间——你还没授权过我记录。"
+            ref = spaces.ref(str(binding["space_id"]))
+            if ref is None:
+                return "还没有你的个人记忆空间——你还没授权过我记录。"
+            from whale_core.memory.store import MemoryKind
+            items = []
+            for kind in (MemoryKind.EPISODE, MemoryKind.PREFERENCE):
+                for rec in self.store.list_by_kind(kind, space_ids=(ref.space_id,)):
+                    if "member" in rec.tags and "superseded" not in rec.tags:
+                        items.append(str(rec.content.get("summary", ""))[:60])
+            if not items:
+                return "你的小本本现在还是空的。"
+            return "我现在记着你的这些：\n" + "\n".join(f"· {s}" for s in items[:10])
+
+        if matched == "wipe":
+            binding = bindings.member_binding_for(principal_id)
+            n_del = 0
+            if binding:
+                ref = spaces.ref(str(binding["space_id"]))
+                if ref is not None:
+                    from whale_core.memory.store import MemoryKind
+                    for kind in (MemoryKind.EPISODE, MemoryKind.PREFERENCE):
+                        for rec in list(self.store.list_by_kind(
+                                kind, space_ids=(ref.space_id,))):
+                            if "member" in rec.tags:
+                                self.store.delete(rec.key)  # 真删
+                                n_del += 1
+            from whale_core.memory.extraction import (
+                purge_member_extraction_state)
+            n_del += purge_member_extraction_state(self.store, principal_id)
+            # issue #21：经验（个性化建议权重）随记忆一并真删
+            from whale_core.memory.experience import ExperienceStore
+            n_del += ExperienceStore(self.store).purge_principal(principal_id)
+            consents.opt_out(principal_id)
+            return (f"清掉了 {n_del} 条（含提炼进度记录），以后我也不再记了。"
+                    "（已经发出去的聊天记录和群里的公共时间线收不回。）"
+                    "想说重新开始就说「恢复记录我」。")
         return None
 
     def handle_stranger_event(self, event) -> dict:
@@ -387,6 +494,36 @@ class QqInboundWorkflow:
             # 群里的 sudo 尝试：不验证、不回显、不落记忆——只提示私聊（N05/N17）
             return {"reply": "验证身份请私聊我（群里不做这个）。"}
 
+        # owner 决策 2026-11-01：成员私聊即默认记录其个人记忆（自动建档；
+        # 「别记我了」持久退出）。先建档再进 resolver，当轮即可回忆。
+        if is_private and sender:
+            try:
+                from whale_core.memory.consent import MemberConsentStore
+                consents = MemberConsentStore(self.store)
+                principal_id = f"anon:{channel}:{sender}"
+                if not consents.is_opted_out(principal_id):
+                    from whale_core.memory.spaces import SpaceStore
+                    from whale_core.memory.bindings import BindingStore
+                    spaces = SpaceStore(self.store)
+                    BindingStore(self.store, spaces).ensure_member_space(
+                        principal_id,
+                        conversation_key=f"qq:qq_private:{event.conversation}",
+                        granted_by=principal_id)
+                    if self._on_member_provisioned is not None:
+                        self._on_member_provisioned(principal_id, "auto")
+            except Exception:
+                pass  # 建档/回填失败不阻断对话（fail soft；记忆缺席非致命）
+
+        # G2.4：成员本人私聊的授权/记忆管理指令（先于预算闸门与闲聊——
+        # 隐私管理权不消耗对话额度、不被静默时段拦）。
+        if is_private:
+            principal_id = f"anon:{channel}:{sender}"
+            member_reply = self._member_command_reply(
+                text, principal_id=principal_id,
+                conversation_key=f"qq:qq_private:{event.conversation}")
+            if member_reply is not None:
+                return {"reply": member_reply}
+
         # G6 红队高-1：陌生人/群成员回复自带预算与静默闸门（直发路径不经
         # Outbox，必须前置）。sudo 验证回复不计额度（那是安全功能）。
         gate = self._stranger_gate(sender, str(event.conversation))
@@ -395,9 +532,13 @@ class QqInboundWorkflow:
 
         if self.orchestrator is None:
             return {"skipped": "no_orchestrator"}
+        # 附件图片与 owner 路径同一可信边界（白名单/嗅探/SSRF 门控）；
+        # 陌生人发的图可读，但不写入任何记忆（写作仍受空间纪律约束）。
+        images = self._attachment_images(event) if getattr(
+            event, "attachments", None) else ()
         envelope = InputEnvelope(
             conversation_id=event.conversation, text=text, source="qq:stranger",
-            channel=channel, sender_id=sender)
+            channel=channel, sender_id=sender, images=images)
         result = self.orchestrator.handle_envelope(envelope)
         reply = (result.reply or "").strip()
         if not reply:

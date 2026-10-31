@@ -47,7 +47,7 @@
 
 | PR | 目标 | 主要新增/改动 | 验收要点 |
 |----|------|--------------|----------|
-| **PR-0** 文档与合规 | 任务书与差距表入仓；LICENSE 落地 | `docs/roadmap-2026-10-30.md`、本文档、`LICENSE`（等 owner 选定）、README 状态表 | CI 绿；文档状态口径诚实 |
+| **PR-0** 文档与合规 | 任务书与差距表入仓；LICENSE 落地 | `docs/archive/2026-10-30/roadmap-2026-10-30.md`、本文档、`LICENSE`（等 owner 选定）、README 状态表 | CI 绿；文档状态口径诚实 |
 | **PR-1** 记忆 V1 修复 | 补齐 roadmap §7.4 三个已确认缺口 | **已落地（2026-10-30）**：`memory/history.py`（会话环形缓冲 kv 持久化）、`core/companion.py`（history 传递 + chat 情节注入召回）、`memory/store.py`+`sqlite_store.py`（parity 对齐）、`memory/export.py`（JSONL 导出/导入）、`life/qq_workflow.py`（conversation_id 接入 + 记住/忘掉指令） | 多轮历史测试（模型侧断言 history）；召回修复测试；parity 双后端参数化 16 例；导出/导入 12 例；指令路径 8 例。全量 336 绿 |
 | **PR-2** IntentPlan + Runtime 骨架 | 结构化意图 + 统一对话编排 | **已落地（2438ae8）**：`core/intent_plan.py` + `core/runtime.py` + `core/memory_commands.py`（指令共享化）+ `examples/runtime_demo.py` | 76 例新增；全量 395 绿；模型自批字段丢弃有专测 |
 | **PR-3** PluginManager | 清单文件加载 + 生命周期 | **已落地（998b14c）**：清单 JSON 目录加载、api_version 校验、生命周期+kv 回放、健康检查五态、config 校验+脱敏、工厂接线、故障隔离 | 33 例；全量 453 绿 |

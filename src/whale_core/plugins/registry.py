@@ -1,5 +1,7 @@
 """插件注册表：显式注册、能力查询、执行器解析。
 
+分层：插件框架契约（framework，issue #31）。
+
 与仓内既有约定一致（qq_onebot / gateway 同款）：**不做自动发现**——
 不扫描 entry_points、不读环境变量自动加载。宿主在自己的组装代码里
 显式 ``register()``；外置进程插件只注册 manifest + HTTP/队列执行器。

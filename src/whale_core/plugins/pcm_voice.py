@@ -1,5 +1,7 @@
 """whale-io PCM wire adapter；实时音频路径不经过文字模型。
 
+分层：内置 provider 实现，非插件框架契约（builtin-provider，issue #31）。
+
 帧协议（与 whale-io ``infra/call-bridge/audio-bridge/server.py`` 逐字节一致，
 镜像基线 whale-io@48f5993）::
 

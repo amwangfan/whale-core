@@ -1,5 +1,7 @@
 """One composition point for optional speech and media capabilities.
 
+分层：内置 provider 实现（宿主装配点），非插件框架契约（builtin-provider，issue #31）。
+
 Providers are registered only for explicitly configured endpoints. No canned results.
 """
 from __future__ import annotations

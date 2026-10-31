@@ -27,10 +27,15 @@ export type SpaceNodeData = {
   space?: StudioMemorySpace;
 };
 
+export type DeviceNodeData = {
+  node: StudioGraphNode;
+};
+
 export type StudioFlowNode =
   | Node<ConvNodeData, "conversation">
   | Node<PersonaNodeData, "persona">
-  | Node<SpaceNodeData, "memory_space">;
+  | Node<SpaceNodeData, "memory_space">
+  | Node<DeviceNodeData, "device">;
 
 const KIND_LABEL: Record<string, string> = {
   qq_group: "QQ 群",
@@ -288,6 +293,27 @@ export function TemporaryGrantCard({
           撤销授权
         </button>
       )}
+    </div>
+  );
+}
+
+/** issue #11：设备卡——只渲染服务端 registry 视图（状态/能力/排队水位）。
+ *  设备不参与连线（授权走一次性凭证，非画布连线）。 */
+export function DeviceCard({ data }: NodeProps<StudioFlowNode>) {
+  const { node } = data as DeviceNodeData;
+  const statusLabel =
+    { pending: "待配对", active: "在线", revoked: "已吊销" }[
+      node.status ?? ""
+    ] ?? node.status;
+  return (
+    <div className="studio-card studio-device" data-testid={`card-${node.id}`}>
+      <div className="studio-card-kind">设备</div>
+      <div className="studio-card-title">{node.label}</div>
+      <div className="studio-card-meta">
+        <span>状态：{statusLabel}</span>
+        <span>能力：{node.capabilities?.length ?? 0}</span>
+        <span>待处理事件：{node.queued_events ?? 0}</span>
+      </div>
     </div>
   );
 }

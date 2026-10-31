@@ -18,6 +18,19 @@ qwen 等执行器模型跑工具循环 → 只回摘要，上下文隔离）。
 不可信插件用外置进程（QQ OneBot / WeQ 适配器先例），核心不 import 插件业务代码。
 **门控本身不可插件化**：Initiative / ShellPolicy / OwnerChannelRegistry /
 PluginActionPolicy 是核心安全不变量。
+
+三层职责（issue #31；模块级分类与已知例外见本目录 README.md）：
+
+- **framework（插件框架契约）**：manifest / registry / loader / manager /
+  gateway / policy / events（+ intents / processing 契约）——插件与核心
+  之间的稳定契约面；framework 模块不得 import 内置 provider 实现；
+- **builtin providers（内置 provider 实现）**：本包内的媒体 / 语音 /
+  shell / realtime / 模型供给等能力实现——走同一框架注册，但**不是**
+  框架契约，可按需替换；
+- **bundled official plugins（捆绑官方插件）**：仓库根 ``plugins/`` 下的
+  weq_channel / search_web——独立发行单元，随 wheel 打包（pyproject.toml
+  ``[tool.hatch.build.targets.wheel] packages`` 显式列入），经
+  ``plugins/loader.py`` 显式加载，核心不 import 其业务代码。
 """
 
 from whale_core.plugins.events import PluginEvent

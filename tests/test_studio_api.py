@@ -616,3 +616,87 @@ def test_create_code_with_search_scope(api):
     result = _json(raw)["result"]
     assert set(result["scopes"]) == {"tool.web.search", "task.read:self"}
     assert result["code"]  # 明文仅此一次
+
+
+def test_vault_bindable_for_owner_private_only(api):
+    """owner 决策 2026-11-01：主人大号私聊可直连 vault；他人/群仍 403。"""
+    server, store = api
+    from whale_core.memory.bindings import BindingStore
+    from whale_core.memory.spaces import SpaceStore
+    spaces = SpaceStore(store)
+    owner_key = "qq:qq_private:private:u_owner"
+    b = BindingStore(store, spaces, owner_conversations=frozenset({owner_key}))
+    # 主人私聊：可绑
+    row = b.bind_memory(owner_key, "vault-1", granted_by="owner")
+    assert row["space_id"] == "vault-1"
+    # 他人私聊/群：仍拒
+    import pytest
+    from whale_core.memory.bindings import BindingError
+    with pytest.raises(BindingError):
+        b.bind_memory("qq:qq_private:private:u_stranger", "vault-1",
+                      granted_by="owner")
+    with pytest.raises(BindingError):
+        b.bind_memory(GROUP_KEY, "vault-1", granted_by="owner")
+
+
+def test_vault_delivery_and_revocation_chain(api):
+    """issue #14 链路验收：绑定后 memory_spaces_for 真实下发 vault；
+    撤销立即失效；他人会话即使绑定表被污染也拿不到 vault（第二道墙）。"""
+    server, store = api
+    from whale_core.memory.bindings import BindingStore
+    from whale_core.memory.spaces import SpaceStore
+    spaces = SpaceStore(store)
+    owner_key = "qq:qq_private:private:u_owner"
+    b = BindingStore(store, spaces, owner_conversations=frozenset({owner_key}))
+
+    # 绑定前：不下发
+    assert all(s.space_id != "vault-1" for s in b.memory_spaces_for(owner_key))
+    # 绑定后：真实下发（默认只读）
+    b.bind_memory(owner_key, "vault-1", granted_by="owner")
+    spaces_for = b.memory_spaces_for(owner_key)
+    vault = next(s for s in spaces_for if s.space_id == "vault-1")
+    assert vault.can_write is False
+    # 撤销：立即不再下发（无缓存旧权限）
+    assert b.unbind_memory(owner_key, "vault-1") is True
+    assert all(s.space_id != "vault-1" for s in b.memory_spaces_for(owner_key))
+    # 绑定表污染负例：手工给他人会话塞 vault 行，读取侧仍剥离
+    store.put("bind:mem:qq:qq_private:private:u_eve",
+              [{"space_id": "vault-1", "can_read": True, "can_write": True}])
+    assert all(s.space_id != "vault-1"
+               for s in b.memory_spaces_for("qq:qq_private:private:u_eve"))
+    assert all(s.space_id != "vault-1"
+               for s in b.memory_spaces_for(GROUP_KEY))
+
+
+def test_graph_includes_device_nodes_without_secrets(api):
+    """issue #11：设备卡来自 DeviceRegistry（服务端事实源）；
+    不回显 token/公钥/配对码；无设备时图正常。"""
+    server, store = api
+    # 无设备：图正常加载
+    status, raw = _req(server, "GET", "/api/v1/studio/graph")
+    assert status == 200
+    assert _json(raw)["result"]["nodes"]  # 至少有会话/角色节点
+
+    from whale_core.devices.registry import DeviceRegistry
+    registry = DeviceRegistry(store)
+    registry.request_pairing(label="我的工作手机",
+                             pubkey_hex="ab12" * 16,
+                             scopes=("phone.notification.post",))
+    did = registry.list_devices()[0]["device_id"]
+    # 一条未处理事件 → 排队水位 1
+    store.put(f"device:event:{did}:ev-1", {
+        "device_id": did, "event_id": "ev-1", "kind": "screen.memo",
+        "occurred_at": 1, "privacy_class": "shared", "summary": "会议",
+        "schema_version": "1", "received_at": 1})
+
+    status, raw = _req(server, "GET", "/api/v1/studio/graph")
+    assert status == 200
+    nodes = _json(raw)["result"]["nodes"]
+    dev = next((n for n in nodes if n["id"] == f"device:{did}"), None)
+    assert dev is not None
+    assert dev["kind"] == "device" and dev["label"] == "我的工作手机"
+    assert dev["status"] == "pending"
+    assert dev["capabilities"] == ["phone.notification.post"]
+    assert dev["queued_events"] == 1
+    # INV-10 类纪律：不回显敏感字段
+    assert "pubkey_hex" not in dev and "pairing_code" not in dev

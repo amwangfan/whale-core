@@ -1,5 +1,7 @@
 """插件目录加载器：把仓内 plugins/<name>/ 拆分包显式接进注册表。
 
+分层：插件框架契约（framework，issue #31）。
+
 **官方插件发行策略（单一明确）**：仓内 ``plugins/`` 下的官方拆分包
 （search_web / weq_channel 等）随 wheel/frozen/Docker 一起打包发行，
 宿主直接按包名导入；本加载器服务的是**外部第三方目录插件**（显式路径

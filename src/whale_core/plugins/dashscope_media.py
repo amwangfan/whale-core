@@ -1,5 +1,7 @@
 """DashScope 兼容协议的媒体 provider（生图/ASR/TTS），多平台可用。
 
+分层：内置 provider 实现，非插件框架契约（builtin-provider，issue #31）。
+
 协议契约来源：whale-io 生产 bridge（infra/call-bridge/audio-bridge/agent_api.py）
 实测通过的形状 + AgentScope 平台媒体手册（docs/media-and-voice.md 口径）：
 
@@ -15,7 +17,7 @@ AgentScope 平台（platform.agentscope.io/v1）都成立——base_url 可换�
 
 安全：key 只从构造参数/env 读，永不进日志/异常；结果 URL 是签名临时链接，
 不落盘由宿主决定（ArtifactStore）。本模块未与真实服务联调的部分在测试中以
-离线替身验证；真实联通记录见 docs/gap-analysis-2026-10-30.md。
+离线替身验证；真实联通记录见 docs/archive/2026-10-30/gap-analysis-2026-10-30.md。
 """
 from __future__ import annotations
 

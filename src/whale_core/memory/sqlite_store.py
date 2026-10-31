@@ -206,16 +206,19 @@ class SqliteMemoryStore:
                             tags=tuple(json.loads(row[5])), space_id=row[6])
 
     def list_by_kind(
-        self, kind: MemoryKind, *, space_ids: tuple[str, ...] | None = None
+        self, kind: MemoryKind, *, space_ids: tuple[str, ...] | None = None,
+        include_protected: bool = False,
     ) -> list[MemoryRecord]:
         """按类别列举，SQL 层限域（S2：查询前隔离，不做事后过滤）。
 
         - space_ids=None：全部非受保护空间（兼容期；vault 仍被排除）；
         - space_ids=()：空集，fail closed 返回空；
-        - 显式集合：先剔除受保护空间（纵深防御），再 IN 过滤。
+        - 显式集合：先剔除受保护空间（纵深防御），再 IN 过滤；
+        - include_protected=True：仅当调用方持有主人本人私聊的授权上下文
+          时使用（owner 决策 2026-11-01）；默认 False 永远排除 vault。
         """
         with self._lock:
-            protected = self._protected_space_ids()
+            protected = set() if include_protected else self._protected_space_ids()
             if space_ids is None:
                 if not protected:
                     rows = self.db.execute(

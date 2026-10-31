@@ -207,12 +207,14 @@ class InMemoryStore:
         return protected
 
     def list_by_kind(
-        self, kind: MemoryKind, *, space_ids: tuple[str, ...] | None = None
+        self, kind: MemoryKind, *, space_ids: tuple[str, ...] | None = None,
+        include_protected: bool = False,
     ) -> list[MemoryRecord]:
         # created_at 倒序（新的在前）；sorted 稳定，同 created_at 保持插入顺序。
         records = [r for r in self._records.values() if r.kind == kind]
-        # MEM-HARD-01：protected_original 永不进入列举（无论调用方是谁）。
-        protected = self._protected_space_ids()
+        # MEM-HARD-01：protected_original 默认永不进入列举；include_protected
+        # 仅由主人本人私聊的召回路径显式开启（owner 决策 2026-11-01）。
+        protected = set() if include_protected else self._protected_space_ids()
         if protected:
             records = [r for r in records if r.space_id not in protected]
         if space_ids is not None:

@@ -597,9 +597,47 @@ export interface StudioMemorySpace {
   restricted?: boolean;
 }
 
+/** 人物卡编辑用完整视图（owner 管理面；含 external_prompt 等内部字段）。 */
+export interface StudioPersonaDetail extends StudioPersona {
+  description?: string;
+  tone?: string;
+  address_user_as?: string;
+  style_rules?: string[];
+  extra_taboos?: string[];
+  timbre_hint?: string;
+  speaking_rate?: number;
+  artwork_ref?: string;
+  external_prompt?: string;
+  channels?: string[];
+}
+
+/** 新建/修改人物卡的可编辑字段（严格字段表；全可选，新建时 title 必填）。 */
+export interface PersonaCardInput {
+  card_id?: string;
+  title?: string;
+  name?: string;
+  summary?: string;
+  description?: string;
+  temperament?: string;
+  relationship_style?: string;
+  voice_hint?: string;
+  category?: string;
+  tone?: string;
+  address_user_as?: string;
+  timbre_hint?: string;
+  artwork_ref?: string;
+  author?: string;
+  source_url?: string;
+  license?: string;
+  external_prompt?: string;
+  style_rules?: string[];
+  extra_taboos?: string[];
+  speaking_rate?: number;
+}
+
 export interface StudioGraphNode {
   id: string;
-  kind: "conversation" | "persona" | "memory_space";
+  kind: "conversation" | "persona" | "memory_space" | "device";
   label: string;
   key?: string;
   channel?: string;
@@ -613,6 +651,9 @@ export interface StudioGraphNode {
   restricted?: boolean;
   record_count?: number;
   writable?: boolean;
+  /** kind=device：设备状态（pending/active/revoked）与事件排队水位。 */
+  status?: string;
+  queued_events?: number;
 }
 
 export interface StudioGraphEdge {
@@ -747,6 +788,26 @@ export const studioApi = {
     }>(`/studio/vault/records?space_id=${encodeURIComponent(spaceId)}`)).items,
   personas: async () =>
     (await request<{ personas: StudioPersona[] }>("/studio/personas")).personas,
+  personaDetail: async (id: string) =>
+    (
+      await request<{ persona: StudioPersonaDetail }>(
+        `/studio/personas/${encodeURIComponent(id)}`,
+      )
+    ).persona,
+  createPersona: async (input: PersonaCardInput) =>
+    (
+      await request<{ persona: StudioPersonaDetail }>("/studio/personas", {
+        method: "POST",
+        body: JSON.stringify(input),
+      })
+    ).persona,
+  updatePersona: async (id: string, input: PersonaCardInput) =>
+    (
+      await request<{ persona: StudioPersonaDetail }>(
+        `/studio/personas/${encodeURIComponent(id)}`,
+        { method: "PUT", body: JSON.stringify(input) },
+      )
+    ).persona,
   memorySpaces: async () =>
     (await request<{ memory_spaces: StudioMemorySpace[] }>(
       "/studio/memory-spaces",

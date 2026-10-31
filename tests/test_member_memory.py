@@ -191,13 +191,23 @@ def test_consent_grant_revoke_ttl(env):
 # ---------------------------------------------------------------------------
 
 
-def test_extraction_requires_consent(env):
+def test_extraction_default_on_and_optout_stops(env):
+    """owner 决策 2026-11-01：成员记忆默认开启（私聊即同意）；退出即停。
+
+    MEM-02 修订：默认采集仅本人自述；「别记我了」写持久退出标记，
+    退出后零扫描零写入。
+    """
     store, spaces, bindings, consents, _, tl, extractor = env
     _fill_timeline(tl)
-    # 未授权：0 写入（MEM-02）；G6 低-4 起 consent 先行早退，零扫描
+    _, ref = _grant_self(env)  # 建档（空间+绑定）
+    # 默认在记：无需显式 consent 即写入
     stats = extractor.extract_for_principal(A_PRINCIPAL, GROUP)
-    assert stats.written == 0 and stats.scanned == 0
-    assert store.list_by_kind(MemoryKind.EPISODE) == []
+    assert stats.written >= 1
+    # 退出：零扫描零写入
+    consents.opt_out(A_PRINCIPAL)
+    tl.append(GROUP, message_id="m-a9", sender_id=A_UIN, text="我又来了一句自述")
+    stats2 = extractor.extract_for_principal(A_PRINCIPAL, GROUP)
+    assert stats2.written == 0 and stats2.scanned == 0
 
 
 def test_extraction_writes_only_self_sourced(env):
@@ -258,12 +268,11 @@ def test_extraction_idempotent_and_revoke_stops(env):
     s2 = extractor.extract_for_principal(A_PRINCIPAL, GROUP)
     assert s1.written >= 1
     assert s2.written == 0 and s2.skipped_duplicate == s2.candidates
-    # 撤销后：新消息不再写入（ consent 无效即丢弃）
-    consents.revoke(A_PRINCIPAL, GROUP)
+    # 退出后：新消息不再写入（opt-out 持久标记）
+    consents.opt_out(A_PRINCIPAL)
     tl.append(GROUP, message_id="m-a4", sender_id=A_UIN,
               text="我下周要出差答辩。")
     s3 = extractor.extract_for_principal(A_PRINCIPAL, GROUP)
-    # 撤销后：0 写入（G6 低-4 起 consent 先行，零扫描）
     assert s3.written == 0 and s3.candidates == 0
 
 
@@ -313,8 +322,8 @@ def test_resolver_member_space_only_in_own_private(env):
                              conversation_id="private:99999")
     assert not [s for s in ctx_x.allowed_memory_spaces
                 if s.type is MemorySpaceType.MEMBER_PRIVATE]
-    # 撤销 → 不再下发
-    env[3].revoke_all(A_PRINCIPAL)
+    # opt-out → 不再下发
+    env[3].opt_out(A_PRINCIPAL)
     ctx_a2 = resolver.resolve(channel="qq", sender_id=A_UIN,
                               conversation_id=f"private:{A_UIN}")
     assert not [s for s in ctx_a2.allowed_memory_spaces
@@ -680,3 +689,90 @@ def test_section10_full_chain(api):
     records = store.list_by_kind(MemoryKind.EPISODE, space_ids=(space_id,))
     assert not any("E6 88 91" in str(r.content.get("summary"))
                    for r in records)
+
+
+# ---------------------------------------------------------------------------
+# issue #16：首次私聊回填（有界/增量/幂等）、退出期间不补采、wipe 清提炼态
+# ---------------------------------------------------------------------------
+
+
+def test_first_private_chat_backfills_group_history(env):
+    """A 先在群里自述，之后首次私聊建档 → 历史回填可召回（issue #16 验收 A）。"""
+    store, spaces, bindings, consents, directory, timeline, extractor = env
+    _fill_timeline(timeline)
+    # 首次私聊：建档 + 回填（runner 的 hook 顺序：ensure → backfill）
+    ref = bindings.ensure_member_space(A_PRINCIPAL, conversation_key=A_PRIVATE_KEY,
+                                       granted_by=A_PRINCIPAL)
+    stats = extractor.backfill_for_principal(A_PRINCIPAL)
+    assert stats.scanned == 2            # A 在群里两条自述
+    assert stats.written >= 1
+    recs = store.list_by_kind(MemoryKind.EPISODE, space_ids=(ref.space_id,))
+    prefs = store.list_by_kind(MemoryKind.PREFERENCE, space_ids=(ref.space_id,))
+    assert recs or prefs
+    # 幂等：再次回填不重复
+    again = extractor.backfill_for_principal(A_PRINCIPAL)
+    assert again.written == 0            # done 水位跳过（force=False）
+
+
+def test_backfill_opted_out_zero_scan_zero_write(env):
+    """退出者：零扫描零写入（issue #16 / owner 决策）。"""
+    store, spaces, bindings, consents, directory, timeline, extractor = env
+    _fill_timeline(timeline)
+    consents.opt_out(A_PRINCIPAL)
+    _grant_self(env)  # 即便有空间/绑定
+    stats = extractor.backfill_for_principal(A_PRINCIPAL)
+    assert stats.scanned == 0 and stats.written == 0
+
+
+def test_optin_watermark_excludes_opted_out_interval(env):
+    """「恢复记录我」钉水位：退出期间留在时间线的消息不补采。"""
+    from whale_core.memory.extraction import (
+        backfill_watermark, note_optin_watermark)
+    store, spaces, bindings, consents, directory, timeline, extractor = env
+    t0 = datetime(2026, 11, 1, 10, 0, tzinfo=timezone.utc)
+    timeline.append(GROUP, message_id="m-old", sender_id=A_UIN,
+                    text="我的旧自述", send_time=t0.isoformat())
+    consents.opt_out(A_PRINCIPAL)
+    # 退出期间的消息（时间线仍留存——群公共记录）
+    t1 = datetime(2026, 11, 1, 12, 0, tzinfo=timezone.utc)
+    timeline.append(GROUP, message_id="m-during", sender_id=A_UIN,
+                    text="我在退出期间说的事", send_time=t1.isoformat())
+    consents.opt_in(A_PRINCIPAL)
+    note_optin_watermark(store, A_PRINCIPAL,
+                         now=datetime(2026, 11, 1, 13, 0, tzinfo=timezone.utc))
+    _grant_self(env)
+    stats = extractor.backfill_for_principal(A_PRINCIPAL, force=True)
+    # 水位 13:00：m-old(10:00) 与 m-during(12:00) 都不补采
+    assert stats.scanned == 0 and stats.written == 0
+    wm = backfill_watermark(store, A_PRINCIPAL)
+    assert wm["not_before"] > t1.isoformat()
+
+
+def test_wipe_purges_extraction_state(env):
+    """删掉我的记忆：记忆记录 + 提炼幂等键 + 回填水位全部真删。"""
+    from whale_core.memory.extraction import (
+        backfill_watermark, purge_member_extraction_state)
+    store, spaces, bindings, consents, directory, timeline, extractor = env
+    _fill_timeline(timeline)
+    _grant_self(env)
+    extractor.backfill_for_principal(A_PRINCIPAL)
+    assert any(k.startswith("member:ex:") for k in store.keys())
+    assert backfill_watermark(store, A_PRINCIPAL) is not None
+    n = purge_member_extraction_state(store, A_PRINCIPAL)
+    assert n >= 1
+    assert not any(k.startswith("member:ex:") for k in store.keys())
+    assert backfill_watermark(store, A_PRINCIPAL) is None
+    # 他人（B）的提炼态不受影响
+    assert not any(True for k in store.keys() if k.startswith("member:ex:"))
+
+
+def test_backfill_bounded_by_group_cap(env):
+    """有界：来源群数 ≤ BACKFILL_MAX_GROUPS；失败可观测不静默。"""
+    store, spaces, bindings, consents, directory, timeline, extractor = env
+    _grant_self(env)
+    for i in range(60):
+        timeline.append(f"group:g{i}", message_id=f"m-{i}",
+                        sender_id=A_UIN, text="我的电脑很卡")
+    stats = extractor.backfill_for_principal(A_PRINCIPAL)
+    from whale_core.memory.extraction import BACKFILL_MAX_GROUPS
+    assert stats.scanned <= BACKFILL_MAX_GROUPS

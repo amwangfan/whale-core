@@ -1,5 +1,7 @@
 """OpenAI-compatible embedding provider with bounded requests and hash-only LRU.
 
+分层：内置 provider 实现，非插件框架契约（builtin-provider，issue #31）。
+
 The cache never stores source text. It is process-local, bounded and clearable;
 provider registration is explicit and does not enable external calls by default.
 """

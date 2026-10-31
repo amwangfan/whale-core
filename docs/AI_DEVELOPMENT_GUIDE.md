@@ -4,8 +4,8 @@
 > 本文件是代码导航、运行链路和工作约定，不替代源码、测试与契约文档。
 >
 > 快照：2026-10-31，`main @ be7a2ee`，Python 测试 **1115 passed**，前端 **38 passed**。
-> 代码变化快：动手前以目标分支最新代码、测试和[完成记录](completion-report-2026-10-30.md)为准；
-> [差距表](gap-analysis-2026-10-30.md)和[路线图](roadmap-2026-10-30.md)是历史快照，不要把其中的旧缺口当成当前结论。
+> 代码变化快：动手前以目标分支最新代码、测试和[完成记录](archive/2026-10-30/completion-report-2026-10-30.md)为准；
+> [差距表](archive/2026-10-30/gap-analysis-2026-10-30.md)和[路线图](archive/2026-10-30/roadmap-2026-10-30.md)是历史快照，不要把其中的旧缺口当成当前结论。
 
 ## 1. 定位与边界
 
@@ -123,7 +123,7 @@ whale api                                   # http://127.0.0.1:8080
 - Shell 沙箱：当前容器不能建用户命名空间，只验证了 fail-closed；成功隔离需在目标 Linux 主机点验。
 - 桌面与发行：macOS 签名/公证与真实 GUI 未做；Windows 排除；wheel/冻结包已过 CI 隔离启动。
 - 许可：项目级 LICENSE 未定，正式对外发行前必须解决。
-- `gap-analysis-2026-10-30.md` 与 `roadmap-2026-10-30.md` 保留历史快照，状态以代码、测试和完成记录为准。
+- `archive/2026-10-30/gap-analysis-2026-10-30.md` 与 `archive/2026-10-30/roadmap-2026-10-30.md` 保留历史快照，状态以代码、测试和完成记录为准。
 
 ## 8. 与 AI 协作的约定
 
@@ -140,9 +140,10 @@ whale api                                   # http://127.0.0.1:8080
 
 - `README.md` / `README_EN.md`：面向第一次访问的人，写用途、可用能力、安装和当前限制；保持双语同步。
 - 本文件：代码地图、运行链路、安全不变量与协作规则；模块或目录变化时同步更新。
-- `docs/completion-report-2026-10-30.md`：本轮的完成证据与验收边界，新增验收先补证据再改结论。
+- `docs/archive/2026-10-30/completion-report-2026-10-30.md`：本轮的完成证据与验收边界，新增验收先补证据再改结论。
 - `docs/management-api.md`、`media-and-voice.md`、`shell-sandbox.md`、`deployment.md`、`packaging-desktop.md`：面向具体操作，改接口、环境变量或默认值时同步。
 - `docs/contracts.md`：事件与动作的长期精确契约，改动前先确认兼容。
-- `gap-analysis-2026-10-30.md` / `roadmap-2026-10-30.md`：历史目标与证据快照，不追着现状改，但要在页首标注快照属性。
+- `archive/2026-10-30/gap-analysis-2026-10-30.md` / `archive/2026-10-30/roadmap-2026-10-30.md`：历史目标与证据快照，不追着现状改，但要在页首标注快照属性。
+- `docs/README.md`：文档入口与清单，区分当前有效文档与历史归档；新增、归档文档时同步更新。
 
 README 与本文中出现的每条命令都必须能在当前代码上执行；任何“可用”说法都要标出凭据、接线和联调边界。

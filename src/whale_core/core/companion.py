@@ -10,6 +10,7 @@ from whale_core.memory.curation import MemoryCurator
 from whale_core.memory.continuity import remember_episode, build_continuity_context
 from whale_core.memory.history import append_turn, load_history, conversation_lock
 from whale_core.memory.spaces import default_write_space
+from whale_core.memory.types import MemorySpaceType
 
 class TextCompanion(Protocol):
     def reply(self, text: str, *, persona: str = "", memories=(), history=(),
@@ -35,18 +36,37 @@ def _recall(curator, query: str, allowed_spaces, **kwargs):
 
     Legacy no-context callers may use the older signature; an authorized
     conversation must use a scope-aware curator or fail closed.
+    include_protected=False 时不向下游传该参数（兼容旧 curator 签名）。
     """
+    if not kwargs.get("include_protected"):
+        kwargs.pop("include_protected", None)
     if allowed_spaces is None:
+        kwargs.pop("include_protected", None)
         return curator.recall(query, **kwargs)
     return curator.recall(query, allowed_spaces=allowed_spaces, **kwargs)
 
+
+def _spaces_include_vault(spaces) -> bool:
+    """授权空间集合里是否含受保护原始库（resolver 已按主人私聊规则过滤）。"""
+    try:
+        return any(getattr(s, "type", None) is MemorySpaceType.PROTECTED_ORIGINAL
+                   for s in (spaces or ()))
+    except Exception:
+        return False
+
 class WhaleCompanion:
     def __init__(self, store: MemoryStore, model: TextCompanion, *, curator: MemoryCurator | None = None,
-                 timeline=None):
+                 timeline=None, self_uid: str = ""):
         self.store, self.model, self.curator = store, model, curator
         # G1：群时间线（GroupTimelineStore）；群会话的历史从它渲染（带归属），
         # 不再用无身份的历史回放。
         self.timeline = timeline
+        # 机器人自身 uid（issue #15）：时间线渲染用来标注「@我」；空则不标注。
+        self.self_uid = self_uid
+        # issue #23：回复规划提示（ResponsePlanner 标记约定）。宿主按需设置
+        # （如 QQ 会话），空 = 不提示（纯文本单条路径，行为不变）。
+        self.planning_hint = ""
+
 
     def chat(self, text: str, *, conversation_id: str = "", user_text: str | None = None,
              images: Sequence[bytes] = (), turn_key: str = "",
@@ -113,9 +133,12 @@ class WhaleCompanion:
                 import logging
                 logging.getLogger(__name__).exception(
                     "G4 relationship/expression hint failed; continuing without")
+        if self.planning_hint:
+            persona_text = (persona_text or "") + "\n\n" + self.planning_hint
         if self.curator is not None:
             memories = [str(hit.record.content.get("summary", ""))
-                        for hit in _recall(self.curator, original, spaces)]
+                        for hit in _recall(self.curator, original, spaces,
+                                           include_protected=_spaces_include_vault(spaces))]
             # 近期对话情节补充注入的纪律（owner 反馈 2026-10-31「总重复图片的事」）：
             # 1. **只取本会话**的情节——别会话的旧情节会把话题带偏；
             # 2. 规范化去重（同主题多条情节只留最新一条）；
@@ -147,7 +170,8 @@ class WhaleCompanion:
         history: object = ()
         if conversation_id:
             if self.timeline is not None and conversation_id.startswith("group:"):
-                block = self.timeline.render_for_model(conversation_id)
+                block = self.timeline.render_for_model(conversation_id,
+                                                      self_uid=self.self_uid)
                 if block:
                     history = ({"role": "user",
                                 "content": "以下是本群最近的消息时间线，格式为"

@@ -87,9 +87,9 @@ GitHub首轮安装发行检查（run 41050096142）已通过Docker、Linux/macOS
 
 使用真实Chromium打开实际Python API托管的构建资源，1440px和390px下逐个导航10个页面；20项均无文档横向溢出，没有页面脚本错误。实际点击发送记忆指令，刷新页面后成功恢复这轮历史。截图环境仅为字体显示注入了本地CJK字体，没有改变产品布局或网络功能。
 
-![桌面总览](screenshots/console-overview.png)
+![桌面总览](../../screenshots/console-overview.png)
 
-![手机设置](screenshots/console-mobile-settings.png)
+![手机设置](../../screenshots/console-mobile-settings.png)
 
 这项检查不等于真实麦克风、供应商或macOS原生窗口联调。
 

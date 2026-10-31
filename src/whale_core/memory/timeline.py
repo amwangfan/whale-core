@@ -72,40 +72,90 @@ class GroupTimelineStore:
     def clear(self, conversation_id: str) -> None:
         self.store.delete(_key(conversation_id))
 
-    def render_for_model(self, conversation_id: str, *, limit: int = 20) -> str:
+    def render_for_model(self, conversation_id: str, *, limit: int = 20,
+                         self_uid: str = "") -> str:
         """模型可读的带归属时间线（可信容器格式；正文按不可信数据处理）。
 
-        每条一行：``[#msg尾4|uin尾4] 正文`` —— 归属映射回真实消息 ID，
-        群成员不坍缩成同一个 user（ID-01）。正文中的换行压平，防止伪造
-        行结构冒充他人发言或系统消息。
+        每条一行：``[#msg尾4|群友hash]（↩回复#尾4） 正文`` —— 归属映射回
+        真实消息 ID，群成员不坍缩成同一个 user（ID-01）。正文中的换行压平，
+        防止伪造行结构冒充他人发言或系统消息。
+
+        群友标签纪律（issue #15）：
+        - 标签是 ``sender_id`` 的纯函数：同一发送者在同一次渲染与不同窗口
+          内保持一致；绝不按消息条数重新编号（同一人连发两条不能变成
+          两个「群友」）；
+        - 不同 sender 的短哈希碰撞用**确定性**消歧：按 sender_id 排序后
+          逐步加长哈希前缀（6→8→10…），结果只取决于窗口内的 sender 集合，
+          与消息顺序无关；
+        - 昵称永不作为身份键；标签不含任何 QQ UIN 片段。
         """
-        lines = []
-        # G6 红队中-4：uin 尾 4 可碰撞（同名「群友0001」会被模型串人）。
-        # 改用 sender 的稳定短哈希，并在本次渲染内保证唯一。
         entries = self.recent(conversation_id, limit=limit)
-        used_labels: set[str] = set()
+        labels = _stable_sender_labels(entries)
+        msg_label = {e["message_id"]: e["message_id"][-4:] for e in entries}
 
-        def _who(e) -> str:
-            if e.get("is_self"):
-                return "我"
-            import hashlib
-            base = hashlib.sha1(
-                str(e.get("sender_id") or "?").encode()).hexdigest()[:6]
-            label = base
-            n = 0
-            while label in used_labels:
-                n += 1
-                label = hashlib.sha1(f"{base}#{n}".encode()).hexdigest()[:6]
-            used_labels.add(label)
-            return f"群友{label}"
+        def _reply_marks(e) -> str:
+            """回复/@ 关系标注（模型可见「回复谁/@谁」，防引用伪造归属）。
 
+            只标注两类确定性事实：reply_to 的消息尾号、是否 @ 了鲸鱼自己
+            （self_uid 命中 mentions）。被 @ 的第三方 uid 不做猜测性归属，
+            避免把错误身份喂给模型。
+            """
+            marks = []
+            for ref in e.get("reply_to") or ():
+                tail = msg_label.get(ref) or str(ref)[-4:]
+                marks.append(f"↩回复#{tail}")
+            if self_uid and self_uid in (e.get("mentions") or ()):
+                marks.append("@我")
+            return (" " + " ".join(marks)) if marks else ""
+
+        lines = []
         for e in entries:
-            label = e["message_id"][-4:]
             # 正文压平 + 转义方括号（防伪造行结构/伪造归属标签）
             text = " ".join(str(e.get("text") or "").split())[:500] \
                 .replace("[", "［").replace("]", "］")
-            lines.append(f"[{label}|{_who(e)}] {text}")
+            lines.append(
+                f"[{msg_label[e['message_id']]}|{labels[e['message_id']]}]"
+                f"{_reply_marks(e)} {text}")
         return "\n".join(lines)
+
+
+def _stable_sender_labels(entries: tuple[dict, ...]) -> dict[str, str]:
+    """message_id → 稳定归属标签（「我」或「群友<hash>」）。
+
+    同一 sender_id 恒同标签；碰撞按 sender_id 排序后确定性加长前缀。
+    """
+    senders: list[str] = sorted({
+        str(e.get("sender_id") or "?") for e in entries if not e.get("is_self")
+    })
+    sender_label = _unique_hashes(senders)
+    return {
+        e["message_id"]: ("我" if e.get("is_self")
+                          else f"群友{sender_label[str(e.get('sender_id') or '?')]}")
+        for e in entries
+    }
+
+
+def _unique_hashes(ids: list[str], *, digest_fn=None) -> dict[str, str]:
+    """每个 id 分配唯一短哈希：优先 6 位，碰撞集合内同步加长前缀。
+
+    ``digest_fn`` 仅测试注入（制造确定性碰撞）；生产固定 sha1。
+    """
+    if digest_fn is None:
+        import hashlib
+        digest_fn = lambda s: hashlib.sha1(s.encode()).hexdigest()
+    digest = {i: digest_fn(i) for i in ids}
+    # 只加长碰撞者：无碰撞的 id 恒为 6 位（跨窗口稳定性最大化）。
+    length = {i: 6 for i in ids}
+    while True:
+        labels = {i: d[:length[i]] for i, d in digest.items()}
+        counts: dict[str, int] = {}
+        for lab in labels.values():
+            counts[lab] = counts.get(lab, 0) + 1
+        collided = {i for i, lab in labels.items() if counts[lab] > 1}
+        if not collided:
+            return labels
+        for i in collided:
+            length[i] += 2  # 确定性：同一 id 集合必得同一结果
 
 
 def _ts(iso: str) -> float:

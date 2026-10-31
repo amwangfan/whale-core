@@ -28,6 +28,7 @@ import type {
 } from "../../api";
 import {
   ConversationCard,
+  DeviceCard,
   MemorySpaceCard,
   PersonaCard,
   type StudioFlowNode,
@@ -38,13 +39,14 @@ const nodeTypes: NodeTypes = {
   conversation: ConversationCard,
   persona: PersonaCard,
   memory_space: MemorySpaceCard,
+  device: DeviceCard,
 };
 
-const COL_X = { conversation: 40, persona: 460, memory_space: 840 };
+const COL_X = { conversation: 40, persona: 460, memory_space: 840, device: 1220 };
 const ROW_H = 150;
 
 function layout(graph: StudioGraph): StudioFlowNode[] {
-  const counters = { conversation: 0, persona: 0, memory_space: 0 };
+  const counters = { conversation: 0, persona: 0, memory_space: 0, device: 0 };
   return graph.nodes.map((n) => {
     const kind = n.kind;
     const row = counters[kind]++;

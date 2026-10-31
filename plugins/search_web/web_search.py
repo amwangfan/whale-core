@@ -1,6 +1,6 @@
 """web.search 官方插件：可插拔搜索 provider（roadmap §8 P0-6）。
 
-provider 选择链（调研依据见 docs/gap-analysis-2026-10-30.md 与调研纪要）：
+provider 选择链（调研依据见 docs/archive/2026-10-30/gap-analysis-2026-10-30.md 与调研纪要）：
 
 - 显式 ``WHALE_SEARCH_PROVIDER``（tavily/brave/deepseek/duckduckgo/bing）优先；
 - 否则按 key 存在性：TAVILY_API_KEY → BRAVE_API_KEY → DEEPSEEK_API_KEY →

@@ -338,6 +338,12 @@ class WeQSsePushListener:
                                                    group_allow=self.group_allow)
                 if incoming is None or incoming.message_id in self._seen:
                     continue
+                # G2：uin↔uid 同源映射入档（本人私聊结构校验依赖它）
+                if (incoming.sender_uid and incoming.account
+                        and self.timeline is not None):
+                    from whale_core.life.channels import record_uid_mapping
+                    record_uid_mapping(self.timeline.store, incoming.account,
+                                       incoming.sender_uid)
                 # G1：群消息先入时间线（短期公共证据；不等于个人长期记忆）
                 # G6 红队高-2：sudo 明文永不落时间线/提炼（N17）——截获先于
                 # 任何持久化；但私聊的 sudo 仍须正常流到工作流做验证。

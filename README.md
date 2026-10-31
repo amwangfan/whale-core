@@ -103,8 +103,8 @@ whale desktop
 
 ## 开发文档
 
-- [本轮计划与差距](docs/completion-plan-2026-10-30.md)
-- [完成与验收记录](docs/completion-report-2026-10-30.md)
+文档入口与完整清单（含历史阶段文档归档）见 [docs/README.md](docs/README.md)。
+
 - [管理 API](docs/management-api.md)
 - [设备与意图契约](docs/contracts.md)
 - [能力与语音配置](docs/media-and-voice.md)

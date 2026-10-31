@@ -236,3 +236,190 @@ def test_persona_differs_by_conversation():
     ctx8 = resolver.resolve(channel="qq", sender_id="m", conversation_id="group:8")
     assert ctx7.persona_id == "whale-playful"
     assert ctx8.persona_id is None
+
+
+# ---------------------------------------------------------------------------
+# G2.4：成员私聊自助指令（授权/撤销/查看/清除）
+# ---------------------------------------------------------------------------
+
+
+class _In:
+    def __init__(self, sender, text, conv=None):
+        self.channel = "qq"
+        self.account = sender
+        self.conversation = conv or f"private:u_{sender}"
+        self.text = text
+        self.sender_id = sender
+
+
+def test_member_self_service_full_cycle():
+    """授权（有共同群证据）→ 群里自述被提炼 → 私聊可回忆 → 撤销 → 清除。"""
+    store, spaces, bindings, auth, resolver, brain, orch = _world()
+    from whale_core.memory.timeline import GroupTimelineStore
+    timeline = GroupTimelineStore(store)
+    orch.companion.timeline = timeline
+    from whale_core.life.channels import record_uid_mapping
+    record_uid_mapping(store, "u_s", "u_s")  # 测试形态：uin==uid 恒等映射
+    timeline.append("group:7", message_id="m1", sender_id="u_s",
+                    text="我明天要交论文，电脑还卡死了")
+    wf = QqInboundWorkflow(store, Brain(), orchestrator=orch, auth_service=auth)
+    wf.companion.timeline = timeline
+
+    # 默认在记（owner 决策 2026-11-01）：授权指令=恢复/确认语义
+    out1 = wf.handle_stranger_event(_In("u_s", "同意记录我", conv="private:u_s"))
+    assert "记" in out1["reply"]
+    from whale_core.memory.consent import MemberConsentStore
+    from whale_core.memory.bindings import BindingStore
+    # 新模型：无 opt-out 标记 + 已建档（默认开启，不再要求 consent 记录）
+    assert not MemberConsentStore(store).is_opted_out("anon:qq:u_s")
+    assert BindingStore(store, spaces).member_binding_for("anon:qq:u_s")
+
+    # 提炼（时间线里已有自述）→ 本人私聊可读
+    from whale_core.memory.extraction import MemberMemoryExtractor
+    MemberMemoryExtractor(store, timeline, MemberConsentStore(store),
+                          bindings, spaces).extract_for_principal(
+                              "anon:qq:u_s", "group:7")
+    out2 = wf.handle_stranger_event(_In("u_s", "我的记忆", conv="private:u_s"))
+    assert "论文" in out2["reply"]
+
+    # 清除：真删 + 撤销 + 不可再召回
+    out3 = wf.handle_stranger_event(_In("u_s", "删掉我的记忆", conv="private:u_s"))
+    assert "清掉" in out3["reply"]
+    assert MemberConsentStore(store).is_opted_out("anon:qq:u_s")
+    out4 = wf.handle_stranger_event(_In("u_s", "我的记忆", conv="private:u_s"))
+    assert "空的" in out4["reply"] or "没授权" in out4["reply"]
+
+
+def test_member_commands_group_chat_not_management():
+    """群里的记忆管理短语只能作为普通消息，不能改变成员本人设置。"""
+    store, spaces, bindings, auth, resolver, brain, orch = _world()
+    from whale_core.memory.consent import MemberConsentStore
+
+    principal_id = "anon:qq:u_s"
+    consents = MemberConsentStore(store)
+    consents.opt_out(principal_id)  # 建立明确基线：该成员此前已退出记忆
+    wf = QqInboundWorkflow(
+        store, Brain(), orchestrator=orch, auth_service=auth,
+        prefs=_prefs_no_quiet())
+    out = wf.handle_stranger_event(
+        _In("u_s", "同意记录我", conv="group:7"))
+
+    # Brain 是回显测试替身，回复正文出现原短语不代表执行了管理指令。
+    # 应断言群聊不能替成员本人重新开启记忆，而不是限制回复复述输入。
+    assert out.get("reply") == "收到：同意记录我"
+    assert consents.is_opted_out(principal_id)
+    assert consents.list_for(principal_id) == ()
+    assert bindings.member_binding_for(principal_id) is None
+
+
+# ---------------------------------------------------------------------------
+# issue #22：静默时段只拦主动打扰；陌生人/群友先发的被动回复深夜不拦截
+# ---------------------------------------------------------------------------
+
+
+def test_stranger_passive_reply_not_blocked_in_quiet_hours():
+    """深夜（静默窗口内）陌生人私聊仍得到回复；防滥用日额度照常生效。"""
+    from datetime import datetime, time as _t, timezone
+    from whale_core.life.initiative import ProactivePrefs
+
+    store, spaces, bindings, auth, resolver, brain, orch = _world()
+    # 2026-11-01 03:30 Asia/Shanghai（静默窗 22:00–07:00 内）
+    night = datetime(2026, 10, 31, 19, 30, tzinfo=timezone.utc)
+    prefs = ProactivePrefs(enabled=True,
+                           allowed_channels=frozenset({"direct_message"}),
+                           quiet_start=_t(22), quiet_end=_t(7))
+    wf = QqInboundWorkflow(store, Brain(), orchestrator=orch, auth_service=auth,
+                           prefs=prefs, now_fn=lambda: night)
+
+    class In:
+        channel = "qq"
+        account = "u_night"
+        conversation = "private:u_night"
+        text = "睡了吗"
+
+    out = wf.handle_stranger_event(In())
+    assert out.get("skipped") != "quiet_hours"      # 被动回复不被深夜拦截
+    assert out["reply"].startswith("收到")
+
+    # 主动打扰在同一时刻仍被静默拦下（unsolicited 不豁免）
+    from whale_core.life.initiative import ProactiveDraft, ProactiveOutbox
+    ob = ProactiveOutbox(store)
+    ob.propose(ProactiveDraft("n1", "t", "r", ("e",), channel="direct_message"))
+    assert ob.inspect("n1", prefs, now=night).status == "deferred"
+
+
+def test_stranger_daily_budget_still_enforced_at_night():
+    """被动豁免静默 ≠ 豁免防滥用额度（issue #22 边界）。"""
+    from datetime import datetime, time as _t, timezone
+    from whale_core.life.initiative import ProactivePrefs
+
+    store, spaces, bindings, auth, resolver, brain, orch = _world()
+    night = datetime(2026, 11, 1, 3, 30, tzinfo=timezone.utc)
+    prefs = ProactivePrefs(quiet_start=_t(22), quiet_end=_t(7))
+    wf = QqInboundWorkflow(store, Brain(), orchestrator=orch, auth_service=auth,
+                           prefs=prefs, now_fn=lambda: night)
+
+    class In:
+        channel = "qq"
+        account = "u_spam"
+        conversation = "private:u_spam"
+        text = "刷屏"
+
+    for _ in range(wf.STRANGER_DAILY_LIMIT):
+        out = wf.handle_stranger_event(In())
+        assert "skipped" not in out
+    out = wf.handle_stranger_event(In())
+    assert out.get("skipped") == "stranger_budget"
+
+
+# ---------------------------------------------------------------------------
+# issue #14：主人私聊 vault 端到端召回 + 非主人零泄漏
+# ---------------------------------------------------------------------------
+
+
+def _world_with_vault():
+    """_world + 真实 vault 空间与绑定（owner 大号私聊例外链路）。"""
+    store, spaces, bindings, auth, resolver, brain, orch = _world()
+    store.put("space:vault-1", {
+        "space_id": "vault-1", "type": "protected_original",
+        "name": "默认私人原始库", "owner": "owner", "version": 1,
+        "created_at": "t", "retired_at": None})
+    store.put_record(MemoryRecord(
+        kind=MemoryKind.EPISODE, key="v-fact",
+        content={"summary": "主人对芒果过敏", "importance": 0.9,
+                 "confidence": 1.0},
+        tags=("curated",), space_id="vault-1"))
+    # 重建 resolver：bindings 带 owner 私聊白名单
+    owner_key = "qq:qq_private:private:10001"
+    bindings2 = BindingStore(store, spaces,
+                             owner_conversations=frozenset({owner_key}))
+    bindings2.bind_memory(owner_key, "vault-1", granted_by="owner")
+    resolver2 = ConversationContextResolver(
+        pairing_lookup=pairing_lookup_from_mapping({("qq", "10001"): "owner"}),
+        bindings=bindings2, grants=auth, owner_id="owner")
+    orch2 = ConversationOrchestrator(
+        store, WhaleCompanion(store, brain, curator=MemoryCurator(store)),
+        context_resolver=resolver2)
+    return store, brain, orch2
+
+
+def test_owner_private_recalls_vault_end_to_end():
+    store, brain, orch = _world_with_vault()
+    orch.handle_envelope(InputEnvelope(
+        conversation_id="private:10001", text="我有什么过敏？",
+        channel="qq", sender_id="10001", source="qq:owner"))
+    assert any("芒果" in m for m in brain.calls[-1]["memories"])
+
+
+def test_stranger_and_group_never_recall_vault():
+    store, brain, orch = _world_with_vault()
+    # 陌生人私聊：无绑定 → 不召回
+    orch.handle_envelope(InputEnvelope(
+        conversation_id="private:u_eve", text="芒果？",
+        channel="qq", sender_id="u_eve"))
+    assert not any("芒果" in m for m in brain.calls[-1]["memories"])
+    # owner 本人在群聊：也不召回（kind 不符，allows_memory_read=False）
+    orch.handle_envelope(InputEnvelope(
+        conversation_id="group:9", text="芒果？",
+        channel="qq", sender_id="10001", source="qq:owner"))
+    assert not any("芒果" in m for m in brain.calls[-1]["memories"])
