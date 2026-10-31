@@ -17,6 +17,17 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional, Tuple
 
+# issue #26：MemorySpaceType / MemorySpaceRef 已下沉至记忆域稳定模块
+# whale_core.memory.types（memory 不再反向依赖 life，单向边界）。此处
+# re-export 仅为兼容旧 import 路径；新代码请直接从 whale_core.memory.types
+# 导入。principal_matches_private_conversation（G2 成员记忆归属谓词）一并
+# 迁出并在此 re-export。
+from whale_core.memory.types import (  # noqa: F401
+    MemorySpaceRef,
+    MemorySpaceType,
+    principal_matches_private_conversation,
+)
+
 # ---------------------------------------------------------------------------
 # 会话与主体
 # ---------------------------------------------------------------------------
@@ -59,59 +70,9 @@ class Principal:
 # ---------------------------------------------------------------------------
 # 记忆空间
 # ---------------------------------------------------------------------------
-
-
-class MemorySpaceType(str, Enum):
-    # MEM-HARD-01（owner 决策 2026-11-01 修订）：仅主人已认证本人私聊/管理
-    # 会话可直连（见 allows_memory_read / BindingStore.owner_conversations）；
-    # 其他成员、群聊、未认证会话、临时 sudo 一律不可接入。
-    PROTECTED_ORIGINAL = "protected_original"
-    OWNER_WORKING_COPY = "owner_working_copy"
-    GROUP_SPACE = "group_space"
-    SHAREABLE_FORK = "shareable_fork"
-    # G2：群友个人记忆空间。按 Principal 归属，仅在本人已认证私聊召回；
-    # 群聊、其他成员与未认证身份永不可读（MEM-02/03）。
-    MEMBER_PRIVATE = "member_private"
-
-
-def principal_matches_private_conversation(
-    channel: str,
-    kind: ConversationKind,
-    conversation_id: str,
-    principal_id: str,
-    *,
-    store=None,
-) -> bool:
-    """判断私聊会话是否可证明属于某 Principal（G2 成员记忆归属校验）。
-
-    只允许结构性证据：QQ 私聊 conversation_id 形如 ``private:{uin}``，
-    其 uid 必须与 principal 的渠道账号一致（``anon:{channel}:{uid}`` /
-    ``paired:{channel}:{uid}``）。群会话一律 False；昵称、正文不构成证据。
-    """
-    if kind is ConversationKind.QQ_GROUP:
-        return False
-    if kind not in (ConversationKind.QQ_PRIVATE, ConversationKind.WEB):
-        return False
-    cid = conversation_id or ""
-    uid = cid[len("private:"):] if cid.startswith("private:") else cid
-    if not uid or not principal_id:
-        return False
-    direct = principal_id in (f"anon:{channel}:{uid}", f"paired:{channel}:{uid}")
-    if direct or store is None:
-        return direct
-    # uid ↔ uin 映射（传输层同源证据）：会话 uid → uin 再比 principal 账号
-    from whale_core.life.channels import uid_to_uin
-    mapped = uid_to_uin(store, uid)
-    return bool(mapped) and principal_id in (
-        f"anon:{channel}:{mapped}", f"paired:{channel}:{mapped}")
-
-
-@dataclass(frozen=True)
-class MemorySpaceRef:
-    space_id: str
-    type: MemorySpaceType
-    version: int  # 缓存分区键的一部分
-    can_write: bool = False  # 会话绑定实际写权限；类型本身不构成授权
+#
+# MemorySpaceType / MemorySpaceRef / principal_matches_private_conversation
+# 已迁至 whale_core.memory.types（见文件头 re-export，issue #26）。
 
 
 # ---------------------------------------------------------------------------

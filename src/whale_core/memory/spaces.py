@@ -15,7 +15,7 @@ from dataclasses import replace
 from typing import Any, Mapping, Optional, Tuple
 from uuid import uuid4
 
-from whale_core.life.conversation_context import MemorySpaceRef, MemorySpaceType
+from whale_core.memory.types import MemorySpaceRef, MemorySpaceType
 from whale_core.memory.store import MemoryKind, MemoryStore
 
 DEFAULT_VAULT_ID = "vault-default"

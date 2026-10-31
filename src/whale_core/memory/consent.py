@@ -22,7 +22,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Optional, Tuple
 
-from whale_core.life.conversation_context import MemorySpaceRef, MemorySpaceType
+from whale_core.memory.types import MemorySpaceRef, MemorySpaceType
 from whale_core.memory.store import MemoryStore
 
 #: 授权默认有效期：180 天（0 = 不过期，需显式传入）。

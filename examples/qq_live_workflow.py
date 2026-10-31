@@ -378,6 +378,34 @@ def cmd_run(args) -> int:
             except Exception as exc:
                 print(f"  [语音] {aid[:8]} 读取失败：{type(exc).__name__}")
 
+    def _plan_segments(text, *, is_group, rhythm):
+        """issue #23：模型规划优先（◆ 分隔/[[沉默]]/[[稍后补充]]），
+        无标记回落 split_reply。返回 (bubbles, plan)。"""
+        from whale_core.life.response_planner import plan_reply
+        plan = plan_reply(text, is_group=is_group,
+                          max_segments=rhythm.effective_max_segments(
+                              is_group=is_group))
+        if plan.follow_up:
+            # 「稍后补充」是意图声明：只有存在服务端可信的未完成任务/事件
+            # 时才可能真的续聊（#20）；此处只记录，不产生任何后台行为。
+            print(f"  [规划] 模型声明稍后补充：{plan.follow_up[:40]}"
+                  f"（无任务关联则不续聊）")
+        if plan.planner == "model":
+            print(f"  [规划] 模型规划 {len(plan.bubbles)} 个气泡")
+        return plan.bubbles, plan
+
+    # issue #17：原请求 message_id → 其回合 epoch；任务补发以此为基线，
+    # 不在发送前重读 current_epoch 把中途新消息吞进基线。
+    turn_epoch_by_msg: dict[str, int] = {}
+
+    def _note_turn_epoch(message_id: str, epoch: int) -> None:
+        if not message_id or not epoch:
+            return
+        turn_epoch_by_msg[message_id] = epoch
+        if len(turn_epoch_by_msg) > 500:  # 有界
+            for k in list(turn_epoch_by_msg)[:250]:
+                turn_epoch_by_msg.pop(k, None)
+
     def _send_completion(event, reply: str, audio_ids=()) -> None:
         """两段式补发：草稿+审批+网关发送（与主回复同一条发送链）。"""
         if not live_auto:
@@ -391,7 +419,8 @@ def cmd_run(args) -> int:
             reason="两段式慢任务完成后的补发（ack 已发）",
             evidence=(f"qq:{event.conversation}:{event.message_id}",),
             channel="direct_message"))
-        # G3：补发也分段 + epoch 校验（结果回来时话题可能已换）
+        # G3/issue #17：补发也分段 + epoch 校验；基线 = 原请求回合的 epoch
+        # （查不到才回落当前值），不把任务执行期间到达的新消息吞进基线。
         from whale_core.life.segments import split_reply
         from whale_core.life.batching import current_epoch, epoch_fresh
         from whale_core.life.rhythm import RhythmStore, rhythm_key_for
@@ -402,11 +431,14 @@ def cmd_run(args) -> int:
         if rhythm.dnd:
             print("  [节奏] 免打扰开启，任务补发跳过")
             return
-        ep = current_epoch(store, event.conversation)
-        segments = split_reply(
+        ep = turn_epoch_by_msg.get(str(getattr(event, "message_id", "") or "")) \
+            or current_epoch(store, event.conversation)
+        segments, _plan = _plan_segments(
             reply, is_group=event.conversation.startswith("group:"),
-            max_segments=rhythm.effective_max_segments(
-                is_group=event.conversation.startswith("group:")))
+            rhythm=rhythm)
+        if _plan.silent:
+            print("  [规划] 补发内容被规划为沉默，不发送")
+            return
         for i, seg in enumerate(segments):
             if not epoch_fresh(store, event.conversation, ep):
                 print(f"  [补发] 会话已有新消息，剩余 {len(segments)-i} 段作废")
@@ -537,9 +569,9 @@ def cmd_run(args) -> int:
             print(f"[恢复] 处理被上次重启打断的任务：{len(recovered)} 个")
 
     # G3：入站合批——同一人短窗口连发合并为一个处理回合（不同发送者
-    # 绝不合并）；epoch 在冲刷时 +1，发送前校验作废旧片段（MSG-02）。
+    # 绝不合并）；epoch 在接受入队时 +1（issue #17），发送前校验作废旧片段（MSG-02）。
     from whale_core.life.batching import (
-        MessageBatcher, bump_epoch, epoch_fresh)
+        MessageBatcher, epoch_fresh)
 
     def on_owner(event):
         batcher.offer(event)
@@ -552,10 +584,9 @@ def cmd_run(args) -> int:
         last = batch.last_event
         if last is None:
             return
-        # G6 中-1：epoch 在冲刷时捕获并随批透传——发送侧以此为作废基线，
-        # AI 处理期间到达的新消息不会被吞进基线。
-        import dataclasses as _dc0
-        batch = _dc0.replace(batch, epoch=bump_epoch(store, batch.conversation))
+        # issue #17：epoch 已在 offer（消息接受）时 +1 并随批透传
+        # （batch.epoch = 冲刷时刻当前值）；发送侧以此为作废基线，
+        # AI 处理期间到达的新消息（含尚在合批窗口内的）都使其失效。
         import dataclasses as _dc
         merged_attach = []
         for ev in batch.events:
@@ -570,9 +601,14 @@ def cmd_run(args) -> int:
         else:
             _dispatch_unpaired(event, epoch=batch.epoch)
 
-    batcher = MessageBatcher(_flush_batch)
+    def _batch_error(key, exc):
+        print(f"  [合批] 冲刷回调失败 {key}: {type(exc).__name__}（批次未处理，"
+              f"inbox 未 ack 将按策略重投）")
+
+    batcher = MessageBatcher(_flush_batch, store=store, on_error=_batch_error)
 
     def _dispatch_owner(event, *, epoch: int = 0):
+        _note_turn_epoch(str(getattr(event, "message_id", "") or ""), epoch)
         if not adapter.feed(event):
             raise RuntimeError("QQ/WeQ plugin input adapter full")
         plugin_event = next(adapter.poll(), None)
@@ -604,8 +640,29 @@ def cmd_run(args) -> int:
                 message_id=event.message_id, mentions=event.mentions,
                 reply_to=event.reply_to, sender_uid=event.sender_uid)
             if decision.action != "reply":
-                print("  [旁观] 群消息未指向鲸鱼，仅记录时间线")
-                return
+                # issue #18：quiet/balanced/lively 主动参与裁决（规则先行）。
+                from whale_core.life.rhythm import (
+                    RhythmStore as _RhythmStore, rhythm_key_for)
+                from whale_core.life.reply_target import TurnDecision
+                RhythmStore = _RhythmStore
+                rhythm0 = RhythmStore(store).get(
+                    rhythm_key_for("qq", event.conversation) or "")
+                join = group_turn_policy.maybe_join(
+                    conversation=event.conversation, text=event.text,
+                    activity=rhythm0.activity, dnd=rhythm0.dnd,
+                    timeline_entries=timeline.recent(event.conversation,
+                                                     limit=5))
+                if join.action != "join":
+                    print(f"  [旁观] 群消息未指向鲸鱼"
+                          f"（{decision.reason_code}/{join.reason_code}），"
+                          f"仅记录时间线")
+                    return
+                print(f"  [参与] {rhythm0.activity} 档主动接话 ← "
+                      f"{event.sender_id}")
+                decision = TurnDecision(
+                    "reply", f"join:{rhythm0.activity}",
+                    target_sender_id=event.sender_id,
+                    reply_to_message_id=event.message_id)
         try:
             result = workflow.handle_owner_event(event)
         except Exception as exc:  # AI/存储失败不打断监听（inbox 模式下按策略重试）
@@ -635,11 +692,13 @@ def cmd_run(args) -> int:
             rhythm = RhythmStore(store).get(
                 rhythm_key_for("qq", event.conversation) or "")
             ep = current_epoch(store, event.conversation)
-            segments = split_reply(
+            segments, _plan = _plan_segments(
                 result["reply"],
                 is_group=event.conversation.startswith("group:"),
-                max_segments=rhythm.effective_max_segments(
-                    is_group=event.conversation.startswith("group:")))
+                rhythm=rhythm)
+            if _plan.silent:
+                print("  [规划] 本轮规划为沉默，不发送")
+                return
             for i, seg in enumerate(segments):
                 if not epoch_fresh(store, event.conversation, ep):
                     print(f"  [分段] 会话已有新消息，剩余 {len(segments)-i} 段作废")
@@ -720,9 +779,11 @@ def cmd_run(args) -> int:
         # G4：分段上限取会话节奏卡配置（quiet = 单气泡）。
         rhythm = RhythmStore(store).get(
             rhythm_key_for("qq", incoming.conversation) or "")
-        segments = split_reply(
-            reply, is_group=is_group,
-            max_segments=rhythm.effective_max_segments(is_group=is_group))
+        segments, _plan = _plan_segments(reply, is_group=is_group,
+                                         rhythm=rhythm)
+        if _plan.silent:
+            print("  [规划] 本轮规划为沉默，不发送")
+            return
         for i, seg in enumerate(segments):
             if not epoch_fresh(store, incoming.conversation, ep):
                 print(f"  [分段] 会话已有新消息，剩余 {len(segments)-i} 段作废")
@@ -757,6 +818,9 @@ def cmd_run(args) -> int:
     self_uid = os.environ.get("QQ_SELF_UID", "").strip()
     # issue #15：时间线渲染标注「@我」需要自身 uid
     workflow.companion.self_uid = self_uid
+    # issue #23：QQ 会话启用回复规划标记（◆ 多气泡 / [[沉默]] / [[稍后补充]]）
+    from whale_core.life.response_planner import PLANNING_HINT
+    workflow.companion.planning_hint = PLANNING_HINT
     if not self_uid:
         try:
             import glob as _glob, json as _json
@@ -770,6 +834,44 @@ def cmd_run(args) -> int:
             pass
     target_resolver = ReplyTargetResolver(self_uin=self_uin, self_uid=self_uid)
 
+    # issue #18：群聊主动参与策略（quiet/balanced/lively）。
+    # 时间静默判定复用 Outbox 的同一口径：静默时段压制非定向自主插话，
+    # 不拦定向被动回复（issue #18/#22 补充）。
+    from whale_core.life.group_turn import GroupTurnPolicy
+
+    def _quiet_now() -> bool:
+        from whale_core.life.initiative import ProactiveOutbox
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo
+        return ProactiveOutbox._is_quiet(
+            _dt.now(ZoneInfo(prefs.tz)).time(), prefs)
+
+    group_turn_policy = GroupTurnPolicy(store, quiet_now=_quiet_now)
+
+    _member_extractor = MemberMemoryExtractor(
+        store, timeline, MemberConsentStore(store), _bindings, _spaces)
+
+    def _on_member_provisioned(principal_id: str, reason: str) -> None:
+        """issue #16：成员建档/恢复后的历史回填（有界/幂等/增量）。
+
+        - auto（首次私聊建档）：全量回填当前各群时间线（有界窗口）；
+        - optin（「恢复记录我」）：先钉水位再回填——退出期间的消息不补采。
+        重复 auto 触发是 no-op（水位 done 即跳过）。
+        """
+        try:
+            if reason == "optin":
+                from whale_core.memory.extraction import note_optin_watermark
+                note_optin_watermark(store, principal_id)
+            stats = _member_extractor.backfill_for_principal(
+                principal_id, force=(reason == "optin"))
+            if stats.written or stats.scanned:
+                print(f"  [成员回填] {principal_id[-6:]}… 扫描 {stats.scanned} "
+                      f"写入 {stats.written}（{reason}）")
+        except Exception as exc:
+            print(f"  [成员回填] 失败 fail-soft: {type(exc).__name__}")
+
+    workflow._on_member_provisioned = _on_member_provisioned
+
     listener = WeQSsePushListener(
         registry, expected_token=token, self_uin=self_uin,
         on_owner_event=on_owner, on_unpaired=on_unpaired, on_mass=on_mass,
@@ -777,8 +879,7 @@ def cmd_run(args) -> int:
         group_allow=frozenset(group_allow) if group_allow else None,
         timeline=timeline,
         # G2：群消息入时间线后自动提炼已授权成员的记忆（未授权 0 写入）
-        member_extractor=MemberMemoryExtractor(
-            store, timeline, MemberConsentStore(store), _bindings, _spaces),
+        member_extractor=_member_extractor,
         port=args.port, inbox=inbox)
     try:
         listener.start()

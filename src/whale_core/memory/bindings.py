@@ -15,8 +15,7 @@ from datetime import datetime, timezone
 from dataclasses import replace
 from typing import Optional, Tuple
 
-from whale_core.life.conversation_context import (
-    ConversationKind,
+from whale_core.memory.types import (
     MemorySpaceRef,
     MemorySpaceType,
     principal_matches_private_conversation,
@@ -49,14 +48,13 @@ def _assert_member_private_bindable(
     if len(parts) != 3:
         raise BindingError("member_private 绑定需要完整 conversation_key")
     channel, kind_s, cid = parts
-    try:
-        kind = ConversationKind(kind_s)
-    except ValueError:
-        raise BindingError(f"未知会话类型 {kind_s!r}")
-    if kind is ConversationKind.QQ_GROUP:
+    # issue #26：memory 不反向依赖 life.ConversationKind；会话类型按
+    # conversation_key 线值（ConversationKind.value，见 ConversationRef.as_key）
+    # 比较。未知类型不单独报错——交由下面的归属谓词 fail closed。
+    if kind_s == "qq_group":  # ConversationKind.QQ_GROUP.value
         raise BindingError("member_private 空间永不绑定群聊（MEM-03）")
     if not owner or not principal_matches_private_conversation(
-            channel, kind, cid, owner, store=spaces.store):
+            channel, kind_s, cid, owner, store=spaces.store):
         raise BindingError(
             "member_private 只能绑定空间所属成员本人的已认证私聊")
 

@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Mapping, Optional
 from uuid import uuid4
 
-from whale_core.life.conversation_context import MemorySpaceType
+from whale_core.memory.types import MemorySpaceType
 from whale_core.memory.spaces import FORKABLE_TARGET_TYPES, MemorySpaceError, SpaceStore
 from whale_core.memory.store import MemoryRecord, MemoryStore
 

@@ -32,6 +32,14 @@ from whale_core.memory.timeline import GroupTimelineStore
 #: 提炼规则版本：规则变更时递增，幂等键随之变化（旧记录按 TTL 自然过期）。
 EXTRACTION_VERSION = 1
 
+#: 回填水位键：``member:backfill:{principal_id}`` →
+#: ``{"not_before": iso, "done_at": iso}``。not_before 只约束回填窗口
+#: （退出期间不补采）；正常新消息提炼不看它。
+BACKFILL_KEY_PREFIX = "member:backfill:"
+
+#: 单次回填最多覆盖的来源群数（有界；时间线本身还有 200 条/48h 上限）。
+BACKFILL_MAX_GROUPS = 50
+
 #: 情节默认保留 90 天；带明确近期时间词的事件 14 天；自述偏好 180 天。
 DEFAULT_EPISODE_TTL_S = 90 * 86400
 SHORT_EVENT_TTL_S = 14 * 86400
@@ -187,11 +195,13 @@ class MemberMemoryExtractor:
     # -- 管道 ---------------------------------------------------------------
 
     def extract_for_principal(self, principal_id: str, source_group: str,
-                              *, now: Optional[datetime] = None
-                              ) -> ExtractionStats:
+                              *, now: Optional[datetime] = None,
+                              not_before: str = "") -> ExtractionStats:
         """提炼某成员在某来源群时间线中的本人记忆。
 
         consent 无效 → 候选全部丢弃（dropped_no_consent），0 写入。
+        ``not_before``（ISO 时间串，水位）：只处理 recorded_at ≥ 该时刻的
+        消息——回填/恢复场景用它保证「退出期间不补采」（issue #16）。
         """
         stats = ExtractionStats()
         current = now or datetime.now(timezone.utc)
@@ -205,6 +215,9 @@ class MemberMemoryExtractor:
         entries = [e for e in self.timeline.recent(source_group, limit=1000)
                    if str(e.get("sender_id") or "") == uid
                    and not e.get("is_self")]
+        if not_before:
+            entries = [e for e in entries
+                       if str(e.get("recorded_at") or "") >= not_before]
         stats.scanned = len(entries)
 
         # consent 记录只作审计/版本证据，不再是写入闸门（owner 决策）。
@@ -247,6 +260,49 @@ class MemberMemoryExtractor:
             stats.record_keys.append(cand.record_key)
         return stats
 
+    # -- 首次私聊后的历史回填（issue #16） ----------------------------------
+
+    def backfill_for_principal(self, principal_id: str,
+                               *, now: Optional[datetime] = None,
+                               max_groups: int = BACKFILL_MAX_GROUPS,
+                               force: bool = False
+                               ) -> ExtractionStats:
+        """首次建档后的历史回填：有界、增量、幂等。
+
+        - 有界：最多 ``max_groups`` 个来源群 × 时间线自身保留窗（200 条/48h）；
+        - 幂等：候选级幂等键去重，重复运行不产生重复记忆；
+        - 增量/退出纪律：水位 ``not_before``（恢复记录时刻）之前的消息不补采；
+          正在退出（opt-out）状态的成员零扫描零写入。
+        返回合并后的可观测统计（scanned/written/... 可追踪）。
+        """
+        total = ExtractionStats()
+        current = now or datetime.now(timezone.utc)
+        if self.consents.is_opted_out(principal_id):
+            return total
+        wm = backfill_watermark(self.store, principal_id) or {}
+        if wm.get("done_at") and not force:
+            return total  # 已回填过；增量由新消息的实时提炼覆盖（issue #16）
+        not_before = str(wm.get("not_before") or "")
+        keys = sorted(
+            k for k in self.store.keys()
+            if isinstance(k, str) and k.startswith("timeline:group:")
+        )[:max(0, int(max_groups))]
+        for key in keys:
+            group = key[len("timeline:"):]
+            stats = self.extract_for_principal(
+                principal_id, group, now=current, not_before=not_before)
+            total.scanned += stats.scanned
+            total.candidates += stats.candidates
+            total.written += stats.written
+            total.skipped_sensitive += stats.skipped_sensitive
+            total.skipped_duplicate += stats.skipped_duplicate
+            total.dropped_no_consent += stats.dropped_no_consent
+            total.record_keys.extend(stats.record_keys)
+        self.store.put(f"{BACKFILL_KEY_PREFIX}{principal_id}", {
+            "not_before": not_before, "done_at": current.isoformat(),
+            "groups": len(keys)})
+        return total
+
     def _write_candidate(self, cand: MemoryCandidate, space_id: str,
                          now: datetime) -> None:
         expires = (now + timedelta(seconds=cand.ttl_s)).isoformat() \
@@ -283,3 +339,43 @@ class MemberMemoryExtractor:
             "extraction_version": EXTRACTION_VERSION,
             "written_at": now.isoformat(),
         })
+
+
+# ---------------------------------------------------------------------------
+# issue #16：首次私聊后的历史回填（有界/增量/幂等）与提炼状态清理
+# ---------------------------------------------------------------------------
+
+
+
+def backfill_watermark(store: MemoryStore, principal_id: str) -> Optional[dict]:
+    data = store.get(f"{BACKFILL_KEY_PREFIX}{principal_id}")
+    return dict(data) if isinstance(data, dict) else None
+
+
+def note_optin_watermark(store: MemoryStore, principal_id: str,
+                         *, now: Optional[datetime] = None) -> None:
+    """「恢复记录我」时钉水位：回填窗口从恢复时刻起算——
+    退出期间留在公共时间线里的消息**不补采**（issue #16）。"""
+    at = (now or datetime.now(timezone.utc)).isoformat()
+    store.put(f"{BACKFILL_KEY_PREFIX}{principal_id}",
+              {"not_before": at, "done_at": None})
+
+
+def purge_member_extraction_state(store: MemoryStore,
+                                  principal_id: str) -> int:
+    """「删掉我的记忆」配套：清掉该成员的提炼幂等键与回填水位（真删）。
+
+    幂等键是内容寻址的（无法按 principal 前缀枚举），逐个读值比对
+    principal_id；返回删除条数。群公共时间线与平台侧聊天记录的保留边界
+    不同，不在此删除（issue #16 的说明义务由回复文案承担）。
+    """
+    n = 0
+    for key in list(store.keys()):
+        if not key.startswith("member:ex:"):
+            continue
+        val = store.get(key)
+        if isinstance(val, dict) and val.get("principal_id") == principal_id:
+            store.delete(key)
+            n += 1
+    store.delete(f"{BACKFILL_KEY_PREFIX}{principal_id}")
+    return n

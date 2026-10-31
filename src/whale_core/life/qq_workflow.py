@@ -60,7 +60,8 @@ class QqInboundWorkflow:
                  completion_sender=None,
                  media_validator=None,
                  auth_service=None,
-                 context_resolver=None) -> None:
+                 context_resolver=None,
+                 on_member_provisioned=None) -> None:
         self.store = store
         self.companion = WhaleCompanion(store, brain, curator=MemoryCurator(store))
         self.outbox = ProactiveOutbox(store)
@@ -78,6 +79,9 @@ class QqInboundWorkflow:
         # 可选补发回调（两段式慢任务）：callable(event, reply) -> None。
         # 由宿主注入真实发送路径（草稿+审批+网关）；慢任务 ack 后的结果经此补发。
         self._completion_sender = completion_sender
+        # issue #16：成员建档/恢复后的回调（宿主接回填管道）；
+        # callable(principal_id, reason)——reason ∈ {"auto", "optin"}。
+        self._on_member_provisioned = on_member_provisioned
         # S4：临时授权服务（一次性口令 sudo）；None = 未启用，口令消息按
         # 普通文本处理。
         self._auth_service = auth_service
@@ -385,6 +389,11 @@ class QqInboundWorkflow:
                 bindings.ensure_member_space(
                     principal_id, conversation_key=conversation_key,
                     granted_by=principal_id)
+                if self._on_member_provisioned is not None:
+                    try:
+                        self._on_member_provisioned(principal_id, "optin")
+                    except Exception:
+                        pass  # 回填失败不阻断指令回复
                 return "好，重新开始记啦。"
             bindings.ensure_member_space(
                 principal_id, conversation_key=conversation_key,
@@ -427,9 +436,13 @@ class QqInboundWorkflow:
                             if "member" in rec.tags:
                                 self.store.delete(rec.key)  # 真删
                                 n_del += 1
+            from whale_core.memory.extraction import (
+                purge_member_extraction_state)
+            n_del += purge_member_extraction_state(self.store, principal_id)
             consents.opt_out(principal_id)
-            return (f"清掉了 {n_del} 条，以后我也不再记了。"
-                    "（已经发出去的聊天记录收不回。）想说重新开始就说「恢复记录我」。")
+            return (f"清掉了 {n_del} 条（含提炼进度记录），以后我也不再记了。"
+                    "（已经发出去的聊天记录和群里的公共时间线收不回。）"
+                    "想说重新开始就说「恢复记录我」。")
         return None
 
     def handle_stranger_event(self, event) -> dict:
@@ -493,8 +506,10 @@ class QqInboundWorkflow:
                         principal_id,
                         conversation_key=f"qq:qq_private:{event.conversation}",
                         granted_by=principal_id)
+                    if self._on_member_provisioned is not None:
+                        self._on_member_provisioned(principal_id, "auto")
             except Exception:
-                pass  # 建档失败不阻断对话（fail soft；记忆缺席非致命）
+                pass  # 建档/回填失败不阻断对话（fail soft；记忆缺席非致命）
 
         # G2.4：成员本人私聊的授权/记忆管理指令（先于预算闸门与闲聊——
         # 隐私管理权不消耗对话额度、不被静默时段拦）。

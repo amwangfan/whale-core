@@ -10,6 +10,7 @@ from whale_core.memory.curation import MemoryCurator
 from whale_core.memory.continuity import remember_episode, build_continuity_context
 from whale_core.memory.history import append_turn, load_history, conversation_lock
 from whale_core.memory.spaces import default_write_space
+from whale_core.memory.types import MemorySpaceType
 
 class TextCompanion(Protocol):
     def reply(self, text: str, *, persona: str = "", memories=(), history=(),
@@ -48,7 +49,6 @@ def _recall(curator, query: str, allowed_spaces, **kwargs):
 def _spaces_include_vault(spaces) -> bool:
     """授权空间集合里是否含受保护原始库（resolver 已按主人私聊规则过滤）。"""
     try:
-        from whale_core.life.conversation_context import MemorySpaceType
         return any(getattr(s, "type", None) is MemorySpaceType.PROTECTED_ORIGINAL
                    for s in (spaces or ()))
     except Exception:
@@ -63,6 +63,10 @@ class WhaleCompanion:
         self.timeline = timeline
         # 机器人自身 uid（issue #15）：时间线渲染用来标注「@我」；空则不标注。
         self.self_uid = self_uid
+        # issue #23：回复规划提示（ResponsePlanner 标记约定）。宿主按需设置
+        # （如 QQ 会话），空 = 不提示（纯文本单条路径，行为不变）。
+        self.planning_hint = ""
+
 
     def chat(self, text: str, *, conversation_id: str = "", user_text: str | None = None,
              images: Sequence[bytes] = (), turn_key: str = "",
@@ -129,6 +133,8 @@ class WhaleCompanion:
                 import logging
                 logging.getLogger(__name__).exception(
                     "G4 relationship/expression hint failed; continuing without")
+        if self.planning_hint:
+            persona_text = (persona_text or "") + "\n\n" + self.planning_hint
         if self.curator is not None:
             memories = [str(hit.record.content.get("summary", ""))
                         for hit in _recall(self.curator, original, spaces,

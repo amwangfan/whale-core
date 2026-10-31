@@ -103,8 +103,8 @@ Raw audio stays in memory; final transcripts may become conversation memory. Ima
 
 ## Development docs
 
-- [Plan and gap analysis](docs/completion-plan-2026-10-30.md)
-- [Completion and acceptance record](docs/completion-report-2026-10-30.md)
+See [docs/README.md](docs/README.md) for the documentation index, including the archive of dated phase documents.
+
 - [Management API](docs/management-api.md)
 - [Device and intent contracts](docs/contracts.md)
 - [Capability and voice configuration](docs/media-and-voice.md)

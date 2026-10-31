@@ -1,7 +1,7 @@
 """owner 显式记忆指令（记住/忘掉）的共享处理：QQ 工作流与 Runtime 共用。
 
 owner 直聊的显式指令即 consent（单 owner 陪伴场景，
-docs/gap-analysis-2026-10-30.md §4 R4）；证据链指向触发消息，
+docs/archive/2026-10-30/gap-analysis-2026-10-30.md §4 R4）；证据链指向触发消息，
 记忆可经「忘掉」或删除语义移除。
 """
 from __future__ import annotations
