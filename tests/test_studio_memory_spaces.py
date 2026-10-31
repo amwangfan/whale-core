@@ -210,7 +210,7 @@ def test_retired_space_fails_closed(store, spaces):
 def test_write_space_selection():
     refs = (
         MemorySpaceRef("s-read", MemorySpaceType.SHAREABLE_FORK, 1),
-        MemorySpaceRef("s-write", MemorySpaceType.GROUP_SPACE, 1),
+        MemorySpaceRef("s-write", MemorySpaceType.GROUP_SPACE, 1, can_write=True),
     )
     assert default_write_space(refs) == "s-write"
     assert default_write_space(refs[:1]) == ""  # 共享副本不可写
