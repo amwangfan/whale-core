@@ -379,6 +379,12 @@ def cmd_run(args) -> int:
         artifact_dir=Path(args.store).parent / "artifacts")
     for note in cap.notes:
         print(f"[能力] {note}")
+    # 图片产物本地字节直发（不经过网络/代理）：端口拿到 artifact 引用时
+    # 直接从 ArtifactStore 读字节（穿透 WindowedSendPort 取内层）。
+    if cap.artifacts is not None:
+        _inner_port = getattr(send_port, "_inner", send_port)
+        if hasattr(_inner_port, "send_image"):
+            _inner_port.artifact_reader = lambda aid: cap.artifacts.read(aid)
 
     # 意图模型（可选，默认关）：QQ_INTENT_MODEL=<模型 id> 开启——同 AgentScope
     # 平台的 OpenAI 兼容端点复用 DEEPSEEK_* 凭据；规则优先（显式搜索指令本地

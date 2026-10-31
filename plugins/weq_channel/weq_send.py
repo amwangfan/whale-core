@@ -294,9 +294,14 @@ class WeQWebSendPort:
 
 # markdown 图片；模型有时写成不带 ! 的链接形态——也认（生产实证）
 _MARKDOWN_IMG_RE = re.compile(r"!?\[[^\]]*\]\((https?://[^)\s]+\.(?:png|jpe?g|webp|gif)[^)\s]*)\)", re.IGNORECASE)
+# HTML <img src="..."> 整标签识别（模型有时输出 HTML 而非 markdown——
+# 生产实证 2026-10-31）：整段摘除，URL 单独发图，不留 HTML 残片。
+_HTML_IMG_RE = re.compile(r"<img\b[^>]*?src=[\"'](https?://[^\"'\s]+\.(?:png|jpe?g|webp|gif)[^\"'\s]*)[\"'][^>]*>", re.IGNORECASE)
 _IMAGE_URL_RE = re.compile(
     r"https?://[^\s)\]<>'\"]+\.(?:png|jpe?g|webp|gif)(?:\?[^\s)\]<>'\"]*)?",
     re.IGNORECASE)
+# 本地产物引用（控制台 artifact）：生成图本地已存字节，发送时**不经过网络**
+_ARTIFACT_RE = re.compile(r"/api/v1/artifacts/([0-9a-f]{16,64})")
 _IMAGE_MAX_BYTES = 20 * 1024 * 1024
 
 
@@ -304,13 +309,21 @@ def _split_image_parts(text: str) -> list[tuple[str, str]]:
     """把文本拆成 [('text',...)|('image',url)] 按序分段。markdown 图片和裸图片
     链接都识别；链接本身从文本里摘除（图片单独发，不留重复链接）。"""
     spans: list[tuple[int, int, str]] = []
+    for m in _HTML_IMG_RE.finditer(text):
+        spans.append((m.start(), m.end(), m.group(1)))
     for m in _MARKDOWN_IMG_RE.finditer(text):
+        if any(s <= m.start() < e for s, e, _u in spans):
+            continue
         spans.append((m.start(), m.end(), m.group(1)))
     covered = [(s, e) for s, e, _ in spans]
     for m in _IMAGE_URL_RE.finditer(text):
         if any(s <= m.start() < e for s, e in covered):
             continue
         spans.append((m.start(), m.end(), m.group(0)))
+    for m in _ARTIFACT_RE.finditer(text):
+        if any(s <= m.start() < e for s, e, _u in spans):
+            continue
+        spans.append((m.start(), m.end(), "artifact:" + m.group(1)))
     if not spans:
         return [("text", text)]
     spans.sort()
@@ -320,7 +333,10 @@ def _split_image_parts(text: str) -> list[tuple[str, str]]:
         before = text[cursor:s].strip()
         if before:
             parts.append(("text", before))
-        parts.append(("image", url))
+        if url.startswith("artifact:"):
+            parts.append(("artifact", url[9:]))
+        else:
+            parts.append(("image", url))
         cursor = e
     tail = text[cursor:].strip()
     if tail:
@@ -332,15 +348,20 @@ def _download_image(url: str, *, timeout: float = 30.0) -> bytes | None:
     """下载图片字节：仅 https、不跟重定向（防把凭据/会话带给第三方）、限 20MB。"""
     if not url.startswith("https://"):
         return None
-    req = urllib.request.Request(url, headers={"User-Agent": "whale-core/0.1"})
-    try:
-        with urllib.request.build_opener(_NoRedirect()).open(req, timeout=timeout) as resp:
-            data = resp.read(_IMAGE_MAX_BYTES + 1)
-            if len(data) > _IMAGE_MAX_BYTES:
-                return None
-            return data
-    except Exception:
-        return None
+    # 直连下载（owner 决策 2026-10-31：不经过任何代理；与 http_guard 一致——
+    # 代理会隐藏真实对端）。失败重试一次（CDN 偶发抖动）。
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+    for _attempt in (0, 1):
+        req = urllib.request.Request(url, headers={"User-Agent": "whale-core/0.1"})
+        try:
+            with opener.open(req, timeout=timeout) as resp:
+                data = resp.read(_IMAGE_MAX_BYTES + 1)
+                if len(data) > _IMAGE_MAX_BYTES:
+                    return None
+                return data
+        except Exception:
+            continue
+    return None
 
 
 class _MixedSend:
@@ -353,11 +374,32 @@ def _send_mixed_impl(self, parts: list[tuple[str, str]]) -> bool:
         if kind == "text":
             if not self._send_text_payload(content):
                 ok_all = False
+            continue
+        # 图片段：本地产物字节优先（不经过网络/代理）；否则 https 直连下载。
+        data = None
+        label = content
+        if kind == "artifact":
+            reader = getattr(self, "artifact_reader", None)
+            if callable(reader):
+                try:
+                    blob = reader(content)
+                    data = blob[1] if isinstance(blob, tuple) else blob
+                except Exception:
+                    data = None
+            label = f"artifact:{content[:12]}"
         else:
             data = _download_image(content)
-            if data and self.send_image(data, filename=content.rsplit("/", 1)[-1][:60] or "image.png"):
-                continue
-            # 图片失败兜底回文字链接（不丢内容）
-            if not self._send_text_payload(content):
-                ok_all = False
+        if data:
+            for _attempt in (0, 1):  # sendImage 偶发失败重试一次
+                if self.send_image(data, filename=label.rsplit("/", 1)[-1][:60] or "image.png"):
+                    break
+            else:
+                data = None
+        if data:
+            continue
+        # 图片实在发不出去：诚实留痕 + 兜底文字链接（不丢内容）
+        print(f"  [图片] 发送失败，兜底链接：{type(content).__name__} {label[:60]}",
+              flush=True)
+        if not self._send_text_payload(content if kind == "image" else f"[图片 {label}]"):
+            ok_all = False
     return ok_all

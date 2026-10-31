@@ -348,11 +348,15 @@ class ConversationOrchestrator:
                 source=env.source, channel=env.channel, owner_id=env.owner_id,
                 async_delivery=True)
             try:
+                attach_note = (
+                    "用户的消息带有图片附件且已成功读取（你在生成这句占位回复时"
+                    "看不到图片内容，但**不要说没看到图**）。"
+                    if env.images else "")
                 ack = self._voiced(
                     env.conversation_id, env.text,
                     "用户的请求需要耗时工具处理（生图/搜索等，约半分钟到几分钟）。"
                     "请用你自己的人格语气先回一句你已经在做了、稍后给结果——简短自然，"
-                    "不要假装已经完成。", turn_key=task_id)
+                    "不要假装已经完成。" + attach_note, turn_key=task_id)
             except Exception:
                 ack = "好，我在处理了，稍后给你结果。"  # ack 模型失败不阻断任务
             self._save_task(task_id, plan, "acknowledged", ())
