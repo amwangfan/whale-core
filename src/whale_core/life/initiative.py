@@ -25,6 +25,8 @@ class ProactiveDraft:
     importance: float = 0.5
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     expires_at: datetime | None = None
+    # 主题标签（可选）：主动行为的主题去重键（roadmap P2-3），如 "weather:shanghai"。
+    topic: str = ""
 
     def __post_init__(self) -> None:
         if not self.draft_id or not self.text.strip() or not self.reason.strip() or not self.evidence:
@@ -39,7 +41,8 @@ class ProactiveDraft:
                 "reason": self.reason[:400], "evidence": list(self.evidence)[:10],
                 "channel": self.channel, "importance": self.importance,
                 "created_at": self.created_at.isoformat(),
-                "expires_at": self.expires_at.isoformat() if self.expires_at else None}
+                "expires_at": self.expires_at.isoformat() if self.expires_at else None,
+                "topic": self.topic[:80]}
 
     @classmethod
     def from_dict(cls, data: dict) -> ProactiveDraft:
@@ -47,7 +50,8 @@ class ProactiveDraft:
                    reason=data["reason"], evidence=tuple(data["evidence"]),
                    channel=data["channel"], importance=float(data["importance"]),
                    created_at=datetime.fromisoformat(data["created_at"]),
-                   expires_at=datetime.fromisoformat(data["expires_at"]) if data.get("expires_at") else None)
+                   expires_at=datetime.fromisoformat(data["expires_at"]) if data.get("expires_at") else None,
+                   topic=str(data.get("topic") or ""))
 
 
 @dataclass(frozen=True)
@@ -92,17 +96,60 @@ class OutboundPort(Protocol):
 
 
 class ProactiveOutbox:
-    def __init__(self, store: MemoryStore):
+    def __init__(self, store: MemoryStore, *, topic_dedup_hours: float = 24.0,
+                 now_fn=None):
         self.store = store
+        # 主题去重窗口（roadmap P2-3）：同 topic 的草稿在窗口内不重复提案；
+        # 0 = 关闭去重。topic 为空的草稿不参与去重（幂等键仍是 draft_id）。
+        self.topic_dedup_hours = topic_dedup_hours
+        self._now = now_fn or (lambda: datetime.now(timezone.utc))
 
     def propose(self, draft: ProactiveDraft) -> bool:
         key = f"life:draft:{draft.draft_id}"
         if self.store.get(key) is not None:
             return False
+        if draft.topic and self._topic_seen(draft.topic):
+            return False
         self.store.put(key, draft.as_dict())
         self.store.put(f"life:ledger:{draft.draft_id}",
                        {"status": "draft", "reason": "awaiting policy", "attempts": 0})
+        if draft.topic:
+            self._topic_mark(draft.topic)
         return True
+
+    _TOPICS_KEY = "life:topics:recent"
+
+    def _topic_seen(self, topic: str) -> bool:
+        if self.topic_dedup_hours <= 0:
+            return False
+        now = self._now()
+        window_s = self.topic_dedup_hours * 3600
+        for entry in self._topic_entries():
+            if entry["topic"] == topic and (now - entry["at"]).total_seconds() < window_s:
+                return True
+        return False
+
+    def _topic_mark(self, topic: str) -> None:
+        entries = [e for e in self._topic_entries()
+                   if (self._now() - e["at"]).total_seconds() < self.topic_dedup_hours * 3600
+                   and e["topic"] != topic]
+        entries.append({"topic": topic, "at": self._now().isoformat()})
+        self.store.put(self._TOPICS_KEY, entries[-200:])
+
+    def _topic_entries(self) -> list[dict]:
+        raw = self.store.get(self._TOPICS_KEY)
+        if not isinstance(raw, list):
+            return []
+        out = []
+        for e in raw:
+            if not isinstance(e, dict) or not e.get("topic"):
+                continue
+            try:
+                at = datetime.fromisoformat(str(e["at"]))
+            except (ValueError, KeyError):
+                continue
+            out.append({"topic": str(e["topic"]), "at": at})
+        return out
 
     def get(self, draft_id: str) -> ProactiveDraft | None:
         data = self.store.get(f"life:draft:{draft_id}")
@@ -124,8 +171,18 @@ class ProactiveOutbox:
         if draft is None:
             return DispatchVerdict("missing", "not found", draft_id)
         ledger = self.store.get(f"life:ledger:{draft_id}") or {}
+        decision = self.store.get(f"life:decision:{draft_id}") or {}
+        # Web approvals are durable authorization for a *future* dispatch,
+        # not proof that the message has been sent. Rejections always prevail.
+        if decision.get("decision") == "reject":
+            return DispatchVerdict("rejected", "owner rejected the draft", draft_id)
+        if decision.get("decision") == "approve":
+            explicitly_approved = True
         if ledger.get("attempts", 0) > 0:
             return DispatchVerdict("already_attempted", "no automatic repeat", draft_id)
+        global_settings = self.store.get("workflows:settings") or {}
+        if isinstance(global_settings, dict) and global_settings.get("paused") is True and not passive_reply:
+            return DispatchVerdict("paused", "global proactive pause", draft_id)
         if not prefs.enabled:
             return DispatchVerdict("disabled", "proactivity disabled", draft_id)
         if draft.channel not in prefs.allowed_channels:

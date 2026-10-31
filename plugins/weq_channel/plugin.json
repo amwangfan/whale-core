@@ -1,0 +1,13 @@
+{
+  "plugin_id": "qq_weq",
+  "name": "QQ 渠道（WeQ 协议端）",
+  "version": "1.0.0",
+  "api_version": "1",
+  "kind": "channel",
+  "inputs": ["qq.message"],
+  "actions": ["send_message"],
+  "action_risk": {"send_message": "communicate"},
+  "entrypoint": "main.py",
+  "description": "QQ/WeQ 渠道：SSE 入站推送监听 + tRPC 发送端口 + 按需完整模式窗口 + channel 注册",
+  "homepage": "https://github.com/amwangfan/whale-core"
+}

@@ -57,3 +57,10 @@ Thumbs.db
 # ---------- local private notes ----------
 LOCAL.md
 NOTES.private.md
+
+# ---------- web console ----------
+web/node_modules
+web/dist
+
+# Local self-contained release build tools
+.freeze-venv/
