@@ -73,13 +73,39 @@ def build_continuity_context(
     persona_key: str = "persona:default",
     episode_limit: int = 5,
     preference_limit: int = 10,
+    allowed_space_ids: tuple[str, ...] | None = None,
+    persona_card: Any = None,
 ) -> ContinuityContext:
-    """从 MemoryStore 组装 ContinuityContext（进程内 / stub 可用）。"""
+    """从 MemoryStore 组装 ContinuityContext（进程内 / stub 可用）。
+
+    S2：``allowed_space_ids`` 显式限域；空元组 = 不注入任何记忆记录
+    （fail closed）；None = 兼容期旧行为（存储层仍排除 protected_original）。
+
+    S3：``persona_card`` 提供时，persona_summary 改用
+    ``ui.persona_resolver.PersonaResolver.render`` 的极简渲染（不再依赖
+    traits.system_preamble）；渲染为空串则回退低负担默认摘要。不传卡时
+    保持兼容期旧行为（读 persona_key 全局快照）。延迟导入以保持
+    memory 不依赖 ui 的分层。
+    """
     persona = store.get_persona_continuity(key=persona_key)
-    episodes = _sorted_recent(store.list_by_kind(MemoryKind.EPISODE), limit=episode_limit)
-    prefs = _sorted_recent(store.list_by_kind(MemoryKind.PREFERENCE), limit=preference_limit)
+    if persona_card is not None:
+        from whale_core.ui.persona_resolver import PersonaResolver
+
+        summary = PersonaResolver.render(persona_card) or _summarize_persona(persona)
+    else:
+        summary = _summarize_persona(persona)
+    if allowed_space_ids is not None and not allowed_space_ids:
+        episodes: tuple[MemoryRecord, ...] = ()
+        prefs: tuple[MemoryRecord, ...] = ()
+    else:
+        episodes = _sorted_recent(
+            store.list_by_kind(MemoryKind.EPISODE, space_ids=allowed_space_ids),
+            limit=episode_limit)
+        prefs = _sorted_recent(
+            store.list_by_kind(MemoryKind.PREFERENCE, space_ids=allowed_space_ids),
+            limit=preference_limit)
     return ContinuityContext(
-        persona_summary=_summarize_persona(persona),
+        persona_summary=summary,
         persona=persona,
         recent_episodes=episodes,
         preferences=prefs,
@@ -93,8 +119,13 @@ def remember_episode(
     key: str | None = None,
     tags: Sequence[str] = (),
     extra: Mapping[str, Any] | None = None,
+    space_id: str = "",
 ) -> MemoryRecord:
-    """便捷写入一条 episode，便于本地演示连续性。"""
+    """便捷写入一条 episode，便于本地演示连续性。
+
+    S2：``space_id`` 为目标记忆空间；调用方应传入已授权的可写空间，
+    本函数不自行判定权限（权限在进入本函数前决定）。
+    """
     content: dict[str, Any] = {"summary": summary}
     if extra:
         content.update(dict(extra))
@@ -103,6 +134,7 @@ def remember_episode(
         key=key or f"ep:{summary[:24]}",
         content=content,
         tags=tuple(tags),
+        space_id=space_id,
     )
     store.put_record(record)
     return record

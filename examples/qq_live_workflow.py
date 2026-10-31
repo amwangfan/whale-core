@@ -285,8 +285,27 @@ def cmd_run(args) -> int:
         print("[配对] [!] 观察模式：OWNER_QQ 未配置，所有来件只报告不处理（不会喂 AI）。")
     else:
         print(f"[配对] owner 绑定：(qq, {owner_qq}) → owner")
-
     store = build_store(args.store)
+    # S1：服务端会话上下文解析器——群里主人不提权、未配对即普通主体；
+    # S2：绑定存储接入（会话 → 记忆空间/角色卡，vault 硬拒）。
+    from whale_core.life.context_resolver import (
+        ConversationContextResolver, pairing_lookup_from_mapping)
+    from whale_core.memory.bindings import BindingStore
+    from whale_core.memory.spaces import SpaceStore, ensure_owner_working_copy
+    from whale_core.life.temporary_auth import TemporaryAuthService
+    _spaces = SpaceStore(store)
+    _owner_space = ensure_owner_working_copy(store, owner="owner")
+    auth_service = TemporaryAuthService(store, owner_id="owner")
+    context_resolver = ConversationContextResolver(
+        pairing_lookup=pairing_lookup_from_mapping(bindings),
+        bindings=BindingStore(store, _spaces),
+        grants=auth_service,
+        owner_id="owner",
+        owner_default_space=_owner_space)
+
+    def _grant_gate(grant_ids, fingerprint):
+        return any(auth_service.consume_grant_use(g, action_fingerprint=fingerprint)
+                   for g in grant_ids)
     prefs = risk_prefs()
     print(policy_summary(prefs))
 
@@ -322,7 +341,8 @@ def cmd_run(args) -> int:
             print(f"[完整模式] 按需窗口 idle={send_port.idle_min:g}min")
 
     inbox = build_inbox(args.inbox)
-    workflow = QqInboundWorkflow(store, build_brain(), prefs=prefs)
+    workflow = QqInboundWorkflow(store, build_brain(), prefs=prefs,
+                                 auth_service=auth_service)
 
     def _send_audio_artifacts(audio_ids) -> None:
         """把任务产生的音频产物发成 QQ 语音消息。"""
@@ -407,7 +427,8 @@ def cmd_run(args) -> int:
         workflow.orchestrator = ConversationOrchestrator(
             store, workflow.companion,
             intent_model=SearchIntentRouter(model=intent_brain, enable_llm=True, tools=tools),
-            tools=tools)
+            tools=tools, context_resolver=context_resolver,
+            grant_gate=_grant_gate)
         print(f"[意图] 模型={intent_model_id}（规则优先+LLM 规划；{tool_note}）")
 
     # 安全审核模型（可选，默认关）：QQ_SAFETY_MODEL=<模型 id> 开启——
@@ -520,9 +541,45 @@ def cmd_run(args) -> int:
         else:
             print(f"  → 批准发送记录：python examples/qq_live_workflow.py approve {result['draft_id']}")
 
+    # S7：陌生人私聊入口。WHALE_QQ_STRANGER_CHAT=1 开受限对话；sudo 验证
+    # 尝试无论开关都受理（口令验证本身就是门）。群聊陌生人永不进入。
+    stranger_chat = os.environ.get("WHALE_QQ_STRANGER_CHAT", "").strip() == "1"
+
     def on_unpaired(incoming):
-        print(f"[未配对] account={incoming.account} conv={incoming.conversation} "
-              f"msg={incoming.message_id}（在 secrets 设 OWNER_QQ={incoming.account} 并重启即可配对）")
+        is_private = str(incoming.conversation).startswith("private:")
+        if not is_private:
+            return  # 群/频道陌生人：不处理
+        from whale_core.life.temporary_auth import maybe_intercept_sudo
+        if maybe_intercept_sudo(incoming.text) is None and not stranger_chat:
+            print(f"[未配对] account={incoming.account} conv={incoming.conversation} "
+                  f"msg={incoming.message_id}（在 secrets 设 OWNER_QQ 并重启即可配对；"
+                  "或发送 sudo <一次性口令> 申请临时授权）")
+            return
+        try:
+            result = workflow.handle_stranger_event(incoming)
+        except Exception as exc:
+            print(f"  [陌生人处理失败] {type(exc).__name__}")
+            return
+        reply = (result.get("reply") or "").strip()
+        if not reply:
+            print(f"  [陌生人] skipped={result.get('skipped', 'empty_reply')}")
+            return
+        if result.get("auth_grant"):
+            print(f"  [临时授权] 已签发租约 {result['auth_grant']} ← {incoming.account}")
+        if not live_auto:
+            print(f"  [陌生人回复-未发送] {reply[:120]}")
+            return
+        if workflow._safety_reviewer is not None:
+            concern = workflow._safety_reviewer(reply)
+            if concern:
+                print(f"  [安全审核] 陌生人回复有顾虑：{concern[:120]} → 不发送")
+                return
+        draft_id = f"qq-stranger:{incoming.message_id}"
+        owner_draft_ids.add(draft_id)
+        approved_draft_ids.add(draft_id)
+        receipt = plugin_gateway.dispatch(
+            send_message_intent(incoming.conversation, reply, draft_id=draft_id))
+        print(f"  [陌生人回复] {receipt}")
 
     def on_mass(meta):
         print(f"[mass] {meta['chatType']}:{meta['convId']} seq {meta['fromSeq']}→{meta['toSeq']} "

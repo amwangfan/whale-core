@@ -11,9 +11,11 @@ import Icon from "./components/Icon";
 import Settings from "./components/Settings";
 import Media from "./components/Media";
 import Workflows from "./components/Workflows";
+import Studio from "./components/Studio";
 
 type TabKey =
   | "overview"
+  | "studio"
   | "plugins"
   | "memory"
   | "approvals"
@@ -33,6 +35,11 @@ const TABS: { key: TabKey; label: string; description: string }[] = [
     key: "chat",
     label: "与鲸鱼对话",
     description: "想法、日常与任务，都从这里开始。",
+  },
+  {
+    key: "studio",
+    label: "工作台",
+    description: "像卡牌游戏一样配置会话的人格、记忆与能力。",
   },
   {
     key: "plugins",
@@ -306,6 +313,7 @@ export default function App() {
             <span className="workspace-tag">CORE CONSOLE</span>
           </div>
           {tab === "overview" && <Overview onNavigate={setTab} />}
+          {tab === "studio" && <Studio />}
           {tab === "plugins" && <Plugins />}
           {tab === "memory" && <MemoryView />}
           {tab === "approvals" && <Approvals />}

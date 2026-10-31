@@ -518,6 +518,282 @@ export const api = {
     ),
 };
 
+// ---------- Whale Studio（S6：关系画布；所有授权判断都在服务端） ----------
+
+export interface StudioConversation {
+  key: string;
+  channel?: string;
+  kind?: string;
+  conversation_id?: string;
+  persona_id?: string | null;
+  persona_version?: number;
+  memory_spaces?: StudioMemoryBinding[];
+  memory_version?: number;
+  capabilities?: string[];
+  capabilities_version?: number;
+  ceiling?: string[];
+  malformed?: boolean;
+}
+
+export interface StudioMemoryBinding {
+  space_id: string;
+  can_read?: boolean;
+  can_write?: boolean;
+  granted_by?: string;
+  created_at?: string;
+  missing?: boolean;
+  restricted?: boolean;
+  space_type?: string;
+  name?: string;
+  space_version?: number;
+}
+
+export interface StudioPersona {
+  id: string;
+  title: string;
+  name: string;
+  summary?: string;
+  temperament?: string;
+  relationship_style?: string;
+  voice_hint?: string;
+  category?: string;
+  author?: string;
+  license?: string;
+  source_url?: string;
+  builtin: boolean;
+  has_external_prompt?: boolean;
+}
+
+export interface StudioMemorySpace {
+  space_id: string;
+  space_type: string;
+  name: string;
+  version: number;
+  owner?: string;
+  created_at?: string;
+  record_count?: number;
+  bindable: boolean;
+  writable?: boolean;
+  restricted?: boolean;
+}
+
+export interface StudioGraphNode {
+  id: string;
+  kind: "conversation" | "persona" | "memory_space";
+  label: string;
+  key?: string;
+  channel?: string;
+  conversation_kind?: string;
+  capabilities?: string[];
+  ceiling?: string[];
+  builtin?: boolean;
+  space_type?: string;
+  version?: number;
+  bindable?: boolean;
+  restricted?: boolean;
+  record_count?: number;
+  writable?: boolean;
+}
+
+export interface StudioGraphEdge {
+  id: string;
+  kind: "persona" | "memory";
+  from: string;
+  to: string;
+  version?: number;
+  dangling?: boolean;
+  missing?: boolean;
+  can_read?: boolean;
+  can_write?: boolean;
+  granted_by?: string;
+  created_at?: string;
+}
+
+export interface StudioGraph {
+  nodes: StudioGraphNode[];
+  edges: StudioGraphEdge[];
+  explanations: Record<string, { code: string; message: string }>;
+  generated_at: string;
+}
+
+export interface StudioForkPreviewItem {
+  key: string;
+  kind: string;
+  tags: string[];
+  content: Record<string, unknown>;
+}
+
+export interface StudioForkResult {
+  fork: StudioMemorySpace & { auto_bound?: boolean };
+}
+
+export interface StudioBindingResult {
+  key: string;
+  version: number;
+  changed: boolean;
+  persona_id?: string | null;
+  space_id?: string;
+  removed?: boolean;
+  binding?: StudioMemoryBinding | null;
+  capabilities?: string[];
+  ceiling?: string[];
+}
+
+export interface TemporaryCode {
+  code_id: string;
+  allowed_scopes: string[];
+  expires_at: number;
+  created_by?: string;
+  created_at?: number;
+  consumed_at?: number | null;
+  revoked_at?: number | null;
+  failure_count?: number;
+  proof_strength?: string;
+  custom?: boolean;
+  grant_ttl_s?: number;
+  grant_max_uses?: number;
+}
+
+export interface TemporaryCodeCreated {
+  code_id: string;
+  /** 明文仅此一次出现在响应里，服务端只存校验值。 */
+  code: string;
+  proof_strength: string;
+  scopes: string[];
+  expires_at: number;
+  note?: string;
+}
+
+export interface TemporaryGrant {
+  grant_id: string;
+  principal_id: string;
+  channel: string;
+  sender_id: string;
+  conversation_id: string;
+  scopes: string[];
+  issued_at: number;
+  expires_at: number;
+  max_uses: number;
+  used_count: number;
+  remaining_uses: number;
+  proof_method?: string;
+  proof_strength?: string;
+  source_code_id?: string;
+  revoked?: boolean;
+  expired?: boolean;
+}
+
+export interface StudioCodeCreateInput {
+  scopes?: string[];
+  custom_phrase?: string;
+  ttl_s?: number;
+  grant_ttl_s?: number;
+  grant_max_uses?: number;
+  action_fingerprint?: string;
+}
+
+export interface StudioForkInput {
+  source_space: string;
+  record_keys: string[];
+  target_type?: string;
+  target_name?: string;
+  redact?: "builtin" | "none" | boolean;
+  confirmed?: boolean;
+}
+
+const studioConv = (key: string) =>
+  `/studio/conversations/${encodeURIComponent(key)}`;
+
+export const studioApi = {
+  conversations: async () =>
+    (await request<{ conversations: StudioConversation[] }>(
+      "/studio/conversations",
+    )).conversations,
+  personas: async () =>
+    (await request<{ personas: StudioPersona[] }>("/studio/personas")).personas,
+  memorySpaces: async () =>
+    (await request<{ memory_spaces: StudioMemorySpace[] }>(
+      "/studio/memory-spaces",
+    )).memory_spaces,
+  graph: () => request<StudioGraph>("/studio/graph"),
+
+  putPersona: (key: string, personaId: string | null, expectedVersion?: number) =>
+    request<StudioBindingResult>(`${studioConv(key)}/persona`, {
+      method: "PUT",
+      body: JSON.stringify({
+        persona_id: personaId,
+        ...(expectedVersion !== undefined
+          ? { expected_version: expectedVersion }
+          : {}),
+      }),
+    }),
+
+  putMemory: (
+    key: string,
+    input: {
+      space_id: string;
+      can_read?: boolean;
+      can_write?: boolean;
+      remove?: boolean;
+    },
+    expectedVersion?: number,
+  ) =>
+    request<StudioBindingResult>(`${studioConv(key)}/memories`, {
+      method: "PUT",
+      body: JSON.stringify({
+        ...input,
+        ...(expectedVersion !== undefined
+          ? { expected_version: expectedVersion }
+          : {}),
+      }),
+    }),
+
+  putCapabilities: (key: string, capabilities: string[], expectedVersion?: number) =>
+    request<StudioBindingResult>(`${studioConv(key)}/capabilities`, {
+      method: "PUT",
+      body: JSON.stringify({
+        capabilities,
+        ...(expectedVersion !== undefined
+          ? { expected_version: expectedVersion }
+          : {}),
+      }),
+    }),
+
+  forkPreview: (input: Pick<StudioForkInput, "source_space" | "record_keys" | "redact">) =>
+    request<{
+      source_space: string;
+      redact: string;
+      count: number;
+      items: StudioForkPreviewItem[];
+    }>("/studio/forks/preview", { method: "POST", body: JSON.stringify(input) }),
+
+  fork: (input: StudioForkInput) =>
+    request<StudioForkResult>("/studio/forks", {
+      method: "POST",
+      body: JSON.stringify({ ...input, confirmed: input.confirmed ?? true }),
+    }),
+
+  createCode: (input: StudioCodeCreateInput) =>
+    request<TemporaryCodeCreated>("/auth/temporary/codes", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
+  listCodes: async () =>
+    (await request<{ codes: TemporaryCode[] }>("/auth/temporary/codes")).codes,
+  revokeCode: (codeId: string) =>
+    request<{ code_id: string; revoked: boolean }>(
+      `/auth/temporary/codes/${encodeURIComponent(codeId)}/revoke`,
+      { method: "POST", body: "{}" },
+    ),
+  listGrants: async () =>
+    (await request<{ grants: TemporaryGrant[] }>("/auth/temporary/grants")).grants,
+  revokeGrant: (grantId: string) =>
+    request<{ grant_id: string; revoked: boolean }>(
+      `/auth/temporary/grants/${encodeURIComponent(grantId)}/revoke`,
+      { method: "POST", body: "{}" },
+    ),
+};
+
 // ---------- SSE（EventSource 无法带 Authorization 头，用 fetch 流式读取实现） ----------
 
 export interface EventStreamHandlers {

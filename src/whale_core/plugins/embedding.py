@@ -37,18 +37,35 @@ class OpenAICompatibleEmbedding:
         self._cache: OrderedDict[str,tuple[float,...]]=OrderedDict()
         self._dimension: int | None=None
         self._lock=threading.RLock()
+        # S2：text_hash → {cache_key,...} 反向索引，支撑 forget_text 跨命名空间清除。
+        self._text_keys: dict[str,set[str]]={}
 
     @staticmethod
-    def _key(text: str) -> str:
+    def _key(text: str, namespace: str = "") -> str:
+        # S2：缓存分区键 = sha256(namespace \0 text)。同一文本在不同记忆
+        # 空间的缓存项互不复用（INV-08）。
+        return hashlib.sha256(namespace.encode('utf-8')+b'\x00'+text.encode('utf-8')).hexdigest()
+
+    @staticmethod
+    def _text_hash(text: str) -> str:
         return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
     def clear_cache(self) -> None:
         with self._lock:
             self._cache.clear()
+            self._text_keys.clear()
 
     def forget_text(self,text: str) -> None:
+        """清除某段文本在**所有命名空间**的缓存向量（治理删除传播）。"""
         with self._lock:
-            self._cache.pop(self._key(text),None)
+            for key in self._text_keys.pop(self._text_hash(text),()):
+                self._cache.pop(key,None)
+
+    def _evict(self,key: str) -> None:
+        self._cache.pop(key,None)
+
+    def _track(self,key: str,text: str) -> None:
+        self._text_keys.setdefault(self._text_hash(text),set()).add(key)
 
     def _request(self,texts: list[str],timeout: float) -> list[list[float]]:
         from whale_core.plugins.speech import _is_local_or_private_http
@@ -91,7 +108,7 @@ class OpenAICompatibleEmbedding:
             result[index]=[float(value) for value in vector]
         return result
 
-    def embed(self,texts: list[str]) -> list[list[float]]:
+    def embed(self,texts: list[str],*,namespace: str="") -> list[list[float]]:
         if not isinstance(texts,list) or len(texts)>self.max_inputs:
             raise ValueError('embedding inputs exceed item limit')
         if not texts:
@@ -100,7 +117,7 @@ class OpenAICompatibleEmbedding:
             raise ValueError('embedding texts must contain 1..8000 characters')
         if sum(len(text) for text in texts)>512*1024:
             raise ValueError('embedding request exceeds text budget')
-        keys=[self._key(text) for text in texts]
+        keys=[self._key(text,namespace) for text in texts]
         # One provider call at a time bounds concurrent network work and cache races.
         with self._lock:
             deadline=time.monotonic()+self.timeout
@@ -126,12 +143,15 @@ class OpenAICompatibleEmbedding:
             # Commit only after every batch validated. No partially cached invalid reply.
             self._dimension=dimension
             found.update(learned)
-            for key in keys:
+            for key,text in zip(keys,texts):
                 if self.cache_size:
                     self._cache[key]=found[key]
                     self._cache.move_to_end(key)
+                    self._track(key,text)
             while len(self._cache)>self.cache_size:
-                self._cache.popitem(last=False)
+                evicted,_=self._cache.popitem(last=False)
+                for keys_set in self._text_keys.values():
+                    keys_set.discard(evicted)
             return [list(found[key]) for key in keys]
 
 

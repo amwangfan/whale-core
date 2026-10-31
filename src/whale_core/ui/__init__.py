@@ -15,6 +15,7 @@ from whale_core.ui.persona_cards import (
     set_custom_taboos,
     switch_card,
 )
+from whale_core.ui.persona_resolver import PersonaResolver
 from whale_core.ui.voice import VoiceStyle
 from whale_core.ui.hud import HudPresentation
 from whale_core.ui.look import WhaleLook
@@ -36,4 +37,5 @@ __all__ = [
     "catalog_entries",
     "get_custom_taboos",
     "set_custom_taboos",
+    "PersonaResolver",
 ]

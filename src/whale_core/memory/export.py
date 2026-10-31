@@ -1,12 +1,13 @@
-"""记忆 JSONL 导出 / 导入（格式隐含版本 v1）。
+"""记忆 JSONL 导出 / 导入（格式 v1.1）。
 
 用途：备份、迁移、恢复演练——把 MemoryStore 里的记忆记录落成可 diff、
 可传输的文本行，必要时再灌回任意 MemoryStore 后端。
 
-格式（v1）：每行一个 JSON 对象，键固定为
-``{"key", "kind", "record_id", "created_at", "tags", "content"}``；
+格式（v1.1，S2 起）：每行一个 JSON 对象，键固定为
+``{"key", "kind", "record_id", "created_at", "tags", "content", "space_id"}``；
 ``created_at`` 用 ISO 8601 字符串，``tags`` 为字符串数组，
 ``content`` 为 JSON 对象；整体 ``ensure_ascii=False``，非 ASCII 原文保留。
+v1 旧文件缺 ``space_id`` 时按未分区（空串）导入。
 
 边界：只导出 / 导入记忆记录（MemoryRecord，三种 MemoryKind）。
 store 的 kv（draft / ledger / quota 等账本数据）不属于记忆，不导出。
@@ -30,14 +31,18 @@ from whale_core.memory.store import MemoryKind, MemoryRecord, MemoryStore
 __all__ = ["export_jsonl", "import_jsonl"]
 
 
-def export_jsonl(store: MemoryStore, file_obj: TextIO) -> int:
-    """把 store 中全部三类记忆记录按 JSONL 写入 file_obj，返回导出条数。
+def export_jsonl(store: MemoryStore, file_obj: TextIO,
+                 *, space_ids: tuple[str, ...] | None = None) -> int:
+    """把 store 中的记忆记录按 JSONL 写入 file_obj，返回导出条数。
 
     kv 数据（draft / ledger / quota 等账本）不属于记忆，不在导出范围。
+    S2：默认**不含 protected_original**（存储层硬排除——导出/备份不得
+    绕过空间隔离，INV-12）；显式 space_ids 可按空间导出（vault 仍除外，
+    vault 内容只能走整库备份管道）。
     """
     count = 0
     for kind in MemoryKind:
-        for record in store.list_by_kind(kind):
+        for record in store.list_by_kind(kind, space_ids=space_ids):
             line = {
                 "key": record.key,
                 "kind": record.kind.value,
@@ -45,6 +50,7 @@ def export_jsonl(store: MemoryStore, file_obj: TextIO) -> int:
                 "created_at": record.created_at.isoformat(),
                 "tags": list(record.tags),
                 "content": dict(record.content),
+                "space_id": record.space_id,
             }
             file_obj.write(json.dumps(line, ensure_ascii=False) + "\n")
             count += 1
@@ -122,7 +128,12 @@ def _record_from_payload(
         tags = tuple(tags_raw)
     else:
         tags = ()
+    # S2：space_id 缺失/畸形 → 空串（未分区）；绝不借导入伪造空间归属。
+    space_id = payload.get("space_id")
+    if not isinstance(space_id, str):
+        space_id = ""
     return MemoryRecord(
         kind=kind, key=key, content=content,
         record_id=record_id, created_at=created_at, tags=tags,
+        space_id=space_id,
     )
