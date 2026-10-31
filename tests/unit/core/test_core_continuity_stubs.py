@@ -1,4 +1,7 @@
-"""P0 可跑 stub：连续性 / 情境推理 / 打扰策略路径。"""
+"""核心链路可跑 stub：连续性 / 情境推理 / 打扰策略路径。
+
+（原 tests/test_p0_stubs.py，P0 里程碑命名；issue #29 起按领域与层级组织。）
+"""
 
 from __future__ import annotations
 

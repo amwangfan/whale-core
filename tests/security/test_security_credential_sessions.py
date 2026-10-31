@@ -1,4 +1,7 @@
-"""Independent regressions for credential generations and orphaned sessions."""
+"""Independent regressions for credential generations and orphaned sessions.
+
+(Moved from tests/test_final_security_review.py; issue #29 domain-based layout.)
+"""
 from __future__ import annotations
 import pytest
 
