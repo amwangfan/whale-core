@@ -504,6 +504,7 @@ def cmd_run(args) -> int:
             conversation=str(payload["conversation"]), message_id=str(payload["message_id"]),
             text=str(payload["text"]),
             attachments=tuple(payload.get("attachments") or ()),
+            sender_id=str(payload.get("sender_id") or ""),
         )
         print(f"\n← [owner] conv={event.conversation} msg={event.message_id} "
               f"text={event.text[:60]!r}")
