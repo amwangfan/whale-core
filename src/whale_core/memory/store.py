@@ -242,5 +242,18 @@ class InMemoryStore:
             def put(self, key: str, value) -> None:
                 store._data[key] = value
 
+            def get_record(self, key: str):
+                return store._records.get(key)
+
+            def put_record(self, record: MemoryRecord) -> None:
+                store.put_record(record)
+
         with self._lock:
-            return fn(_Tx())
+            original_data = dict(self._data)
+            original_records = dict(self._records)
+            try:
+                return fn(_Tx())
+            except BaseException:
+                self._data = original_data
+                self._records = original_records
+                raise
