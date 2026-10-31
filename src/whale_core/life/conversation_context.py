@@ -73,6 +73,7 @@ class MemorySpaceRef:
     space_id: str
     type: MemorySpaceType
     version: int  # 缓存分区键的一部分
+    can_write: bool = False  # 会话绑定实际写权限；类型本身不构成授权
 
 
 # ---------------------------------------------------------------------------
