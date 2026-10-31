@@ -89,7 +89,10 @@
               "phone.notification.read",
               "phone.call.ring",
               "phone.call.audio",
-              "phone.device.safe_action"
+              "phone.device.safe_action",
+              "glasses.card.show",
+              "glasses.card.update",
+              "glasses.card.dismiss"
             ],
             "description": "能力名（§5）"
           },
