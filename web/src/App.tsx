@@ -161,6 +161,16 @@ export default function App() {
     });
   }, [connect]);
 
+  const reopenSetup = async () => {
+    try {
+      const latest = await api.settings();
+      setSetupSettings(latest);
+      setShowSetup(true);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "读取设置失败。");
+    }
+  };
+
   const disconnect = () => {
     chatSession.current.abort();
     setToken("");
@@ -346,7 +356,7 @@ export default function App() {
           )}
           {tab === "tasks" && <Tasks />}
           {tab === "events" && <Events />}
-          {tab === "settings" && <Settings onDisconnect={disconnect} onRunSetup={() => setShowSetup(true)} />}
+          {tab === "settings" && <Settings onDisconnect={disconnect} onRunSetup={() => void reopenSetup()} />}
           {tab === "media" && <Media />}
           {tab === "workflows" && <Workflows />}
         </main>
