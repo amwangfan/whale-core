@@ -50,6 +50,7 @@ beforeEach(() => {
     drafts_pending: 0,
   });
   vi.mocked(api.plugins).mockResolvedValue([]);
+  vi.mocked(api.tasks).mockResolvedValue([]);
   vi.mocked(api.diagnostics).mockResolvedValue({ checks: [], summary: {} });
 });
 afterEach(() => {
@@ -97,7 +98,7 @@ describe("first run setup", () => {
       },
       services: { WHALE_SEARCH_PROVIDER: "tavily", TAVILY_API_KEY: "search-secret" },
     });
-    expect(await screen.findByText("配置已保存。你可以继续配置，也可以开始使用。")).toBeTruthy();
+    expect(await screen.findByText("设置已保存。你可以继续配置，也可以开始使用。")).toBeTruthy();
     expect(api.testProvider).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
     expect(await screen.findByRole("heading", { name: "运行总览" })).toBeTruthy();
