@@ -79,7 +79,7 @@ registry 与校验器本身纯 stdlib，缺依赖时管理端点回 503）。
 | 过期判定 | `expires_at < now` | `expires_at <= now`（到期瞬间即失效） |
 | schema 校验 | jsonschema 库 | 纯 stdlib 子集校验器（devices/schema.py） |
 | 踢线 | 仅每帧复查 | kick 主动关 + 每帧复查双保险 |
-| 上行事件 | 只落库 | 落库去重 + `DevicePerceptionAdapter` 入 perception 流 |
+| 上行事件 | 只落库 | 落库去重 + 默认 `DurableDevicePerceptionAdapter` 持久待处理队列（自定义 adapter 仍可选） |
 | call.* 消息 | 无处理器，忽略 | 同样忽略（schema 先校验；信令落地属媒体通道后续） |
 
 心跳/离线、challenge TTL、ack 幂等闭环、回执状态机、错误码集合与参考实现
@@ -93,5 +93,6 @@ registry 与校验器本身纯 stdlib，缺依赖时管理端点回 503）。
 - **D6**：设备面指标汇总接口（当前审计已留痕，聚合视图未做）；
 - 媒体通道（call.* 信令处理、audio-bridge 对接）与 `screen.live.subscribe`
   的推送流；
-- 感知事件进入长期记忆/召回的策略（当前只入内存队列，重启即清；
-  去重键与事件本体在 kv 持久）。
+- 感知事件进入长期记忆/召回的策略：默认待处理事件现可重启后重放；
+  消费者必须在处理成功后调用 `adapter.ack(device_id=…, event_id=…)`，
+  否则 `poll()` 会继续返回以保证至少一次交付。后续需要接入实际消费端并制定保留／清理策略。
