@@ -41,6 +41,12 @@ FORBIDDEN_ACTION_NAMES = frozenset(
     {"shell", "exec", "execute", "system", "command", "run", "spawn", "eval"}
 )
 
+# 信任级别（G4）：bundled = 随仓发行/宿主显式装配的官方插件；
+# external = 第三方清单。trust 由**放置清单的宿主/运维者**声明（清单目录是
+# 宿主控制的显式加载面），插件自身无法借此提权——默认 bundled 保持既有行为。
+TRUST_LEVELS = frozenset({"bundled", "external"})
+DEFAULT_TRUST = "bundled"
+
 
 class RiskClass(str, Enum):
     """动作风险级（决定门控强度，见 plugins.policy）。"""
@@ -116,6 +122,7 @@ class PluginManifest:
     provides: tuple[str, ...] = ()  # 仅 processor：能力名，如 "operation_execution"
     process_model: str = "external"  # external（外置进程，推荐）| in_process（owner 自写）
     api_version: str = "1"  # 清单 API 版本；加载方按 major（"." 前）判定兼容性
+    trust: str = DEFAULT_TRUST  # bundled | external（G4；见 policy 信任钩子）
 
     def __post_init__(self) -> None:
         if not PLUGIN_ID_RE.fullmatch(self.plugin_id or ""):
@@ -124,6 +131,10 @@ class PluginManifest:
             raise ValueError("manifest requires name and version")
         if self.process_model not in ("external", "in_process"):
             raise ValueError(f"invalid process_model: {self.process_model!r}")
+        if not isinstance(self.trust, str) or self.trust not in TRUST_LEVELS:
+            raise ValueError(
+                f"invalid trust {self.trust!r}: must be one of {sorted(TRUST_LEVELS)}"
+            )
         major = self.api_version.split(".", 1)[0] if isinstance(self.api_version, str) else ""
         if not major or not (major.isascii() and major.isdigit()):
             raise ValueError(f"invalid api_version: {self.api_version!r}")

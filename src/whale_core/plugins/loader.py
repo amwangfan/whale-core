@@ -65,6 +65,7 @@ def read_plugin_manifest(path: str | Path) -> PluginManifest:
             action_risk=dict(data.get("action_risk") or {}),
             provides=tuple(data.get("provides") or ()),
             api_version=api_version,
+            trust=str(data.get("trust") or "bundled"),
         )
     except (ValueError, KeyError) as exc:
         raise PluginLoadError(f"invalid manifest in {root}: {exc}") from exc

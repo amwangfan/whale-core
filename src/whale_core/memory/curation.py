@@ -55,13 +55,18 @@ class MemoryCurator:
         if not 0 <= importance <= 1 or not 0 <= confidence <= 1:
             raise ValueError("importance and confidence must be within [0,1]")
         kind = MemoryKind.PREFERENCE if stable_fact else MemoryKind.EPISODE
+        stamp = now or datetime.now(timezone.utc)
         record = MemoryRecord(
             kind=kind,
             key=key or f"curated:{uuid4().hex}",
             content={"summary": summary[:1500], "source": source[:120],
                      "evidence_id": evidence_id[:160], "importance": importance,
-                     "confidence": confidence, "stable_fact": stable_fact},
-            created_at=now or datetime.now(timezone.utc),
+                     "confidence": confidence, "stable_fact": stable_fact,
+                     # G2 分层元数据：来源/确认时间/同意/置信度显式可查
+                     "layer": "preference" if stable_fact else "curated",
+                     "consent": True,
+                     "last_confirmed": stamp.isoformat()},
+            created_at=stamp,
             tags=("curated", "stable" if stable_fact else "episode"),
         )
         self.store.put_record(record)
@@ -79,6 +84,8 @@ class MemoryCurator:
         for rec in records:
             if "curated" not in rec.tags:
                 continue
+            if "superseded" in rec.tags:
+                continue  # 被更正的旧记忆不再召回（G2）
             content = rec.content
             stable = bool(content.get("stable_fact"))
             terms = _terms(str(content.get("summary", "")))

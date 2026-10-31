@@ -210,8 +210,16 @@ def assemble_runtime(
         else:
             register_shell(registry, tools, Path(config_dir) / 'workspace', env=env)
             notes.append('受控终端已挂载；自由命令需WHALE_SHELL_TIER=personal、逐次审批和可用Linux系统沙箱')
-    # 分角色模型注册（可选）：WHALE_INTENT_* / WHALE_EXECUTOR_* / WHALE_SAFETY_*
+    # 分角色模型注册（可选）：WHALE_INTENT_* / WHALE_EXECUTOR_*
+    # （旧 WHALE_SAFETY_* 迁移为 intent——安全审核与规划同一角色）
     # 只配 MODEL 名时复用主端点与凭据（同平台换模型）；配 BASE_URL 则独立供应商。
+    if not env.get('WHALE_INTENT_MODEL') and not env.get('WHALE_INTENT_BASE_URL'):
+        legacy_safety = {k: env[k] for k in ('WHALE_SAFETY_BASE_URL', 'WHALE_SAFETY_MODEL', 'WHALE_SAFETY_API_KEY') if env.get(k)}
+        if legacy_safety:
+            env = dict(env)
+            for k, v in legacy_safety.items():
+                env[k.replace('WHALE_SAFETY_', 'WHALE_INTENT_')] = v
+            notes.append('旧 WHALE_SAFETY_* 配置已迁移为意图角色（审核=规划同模型）')
     for role, capability in ROLE_CAPABILITIES.items():
         r_base = env.get(f"WHALE_{role.upper()}_BASE_URL", "").strip()
         r_model = env.get(f"WHALE_{role.upper()}_MODEL", "").strip()
@@ -252,8 +260,15 @@ def assemble_runtime(
     gateway = PluginGateway(registry, PluginActionPolicy(registry),
                             owner_verifier=runtime_owner_verifier(store),
                             approval_verifier=runtime_approval_verifier(store))
+    # G1-C：多轮工具执行模型（可选，默认关）——plan 未声明能力链时由
+    # llm.tool_executor 角色逐轮提议工具；固定链仍是稳定保底模式。
+    executor_model = None
+    if env.get('WHALE_EXECUTOR_ENABLED', '') == '1':
+        executor_model = _ManagedRoleModel(registry, store, 'executor')
+        notes.append('多轮工具执行模型已启用（WHALE_EXECUTOR_ENABLED=1）')
     orchestrator = ConversationOrchestrator(store, companion, tools=tools,
-                                            intent_model=intent_model, gateway=gateway)
+                                            intent_model=intent_model, gateway=gateway,
+                                            executor_model=executor_model)
     return RuntimeBundle(
         profile=profile, store=store, registry=registry, manager=manager,
         tools=tools, companion=companion, orchestrator=orchestrator, notes=notes, optional=optional,

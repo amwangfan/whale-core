@@ -471,19 +471,29 @@ def test_recover_dispatched_task_marks_unknown_not_rerun():
 
 
 def test_attachment_images_read_local_file(tmp_path):
-    """附件字节读取：本机缓存路径优先（QQ 同机），bytes 进 workflow。"""
+    """附件字节读取：本机缓存路径须在白名单内（G0-B），返回 (bytes, 真实 MIME)。"""
+    import struct
+
+    from whale_core.core.media_input import ImageInputValidator
     from whale_core.life.qq_workflow import QqInboundWorkflow
     from whale_core.life.channels import OwnerEvent
     from whale_core.life.initiative import ProactivePrefs
+    png = (b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR"
+           + struct.pack(">II", 8, 6) + b"\x08\x06\x00\x00\x00" + b"\x00" * 16)
     img = tmp_path / "pic.png"
-    img.write_bytes(b"\x89PNG fake")
+    img.write_bytes(png)
     ev = OwnerEvent(owner_id="o", channel="qq", conversation="c1",
                     message_id="m1", text="参考这张图",
                     attachments=({"kind": "pic", "file_path": str(img), "url": ""},))
     prefs = ProactivePrefs(enabled=True, allowed_channels=frozenset({"direct_message"}))
-    wf = QqInboundWorkflow(InMemoryStore(), FakeBrain("ok"), prefs=prefs)
+    # G0-B：默认验证器无白名单（fail-closed）；宿主须显式授予缓存根目录
+    wf_closed = QqInboundWorkflow(InMemoryStore(), FakeBrain("ok"), prefs=prefs)
+    assert wf_closed._attachment_images(ev) == ()
+    wf = QqInboundWorkflow(
+        InMemoryStore(), FakeBrain("ok"), prefs=prefs,
+        media_validator=ImageInputValidator(allowed_roots=(str(tmp_path),)))
     imgs = wf._attachment_images(ev)
-    assert imgs == (b"\x89PNG fake",)
+    assert imgs == ((png, "image/png"),)
 
 
 def test_attachment_images_missing_file_skips():

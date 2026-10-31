@@ -72,14 +72,14 @@ def test_success_call_stats():
 
 
 def test_kv_record_shape():
-    """kv `provider:health:{name}` 恰含冻结契约的九个字段。"""
+    """kv `provider:health:{name}` 的契约字段（G4 增加 error_events/latency_samples）。"""
     store = InMemoryStore()
     _provider(store, ["ok"]).reply("hi")
     raw = store.get("provider:health:stub")
     assert set(raw) == {
         "calls", "errors", "last_error_kind", "last_error_at",
         "last_latency_ms", "total_latency_ms", "chars_in", "chars_out",
-        "updated_at",
+        "updated_at", "error_events", "latency_samples",
     }
     assert raw["last_latency_ms"] >= 0
     assert raw["total_latency_ms"] >= raw["last_latency_ms"]
@@ -157,6 +157,9 @@ def test_zero_call_health_is_zeroed():
         "chars_in": 0,
         "chars_out": 0,
         "updated_at": None,
+        # G4：无真实样本的运营指标标 unavailable，不猜
+        "errors_24h": "unavailable",
+        "latency": "unavailable",
     }
 
 

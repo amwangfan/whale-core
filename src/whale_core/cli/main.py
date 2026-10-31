@@ -306,25 +306,58 @@ def _cmd_setup(args: argparse.Namespace) -> int:
 
 
 class _Reporter:
-    """[ok]/[fail]/[warn] 逐行报告；fail 计数决定退出码。"""
+    """[ok]/[fail]/[warn] 逐行报告；fail 计数决定退出码。
 
-    def __init__(self) -> None:
+    ``checks`` 同步收集结构化结果供 ``--json`` 机器可读输出
+    （只含状态与说明文字，绝不含 key/token/用户正文）。
+    """
+
+    def __init__(self, *, quiet: bool = False) -> None:
         self.failures = 0
+        self.checks: list[dict] = []
+        self._quiet = quiet
 
-    def ok(self, msg: str) -> None:
-        print(f"[ok] {msg}")
+    def _emit(self, status: str, msg: str, *, live: bool = False) -> None:
+        self.checks.append({"status": status, "detail": msg, "live": live})
+        if not self._quiet:
+            print(f"[{status}] {msg}")
 
-    def fail(self, msg: str) -> None:
+    def ok(self, msg: str, *, live: bool = False) -> None:
+        self._emit("ok", msg, live=live)
+
+    def fail(self, msg: str, *, live: bool = False) -> None:
         self.failures += 1
-        print(f"[fail] {msg}")
+        self._emit("fail", msg, live=live)
 
-    def warn(self, msg: str) -> None:
-        print(f"[warn] {msg}")
+    def warn(self, msg: str, *, live: bool = False) -> None:
+        self._emit("warn", msg, live=live)
+
+
+def _deep_probe_models(base_url: str, api_key: str, *, timeout: float = 5.0) -> tuple[bool, str]:
+    """--deep 显式付费级检查：GET {base}/models（免费端点，不产生生成费用）。
+
+    直连不走代理；返回 (ok, detail)。detail 只含 HTTP 状态码/错误类型名。
+    """
+    import urllib.error
+    import urllib.request
+
+    url = base_url.rstrip("/") + "/models"
+    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(request, timeout=timeout) as resp:
+            return 200 <= resp.status < 300, f"HTTP {resp.status}"
+    except urllib.error.HTTPError as exc:
+        return False, f"HTTP {exc.code}"
+    except Exception as exc:
+        return False, type(exc).__name__
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
+    as_json = bool(getattr(args, "json", False))
+    deep = bool(getattr(args, "deep", False))
     config_dir = _config_dir(args)
-    rep = _Reporter()
+    rep = _Reporter(quiet=as_json)
 
     # 1. Python 版本
     vi = sys.version_info
@@ -410,6 +443,35 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             else:
                 rep.fail(msg)
 
+    # 7. --deep：显式同意后才做真实网络连通检查（免费 /models 端点；
+    # 默认 doctor 不触网、不触付费操作）。
+    if deep:
+        effective_cfg = config or {}
+        profile = str(effective_cfg.get("profile", ""))
+        if profile == "cloud":
+            from whale_core.configuration import configured_env
+            effective = configured_env(profile, config_dir, os.environ)
+            key = effective.get("DEEPSEEK_API_KEY", "")
+            model_cfg = effective_cfg.get("model") or {}
+            base = str(model_cfg.get("base_url")
+                       or effective.get("DEEPSEEK_BASE_URL")
+                       or "https://api.deepseek.com/v1")
+            if not key:
+                rep.warn("deep：模型端点真实探测跳过（key 未配置）", live=False)
+            else:
+                ok, detail = _deep_probe_models(base, key)
+                # 只报告状态码/错误类型，不回显任何凭据
+                (rep.ok if ok else rep.fail)(
+                    f"deep：模型端点 {base} 真实连通（{ok and '可达' or detail}）"
+                    if ok else f"deep：模型端点 {base} 探测失败（{detail}）",
+                    live=True)
+        else:
+            rep.warn("deep：local 档无云端探测对象（端点即本机服务）")
+
+    if as_json:
+        import json as _json
+        print(_json.dumps({"ok": rep.failures == 0, "deep": deep,
+                           "checks": rep.checks}, ensure_ascii=False, indent=2))
     return 1 if rep.failures else 0
 
 
@@ -664,6 +726,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_doctor = sub.add_parser("doctor", help="环境自检（[ok]/[fail]/[warn] 逐行报告）")
     _add_config_dir(p_doctor)
+    p_doctor.add_argument("--json", action="store_true",
+                          help="机器可读 JSON 输出（供 CI/运维采集）")
+    p_doctor.add_argument("--deep", action="store_true",
+                          help="显式同意的真实连通检查（免费 /models 端点；默认不触网）")
     p_doctor.set_defaults(func=_cmd_doctor)
 
     p_run = sub.add_parser("run", help="REPL（使用配置档对应的真实模型端点）")
