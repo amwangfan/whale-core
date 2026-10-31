@@ -637,3 +637,32 @@ def test_vault_bindable_for_owner_private_only(api):
                       granted_by="owner")
     with pytest.raises(BindingError):
         b.bind_memory(GROUP_KEY, "vault-1", granted_by="owner")
+
+
+def test_vault_delivery_and_revocation_chain(api):
+    """issue #14 链路验收：绑定后 memory_spaces_for 真实下发 vault；
+    撤销立即失效；他人会话即使绑定表被污染也拿不到 vault（第二道墙）。"""
+    server, store = api
+    from whale_core.memory.bindings import BindingStore
+    from whale_core.memory.spaces import SpaceStore
+    spaces = SpaceStore(store)
+    owner_key = "qq:qq_private:private:u_owner"
+    b = BindingStore(store, spaces, owner_conversations=frozenset({owner_key}))
+
+    # 绑定前：不下发
+    assert all(s.space_id != "vault-1" for s in b.memory_spaces_for(owner_key))
+    # 绑定后：真实下发（默认只读）
+    b.bind_memory(owner_key, "vault-1", granted_by="owner")
+    spaces_for = b.memory_spaces_for(owner_key)
+    vault = next(s for s in spaces_for if s.space_id == "vault-1")
+    assert vault.can_write is False
+    # 撤销：立即不再下发（无缓存旧权限）
+    assert b.unbind_memory(owner_key, "vault-1") is True
+    assert all(s.space_id != "vault-1" for s in b.memory_spaces_for(owner_key))
+    # 绑定表污染负例：手工给他人会话塞 vault 行，读取侧仍剥离
+    store.put("bind:mem:qq:qq_private:private:u_eve",
+              [{"space_id": "vault-1", "can_read": True, "can_write": True}])
+    assert all(s.space_id != "vault-1"
+               for s in b.memory_spaces_for("qq:qq_private:private:u_eve"))
+    assert all(s.space_id != "vault-1"
+               for s in b.memory_spaces_for(GROUP_KEY))

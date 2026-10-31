@@ -56,11 +56,13 @@ def _spaces_include_vault(spaces) -> bool:
 
 class WhaleCompanion:
     def __init__(self, store: MemoryStore, model: TextCompanion, *, curator: MemoryCurator | None = None,
-                 timeline=None):
+                 timeline=None, self_uid: str = ""):
         self.store, self.model, self.curator = store, model, curator
         # G1：群时间线（GroupTimelineStore）；群会话的历史从它渲染（带归属），
         # 不再用无身份的历史回放。
         self.timeline = timeline
+        # 机器人自身 uid（issue #15）：时间线渲染用来标注「@我」；空则不标注。
+        self.self_uid = self_uid
 
     def chat(self, text: str, *, conversation_id: str = "", user_text: str | None = None,
              images: Sequence[bytes] = (), turn_key: str = "",
@@ -162,7 +164,8 @@ class WhaleCompanion:
         history: object = ()
         if conversation_id:
             if self.timeline is not None and conversation_id.startswith("group:"):
-                block = self.timeline.render_for_model(conversation_id)
+                block = self.timeline.render_for_model(conversation_id,
+                                                      self_uid=self.self_uid)
                 if block:
                     history = ({"role": "user",
                                 "content": "以下是本群最近的消息时间线，格式为"

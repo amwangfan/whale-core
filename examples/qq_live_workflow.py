@@ -755,6 +755,8 @@ def cmd_run(args) -> int:
     timeline = GroupTimelineStore(store)
     workflow.companion.timeline = timeline
     self_uid = os.environ.get("QQ_SELF_UID", "").strip()
+    # issue #15：时间线渲染标注「@我」需要自身 uid
+    workflow.companion.self_uid = self_uid
     if not self_uid:
         try:
             import glob as _glob, json as _json

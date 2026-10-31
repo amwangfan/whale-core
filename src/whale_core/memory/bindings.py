@@ -102,8 +102,12 @@ class BindingStore:
             ref = self.spaces.ref(str(row.get("space_id") or ""))
             if ref is None:
                 continue  # 空间不存在/已注销 → fail closed
-            # MEM-HARD-01 第二道墙：绑定表被污染也不下发 vault。
-            if ref.type is MemorySpaceType.PROTECTED_ORIGINAL:
+            # MEM-HARD-01 第二道墙（owner 决策 2026-11-01 修订，issue #14）：
+            # vault 只下发给 owner_conversations 里的主人本人私聊/管理会话；
+            # 其余会话即使绑定表被污染也不下发。resolver 侧另有
+            # allows_memory_read（is_owner + 会话类型）执行时复核——双闸。
+            if ref.type is MemorySpaceType.PROTECTED_ORIGINAL \
+                    and conversation_key not in self.owner_conversations:
                 continue
             out.append(replace(ref, can_write=row.get('can_write') is True))
         return tuple(out)

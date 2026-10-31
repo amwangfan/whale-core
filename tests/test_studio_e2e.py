@@ -310,3 +310,116 @@ def test_member_commands_group_chat_not_management():
     assert consents.is_opted_out(principal_id)
     assert consents.list_for(principal_id) == ()
     assert bindings.member_binding_for(principal_id) is None
+
+
+# ---------------------------------------------------------------------------
+# issue #22：静默时段只拦主动打扰；陌生人/群友先发的被动回复深夜不拦截
+# ---------------------------------------------------------------------------
+
+
+def test_stranger_passive_reply_not_blocked_in_quiet_hours():
+    """深夜（静默窗口内）陌生人私聊仍得到回复；防滥用日额度照常生效。"""
+    from datetime import datetime, time as _t, timezone
+    from whale_core.life.initiative import ProactivePrefs
+
+    store, spaces, bindings, auth, resolver, brain, orch = _world()
+    # 2026-11-01 03:30 Asia/Shanghai（静默窗 22:00–07:00 内）
+    night = datetime(2026, 10, 31, 19, 30, tzinfo=timezone.utc)
+    prefs = ProactivePrefs(enabled=True,
+                           allowed_channels=frozenset({"direct_message"}),
+                           quiet_start=_t(22), quiet_end=_t(7))
+    wf = QqInboundWorkflow(store, Brain(), orchestrator=orch, auth_service=auth,
+                           prefs=prefs, now_fn=lambda: night)
+
+    class In:
+        channel = "qq"
+        account = "u_night"
+        conversation = "private:u_night"
+        text = "睡了吗"
+
+    out = wf.handle_stranger_event(In())
+    assert out.get("skipped") != "quiet_hours"      # 被动回复不被深夜拦截
+    assert out["reply"].startswith("收到")
+
+    # 主动打扰在同一时刻仍被静默拦下（unsolicited 不豁免）
+    from whale_core.life.initiative import ProactiveDraft, ProactiveOutbox
+    ob = ProactiveOutbox(store)
+    ob.propose(ProactiveDraft("n1", "t", "r", ("e",), channel="direct_message"))
+    assert ob.inspect("n1", prefs, now=night).status == "deferred"
+
+
+def test_stranger_daily_budget_still_enforced_at_night():
+    """被动豁免静默 ≠ 豁免防滥用额度（issue #22 边界）。"""
+    from datetime import datetime, time as _t, timezone
+    from whale_core.life.initiative import ProactivePrefs
+
+    store, spaces, bindings, auth, resolver, brain, orch = _world()
+    night = datetime(2026, 11, 1, 3, 30, tzinfo=timezone.utc)
+    prefs = ProactivePrefs(quiet_start=_t(22), quiet_end=_t(7))
+    wf = QqInboundWorkflow(store, Brain(), orchestrator=orch, auth_service=auth,
+                           prefs=prefs, now_fn=lambda: night)
+
+    class In:
+        channel = "qq"
+        account = "u_spam"
+        conversation = "private:u_spam"
+        text = "刷屏"
+
+    for _ in range(wf.STRANGER_DAILY_LIMIT):
+        out = wf.handle_stranger_event(In())
+        assert "skipped" not in out
+    out = wf.handle_stranger_event(In())
+    assert out.get("skipped") == "stranger_budget"
+
+
+# ---------------------------------------------------------------------------
+# issue #14：主人私聊 vault 端到端召回 + 非主人零泄漏
+# ---------------------------------------------------------------------------
+
+
+def _world_with_vault():
+    """_world + 真实 vault 空间与绑定（owner 大号私聊例外链路）。"""
+    store, spaces, bindings, auth, resolver, brain, orch = _world()
+    store.put("space:vault-1", {
+        "space_id": "vault-1", "type": "protected_original",
+        "name": "默认私人原始库", "owner": "owner", "version": 1,
+        "created_at": "t", "retired_at": None})
+    store.put_record(MemoryRecord(
+        kind=MemoryKind.EPISODE, key="v-fact",
+        content={"summary": "主人对芒果过敏", "importance": 0.9,
+                 "confidence": 1.0},
+        tags=("curated",), space_id="vault-1"))
+    # 重建 resolver：bindings 带 owner 私聊白名单
+    owner_key = "qq:qq_private:private:10001"
+    bindings2 = BindingStore(store, spaces,
+                             owner_conversations=frozenset({owner_key}))
+    bindings2.bind_memory(owner_key, "vault-1", granted_by="owner")
+    resolver2 = ConversationContextResolver(
+        pairing_lookup=pairing_lookup_from_mapping({("qq", "10001"): "owner"}),
+        bindings=bindings2, grants=auth, owner_id="owner")
+    orch2 = ConversationOrchestrator(
+        store, WhaleCompanion(store, brain, curator=MemoryCurator(store)),
+        context_resolver=resolver2)
+    return store, brain, orch2
+
+
+def test_owner_private_recalls_vault_end_to_end():
+    store, brain, orch = _world_with_vault()
+    orch.handle_envelope(InputEnvelope(
+        conversation_id="private:10001", text="我有什么过敏？",
+        channel="qq", sender_id="10001", source="qq:owner"))
+    assert any("芒果" in m for m in brain.calls[-1]["memories"])
+
+
+def test_stranger_and_group_never_recall_vault():
+    store, brain, orch = _world_with_vault()
+    # 陌生人私聊：无绑定 → 不召回
+    orch.handle_envelope(InputEnvelope(
+        conversation_id="private:u_eve", text="芒果？",
+        channel="qq", sender_id="u_eve"))
+    assert not any("芒果" in m for m in brain.calls[-1]["memories"])
+    # owner 本人在群聊：也不召回（kind 不符，allows_memory_read=False）
+    orch.handle_envelope(InputEnvelope(
+        conversation_id="group:9", text="芒果？",
+        channel="qq", sender_id="10001", source="qq:owner"))
+    assert not any("芒果" in m for m in brain.calls[-1]["memories"])

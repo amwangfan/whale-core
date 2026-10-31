@@ -93,7 +93,9 @@ def test_policy_summary_prints_no_secrets(runner, monkeypatch):
 
 
 def test_passive_quiet_exemption_matrix():
-    """被动回复可显式豁免静默；主动行为永不豁免（#13 核心语义）。"""
+    """issue #22（owner 决策 2026-11-01）：被动回复**一律**豁免静默——
+    与 passive_reply_in_quiet 旧开关无关（该字段已废弃，仅为配置兼容保留）；
+    主动打扰（unsolicited）在静默时段仍然 deferred。"""
     store = InMemoryStore()
     outbox = ProactiveOutbox(store)
     night = datetime(2026, 10, 29, 23, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
@@ -102,16 +104,24 @@ def test_passive_quiet_exemption_matrix():
     exempt = ProactivePrefs(passive_reply_in_quiet=True, **base)
     strict = ProactivePrefs(passive_reply_in_quiet=False, **base)
 
-    for did in ("p1", "p2", "a1", "a2"):
+    for did in ("p1", "p2", "a1", "c1", "x1", "a2"):
         outbox.propose(ProactiveDraft(did, "回复", "r", ("e",), channel="direct_message"))
 
+    # 被动回复：无论旧开关 True/False，都不再被静默拦截（政策固定豁免）
     assert outbox.inspect("p1", exempt, now=night, passive_reply=True).status == "needs_approval"
-    assert outbox.inspect("p2", strict, now=night, passive_reply=True).status == "deferred"
+    assert outbox.inspect("p2", strict, now=night, passive_reply=True).status == "needs_approval"
+    # 主动打扰：静默时段仍 deferred
     assert outbox.inspect("a1", exempt, now=night, passive_reply=False).status == "deferred"
-    # 核心默认（未显式配置）保守：不豁免
+    # response_origin 显式语义：reactive_completion（任务续答）同样豁免
     default_prefs = ProactivePrefs(enabled=True,
                                    allowed_channels=frozenset({"direct_message"}))
-    assert outbox.inspect("a2", default_prefs, now=night, passive_reply=True).status == "deferred"
+    assert outbox.inspect("c1", default_prefs, now=night,
+                          response_origin="reactive_completion").status == "needs_approval"
+    assert outbox.inspect("a2", default_prefs, now=night,
+                          response_origin="unsolicited").status == "deferred"
+    # 未知 origin fail closed → unsolicited
+    assert outbox.inspect("x1", default_prefs, now=night,
+                          response_origin="bogus").status == "deferred"
 
 
 def test_passive_quota_separate_from_proactive():

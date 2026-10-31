@@ -62,7 +62,10 @@ class Principal:
 
 
 class MemorySpaceType(str, Enum):
-    PROTECTED_ORIGINAL = "protected_original"  # 永不直连会话（MEM-HARD-01）
+    # MEM-HARD-01（owner 决策 2026-11-01 修订）：仅主人已认证本人私聊/管理
+    # 会话可直连（见 allows_memory_read / BindingStore.owner_conversations）；
+    # 其他成员、群聊、未认证会话、临时 sudo 一律不可接入。
+    PROTECTED_ORIGINAL = "protected_original"
     OWNER_WORKING_COPY = "owner_working_copy"
     GROUP_SPACE = "group_space"
     SHAREABLE_FORK = "shareable_fork"

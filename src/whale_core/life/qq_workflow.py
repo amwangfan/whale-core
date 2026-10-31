@@ -321,17 +321,18 @@ class QqInboundWorkflow:
     STRANGER_DAILY_LIMIT = 20
 
     def _stranger_gate(self, sender: str, conversation: str) -> str | None:
-        """陌生人/群成员回复的预算+静默闸门（直发路径不经 Outbox，必须自带）。
+        """陌生人/群成员被动回复的滥用闸门（直发路径不经 Outbox，必须自带）。
 
-        返回 None 放行；否则返回跳过原因。静默时段对非 owner 一律生效
-        （被动豁免只属于主人对话的延续）。
-        注意：不查 prefs.enabled——那是主动外发总开关；陌生人/群成员回复
-        是对已收消息的被动回应，是否开门由宿主的陌生人开关决定。
+        返回 None 放行；否则返回跳过原因。
+
+        issue #22（owner 决策 2026-11-01）：本路径处理的都是「人类先发起」
+        的入站消息，属于被动回复——**静默时段不拦截**；静默只约束无请求
+        触发的主动打扰（ProactiveOutbox 的 unsolicited 判定）。这里保留的
+        是防滥用额度（每人每会话每日上限），与渠道白名单/去重/工具权限
+        各司其职。
+        注意：不查 prefs.enabled——那是主动外发总开关，与本路径无关。
         """
         now = self._now()
-        from whale_core.life.initiative import ProactiveOutbox
-        if ProactiveOutbox._is_quiet(now.astimezone().time(), self.prefs):
-            return "quiet_hours"
         day = now.strftime("%Y-%m-%d")
         key = f"rl:stranger:{day}:{conversation}:{sender}"
         count = self.store.get(key)

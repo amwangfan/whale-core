@@ -54,6 +54,33 @@ class ProactiveDraft:
                    topic=str(data.get("topic") or ""))
 
 
+# ---------------------------------------------------------------------------
+# response_origin（issue #22）：回复的因果来源，由服务端入站/任务链路给出，
+# 绝不取自模型输出或用户正文。
+# ---------------------------------------------------------------------------
+
+#: 对当前入站消息的即时被动回应（人类先发起）。
+ORIGIN_REACTIVE_INBOUND = "reactive_inbound"
+#: 用户触发的异步任务/工具完成后，对**同一请求**的延续答复。
+ORIGIN_REACTIVE_COMPLETION = "reactive_completion"
+#: 无当前请求支持的主动行为（话题发起/问候/提醒/新通知/主动电话）。
+ORIGIN_UNSOLICITED = "unsolicited"
+
+#: 被动来源集合：静默时段只拦 unsolicited，这两种一律豁免。
+REACTIVE_ORIGINS = frozenset({ORIGIN_REACTIVE_INBOUND, ORIGIN_REACTIVE_COMPLETION})
+
+_KNOWN_ORIGINS = REACTIVE_ORIGINS | {ORIGIN_UNSOLICITED}
+
+
+def _resolve_origin(response_origin: str | None, passive_reply: bool) -> str:
+    """归一化来源参数。显式 response_origin 优先；旧 passive_reply=True
+    等价 reactive_inbound（兼容期）。未知值按 unsolicited 处理（fail closed）。"""
+    if response_origin is not None:
+        origin = str(response_origin).strip()
+        return origin if origin in _KNOWN_ORIGINS else ORIGIN_UNSOLICITED
+    return ORIGIN_REACTIVE_INBOUND if passive_reply else ORIGIN_UNSOLICITED
+
+
 @dataclass(frozen=True)
 class ProactivePrefs:
     enabled: bool = False
@@ -64,13 +91,15 @@ class ProactivePrefs:
     quiet_start: time = time(22)
     quiet_end: time = time(7)
     tz: str = "Asia/Shanghai"
-    # 被动回复与主动行为是两套策略（issue #13）：
-    # - passive_reply_in_quiet：被动回复（仅回应已配对 owner 的入站消息）是否豁免
-    #   静默时段。豁免的正当性：对话由 owner 发起，回复是对话延续而非打扰；
-    #   **主动行为永远不豁免**。核心默认 False（保守），由运行器显式开启并公示。
+    # 被动回复与主动行为是两套策略（issue #22，owner 决策 2026-11-01）：
+    # - 静默时段只约束「无当前请求触发的主动打扰」；经服务端核实的被动回复
+    #   （reactive_inbound / reactive_completion）**一律豁免静默**，
+    #   不限 owner——这是固定产品规则，不再由开关决定。
+    # - passive_reply_in_quiet：**已废弃**（保留字段仅为配置兼容，
+    #   不再参与判定；误留 False 不再压制被动回复）。
     # - passive_daily_limit：被动回复的独立额度（防跑飞循环的保险丝），
     #   None = 回落 daily_limit；配额计数也与主动分开（life:quota:passive:*）。
-    passive_reply_in_quiet: bool = False
+    passive_reply_in_quiet: bool = False  # deprecated, 见上
     passive_daily_limit: int | None = None
 
     def __post_init__(self) -> None:
@@ -166,7 +195,10 @@ class ProactiveOutbox:
 
     def inspect(self, draft_id: str, prefs: ProactivePrefs, *, now: datetime,
                 busy: bool = False, explicitly_approved: bool = False,
-                passive_reply: bool = False) -> DispatchVerdict:
+                passive_reply: bool = False,
+                response_origin: str | None = None) -> DispatchVerdict:
+        origin = _resolve_origin(response_origin, passive_reply)
+        reactive = origin in REACTIVE_ORIGINS
         draft = self.get(draft_id)
         if draft is None:
             return DispatchVerdict("missing", "not found", draft_id)
@@ -181,7 +213,7 @@ class ProactiveOutbox:
         if ledger.get("attempts", 0) > 0:
             return DispatchVerdict("already_attempted", "no automatic repeat", draft_id)
         global_settings = self.store.get("workflows:settings") or {}
-        if isinstance(global_settings, dict) and global_settings.get("paused") is True and not passive_reply:
+        if isinstance(global_settings, dict) and global_settings.get("paused") is True and not reactive:
             return DispatchVerdict("paused", "global proactive pause", draft_id)
         if not prefs.enabled:
             return DispatchVerdict("disabled", "proactivity disabled", draft_id)
@@ -192,11 +224,14 @@ class ProactiveOutbox:
         if draft.expires_at is not None and now >= draft.expires_at:
             return DispatchVerdict("expired", "candidate expired", draft_id)
         local = now.astimezone(ZoneInfo(prefs.tz))
-        quiet_exempt = passive_reply and prefs.passive_reply_in_quiet
-        if (self._is_quiet(local.time(), prefs) and not quiet_exempt) or busy:
+        # issue #22：静默时段只拦「主动打扰」（unsolicited）；被动回复一律豁免
+        # （不依赖 prefs.passive_reply_in_quiet——那是旧开关，已废弃）。
+        # reactive 的正当性来自调用链：origin 由服务端入站/任务链路给出，
+        # 不取自模型输出或用户正文。
+        if (self._is_quiet(local.time(), prefs) and not reactive) or busy:
             return DispatchVerdict("deferred", "quiet hours or busy context", draft_id)
         date = local.date().isoformat()
-        limit, count = self._quota_view(prefs, date, passive_reply=passive_reply)
+        limit, count = self._quota_view(prefs, date, passive_reply=reactive)
         if count >= limit:
             return DispatchVerdict("over_budget", "daily delivery cap", draft_id)
         # A call is always reviewed; auto_send is limited to explicitly allowed low-risk channels.
@@ -217,10 +252,12 @@ class ProactiveOutbox:
     def dispatch(self, draft_id: str, prefs: ProactivePrefs, *, now: datetime,
                  port: OutboundPort, busy: bool = False,
                  explicitly_approved: bool = False,
-                 passive_reply: bool = False) -> DispatchVerdict:
+                 passive_reply: bool = False,
+                 response_origin: str | None = None) -> DispatchVerdict:
         verdict = self.inspect(draft_id, prefs, now=now, busy=busy,
                                explicitly_approved=explicitly_approved,
-                               passive_reply=passive_reply)
+                               passive_reply=passive_reply,
+                               response_origin=response_origin)
         if verdict.status != "ready":
             self.store.put(f"life:last_review:{draft_id}",
                            {"status": verdict.status, "reason": verdict.reason,
