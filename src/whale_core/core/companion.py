@@ -17,13 +17,14 @@ class TextCompanion(Protocol):
 
 
 def _recall(curator, query: str, allowed_spaces, **kwargs):
-    """S2 兼容调用：旧版 curator 不认识 allowed_spaces 时按原签名调用。"""
+    """Never discard resolved space ACL on a retrieval error.
+
+    Legacy no-context callers may use the older signature; an authorized
+    conversation must use a scope-aware curator or fail closed.
+    """
     if allowed_spaces is None:
         return curator.recall(query, **kwargs)
-    try:
-        return curator.recall(query, allowed_spaces=allowed_spaces, **kwargs)
-    except TypeError:
-        return curator.recall(query, **kwargs)
+    return curator.recall(query, allowed_spaces=allowed_spaces, **kwargs)
 
 class WhaleCompanion:
     def __init__(self, store: MemoryStore, model: TextCompanion, *, curator: MemoryCurator | None = None):
