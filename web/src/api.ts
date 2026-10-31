@@ -119,6 +119,7 @@ export interface BudgetView {
 }
 
 export interface RuntimeSettings {
+  setup_completed?: boolean;
   profile: "cloud" | "local";
   model: { base_url: string; model: string; api_key_configured: boolean };
   intent_model_enabled: boolean;
@@ -417,6 +418,7 @@ export const api = {
 
   settings: () => request<RuntimeSettings>("/settings"),
   saveSettings: (settings: {
+    setup_completed?: boolean;
     profile?: "cloud" | "local";
     model?: { base_url?: string; model?: string; api_key?: string | null };
   intent_model_enabled?: boolean;
