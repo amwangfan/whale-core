@@ -263,6 +263,7 @@ def _downlink(handler, gateway: DeviceGateway | None, device_id: str, *,
             receipt = gateway.send_action(
                 device_id, capability=capability, args=args,
                 idempotency_key=body.get("idempotency_key"),
+                correlation_id=body.get("correlation_id"),
                 authorized_scope=authorized_scope,
                 approval_ref=body.get("approval_ref"),
                 timeout_s=timeout)

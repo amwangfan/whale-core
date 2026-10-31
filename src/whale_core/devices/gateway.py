@@ -525,6 +525,7 @@ class DeviceGateway:
                     args: dict | None = None, idempotency_key: str | None = None,
                     authorized_scope: list[str] | None = None,
                     approval_ref: str | None = None,
+                    correlation_id: str | None = None,
                     timeout_s: float = 15.0) -> dict:
         """下发 action.request；幂等键查重（§6），等待终态回执。"""
         st = self._online_or_raise(device_id)
@@ -553,6 +554,9 @@ class DeviceGateway:
         }
         if approval_ref:
             payload["approval_ref"] = approval_ref
+        if correlation_id:
+            # EV-02：事件→决策→动作关联键（契约 v1 minor：可选字段）
+            payload["correlation_id"] = correlation_id
         pend = _Pending()
         self.pending[action_id] = pend
         try:
