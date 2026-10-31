@@ -221,3 +221,34 @@ def test_capability_env_fallback_chain():
     b3, _, _ = _resolve_capability_env({"WHALE_MEDIA_BASE_URL": "https://b",
                                         "WHALE_IMAGE_BASE_URL": "https://c"}, "IMAGE")
     assert b3 == "https://c"
+
+
+def test_capability_env_inherits_reply_endpoint_only_when_compatible():
+    """P1 供应商适配矩阵：回复模型端点不兼容 DashScope 协议时不继承。"""
+    from whale_core.plugins.capability_setup import _resolve_capability_env
+    # DeepSeek 官方端点不是 DashScope 媒体协议 → 不继承（诚实「未配置」）
+    b, k, _ = _resolve_capability_env(
+        {"DEEPSEEK_BASE_URL": "https://api.deepseek.com/v1",
+         "DEEPSEEK_API_KEY": "sk-dp"}, "IMAGE")
+    assert b == "" and k == ""
+    # AgentScope / 阿里百炼端点 → 兼容，继承（owner 决策同款默认）
+    for host in ("https://platform.agentscope.io/v1",
+                 "https://dashscope.aliyuncs.com/compatible-mode/v1"):
+        b, k, kind = _resolve_capability_env(
+            {"DEEPSEEK_BASE_URL": host, "DEEPSEEK_API_KEY": "sk-as"}, "IMAGE")
+        assert b == host and k == "sk-as" and kind == "dashscope"
+    # 用户显式声明 provider → 视为用户断言兼容，允许继承
+    b, k, kind = _resolve_capability_env(
+        {"DEEPSEEK_BASE_URL": "https://api.deepseek.com/v1",
+         "DEEPSEEK_API_KEY": "sk-dp", "WHALE_IMAGE_PROVIDER": "openai"}, "IMAGE")
+    assert b == "https://api.deepseek.com/v1" and kind == "openai"
+
+
+def test_pcm_bridge_fields_in_settings_contract():
+    """P1：PCM 桥配置族进入设置页契约；token 属敏感字段不回显。"""
+    from whale_core.configuration import SECRET_FIELDS, SERVICE_FIELDS
+    for field in ("WHALE_PCM_BRIDGE_HOST", "WHALE_PCM_BRIDGE_PORT",
+                  "WHALE_PCM_BRIDGE_TOKEN", "WHALE_PCM_BRIDGE_TLS",
+                  "WHALE_PCM_BRIDGE_PUBLIC_WS_URL"):
+        assert field in SERVICE_FIELDS
+    assert "WHALE_PCM_BRIDGE_TOKEN" in SECRET_FIELDS

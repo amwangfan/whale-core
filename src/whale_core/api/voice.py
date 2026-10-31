@@ -4,7 +4,9 @@
 subprotocol 传递，不进 URL、不落盘、**不进日志**；永久桥凭据只留在服务端
 ``PCMVoiceProvider``。音频字节不在本层持久化。
 
-**协议按 PR#4 契约实现，尚未与真实 whale-io 桥联调。**
+握手（AUTH → AUTH_OK → HELLO 显式状态机）由 ``PCMVoiceProvider.connect``
+完成，帧格式与 whale-io ``server.py`` 逐字节一致（镜像基线见 pcm_voice.py）；
+模拟器层测试通过，**真机联调待安排**。
 
 与 ``api/server.py`` 的 ``/voice/sessions``（realtime base64 chunk/poll）
 并存：本模块是 ``voice.pcm_bridge`` 能力启用时的低延迟传输选项。
@@ -19,7 +21,11 @@ import socket
 import threading
 import time
 
-from whale_core.plugins.pcm_voice import pack_frame, read_frame
+from whale_core.plugins.pcm_voice import (
+    PCMHandshakeError,
+    pack_frame,
+    read_frame,
+)
 
 TICKET_TTL_SECONDS = 60
 MAX_VOICE_SESSIONS = 4
@@ -122,11 +128,11 @@ class VoiceGateway:
             if not self._provider_enabled(provider):
                 ws.close(1008, "voice capability disabled")
                 return
+            # connect() 内含完整握手状态机（AUTH → AUTH_OK → HELLO），
+            # 鉴权被拒/乱序/超时都会抛 PCMHandshakeError 并释放 socket。
             upstream = provider.connect()
-            # 先验证桥的握手问候，再向浏览器暴露 ready 通话。
-            kind, greeting = read_frame(upstream)
-            if kind != 1 or not greeting.startswith(b"HELLO"):
-                raise ValueError("PCM bridge rejected authentication or greeting")
+            if provider.last_hello.get("sample", str(SAMPLE_RATE)) != str(SAMPLE_RATE):
+                raise ValueError("PCM bridge sample rate mismatch")
             upstream.settimeout(60)
             ws.send(
                 json.dumps(
@@ -179,7 +185,7 @@ class VoiceGateway:
                     break
                 else:
                     raise ValueError("only PCM audio or stop is accepted")
-        except (ConnectionClosed, EOFError, OSError, ValueError):
+        except (ConnectionClosed, EOFError, OSError, ValueError, PCMHandshakeError):
             try:
                 ws.close(1011, "voice bridge unavailable or session ended")
             except Exception:

@@ -1,0 +1,43 @@
+name: contract smoke（协议与边界契约）
+
+# G4：跨模块契约测试——PCM 线协议镜像、媒体输入可信边界、任务引擎、
+# 工具执行器、记忆治理与身份。这些套件守护「与 whale-io 的线协议」与
+# 「安全边界」，破坏即失败，不允许静默漂移。
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 19 * * *'  # 每日 03:17 Asia/Shanghai（UTC+8）全量回归
+  workflow_dispatch:
+
+concurrency:
+  group: contract-smoke-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -e ".[dev]"
+      - name: 契约子集（协议镜像/安全边界/任务引擎）
+        run: >-
+          python -m pytest tests/test_pcm_voice.py tests/test_media_input.py
+          tests/test_task_engine.py tests/test_tool_executor.py
+          tests/test_g2_memory_identity.py tests/test_g3_scenarios.py -q
+
+  nightly-full:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m pytest tests -q

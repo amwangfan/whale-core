@@ -56,28 +56,36 @@ MAX_REDIRECTS = 3
 _READ_CHUNK = 65536
 _SNIFF_BYTES = 4096
 _REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
-_LINK_LOCAL_V4 = ipaddress.ip_network("169.254.0.0/16")
-_NAT64_WK = ipaddress.ip_network("64:ff9b::/96")       # NAT64 well-known（安全审查：is_global 误判）
-_NAT64_LOCAL = ipaddress.ip_network("64:ff9b:1::/48")  # NAT64 local-use
 _META_CHARSET_RE = re.compile(rb"<meta[^>]+charset=[\"']?\s*([A-Za-z0-9._-]+)", re.IGNORECASE)
 
 
-def _ip_allowed(ip) -> bool:
-    """SSRF 肯定式门控（_check_host 与连接层 peer 复核共用同一判定）。
+@dataclass(frozen=True)
+class FetchResult:
+    """一次抓取的结果。``url`` 为请求 URL，``final_url`` 为重定向后的最终 URL。"""
 
-    - 必须 ``is_global``（回环/私网/CGNAT/保留段一并拦下）；
-    - 显式拒绝 169.254.0.0/16（链路本地/云元数据）与 NAT64 段
-      （64:ff9b::/96、64:ff9b:1::/48——其 is_global 在 Python 3.13 误判为 True，
-      可绕过到链路本地 v4 地址）。
-    """
-    if ip.version == 4 and ip in _LINK_LOCAL_V4:
-        return False
-    if ip.version == 6 and (ip in _NAT64_WK or ip in _NAT64_LOCAL):
-        return False
-    return bool(ip.is_global)
+    url: str
+    final_url: str
+    title: str
+    text: str  # 提取正文（截断至 max_chars）
+    truncated: bool  # 正文是否被 max_chars 截断
 
 
-class _PeerCheckedHTTPConnection:  # 见下：两个子类共用
+class FetchError(RuntimeError):
+    """抓取失败：消息含状态码 / 错误类型，除 URL 外不含其它（敏感）信息。"""
+
+
+# SSRF/重定向/peer 复核原语统一由核心 ``whale_core.core.http_guard`` 提供
+# （单一实现，媒体输入验证器等其它出站方共用）。以下别名保持本模块既有
+# 私有名（含测试 monkeypatch 语义：_ip_allowed 在调用时查本模块全局）。
+from whale_core.core.http_guard import (  # noqa: E402
+    NoRedirectHandler as _NoRedirectHandler,
+    PeerCheckedConnectionMixin,
+    default_resolver as _default_resolver,
+    ip_allowed as _ip_allowed,
+)
+
+
+class _PeerCheckedHTTPConnection(PeerCheckedConnectionMixin):  # 见下：两个子类共用
     """``connect()`` 后、发请求前复核实际对端 IP（TOCTOU/DNS rebinding 防线）。
 
     校验与连接分离时，攻击者控权威 DNS（TTL=0）可让「已验证」的域名在实际连接时
@@ -85,18 +93,8 @@ class _PeerCheckedHTTPConnection:  # 见下：两个子类共用
     门控，不过即断开抛错（fail-closed）。
     """
 
-    def connect(self) -> None:  # noqa: D102
-        super().connect()
-        peer = self.sock.getpeername()[0]
-        try:
-            ip = ipaddress.ip_address(peer)
-        except ValueError:
-            ip = None
-        if ip is None or not _ip_allowed(ip):
-            try:
-                self.close()
-            finally:
-                raise FetchError("blocked non-global peer after connect (rebinding guard)")
+    _error_type = FetchError
+    _ip_check = staticmethod(lambda ip: _ip_allowed(ip))
 
 
 class _PeerCheckedHTTP(_PeerCheckedHTTPConnection, http.client.HTTPConnection):
@@ -115,33 +113,6 @@ class _PeerCheckedHTTPHandler(urllib.request.HTTPHandler):
 class _PeerCheckedHTTPSHandler(urllib.request.HTTPSHandler):
     def https_open(self, req):  # noqa: D102
         return self.do_open(_PeerCheckedHTTPS, req)
-
-
-@dataclass(frozen=True)
-class FetchResult:
-    """一次抓取的结果。``url`` 为请求 URL，``final_url`` 为重定向后的最终 URL。"""
-
-    url: str
-    final_url: str
-    title: str
-    text: str  # 提取正文（截断至 max_chars）
-    truncated: bool  # 正文是否被 max_chars 截断
-
-
-class FetchError(RuntimeError):
-    """抓取失败：消息含状态码 / 错误类型，除 URL 外不含其它（敏感）信息。"""
-
-
-def _default_resolver(host: str, port: int):
-    """默认解析器：``socket.getaddrinfo``（流式套接字地址族）。"""
-    return socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-
-
-class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """不跟跳转：把 3xx 以 HTTPError 形式交还，由 WebFetcher 逐跳校验后跟随。"""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
-        return None
 
 
 class _TextExtractor(HTMLParser):

@@ -19,13 +19,15 @@ class WhaleCompanion:
         self.store, self.model, self.curator = store, model, curator
 
     def chat(self, text: str, *, conversation_id: str = "", user_text: str | None = None,
-             images: Sequence[bytes] = ()) -> str:
+             images: Sequence[bytes] = (), turn_key: str = "",
+             episodic: bool = True) -> str:
         with conversation_lock(self.store, conversation_id):
             return self._chat(text, conversation_id=conversation_id, user_text=user_text,
-                              images=images)
+                              images=images, turn_key=turn_key, episodic=episodic)
 
     def _chat(self, text: str, *, conversation_id: str = "", user_text: str | None = None,
-              images: Sequence[bytes] = ()) -> str:
+              images: Sequence[bytes] = (), turn_key: str = "",
+              episodic: bool = True) -> str:
         original = text if user_text is None else user_text
         ctx = build_continuity_context(self.store)
         if self.curator is not None:
@@ -50,9 +52,17 @@ class WhaleCompanion:
         if images:
             kwargs["images"] = images
         response = self.model.reply(text, **kwargs)
-        remember_episode(self.store, summary=f"用户：{original[:500]}\n鲸鱼：{response[:500]}",
-                         key=f"ep:chat:{uuid4().hex}", tags=("chat",),
-                         extra={"conversation_id": conversation_id[:160]})
+        if episodic:
+            # G2 情节质量：同一对话轮（turn_key，如 task_id）内的 ack/补发等
+            # 多次系统中间对话**合并回写**同一条情节（后者覆盖前者，包含最终
+            # 答复），不再每句聊天都制造一条低价值记忆；纯内部调用
+            # （episodic=False，如参考图描述）不写情节。
+            ep_key = (f"ep:chat:{conversation_id}:{turn_key}" if turn_key
+                      else f"ep:chat:{uuid4().hex}")
+            remember_episode(self.store, summary=f"用户：{original[:500]}\n鲸鱼：{response[:500]}",
+                             key=ep_key, tags=("chat",),
+                             extra={"conversation_id": conversation_id[:160],
+                                    "layer": "episode"})
         if conversation_id:
             append_turn(self.store, conversation_id, original, response)
         return response

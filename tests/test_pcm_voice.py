@@ -1,23 +1,25 @@
-"""PR#4 移植：whale-io PCM 帧协议 + PCMVoiceProvider + 票据中继的离线测试。
+"""whale-io PCM 帧协议 + 握手状态机 + 票据中继测试。
 
-全部在 127.0.0.1 回环上以真实 socket / WebSocket 跑通，不触外网；
-**协议按 PR#4 契约实现，未与真实 whale-io 桥联调**。
+全部在 127.0.0.1 回环上以真实 socket / WebSocket 跑通，不触外网。
+线协议夹具 ``tests/fixtures/whale_io_protocol.py`` **直接复制** whale-io
+``server.py`` 的帧函数与握手分支（镜像基线 whale-io@48f5993），不简化、
+不跳过 AUTH_OK——这是与真实桥联调前的协议镜像层验证。
 """
 
 from __future__ import annotations
 
 import json
 import socket
-import socketserver
 import struct
 import threading
 import time
-from types import SimpleNamespace
 
 import pytest
 
+from fixtures.whale_io_protocol import WhaleIoBridgeFixture
 from whale_core.plugins.pcm_voice import (
     MAX_FRAME,
+    PCMHandshakeError,
     PCMVoiceProvider,
     pack_frame,
     read_frame,
@@ -25,12 +27,11 @@ from whale_core.plugins.pcm_voice import (
 )
 
 
-# ---------- 帧协议 ----------
+# ---------- 帧协议（whale-io 线格式：长度不含类型字节） ----------
 
 
 def _socketpair():
-    a, b = socket.socketpair()
-    return a, b
+    return socket.socketpair()
 
 
 def test_frame_roundtrip_audio_and_control():
@@ -45,10 +46,18 @@ def test_frame_roundtrip_audio_and_control():
         b.close()
 
 
+def test_frame_wire_format_matches_whale_io_server():
+    """逐字节对照 whale-io server.py write_frame：struct.pack('!IB', len(payload), typ)。"""
+    payload = b"HELLO box mode=echo sample=16000"
+    assert pack_frame(1, payload) == struct.pack("!IB", len(payload), 1) + payload
+    pcm = b"\x00\x01" * 160
+    assert pack_frame(0, pcm) == struct.pack("!IB", len(pcm), 0) + pcm
+
+
 def test_frame_roundtrip_exact_boundary_size():
     a, b = _socketpair()
     try:
-        payload = b"\x00" * (MAX_FRAME - 1)
+        payload = b"\x00" * MAX_FRAME
         # 512KiB 超过回环缓冲：发送放后台线程，接收端边收边排水
         sender = threading.Thread(target=a.sendall, args=(pack_frame(0, payload),))
         sender.start()
@@ -59,17 +68,28 @@ def test_frame_roundtrip_exact_boundary_size():
         b.close()
 
 
+def test_frame_zero_length_payload_legal():
+    """whale-io read_frame 允许 0 长度 payload；客户端必须同样容忍。"""
+    a, b = _socketpair()
+    try:
+        a.sendall(pack_frame(1, b""))
+        assert read_frame(b) == (1, b"")
+    finally:
+        a.close()
+        b.close()
+
+
 def test_pack_frame_rejects_bad_kind_and_oversize():
     with pytest.raises(ValueError):
         pack_frame(2, b"x")
     with pytest.raises(ValueError):
-        pack_frame(0, b"x" * MAX_FRAME)
+        pack_frame(0, b"x" * (MAX_FRAME + 1))
 
 
 def test_read_frame_rejects_bad_length_and_type():
     a, b = _socketpair()
     try:
-        a.sendall(struct.pack("!I", 0))
+        a.sendall(struct.pack("!IB", MAX_FRAME + 1, 0))
         with pytest.raises(ValueError):
             read_frame(b)
     finally:
@@ -77,15 +97,7 @@ def test_read_frame_rejects_bad_length_and_type():
         b.close()
     a, b = _socketpair()
     try:
-        a.sendall(struct.pack("!I", MAX_FRAME + 1))
-        with pytest.raises(ValueError):
-            read_frame(b)
-    finally:
-        a.close()
-        b.close()
-    a, b = _socketpair()
-    try:
-        a.sendall(struct.pack("!I", 2) + b"\x09x")  # 未知类型 9
+        a.sendall(struct.pack("!IB", 1, 9) + b"x")  # 未知类型 9
         with pytest.raises(ValueError):
             read_frame(b)
     finally:
@@ -96,7 +108,7 @@ def test_read_frame_rejects_bad_length_and_type():
 def test_read_frame_eof_on_disconnect():
     a, b = _socketpair()
     try:
-        a.sendall(struct.pack("!I", 10) + b"\x00\x01")  # 声明 10 字节只给 2
+        a.sendall(struct.pack("!IB", 10, 0) + b"\x00\x01")  # 声明 10 字节只给 2
         a.close()
         with pytest.raises(EOFError):
             read_frame(b)
@@ -104,7 +116,7 @@ def test_read_frame_eof_on_disconnect():
         b.close()
 
 
-# ---------- PCMVoiceProvider 校验（照搬 PR#4） ----------
+# ---------- PCMVoiceProvider 校验 ----------
 
 
 def test_provider_defaults_loopback_ok():
@@ -166,76 +178,134 @@ def test_provider_public_ws_url_rules():
             PCMVoiceProvider(public_ws_url=url)
 
 
-# ---------- AUTH 帧（回环 TCP 夹具） ----------
+# ---------- 握手状态机（whale-io 真实帧序夹具） ----------
 
 
-class _TCPFixture:
-    """最小 PCM 桥夹具：记录收到的帧，可脚本化应答。"""
-
-    def __init__(self, handler):
-        self.received: list[tuple[int, bytes]] = []
-
-        fixture = self
-
-        class Handler(socketserver.BaseRequestHandler):
-            def handle(self):
-                handler(fixture, self.request)
-
-        self.server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
-        self.server.daemon_threads = True
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-        self.thread.start()
-
-    @property
-    def port(self) -> int:
-        return self.server.server_address[1]
-
-    def close(self):
-        self.server.shutdown()
-        self.server.server_close()
-        self.thread.join(timeout=3)
-
-
-def test_connect_sends_auth_frame_with_token():
-    def handler(fixture, sock):
-        try:
-            fixture.received.append(read_frame(sock))
-        except (EOFError, OSError, ValueError):
-            pass
-
-    fixture = _TCPFixture(handler)
+def test_handshake_with_token_full_sequence():
+    """token 匹配：AUTH → AUTH_OK → HELLO，connect 返回即可读音频流。"""
+    fixture = WhaleIoBridgeFixture(token="bridge-secret", mode="echo")
     try:
         provider = PCMVoiceProvider(
-            host="127.0.0.1", port=fixture.port, bridge_token="fixture-bridge-secret"
+            host="127.0.0.1", port=fixture.port, bridge_token="bridge-secret"
         )
         conn = provider.connect()
+        assert provider.last_hello["mode"] == "echo"
+        assert provider.last_hello["sample"] == "16000"
+        # 握手完成后 PCM 回环可用
+        conn.sendall(pack_frame(0, b"\x01\x00\xff\x7f"))
+        assert read_frame(conn) == (0, b"\x01\x00\xff\x7f")
         conn.close()
         deadline = time.monotonic() + 3
         while not fixture.received and time.monotonic() < deadline:
             time.sleep(0.01)
-        assert fixture.received == [(1, b"AUTH fixture-bridge-secret")]
+        assert fixture.received[0] == (1, b"AUTH bridge-secret")
     finally:
         fixture.close()
 
 
-def test_connect_without_token_sends_no_auth():
-    def handler(fixture, sock):
-        sock.settimeout(0.5)
-        try:
-            fixture.received.append(read_frame(sock))
-        except (EOFError, OSError, ValueError, socket.timeout):
-            pass
-
-    fixture = _TCPFixture(handler)
+def test_handshake_without_token_direct_hello():
+    """无 token：server 直接 HELLO；客户端不得发送 AUTH 帧。"""
+    fixture = WhaleIoBridgeFixture(mode="omni")
     try:
         provider = PCMVoiceProvider(host="127.0.0.1", port=fixture.port)
         conn = provider.connect()
-        time.sleep(0.2)
+        assert provider.last_hello["mode"] == "omni"
         conn.close()
         deadline = time.monotonic() + 3
         while not fixture.received and time.monotonic() < deadline:
             time.sleep(0.01)
-        assert fixture.received == []  # 无 token → 没有 AUTH 帧
+        assert all(kind != 1 or not p.startswith(b"AUTH ") for kind, p in fixture.received)
+    finally:
+        fixture.close()
+
+
+def test_handshake_wrong_token_server_closes():
+    """真实 handle_client：鉴权失败不发 AUTH_FAIL，直接断开 → 必须拒绝且释放。"""
+    fixture = WhaleIoBridgeFixture(token="right-token")
+    try:
+        provider = PCMVoiceProvider(
+            host="127.0.0.1", port=fixture.port, bridge_token="wrong-token", timeout=5
+        )
+        with pytest.raises(PCMHandshakeError):
+            provider.connect()
+        assert fixture.client_closed.wait(3)
+    finally:
+        fixture.close()
+
+
+def test_handshake_auth_fail_frame_rejected():
+    """mode handler 分支会发 AUTH_FAIL：也必须明确拒绝。"""
+    fixture = WhaleIoBridgeFixture(token="right-token", script="auth_fail_frame")
+    try:
+        provider = PCMVoiceProvider(
+            host="127.0.0.1", port=fixture.port, bridge_token="wrong-token"
+        )
+        with pytest.raises(PCMHandshakeError, match="rejected"):
+            provider.connect()
+    finally:
+        fixture.close()
+
+
+def test_handshake_hello_before_auth_ok_rejected():
+    """乱序：期望 AUTH_OK 时收到 HELLO → 拒绝。"""
+    fixture = WhaleIoBridgeFixture(token="t", script="hello_first")
+    try:
+        provider = PCMVoiceProvider(
+            host="127.0.0.1", port=fixture.port, bridge_token="t"
+        )
+        with pytest.raises(PCMHandshakeError):
+            provider.connect()
+    finally:
+        fixture.close()
+
+
+def test_handshake_pcm_before_greeting_rejected():
+    """乱序：握手阶段收到 PCM 帧 → 拒绝。"""
+    fixture = WhaleIoBridgeFixture(token="t", script="pcm_first")
+    try:
+        provider = PCMVoiceProvider(
+            host="127.0.0.1", port=fixture.port, bridge_token="t"
+        )
+        with pytest.raises(PCMHandshakeError, match="帧序错乱"):
+            provider.connect()
+    finally:
+        fixture.close()
+
+
+def test_handshake_timeout_rejected():
+    """server 在鉴权窗口内不响应 → 超时拒绝，socket 关闭。"""
+    fixture = WhaleIoBridgeFixture(token="t", auth_delay=30.0)
+    try:
+        provider = PCMVoiceProvider(
+            host="127.0.0.1", port=fixture.port, bridge_token="t", timeout=1
+        )
+        started = time.monotonic()
+        with pytest.raises(PCMHandshakeError, match="timeout"):
+            provider.connect()
+        assert time.monotonic() - started < 5
+    finally:
+        fixture.close()
+
+
+def test_handshake_close_on_connect_rejected():
+    fixture = WhaleIoBridgeFixture(script="close_on_connect")
+    try:
+        provider = PCMVoiceProvider(
+            host="127.0.0.1", port=fixture.port, timeout=2
+        )
+        with pytest.raises(PCMHandshakeError):
+            provider.connect()
+    finally:
+        fixture.close()
+
+
+def test_handshake_no_token_but_server_requires_auth():
+    """客户端无 token、server 要求鉴权：server 8s 后断开 → 客户端超时拒绝。"""
+    fixture = WhaleIoBridgeFixture(token="server-side-secret")
+    try:
+        provider = PCMVoiceProvider(host="127.0.0.1", port=fixture.port, timeout=2)
+        with pytest.raises(PCMHandshakeError):
+            provider.connect()
     finally:
         fixture.close()
 
@@ -356,24 +426,6 @@ def test_public_ws_url_overrides_ticket_url():
         gateway.close()
 
 
-def _echo_bridge(fixture_received):
-    """PCM 桥夹具：收 AUTH → 回 HELLO → 收一帧音频 → 原样回送，挂住等关闭。"""
-
-    def handler(fixture, sock):
-        kind, auth = read_frame(sock)
-        fixture.received.append((kind, auth))
-        sock.sendall(pack_frame(1, b"HELLO box mode=echo sample=16000"))
-        kind, audio = read_frame(sock)
-        fixture.received.append((kind, audio))
-        sock.sendall(pack_frame(0, audio))
-        try:
-            sock.recv(1)  # 保持传输打开直到浏览器结束通话
-        except OSError:
-            pass
-
-    return handler
-
-
 @pytest.fixture()
 def api():
     store = InMemoryStore()
@@ -419,7 +471,11 @@ def test_voice_session_requires_bearer_token(api):
 
 
 def test_real_browser_voice_relay_pcm_auth_and_one_use_ticket(api):
-    fixture = _TCPFixture(_echo_bridge(None))
+    """全链路：浏览器 → WS 票据 → AUTH → AUTH_OK → HELLO → PCM 回环。
+
+    桥侧是 whale-io 真实帧序夹具（含 BRIDGE_TOKEN 鉴权分支）。
+    """
+    fixture = WhaleIoBridgeFixture(token="fixture-bridge-secret", mode="echo")
     events: list[tuple[str, str]] = []
     api.ctx.log_event = lambda kind, detail="": events.append((kind, detail))
     provider = PCMVoiceProvider(
@@ -441,7 +497,8 @@ def test_real_browser_voice_relay_pcm_auth_and_one_use_ticket(api):
             ws.send(sample)
             assert ws.recv() == sample
             ws.send("stop")
-        assert fixture.received == [(1, b"AUTH fixture-bridge-secret"), (0, sample)]
+        assert (1, b"AUTH fixture-bridge-secret") in fixture.received
+        assert (0, sample) in fixture.received
         # 票据一次性：重放被拒
         with connect(session["url"], subprotocols=["whale", session["ticket"]],
                      proxy=None) as ws:
@@ -457,8 +514,28 @@ def test_real_browser_voice_relay_pcm_auth_and_one_use_ticket(api):
         fixture.close()
 
 
+def test_voice_session_relay_rejected_when_bridge_auth_fails(api):
+    """桥鉴权失败（真实行为：直接断开）→ 浏览器拿到 1011，不得暴露 ready。"""
+    fixture = WhaleIoBridgeFixture(token="real-secret", mode="echo")
+    provider = PCMVoiceProvider(
+        host="127.0.0.1", port=fixture.port, bridge_token="stale-secret", timeout=5
+    )
+    register_pcm_voice(api.ctx.manager.registry, provider)
+    try:
+        status, data = _post_session(api)
+        assert status == 200, data
+        session = data["result"]
+        with connect(session["url"], subprotocols=["whale", session["ticket"]],
+                     proxy=None) as ws:
+            with pytest.raises(ConnectionClosed) as closed:
+                ws.recv()
+            assert closed.value.rcvd.code == 1011
+    finally:
+        fixture.close()
+
+
 def test_voice_session_relay_closes_when_plugin_disabled(api):
-    fixture = _TCPFixture(_echo_bridge(None))
+    fixture = WhaleIoBridgeFixture(mode="echo")
     provider = PCMVoiceProvider(host="127.0.0.1", port=fixture.port)
     register_pcm_voice(api.ctx.manager.registry, provider)
     try:

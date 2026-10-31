@@ -17,24 +17,51 @@ from whale_core.plugins.speech import OpenAICompatibleASR, OpenAICompatibleTTS, 
 from whale_core.plugins.realtime_voice import OpenAICompatibleRealtime, register_realtime_voice
 
 
+# DashScope 媒体协议兼容宿主（供应商适配矩阵，P1）：
+# 回复模型端点只有确属 DashScope 兼容协议时才被媒体能力继承——否则
+# 「显示已配置但实际 API 不存在」的假就绪比「未配置」更有害。
+_DASHSCOPE_COMPAT_HOSTS = (
+    "dashscope.aliyuncs.com",
+    "dashscope.aliyuncs-inc.com",
+    "agentscope.io",
+)
+
+
+def _host_dashscope_compatible(base_url: str) -> bool:
+    from urllib.parse import urlsplit
+
+    try:
+        host = (urlsplit(base_url).hostname or "").lower()
+    except ValueError:
+        return False
+    return any(host == h or host.endswith("." + h) for h in _DASHSCOPE_COMPAT_HOSTS)
+
+
 def _resolve_capability_env(env: Mapping[str, str], cap: str) -> tuple[str, str, str]:
-    """能力端点/凭据/供应商解析，三级回退：
+    """能力端点/凭据/供应商解析，三级回退（带供应商适配矩阵）：
 
     1. 专属覆盖：``WHALE_<CAP>_BASE_URL`` / ``WHALE_<CAP>_API_KEY``
     2. 共享媒体平台：``WHALE_MEDIA_BASE_URL`` / ``WHALE_MEDIA_API_KEY``
-    3. 回复模型同款：``DEEPSEEK_BASE_URL`` / ``DEEPSEEK_API_KEY``（owner 决策：
-       媒体默认吃回复模型同一端点与 key，不额外配置）
+    3. 回复模型同款：``DEEPSEEK_BASE_URL`` / ``DEEPSEEK_API_KEY``——
+       **仅当端点与媒体协议兼容**（DashScope 兼容宿主矩阵）或用户显式声明
+       ``WHALE_<CAP>_PROVIDER`` / ``WHALE_MEDIA_PROVIDER`` 时才继承；
+       不兼容则返回空（=未配置，诚实显示，不假装就绪）。
 
     返回 (base_url, api_key, provider_kind)。provider_kind ∈ {"dashscope", "openai"}；
     dashscope = DashScope 兼容协议（阿里云百炼 / AgentScope 平台同路径）。
     """
-    base = (env.get(f"WHALE_{cap}_BASE_URL") or env.get("WHALE_MEDIA_BASE_URL")
-            or env.get("DEEPSEEK_BASE_URL") or "").strip()
-    key = (env.get(f"WHALE_{cap}_API_KEY") or env.get("WHALE_MEDIA_API_KEY")
-           or env.get("DEEPSEEK_API_KEY") or "").strip()
     kind = (env.get(f"WHALE_{cap}_PROVIDER") or env.get("WHALE_MEDIA_PROVIDER") or "dashscope").strip().lower()
     if kind not in ("dashscope", "openai"):
         kind = "dashscope"
+    base = (env.get(f"WHALE_{cap}_BASE_URL") or env.get("WHALE_MEDIA_BASE_URL") or "").strip()
+    key = (env.get(f"WHALE_{cap}_API_KEY") or env.get("WHALE_MEDIA_API_KEY") or "").strip()
+    if not base:
+        # 第 3 级：回复模型同款——协议兼容或用户显式声明供应商才继承
+        declared = bool(env.get(f"WHALE_{cap}_PROVIDER") or env.get("WHALE_MEDIA_PROVIDER"))
+        reply_base = (env.get("DEEPSEEK_BASE_URL") or "").strip()
+        if reply_base and (declared or _host_dashscope_compatible(reply_base)):
+            base = reply_base
+            key = key or (env.get("DEEPSEEK_API_KEY") or "").strip()
     return base, key, kind
 
 
@@ -160,5 +187,5 @@ def configure_optional_capabilities(registry, tools, store, *, env: Mapping[str,
             tls=(env.get("WHALE_PCM_BRIDGE_TLS") or "") == "1",
             public_ws_url=env.get("WHALE_PCM_BRIDGE_PUBLIC_WS_URL", "").strip(),
             timeout=pcm_timeout))
-        out.notes.append("whale-io PCM 语音桥已配置（浏览器低延迟通话；协议按 PR#4 契约，未与真实桥联调）")
+        out.notes.append("whale-io PCM 语音桥已配置（浏览器低延迟通话；协议镜像层已验证，真机联调待安排）")
     return out
