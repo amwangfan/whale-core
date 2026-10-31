@@ -5,8 +5,13 @@
  * Fork 成功**不会自动连线**（后端 auto_bound=false），副本出现在手牌后再拖。
  */
 
-import { useState } from "react";
-import { ApiError, studioApi, type StudioForkPreviewItem } from "../../api";
+import { useEffect, useState } from "react";
+import {
+  ApiError,
+  studioApi,
+  type StudioForkPreviewItem,
+  type StudioVaultRecord,
+} from "../../api";
 
 type Step = "select" | "preview" | "done";
 
@@ -20,7 +25,9 @@ export default function ForkWizard({
   onDone: (newSpaceId: string) => void;
 }) {
   const [step, setStep] = useState<Step>("select");
-  const [keysText, setKeysText] = useState("");
+  const [vaultItems, setVaultItems] = useState<StudioVaultRecord[]>([]);
+  const [loadError, setLoadError] = useState("");
+  const [picked, setPicked] = useState<Set<string>>(new Set());
   const [targetType, setTargetType] = useState("shareable_fork");
   const [targetName, setTargetName] = useState("");
   const [items, setItems] = useState<StudioForkPreviewItem[]>([]);
@@ -30,10 +37,35 @@ export default function ForkWizard({
   const [error, setError] = useState("");
   const [newSpaceId, setNewSpaceId] = useState("");
 
-  const recordKeys = keysText
-    .split("\n")
-    .map((k) => k.trim())
-    .filter(Boolean);
+  // S7+：从管理管道加载原始库记录（摘要已脱敏），勾选代替手输 key。
+  useEffect(() => {
+    let cancelled = false;
+    studioApi
+      .vaultRecords(sourceSpace)
+      .then((items) => {
+        if (!cancelled) setVaultItems(items ?? []);
+      })
+      .catch((e) => {
+        if (!cancelled)
+          setLoadError(
+            e instanceof ApiError ? e.message : "记录加载失败，请稍后重试。",
+          );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sourceSpace]);
+
+  const recordKeys = [...picked];
+
+  const togglePick = (key: string) => {
+    setPicked((cur) => {
+      const next = new Set(cur);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
 
   const preview = async () => {
     setBusy(true);
@@ -103,14 +135,30 @@ export default function ForkWizard({
 
         {step === "select" && (
           <>
-            <label htmlFor="fork-keys">记录 key（每行一个）</label>
-            <textarea
-              id="fork-keys"
-              rows={5}
-              value={keysText}
-              onChange={(e) => setKeysText(e.target.value)}
-              placeholder="mem:episode:…"
-            />
+            <p>选择要复制的记录（摘要已脱敏）：</p>
+            {loadError && (
+              <div className="banner error" role="alert">
+                {loadError}
+              </div>
+            )}
+            <ul className="studio-fork-list">
+              {vaultItems.map((item) => (
+                <li key={item.key}>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={picked.has(item.key)}
+                      onChange={() => togglePick(item.key)}
+                    />
+                    <code>{item.key}</code>
+                    <span className="muted">{item.summary.slice(0, 80)}</span>
+                  </label>
+                </li>
+              ))}
+              {vaultItems.length === 0 && !loadError && (
+                <li className="muted">正在加载记录…</li>
+              )}
+            </ul>
             <label htmlFor="fork-type">副本类型</label>
             <select
               id="fork-type"

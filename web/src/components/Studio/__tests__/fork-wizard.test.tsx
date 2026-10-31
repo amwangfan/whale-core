@@ -29,6 +29,21 @@ describe("Fork 向导", () => {
   it("preview → 勾选 → confirmed 勾选 → POST forks(confirmed:true)；不自动连线", async () => {
     const fetchMock = vi.fn((input: unknown) => {
       const url = String(input);
+      if (url.includes("/studio/vault/records")) {
+        return Promise.resolve(
+          jsonResult({
+            space_id: "vault",
+            count: 2,
+            truncated: false,
+            items: [
+              { key: "mem:a", kind: "episode", tags: [],
+                summary: "电话 138****1234", created_at: "t" },
+              { key: "mem:b", kind: "episode", tags: [],
+                summary: "课程表", created_at: "t" },
+            ],
+          }),
+        );
+      }
       if (url.includes("/studio/forks/preview")) {
         return Promise.resolve(
           jsonResult({
@@ -63,9 +78,10 @@ describe("Fork 向导", () => {
     const onDone = vi.fn();
     render(<ForkWizard sourceSpace="vault" onClose={() => {}} onDone={onDone} />);
 
-    fireEvent.change(screen.getByLabelText(/记录 key/), {
-      target: { value: "mem:a\nmem:b" },
-    });
+    // 记录列表从管理管道加载（不再手输 key），勾选两条
+    await waitFor(() => screen.getByText("mem:a"));
+    fireEvent.click(screen.getByText("mem:a"));
+    fireEvent.click(screen.getByText("mem:b"));
     fireEvent.click(screen.getByText("预览脱敏结果"));
 
     await waitFor(() => screen.getByText(/已脱敏/));
