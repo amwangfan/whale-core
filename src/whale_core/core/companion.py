@@ -54,7 +54,17 @@ class WhaleCompanion:
             spaces = getattr(context, "allowed_memory_spaces", None)
         space_ids = (tuple(getattr(s, "space_id", s) for s in spaces)
                      if spaces is not None else None)
-        ctx = build_continuity_context(self.store, allowed_space_ids=space_ids)
+        # S3：context 携带会话绑定 persona_id 时，经 PersonaResolver 取卡并用
+        # 极简渲染；绑定失效 fail soft 回退（不影响对话）。persona_id=None →
+        # 保持兼容期全局快照行为。卡文本只是表达层数据，不触碰任何权限语义。
+        persona_card = None
+        persona_id = getattr(context, "persona_id", None) if context is not None else None
+        if persona_id:
+            from whale_core.ui.persona_resolver import PersonaResolver
+
+            persona_card = PersonaResolver(self.store).card_for(persona_id)
+        ctx = build_continuity_context(
+            self.store, allowed_space_ids=space_ids, persona_card=persona_card)
         if self.curator is not None:
             memories = [str(hit.record.content.get("summary", ""))
                         for hit in _recall(self.curator, original, spaces)]
