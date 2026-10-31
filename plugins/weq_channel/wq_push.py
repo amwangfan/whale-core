@@ -379,6 +379,9 @@ class WeQSsePushListener:
                 attachments=tuple(
                     a for a in (job.attachments or ())
                     if isinstance(a, dict) and a.get("kind") == "pic"),
+                # S1/S7：sender 必须穿透持久化排水路径——inbox 的 account
+                # 即真实发送者，丢失会把主人降级为匿名（记忆失效根因）。
+                sender_id=job.account,
             )
             try:
                 self.on_owner_event(event)
