@@ -637,7 +637,7 @@ export interface PersonaCardInput {
 
 export interface StudioGraphNode {
   id: string;
-  kind: "conversation" | "persona" | "memory_space";
+  kind: "conversation" | "persona" | "memory_space" | "device";
   label: string;
   key?: string;
   channel?: string;
@@ -651,6 +651,9 @@ export interface StudioGraphNode {
   restricted?: boolean;
   record_count?: number;
   writable?: boolean;
+  /** kind=device：设备状态（pending/active/revoked）与事件排队水位。 */
+  status?: string;
+  queued_events?: number;
 }
 
 export interface StudioGraphEdge {

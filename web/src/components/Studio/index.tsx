@@ -413,6 +413,7 @@ export default function Studio() {
             <NodeInspector
               nodeId={node.id}
               kind={node.kind}
+              graphNode={node}
               conversations={conversations.filter((c) => !c.malformed)}
               conv={node.kind === "conversation" ? convByKey.get(node.key ?? "") : undefined}
               busy={busy}
@@ -482,6 +483,7 @@ export default function Studio() {
 function NodeInspector({
   nodeId,
   kind,
+  graphNode,
   conv,
   conversations,
   busy,
@@ -491,6 +493,7 @@ function NodeInspector({
 }: {
   nodeId: string;
   kind: string;
+  graphNode?: import("../../api").StudioGraphNode;
   conv?: StudioConversation;
   conversations: StudioConversation[];
   busy: boolean;
@@ -505,6 +508,29 @@ function NodeInspector({
     setTarget("");
     setCaps(null);
   }, [nodeId]);
+
+  if (kind === "device") {
+    // issue #11：设备卡只读——设备授权走一次性确认凭证（issue #10），
+    // 不是画布连线；状态/能力/排队水位来自服务端 registry。
+    const n = graphNode;
+    return (
+      <section className="studio-inspector" aria-label="设备详情">
+        <h3>设备 · {n?.label ?? nodeId}</h3>
+        <dl>
+          <dt>状态</dt>
+          <dd>{n?.status ?? "—"}</dd>
+          <dt>允许能力</dt>
+          <dd>{(n?.capabilities ?? []).join("、") || "—"}</dd>
+          <dt>待处理事件</dt>
+          <dd>{n?.queued_events ?? 0}</dd>
+        </dl>
+        <p className="muted">
+          设备授权经手机确认的一次性凭证签发（不在画布连线）；
+          个人原始库永不与设备直连。
+        </p>
+      </section>
+    );
+  }
 
   if (kind === "conversation" && conv) {
     const ceiling = conv.ceiling ?? [];

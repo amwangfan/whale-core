@@ -1173,6 +1173,30 @@ def _graph(handler, ctx, svc: StudioServices) -> None:
             nodes.append({"id": f"persona:{cid}", "kind": "persona",
                           "label": card.title or card.name, "builtin": False})
 
+    # issue #11：设备节点——事实源 = DeviceRegistry（非客户端自报）；
+    # 只展示 标签/状态/能力/排队水位，绝不回显 token/公钥/配对码。
+    from whale_core.devices.registry import DeviceRegistry
+    _registry = DeviceRegistry(ctx.store)
+    for meta in _registry.list_devices():
+        did = str(meta.get("device_id") or "")
+        if not did:
+            continue
+        queued = 0
+        for k in ctx.store.keys():
+            if not k.startswith(f"device:event:{did}:"):
+                continue
+            evid = k.rsplit(":", 1)[-1]
+            if not ctx.store.get(f"device:processed:{did}:{evid}"):
+                queued += 1
+        nodes.append({
+            "id": f"device:{did}", "kind": "device",
+            "label": str(meta.get("label") or did),
+            "status": str(meta.get("status") or "unknown"),
+            "capabilities": list(meta.get("scopes") or []),
+            "queued_events": queued,
+            "created_at": meta.get("created_at"),
+        })
+
     for ref in svc.spaces.list_spaces(include_protected=True):
         view = _space_view(ctx, svc, ref.space_id)
         if view is None:

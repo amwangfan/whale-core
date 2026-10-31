@@ -30,6 +30,8 @@ describe("Studio 画布", () => {
     expect(screen.getByTestId("card-persona:whale-playful")).toBeTruthy();
     expect(screen.getByTestId("card-space:sp-copy")).toBeTruthy();
     expect(screen.getByTestId("card-space:vault")).toBeTruthy();
+    // issue #11：设备卡渲染（状态/能力/排队水位来自服务端）
+    expect(screen.getByTestId("card-device:dev-1")).toBeTruthy();
 
     // 文案来自后端 label/name，不是前端编造
     // （人物卡管理面板也会列出同名卡标题，故用 getAllByText 不断言唯一）

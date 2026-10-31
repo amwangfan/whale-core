@@ -439,6 +439,9 @@ class QqInboundWorkflow:
             from whale_core.memory.extraction import (
                 purge_member_extraction_state)
             n_del += purge_member_extraction_state(self.store, principal_id)
+            # issue #21：经验（个性化建议权重）随记忆一并真删
+            from whale_core.memory.experience import ExperienceStore
+            n_del += ExperienceStore(self.store).purge_principal(principal_id)
             consents.opt_out(principal_id)
             return (f"清掉了 {n_del} 条（含提炼进度记录），以后我也不再记了。"
                     "（已经发出去的聊天记录和群里的公共时间线收不回。）"
