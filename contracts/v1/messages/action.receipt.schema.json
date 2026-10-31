@@ -91,9 +91,15 @@
             "unavailable",
             "permission_missing",
             "invalid_message",
+            "background_restricted",
             "internal"
           ],
           "description": "失败时的错误码（state=failed 时携带）"
+        },
+        "provider_ref": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "可选：执行侧参考标记（如 foreground_verified/unverified、桥侧句柄）；诚实性注解，不构成执行证据"
         }
       },
       "description": "动作回执"

@@ -317,6 +317,30 @@ class QqInboundWorkflow:
 
     # -- S7：陌生账号私聊（受限入口） -----------------------------------------
 
+    #: G6 红队高-1：陌生人/群成员回复的独立日额度（每 sender+会话）
+    STRANGER_DAILY_LIMIT = 20
+
+    def _stranger_gate(self, sender: str, conversation: str) -> str | None:
+        """陌生人/群成员回复的预算+静默闸门（直发路径不经 Outbox，必须自带）。
+
+        返回 None 放行；否则返回跳过原因。静默时段对非 owner 一律生效
+        （被动豁免只属于主人对话的延续）。
+        注意：不查 prefs.enabled——那是主动外发总开关；陌生人/群成员回复
+        是对已收消息的被动回应，是否开门由宿主的陌生人开关决定。
+        """
+        now = self._now()
+        from whale_core.life.initiative import ProactiveOutbox
+        if ProactiveOutbox._is_quiet(now.astimezone().time(), self.prefs):
+            return "quiet_hours"
+        day = now.strftime("%Y-%m-%d")
+        key = f"rl:stranger:{day}:{conversation}:{sender}"
+        count = self.store.get(key)
+        count = int(count) if isinstance(count, (int, float)) else 0
+        if count >= self.STRANGER_DAILY_LIMIT:
+            return "stranger_budget"
+        self.store.put(key, count + 1)
+        return None
+
     def handle_stranger_event(self, event) -> dict:
         """处理**未配对**账号的私聊消息（S7；宿主须显式开门）。
 
@@ -362,6 +386,12 @@ class QqInboundWorkflow:
         if not is_private and maybe_intercept_sudo(text) is not None:
             # 群里的 sudo 尝试：不验证、不回显、不落记忆——只提示私聊（N05/N17）
             return {"reply": "验证身份请私聊我（群里不做这个）。"}
+
+        # G6 红队高-1：陌生人/群成员回复自带预算与静默闸门（直发路径不经
+        # Outbox，必须前置）。sudo 验证回复不计额度（那是安全功能）。
+        gate = self._stranger_gate(sender, str(event.conversation))
+        if gate is not None:
+            return {"skipped": gate}
 
         if self.orchestrator is None:
             return {"skipped": "no_orchestrator"}

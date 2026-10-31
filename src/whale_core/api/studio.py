@@ -49,6 +49,13 @@ from whale_core.life.conversation_context import (
     SCOPE_TASK_READ_SELF,
     SCOPE_TOOL_SHELL_SAFE,
     SCOPE_TOOL_WEB_SEARCH,
+    principal_matches_private_conversation,
+)
+from whale_core.life.rhythm import (
+    ACTIVITY_MODES,
+    MAX_SEGMENTS_LIMIT,
+    ConversationRhythm,
+    RhythmStore,
 )
 from whale_core.life.temporary_auth import (
     GRANTABLE_SCOPES,
@@ -56,10 +63,20 @@ from whale_core.life.temporary_auth import (
     TemporaryAuthService,
 )
 from whale_core.memory.bindings import BindingError, BindingStore
+from whale_core.memory.consent import (
+    DEFAULT_CONSENT_TTL_S,
+    KNOWN_CONSENT_SCOPES,
+    ConsentError,
+    MemberConsentStore,
+    MemberMemoryDirectory,
+)
+from whale_core.memory.extraction import contains_sensitive
 from whale_core.memory.fork import ForkError, ForkService
+from whale_core.memory.governance import _purge_embedding, forget_gone_everywhere
 from whale_core.memory.spaces import (
     FORKABLE_TARGET_TYPES,
     WRITABLE_TYPES,
+    MemorySpaceError,
     SpaceStore,
 )
 from whale_core.memory.store import MemoryKind, MemoryStore
@@ -148,16 +165,22 @@ class StudioServices:
     forks: ForkService
     auth: TemporaryAuthService
     personas: PersonaCardLibrary
+    consents: MemberConsentStore
+    directory: MemberMemoryDirectory
 
     @classmethod
     def from_store(cls, store: MemoryStore) -> "StudioServices":
         spaces = SpaceStore(store)
+        bindings = BindingStore(store, spaces)
+        consents = MemberConsentStore(store)
         return cls(
             spaces=spaces,
-            bindings=BindingStore(store, spaces),
+            bindings=bindings,
             forks=ForkService(store, spaces),
             auth=TemporaryAuthService(store),
             personas=PersonaCardLibrary(),
+            consents=consents,
+            directory=MemberMemoryDirectory(bindings, spaces, consents),
         )
 
 
@@ -345,10 +368,11 @@ def _memory_binding_view(svc: StudioServices, row: dict) -> dict:
 
 
 def _conversation_keys(ctx) -> tuple[str, ...]:
-    """可见会话 = 有任何绑定的 key ∪ 已知渠道的历史会话。"""
+    """可见会话 = 有任何绑定/节奏的 key ∪ 已知渠道的历史会话。"""
     keys: set[str] = set()
     for store_key in ctx.store.keys():
-        for prefix in ("bind:persona:", "bind:mem:", _CAPS_PREFIX):
+        for prefix in ("bind:persona:", "bind:mem:", _CAPS_PREFIX,
+                       "bind:rhythm:"):
             if store_key.startswith(prefix):
                 keys.add(store_key[len(prefix):])
     for ref in _known_conversations(ctx):
@@ -390,6 +414,7 @@ def _conversation_entry(ctx, svc: StudioServices, key: str) -> dict:
     scopes = sorted(str(s) for s in caps.get("scopes") or ()) \
         if isinstance(caps, dict) else []
     persona_version, memory_version, caps_version = _binding_versions(ctx, key)
+    rhythm = RhythmStore(ctx.store).get(key)
     return {
         "key": key,
         "channel": ref.channel,
@@ -402,6 +427,13 @@ def _conversation_entry(ctx, svc: StudioServices, key: str) -> dict:
         "capabilities": scopes,
         "capabilities_version": caps_version,
         "ceiling": list(_ceiling_for(ref.kind)),
+        # G4：会话节奏（只影响回复节奏，与能力/记忆授权无关）。
+        "rhythm": {
+            "activity": rhythm.activity,
+            "max_segments": rhythm.max_segments,
+            "dnd": rhythm.dnd,
+        },
+        "rhythm_version": rhythm.version,
     }
 
 
@@ -819,6 +851,91 @@ def _put_capabilities(handler, ctx, svc: StudioServices, raw_key: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# G4：会话节奏（ConversationRhythm）
+#
+# 纪律：节奏卡**只影响回复节奏**（活跃模式/分段上限/免打扰），不得携带
+# 任何工具权限或记忆授权语义——严格字段表直接 422 掉未知字段（含
+# capabilities/scopes/memory 之类越界字段）；写路径 ctx.lock + 版本乐观锁 +
+# 全量审计（只元数据）。
+# ---------------------------------------------------------------------------
+
+_RHYTHM_FIELDS = frozenset({"activity", "max_segments", "dnd",
+                            "expected_version"})
+
+
+def _rhythm_view(key: str, rhythm: ConversationRhythm, *, configured: bool) -> dict:
+    return {
+        "key": key,
+        "rhythm": {
+            "activity": rhythm.activity,
+            "max_segments": rhythm.max_segments,
+            "dnd": rhythm.dnd,
+        },
+        "version": rhythm.version,
+        "configured": configured,
+    }
+
+
+def _get_rhythm(handler, ctx, raw_key: str) -> None:
+    ref = _parse_conversation_key(raw_key)
+    key = ref.as_key()
+    store = RhythmStore(ctx.store)
+    handler._send(200, _ok(_rhythm_view(
+        key, store.get(key), configured=store.configured(key))))
+
+
+def _parse_rhythm_body(body: dict) -> ConversationRhythm:
+    _reject_unknown_fields(body, set(_RHYTHM_FIELDS))
+    activity = body.get("activity", "balanced")
+    if not isinstance(activity, str) or activity not in ACTIVITY_MODES:
+        raise StudioError(422, "invalid_request",
+                          f"activity 必须是 {list(ACTIVITY_MODES)!r} 之一")
+    max_segments = body.get("max_segments", 0)
+    if not isinstance(max_segments, int) or isinstance(max_segments, bool) \
+            or not 0 <= max_segments <= MAX_SEGMENTS_LIMIT:
+        raise StudioError(422, "invalid_request",
+                          f"max_segments 必须是 0..{MAX_SEGMENTS_LIMIT} 的整数"
+                          "（0 = 跟随默认：群2/私3）")
+    dnd = body.get("dnd", False)
+    if not isinstance(dnd, bool):
+        raise StudioError(422, "invalid_request", "dnd 必须是布尔值")
+    return ConversationRhythm(activity=activity, max_segments=max_segments,
+                              dnd=dnd)
+
+
+def _put_rhythm(handler, ctx, raw_key: str) -> None:
+    ref = _parse_conversation_key(raw_key)
+    body = _require_json_body(handler)
+    rhythm = _parse_rhythm_body(body)
+    key = ref.as_key()
+    store = RhythmStore(ctx.store)
+    with ctx.lock:
+        current = store.get(key)
+        # 幂等重放优先于版本检查：同值重试是 200 no-op（N13）。
+        if (rhythm.activity, rhythm.max_segments, rhythm.dnd) == (
+                current.activity, current.max_segments, current.dnd):
+            handler._send(200, _ok({
+                **_rhythm_view(key, current, configured=store.configured(key)),
+                "changed": False,
+            }))
+            return
+        try:
+            _check_expected_version(body, current.version)
+        except StudioError as exc:
+            _audit(ctx, "rhythm.set", outcome="denied", reason=exc.code,
+                   conversation_key=key)
+            raise
+        version = store.put(key, rhythm)
+        _audit(ctx, "rhythm.set", conversation_key=key,
+               activity=rhythm.activity, max_segments=rhythm.max_segments,
+               dnd=rhythm.dnd, version=version)
+    handler._send(200, _ok({
+        **_rhythm_view(key, store.get(key), configured=True),
+        "changed": True,
+    }))
+
+
+# ---------------------------------------------------------------------------
 # 关系图
 # ---------------------------------------------------------------------------
 
@@ -1046,6 +1163,299 @@ def _revoke_grant(handler, ctx, svc: StudioServices, grant_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# G2：成员本人授权与个人记忆管理（consent.* / memory.*-own）
+#
+# 纪律（下一阶段计划 §4 / §11 MEM-02/03/04）：
+# - consent.grant 必须携带「本人已认证私聊」的结构性证据
+#   （actor_conversation_key），其归属 principal 必须等于 consent 主体——
+#   群主/管理通道替成员授权一律 403（member_actor_mismatch）。
+# - 本人记忆管理（list/correct/delete）同样要求本人私聊证据；撤销 consent
+#   后仍可管理存量记忆（隐私权不随授权消失）。
+# - 管理通道（Bearer=主人）可以看到 consent 状态元数据，但看不到成员私人
+#   记忆全文（list-own 对群主同样要求成员本人证据）。
+# - 所有写操作严格字段表 + ctx.lock + 审计（只元数据，不存记忆正文）。
+# ---------------------------------------------------------------------------
+
+#: principal_id 形如 anon:qq:10001 / paired:qq:10001。
+_PRINCIPAL_RE = re.compile(
+    r"^(anon|paired):[A-Za-z0-9_.\-]{1,32}:[A-Za-z0-9_.:\-]{1,64}$")
+_GROUP_ID_RE = re.compile(r"^group:[A-Za-z0-9_.\-]{1,64}$")
+_MAX_CONSENT_TTL_S = 10 * 365 * 86400
+_MEMBER_LIST_LIMIT = 200
+
+
+def _require_member_actor(store: Any, principal_raw: Any, raw_key: Any) -> tuple[str, str]:
+    """校验「成员本人私聊」证据；返回 (principal_id, conversation_key)。
+
+    这是 MEM-02 的 API 关卡：consent 主体 == 会话归属主体。群主用自己的
+    私聊、或任何群会话 key，都无法通过（结构性校验，不看昵称/正文）。
+
+    G6 红队中-2 加固：形状自洽只是必要条件——另要求该私聊**真实发生过
+    入站对话**（chat:history 存在成员发言记录），否则持管理 token 者可为
+    从未说过话的任意 uin 代授 consent。
+    """
+    if not isinstance(principal_raw, str) or not _PRINCIPAL_RE.match(principal_raw):
+        raise StudioError(422, "invalid_request",
+                          "principal_id 形如 anon:qq:123 / paired:qq:123")
+    if not isinstance(raw_key, str) or not raw_key.strip():
+        raise StudioError(422, "invalid_request",
+                          "actor_conversation_key 必填（成员本人已认证私聊）")
+    ref = _parse_conversation_key(raw_key)
+    if not principal_matches_private_conversation(
+            ref.channel, ref.kind, ref.conversation_id, principal_raw):
+        raise StudioError(403, "member_actor_mismatch",
+                          "只有成员本人的已认证私聊可以发起该操作；"
+                          "群主/他人代操作、群会话一律拒绝（MEM-02/03）")
+    history = store.get(f"chat:history:{ref.conversation_id}")
+    has_member_turn = isinstance(history, list) and any(
+        isinstance(m, dict) and m.get("role") == "user" for m in history)
+    if not has_member_turn:
+        raise StudioError(403, "member_actor_no_evidence",
+                          "该私聊尚无成员真实发言记录，不能代授 consent；"
+                          "请让成员本人先私聊鲸鱼后再授权（MEM-02）")
+    return principal_raw, ref.as_key()
+
+
+def _reject_unknown_fields(body: dict, allowed: set[str]) -> None:
+    unknown = sorted(set(body) - allowed)
+    if unknown:
+        raise StudioError(422, "invalid_request",
+                          f"未知字段: {unknown!r}（允许: {sorted(allowed)!r}）")
+
+
+def _consent_view(consent) -> dict:
+    return {
+        "principal_id": consent.principal_id,
+        "source_group": consent.source_group,
+        "scope": consent.scope,
+        "version": consent.version,
+        "granted_at": consent.granted_at,
+        "revoked_at": consent.revoked_at,
+        "ttl_s": consent.ttl_s,
+        "granted_via": consent.granted_via,
+    }
+
+
+def _member_consent_grant(handler, ctx, svc: StudioServices) -> None:
+    body = _require_json_body(handler)
+    _reject_unknown_fields(body, {"principal_id", "source_group", "scope",
+                                  "ttl_s", "actor_conversation_key"})
+    try:
+        principal_id, actor_key = _require_member_actor(
+            ctx.store, body.get("principal_id"), body.get("actor_conversation_key"))
+    except StudioError as exc:
+        _audit(ctx, "member.consent.grant", outcome="denied", reason=exc.code)
+        raise
+    source_group = body.get("source_group")
+    if not isinstance(source_group, str) or not _GROUP_ID_RE.match(source_group):
+        raise StudioError(422, "invalid_request",
+                          "source_group 必须是 group:<群号> 形式的会话 id")
+    scope = body.get("scope", "self_memory")
+    if scope not in KNOWN_CONSENT_SCOPES:
+        raise StudioError(422, "invalid_request",
+                          f"未知授权 scope: {scope!r}")
+    ttl_raw = body.get("ttl_s")
+    if ttl_raw is None:
+        ttl_s = float(DEFAULT_CONSENT_TTL_S)
+    elif isinstance(ttl_raw, (int, float)) and not isinstance(ttl_raw, bool) \
+            and 0 <= float(ttl_raw) <= _MAX_CONSENT_TTL_S:
+        ttl_s = float(ttl_raw)
+    else:
+        raise StudioError(422, "invalid_request",
+                          f"ttl_s 必须在 0..{_MAX_CONSENT_TTL_S} 之间")
+    with ctx.lock:
+        try:
+            consent = svc.consents.grant(
+                principal_id, source_group, scope=scope, ttl_s=ttl_s,
+                granted_by=principal_id, granted_via=actor_key)
+            ref = svc.bindings.ensure_member_space(
+                principal_id, conversation_key=actor_key,
+                granted_by=principal_id)
+        except (ConsentError, BindingError, MemorySpaceError) as exc:
+            _audit(ctx, "member.consent.grant", outcome="denied",
+                   reason="invalid_request", principal_id=principal_id)
+            raise StudioError(422, "invalid_request", str(exc)[:200])
+        _audit(ctx, "member.consent.grant", principal_id=principal_id,
+               source_group=source_group, version=consent.version,
+               space_id=ref.space_id)
+    handler._send(200, _ok({"consent": _consent_view(consent),
+                            "space_id": ref.space_id}))
+
+
+def _member_consent_revoke(handler, ctx, svc: StudioServices) -> None:
+    body = _require_json_body(handler)
+    _reject_unknown_fields(body, {"principal_id", "source_group"})
+    principal_raw = body.get("principal_id")
+    if not isinstance(principal_raw, str) or not _PRINCIPAL_RE.match(principal_raw):
+        raise StudioError(422, "invalid_request", "principal_id 非法")
+    source_group = body.get("source_group")
+    if source_group is not None and (not isinstance(source_group, str)
+                                     or not _GROUP_ID_RE.match(source_group)):
+        raise StudioError(422, "invalid_request", "source_group 非法")
+    with ctx.lock:
+        if source_group:
+            revoked = 1 if svc.consents.revoke(principal_raw, source_group) else 0
+        else:
+            revoked = svc.consents.revoke_all(principal_raw)
+        _audit(ctx, "member.consent.revoke", principal_id=principal_raw,
+               source_group=source_group or "*", revoked=revoked)
+    handler._send(200, _ok({"principal_id": principal_raw,
+                            "revoked": revoked}))
+
+
+def _member_consent_list(handler, ctx, svc: StudioServices) -> None:
+    """consent 状态元数据视图（管理通道可见；不含任何记忆内容）。"""
+    principal_id = str(handler.query.get("principal_id", [""])[0] or "")
+    if not _PRINCIPAL_RE.match(principal_id):
+        raise StudioError(422, "invalid_request", "principal_id 非法")
+    rows = svc.consents.list_for(principal_id)
+    handler._send(200, _ok({
+        "principal_id": principal_id,
+        "consents": [_consent_view(c) for c in rows],
+        "active": svc.consents.has_valid(principal_id),
+    }))
+
+
+def _member_space_or_404(svc: StudioServices, principal_id: str) -> str:
+    ref = svc.directory.space_for_member_management(principal_id)
+    if ref is None:
+        raise StudioError(404, "not_found", "该成员没有个人记忆空间（未授权过）")
+    return ref.space_id
+
+
+def _member_record_view(rec) -> dict:
+    content = dict(rec.content)
+    return {
+        "key": rec.key,
+        "kind": rec.kind.value,
+        "summary": str(content.get("summary") or ""),
+        "confidence": float(content.get("confidence") or 0.0),
+        "source_group": str(content.get("source_group") or ""),
+        "source_message_ids": list(content.get("source_message_ids") or []),
+        "consent_version": int(content.get("consent_version") or 0),
+        "observed_at": str(content.get("observed_at") or ""),
+        "expires_at": content.get("expires_at"),
+        "created_at": rec.created_at.isoformat(),
+        "superseded": "superseded" in rec.tags,
+    }
+
+
+def _member_memory_list(handler, ctx, svc: StudioServices) -> None:
+    """memory.list-own：本人查看自己的成员记忆（须本人私聊证据）。"""
+    try:
+        principal_id, _ = _require_member_actor(
+            ctx.store,
+            handler.query.get("principal_id", [""])[0],
+            handler.query.get("actor_conversation_key", [""])[0])
+    except StudioError as exc:
+        _audit(ctx, "member.memory.list", outcome="denied", reason=exc.code)
+        raise
+    space_id = _member_space_or_404(svc, principal_id)
+    items: list[dict] = []
+    for kind in (MemoryKind.EPISODE, MemoryKind.PREFERENCE):
+        if len(items) >= _MEMBER_LIST_LIMIT:
+            break
+        for rec in ctx.store.list_by_kind(kind, space_ids=(space_id,)):
+            if "member" not in rec.tags or "superseded" in rec.tags:
+                continue
+            items.append(_member_record_view(rec))
+            if len(items) >= _MEMBER_LIST_LIMIT:
+                break
+    _audit(ctx, "member.memory.list", principal_id=principal_id,
+           count=len(items))
+    handler._send(200, _ok({"principal_id": principal_id,
+                            "space_id": space_id, "items": items}))
+
+
+def _member_record_for_write(ctx, svc: StudioServices, principal_id: str,
+                             key: str):
+    """取出待纠正/删除的成员记录；越空间/越标签一律 404（不泄露存在性）。"""
+    space_id = _member_space_or_404(svc, principal_id)
+    rec = ctx.store.get_record(key)
+    if rec is None or rec.space_id != space_id or "member" not in rec.tags:
+        raise StudioError(404, "not_found", "记录不存在")
+    return space_id, rec
+
+
+def _plugin_registry(ctx):
+    return getattr(getattr(ctx, "manager", None), "registry", None)
+
+
+def _member_memory_correct(handler, ctx, svc: StudioServices) -> None:
+    """memory.correct-own：本人更正一条记忆（旧记录 superseded，退出召回）。"""
+    body = _require_json_body(handler)
+    _reject_unknown_fields(body, {"principal_id", "actor_conversation_key",
+                                  "key", "new_summary"})
+    try:
+        principal_id, _ = _require_member_actor(
+            ctx.store, body.get("principal_id"), body.get("actor_conversation_key"))
+    except StudioError as exc:
+        _audit(ctx, "member.memory.correct", outcome="denied", reason=exc.code)
+        raise
+    key = str(body.get("key") or "").strip()
+    new_summary = body.get("new_summary")
+    if not isinstance(new_summary, str) or not (1 <= len(new_summary.strip())
+                                                <= 1500):
+        raise StudioError(422, "invalid_request",
+                          "new_summary 必须是 1..1500 字符的字符串")
+    if contains_sensitive(new_summary):
+        _audit(ctx, "member.memory.correct", outcome="denied",
+               reason="sensitive_content", principal_id=principal_id)
+        raise StudioError(422, "invalid_request",
+                          "更正内容含敏感信息（手机号/证件/地址/凭据类），已拒绝")
+    with ctx.lock:
+        space_id, old = _member_record_for_write(ctx, svc, principal_id, key)
+        old_content = dict(old.content)
+        old_summary = str(old_content.get("summary") or "")
+        # 旧记录退出一切召回（superseded），新记录留在同一成员空间。
+        old_content["layer"] = "superseded"
+        old_content["superseded_at"] = _now_iso()
+        ctx.store.put_record(type(old)(
+            kind=old.kind, key=old.key, content=old_content,
+            record_id=old.record_id, created_at=old.created_at,
+            tags=tuple(set(old.tags) | {"superseded"}), space_id=old.space_id))
+        _purge_embedding(_plugin_registry(ctx), old_summary)
+        new_key = f"member-mem:corr-{uuid4().hex[:16]}"
+        new_content = dict(old.content)
+        new_content.update({
+            "summary": new_summary.strip()[:1500],
+            "source": "member-correct",
+            "layer": "member",
+            "corrected_from": old.key,
+            "last_confirmed": _now_iso(),
+        })
+        ctx.store.put_record(type(old)(
+            kind=old.kind, key=new_key, content=new_content,
+            tags=tuple(t for t in old.tags if t != "superseded"),
+            space_id=space_id))
+        _audit(ctx, "member.memory.correct", principal_id=principal_id,
+               old_key_tail=key[-8:], new_key_tail=new_key[-8:])
+    handler._send(200, _ok({"corrected": True, "old_key": key,
+                            "new_key": new_key}))
+
+
+def _member_memory_delete(handler, ctx, svc: StudioServices) -> None:
+    """memory.delete-own：真删 + embedding 缓存 forget_text 传播。"""
+    body = _require_json_body(handler)
+    _reject_unknown_fields(body, {"principal_id", "actor_conversation_key",
+                                  "key"})
+    try:
+        principal_id, _ = _require_member_actor(
+            ctx.store, body.get("principal_id"), body.get("actor_conversation_key"))
+    except StudioError as exc:
+        _audit(ctx, "member.memory.delete", outcome="denied", reason=exc.code)
+        raise
+    key = str(body.get("key") or "").strip()
+    with ctx.lock:
+        _member_record_for_write(ctx, svc, principal_id, key)
+        deleted = forget_gone_everywhere(
+            ctx.store, key, registry=_plugin_registry(ctx))
+        _audit(ctx, "member.memory.delete", principal_id=principal_id,
+               key_tail=key[-8:], deleted=bool(deleted))
+    handler._send(200, _ok({"deleted": bool(deleted), "key": key}))
+
+
+# ---------------------------------------------------------------------------
 # 路由入口（server._dispatch 挂载）
 # ---------------------------------------------------------------------------
 
@@ -1089,6 +1499,36 @@ def _dispatch_studio(handler, method: str, parts: list[str]) -> None:
         if method != "PUT":
             raise StudioError(405, "method_not_allowed", "use PUT")
         _put_capabilities(handler, ctx, svc, rest[1])
+    elif len(rest) == 3 and rest[0] == "conversations" and rest[2] == "rhythm":
+        if method == "GET":
+            _get_rhythm(handler, ctx, rest[1])
+        elif method == "PUT":
+            _put_rhythm(handler, ctx, rest[1])
+        else:
+            raise StudioError(405, "method_not_allowed", "use GET or PUT")
+    elif rest == ["members", "consent"]:
+        if method == "POST":
+            _member_consent_grant(handler, ctx, svc)
+        elif method == "GET":
+            _member_consent_list(handler, ctx, svc)
+        else:
+            raise StudioError(405, "method_not_allowed", "use GET or POST")
+    elif rest == ["members", "consent", "revoke"]:
+        if method != "POST":
+            raise StudioError(405, "method_not_allowed", "use POST")
+        _member_consent_revoke(handler, ctx, svc)
+    elif rest == ["members", "memory"]:
+        if method != "GET":
+            raise StudioError(405, "method_not_allowed", "use GET")
+        _member_memory_list(handler, ctx, svc)
+    elif rest == ["members", "memory", "correct"]:
+        if method != "POST":
+            raise StudioError(405, "method_not_allowed", "use POST")
+        _member_memory_correct(handler, ctx, svc)
+    elif rest == ["members", "memory", "delete"]:
+        if method != "POST":
+            raise StudioError(405, "method_not_allowed", "use POST")
+        _member_memory_delete(handler, ctx, svc)
     elif _path_known(rest):
         # 路径模板已知但方法不符（PUT 子资源已在上面拦截，这里只剩 GET 集合）
         raise StudioError(405, "method_not_allowed", "method not allowed")
@@ -1099,10 +1539,13 @@ def _dispatch_studio(handler, method: str, parts: list[str]) -> None:
 def _path_known(rest: list[str]) -> bool:
     """路径模板已知但方法不符 → 405（否则 404）。"""
     if rest in (["conversations"], ["personas"], ["memory-spaces"], ["graph"],
-                ["forks"], ["forks", "preview"], ["vault", "records"]):
+                ["forks"], ["forks", "preview"], ["vault", "records"],
+                ["members", "consent"], ["members", "consent", "revoke"],
+                ["members", "memory"], ["members", "memory", "correct"],
+                ["members", "memory", "delete"]):
         return True
     return len(rest) == 3 and rest[0] == "conversations" \
-        and rest[2] in ("persona", "memories", "capabilities")
+        and rest[2] in ("persona", "memories", "capabilities", "rhythm")
 
 
 def dispatch_auth(handler, method: str, parts: list[str]) -> None:

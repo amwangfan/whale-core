@@ -14,7 +14,7 @@ def test_remember_stores_stable_curated_fact():
     assert reply == "好，我记住啦：我怕辣"
     prefs = store.list_by_kind(MemoryKind.PREFERENCE)
     assert len(prefs) == 1
-    assert prefs[0].content["summary"] == "我怕辣"
+    assert prefs[0].content["summary"] == "用户自述：我怕辣"
     assert prefs[0].content["source"] == "qq:owner"
     assert prefs[0].content["evidence_id"] == "qq:c:m1"
     assert prefs[0].content["stable_fact"] is True

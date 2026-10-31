@@ -271,19 +271,24 @@ def assemble_runtime(
     from whale_core.life.context_resolver import (
         ConversationContextResolver, pairing_lookup_from_mapping)
     from whale_core.memory.bindings import BindingStore
+    from whale_core.memory.consent import MemberConsentStore, MemberMemoryDirectory
     from whale_core.memory.spaces import SpaceStore, ensure_owner_working_copy
     from whale_core.life.temporary_auth import TemporaryAuthService
     _spaces = SpaceStore(store)
     _owner_space = ensure_owner_working_copy(store, owner="owner")
     _auth = TemporaryAuthService(store, owner_id="owner")
+    _bindings = BindingStore(store, _spaces)
     context_resolver = ConversationContextResolver(
         pairing_lookup=pairing_lookup_from_mapping(
             {("api", "console"): "owner", ("cli", "local"): "owner",
              ("voice", "console"): "owner"}),
-        bindings=BindingStore(store, _spaces),
+        bindings=_bindings,
         grants=_auth,
         owner_id="owner",
-        owner_default_space=_owner_space)
+        owner_default_space=_owner_space,
+        # G2：成员个人记忆目录（绑定 + 有效 consent 双门，仅本人私聊下发）。
+        member_memory=MemberMemoryDirectory(
+            _bindings, _spaces, MemberConsentStore(store)))
     def _grant_gate(grant_ids, fingerprint, required_scope=None):
         return any(_auth.consume_grant_use(
             g, action_fingerprint=fingerprint, required_scope=required_scope)

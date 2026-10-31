@@ -13,6 +13,14 @@ class Incoming:
     transport_authenticated: bool = False
     # 附件（图片等）：{"kind": "pic", "file_path": "...", "url": "..."} 元组
     attachments: tuple = ()
+    # G1：完整入站元数据（TrustedInboundEvent 子集）。
+    # mentions：被 @ 的目标 uid 元组；reply_to：引用消息的来源
+    # {"sender_uin","sender_uid","msg_id","msg_seq"}；均来自平台事件元数据，
+    # 不从正文猜测（ID-01/02）。
+    sender_uid: str = ""
+    send_time: str = ""
+    mentions: tuple = ()
+    reply_to: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -27,6 +35,11 @@ class OwnerEvent:
     # S1（Whale Studio）：保留真实发送者。群聊中 sender 是说话成员本人，
     # 不等于全群身份；下游禁止用 owner_id 推断群里其他成员的权限。
     sender_id: str = ""
+    # G1：@/引用/uid/时间元数据随事件穿透（含持久化 inbox 路径）。
+    sender_uid: str = ""
+    send_time: str = ""
+    mentions: tuple = ()
+    reply_to: tuple = ()
 
 
 class OwnerChannelRegistry:
@@ -45,4 +58,8 @@ class OwnerChannelRegistry:
                           conversation=message.conversation,
                           message_id=message.message_id, text=message.text,
                           attachments=tuple(message.attachments or ()),
-                          sender_id=message.account)
+                          sender_id=message.account,
+                          sender_uid=message.sender_uid,
+                          send_time=message.send_time,
+                          mentions=tuple(message.mentions or ()),
+                          reply_to=tuple(message.reply_to or ()))

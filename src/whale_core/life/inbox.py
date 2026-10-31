@@ -51,6 +51,7 @@ class InboxJob:
     account: str
     text: str
     attachments: tuple = ()  # 附件元数据（{"kind","file_path","url"}）
+    meta: dict = None  # G1：{"sender_uid","send_time","mentions","reply_to"}
     status: str = STATUS_PENDING
     attempts: int = 0
     last_error: str = ""
@@ -94,6 +95,10 @@ class SqliteInbox:
         if "attachments_json" not in cols:
             self.db.execute(
                 "ALTER TABLE inbox ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'")
+        # G1：消息元数据列（sender_uid/mentions/reply_to/send_time 等）
+        if "meta_json" not in cols:
+            self.db.execute(
+                "ALTER TABLE inbox ADD COLUMN meta_json TEXT NOT NULL DEFAULT '{}'")
         self.db.commit()
         if self.path != ":memory:" and os.name == "posix":
             # Inbox contains private message text; do not leave the main DB world-readable.
@@ -102,7 +107,7 @@ class SqliteInbox:
     # ── 入队 / 认领 ────────────────────────────────────────────
 
     def enqueue(self, *, message_id: str, conversation: str, account: str, text: str,
-                attachments=()) -> bool:
+                attachments=(), meta=None) -> bool:
         """幂等入队：新任务返回 True；message_id 已存在返回 False（不重置状态）。
 
         ``attachments`` 只接受可 JSON 序列化的附件元数据（路径/URL 引用），
@@ -117,12 +122,15 @@ class SqliteInbox:
             [dict(a) for a in (attachments or ())][:8], ensure_ascii=False)
         if len(attachments_json) > 20000:
             raise ValueError("attachments metadata too large")
+        meta_json = _json.dumps(dict(meta or {}), ensure_ascii=False)
+        if len(meta_json) > 4000:
+            raise ValueError("meta too large")
         now = _iso(_utc_now())
         with self._lock, self.db:
             cur = self.db.execute(
-                "INSERT OR IGNORE INTO inbox VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT OR IGNORE INTO inbox VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (mid, conversation, account, text, STATUS_PENDING, 0, "",
-                 now, now, None, attachments_json),
+                 now, now, None, attachments_json, meta_json),
             )
             return cur.rowcount > 0
 
@@ -133,7 +141,7 @@ class SqliteInbox:
         with self._lock, self.db:
             row = self.db.execute(
                 "SELECT message_id, conversation, account, text, status, attempts, "
-                "last_error, created_at, updated_at, attachments_json FROM inbox "
+                "last_error, created_at, updated_at, attachments_json, meta_json FROM inbox "
                 "WHERE status=? ORDER BY created_at, rowid LIMIT 1",
                 (STATUS_PENDING,),
             ).fetchone()
@@ -149,6 +157,12 @@ class SqliteInbox:
             attachments = tuple(_json.loads(row[9] or "[]"))
         except (ValueError, TypeError):
             attachments = ()
+        try:
+            meta = _json.loads(row[10] or "{}")
+            if not isinstance(meta, dict):
+                meta = {}
+        except (ValueError, TypeError):
+            meta = {}
         return InboxJob(
             message_id=row[0],
             conversation=row[1],
@@ -160,6 +174,7 @@ class SqliteInbox:
             created_at=row[7],
             updated_at=row[8],
             attachments=attachments,
+            meta=meta,
         )
 
     # ── 结果落账 ───────────────────────────────────────────────

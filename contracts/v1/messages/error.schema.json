@@ -80,6 +80,7 @@
             "unavailable",
             "invalid_message",
             "permission_missing",
+            "background_restricted",
             "internal"
           ],
           "description": "V1 错误码全集（§4）"

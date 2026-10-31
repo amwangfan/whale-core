@@ -5,11 +5,12 @@
 
 import { useState } from "react";
 import type {
+  ConversationRhythm,
   StudioConversation,
   StudioMemorySpace,
   StudioPersona,
 } from "../../api";
-import { CapabilityCard } from "./cards";
+import { CapabilityCard, RhythmEditor } from "./cards";
 
 export default function StudioListMode({
   conversations,
@@ -19,6 +20,7 @@ export default function StudioListMode({
   onBindPersona,
   onBindMemory,
   onSetCapabilities,
+  onSetRhythm,
   onFork,
 }: {
   conversations: StudioConversation[];
@@ -33,6 +35,7 @@ export default function StudioListMode({
     version?: number,
   ) => void;
   onSetCapabilities: (key: string, scopes: string[], version?: number) => void;
+  onSetRhythm: (key: string, rhythm: ConversationRhythm, version?: number) => void;
   onFork: (spaceId: string) => void;
 }) {
   if (conversations.length === 0) {
@@ -50,6 +53,7 @@ export default function StudioListMode({
           onBindPersona={onBindPersona}
           onBindMemory={onBindMemory}
           onSetCapabilities={onSetCapabilities}
+          onSetRhythm={onSetRhythm}
           onFork={onFork}
         />
       ))}
@@ -65,6 +69,7 @@ function ConversationEditor({
   onBindPersona,
   onBindMemory,
   onSetCapabilities,
+  onSetRhythm,
   onFork,
 }: {
   conv: StudioConversation;
@@ -79,6 +84,7 @@ function ConversationEditor({
     version?: number,
   ) => void;
   onSetCapabilities: (key: string, scopes: string[], version?: number) => void;
+  onSetRhythm: (key: string, rhythm: ConversationRhythm, version?: number) => void;
   onFork: (spaceId: string) => void;
 }) {
   const boundIds = new Set((conv.memory_spaces ?? []).map((m) => m.space_id));
@@ -167,6 +173,13 @@ function ConversationEditor({
           保存能力配置
         </button>
       </fieldset>
+
+      <RhythmEditor
+        rhythm={conv.rhythm}
+        busy={busy}
+        resetKey={conv.key}
+        onSave={(rhythm) => onSetRhythm(conv.key, rhythm, conv.rhythm_version)}
+      />
     </section>
   );
 }

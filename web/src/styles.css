@@ -2186,6 +2186,29 @@ code,
 .studio-cap-note {
   color: var(--warn);
 }
+.studio-rhythm {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin: 10px 0 0;
+  display: grid;
+  gap: 8px;
+  font-size: 13px;
+}
+.studio-rhythm legend {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 0 4px;
+}
+.studio-rhythm label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+}
+.studio-rhythm input[type="number"] {
+  width: 72px;
+}
 .studio-modal-backdrop {
   position: fixed;
   inset: 0;

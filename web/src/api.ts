@@ -534,7 +534,25 @@ export interface StudioConversation {
   capabilities?: string[];
   capabilities_version?: number;
   ceiling?: string[];
+  /** G4：会话节奏（只影响回复节奏，与能力/记忆授权无关）。 */
+  rhythm?: ConversationRhythm;
+  rhythm_version?: number;
   malformed?: boolean;
+}
+
+/** G4 会话节奏卡：活跃模式 / 单条回复分段上限（0=跟随默认）/ 免打扰。 */
+export interface ConversationRhythm {
+  activity: "quiet" | "balanced" | "lively";
+  max_segments: number;
+  dnd: boolean;
+}
+
+export interface StudioRhythmResult {
+  key: string;
+  rhythm: ConversationRhythm;
+  version: number;
+  configured?: boolean;
+  changed?: boolean;
 }
 
 export interface StudioMemoryBinding {
@@ -771,6 +789,24 @@ export const studioApi = {
       method: "PUT",
       body: JSON.stringify({
         capabilities,
+        ...(expectedVersion !== undefined
+          ? { expected_version: expectedVersion }
+          : {}),
+      }),
+    }),
+
+  getRhythm: (key: string) =>
+    request<StudioRhythmResult>(`${studioConv(key)}/rhythm`),
+
+  putRhythm: (
+    key: string,
+    rhythm: ConversationRhythm,
+    expectedVersion?: number,
+  ) =>
+    request<StudioRhythmResult>(`${studioConv(key)}/rhythm`, {
+      method: "PUT",
+      body: JSON.stringify({
+        ...rhythm,
         ...(expectedVersion !== undefined
           ? { expected_version: expectedVersion }
           : {}),

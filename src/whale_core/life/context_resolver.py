@@ -31,6 +31,7 @@ from whale_core.life.conversation_context import (
     SCOPE_OUTBOX_SUBMIT,
     SCOPE_TASK_READ_SELF,
     SCOPE_TOOL_WEB_SEARCH,
+    principal_matches_private_conversation,
 )
 
 # ---- 能力上限（§6.2 权限矩阵的首版落地） ------------------------------
@@ -88,6 +89,16 @@ class GrantLookup(Protocol):
     ) -> Tuple[TemporaryGrantRef, ...]: ...
 
 
+class MemberMemoryLookup(Protocol):
+    """G2 提供：查询某成员的 member_private 空间（绑定 + 有效 consent 双门）。
+
+    返回 None 表示该成员当前没有可下发的个人空间（未授权 / 已撤销 /
+    空间已注销）。本协议只读，永不抛错 widening 权限。
+    """
+
+    def member_space_for(self, principal_id: str) -> Optional[MemorySpaceRef]: ...
+
+
 def derive_kind(channel: str, conversation_id: str) -> ConversationKind:
     """从渠道与现有 conversation 字符串推导会话类型。
 
@@ -124,6 +135,7 @@ class ConversationContextResolver:
         grants: Optional[GrantLookup] = None,
         owner_id: str = "owner",
         owner_default_space: Optional[MemorySpaceRef] = None,
+        member_memory: Optional[MemberMemoryLookup] = None,
         policy_version: int = 1,
     ) -> None:
         # pairing_lookup(channel, sender_id) -> owner_id | None
@@ -131,6 +143,8 @@ class ConversationContextResolver:
         self._bindings = bindings
         self._grants = grants
         self._owner_id = owner_id
+        # G2：成员个人记忆目录（PrincipalMemoryBinding + 有效 consent 双门）。
+        self._member_memory = member_memory
         # 主人私聊/控制台等已认证**非群**会话的默认工作副本（S2 首版策略）。
         self._owner_default_space = owner_default_space
         self._policy_version = policy_version
@@ -219,6 +233,28 @@ class ConversationContextResolver:
                 s.space_id != self._owner_default_space.space_id for s in spaces)
         ):
             spaces = spaces + (self._owner_default_space,)
+
+        # G2：成员本人已认证私聊 → 下发其 member_private 空间（MEM-03）。
+        # 闸门全部在服务端：私聊且会话可证明属于该 sender（结构性证据，
+        # 不看昵称/正文）→ 目录内有绑定 + 有效 consent。群聊永不进入此分支；
+        # 群聊的 INV-03 过滤上面也已把 member_private 排除（纵深防御）。
+        if (
+            self._member_memory is not None
+            and not _is_group(kind)
+            and principal_matches_private_conversation(
+                channel, kind, conversation_id, principal.principal_id)
+        ):
+            try:
+                member_ref = self._member_memory.member_space_for(
+                    principal.principal_id)
+            except Exception:
+                member_ref = None  # 证据源故障 = 不下发（fail closed）
+            if (
+                member_ref is not None
+                and member_ref.type is MemorySpaceType.MEMBER_PRIVATE
+                and all(s.space_id != member_ref.space_id for s in spaces)
+            ):
+                spaces = spaces + (member_ref,)
 
         return ResolvedContext(
             conversation=conv,

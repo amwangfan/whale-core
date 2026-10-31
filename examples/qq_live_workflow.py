@@ -43,6 +43,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -292,17 +293,23 @@ def cmd_run(args) -> int:
     from whale_core.life.context_resolver import (
         ConversationContextResolver, pairing_lookup_from_mapping)
     from whale_core.memory.bindings import BindingStore
+    from whale_core.memory.consent import MemberConsentStore, MemberMemoryDirectory
+    from whale_core.memory.extraction import MemberMemoryExtractor
     from whale_core.memory.spaces import SpaceStore, ensure_owner_working_copy
     from whale_core.life.temporary_auth import TemporaryAuthService
     _spaces = SpaceStore(store)
     _owner_space = ensure_owner_working_copy(store, owner="owner")
     auth_service = TemporaryAuthService(store, owner_id="owner")
+    _bindings = BindingStore(store, _spaces)
     context_resolver = ConversationContextResolver(
         pairing_lookup=pairing_lookup_from_mapping(bindings),
-        bindings=BindingStore(store, _spaces),
+        bindings=_bindings,
         grants=auth_service,
         owner_id="owner",
-        owner_default_space=_owner_space)
+        owner_default_space=_owner_space,
+        # G2：群友个人记忆（仅成员本人已认证私聊、consent 有效时下发）。
+        member_memory=MemberMemoryDirectory(
+            _bindings, _spaces, MemberConsentStore(store)))
 
     def _grant_gate(grant_ids, fingerprint, required_scope=None):
         return any(auth_service.consume_grant_use(
@@ -377,11 +384,34 @@ def cmd_run(args) -> int:
             reason="两段式慢任务完成后的补发（ack 已发）",
             evidence=(f"qq:{event.conversation}:{event.message_id}",),
             channel="direct_message"))
-        owner_draft_ids.add(draft_id)
-        approved_draft_ids.add(draft_id)
-        receipt = plugin_gateway.dispatch(send_message_intent(
-            event.conversation, reply, draft_id=draft_id))
-        print(f"  [补发] {draft_id} → {receipt}")
+        # G3：补发也分段 + epoch 校验（结果回来时话题可能已换）
+        from whale_core.life.segments import split_reply
+        from whale_core.life.batching import current_epoch, epoch_fresh
+        from whale_core.life.rhythm import RhythmStore, rhythm_key_for
+        # G4：会话节奏——免打扰开启时压制任务补发（不拦截被动回复）；
+        # 分段上限取节奏卡配置（quiet = 单气泡）。
+        rhythm = RhythmStore(store).get(
+            rhythm_key_for("qq", event.conversation) or "")
+        if rhythm.dnd:
+            print("  [节奏] 免打扰开启，任务补发跳过")
+            return
+        ep = current_epoch(store, event.conversation)
+        segments = split_reply(
+            reply, is_group=event.conversation.startswith("group:"),
+            max_segments=rhythm.effective_max_segments(
+                is_group=event.conversation.startswith("group:")))
+        for i, seg in enumerate(segments):
+            if not epoch_fresh(store, event.conversation, ep):
+                print(f"  [补发] 会话已有新消息，剩余 {len(segments)-i} 段作废")
+                break
+            seg_id = draft_id if len(segments) == 1 else f"{draft_id}#{i}"
+            owner_draft_ids.add(seg_id)
+            approved_draft_ids.add(seg_id)
+            receipt = plugin_gateway.dispatch(send_message_intent(
+                event.conversation, seg, draft_id=seg_id))
+            print(f"  [补发] {seg_id} → {receipt}")
+            if i + 1 < len(segments):
+                time.sleep(0.35)
     registry = OwnerChannelRegistry(owner_id="owner", bindings=bindings)
 
     # QQ/WeQ is registered as a channel plugin. The input adapter is consumed here
@@ -499,7 +529,43 @@ def cmd_run(args) -> int:
         if recovered:
             print(f"[恢复] 处理被上次重启打断的任务：{len(recovered)} 个")
 
+    # G3：入站合批——同一人短窗口连发合并为一个处理回合（不同发送者
+    # 绝不合并）；epoch 在冲刷时 +1，发送前校验作废旧片段（MSG-02）。
+    from whale_core.life.batching import (
+        MessageBatcher, bump_epoch, epoch_fresh)
+
     def on_owner(event):
+        batcher.offer(event)
+
+    def on_unpaired_buffered(incoming):
+        batcher.offer(incoming)
+
+    def _flush_batch(batch):
+        """合批冲刷：合并同发送者连续消息为一个事件再分发。"""
+        last = batch.last_event
+        if last is None:
+            return
+        # G6 中-1：epoch 在冲刷时捕获并随批透传——发送侧以此为作废基线，
+        # AI 处理期间到达的新消息不会被吞进基线。
+        import dataclasses as _dc0
+        batch = _dc0.replace(batch, epoch=bump_epoch(store, batch.conversation))
+        import dataclasses as _dc
+        merged_attach = []
+        for ev in batch.events:
+            merged_attach.extend(getattr(ev, "attachments", ()) or ())
+        event = _dc.replace(last, text=batch.text,
+                            message_id=batch.message_ids[-1],
+                            attachments=tuple(merged_attach))
+        if batch.message_ids and len(batch.message_ids) > 1:
+            print(f"  [合批] {len(batch.message_ids)} 条合并为一回合 ← {batch.sender_id}")
+        if isinstance(last, OwnerEvent):
+            _dispatch_owner(event, epoch=batch.epoch)
+        else:
+            _dispatch_unpaired(event, epoch=batch.epoch)
+
+    batcher = MessageBatcher(_flush_batch)
+
+    def _dispatch_owner(event, *, epoch: int = 0):
         if not adapter.feed(event):
             raise RuntimeError("QQ/WeQ plugin input adapter full")
         plugin_event = next(adapter.poll(), None)
@@ -512,6 +578,9 @@ def cmd_run(args) -> int:
             text=str(payload["text"]),
             attachments=tuple(payload.get("attachments") or ()),
             sender_id=str(payload.get("sender_id") or ""),
+            sender_uid=str(payload.get("sender_uid") or ""),
+            mentions=tuple(payload.get("mentions") or ()),
+            reply_to=tuple(payload.get("reply_to") or ()),
         )
         # F-03（红队）：sudo 验证尝试的明文永不进日志（拦截在工作流内，
         # 但宿主打印发生得更早——在这里就脱敏）。
@@ -520,6 +589,16 @@ def cmd_run(args) -> int:
             else event.text[:60]
         print(f"\n← [owner] conv={event.conversation} msg={event.message_id} "
               f"text={shown!r}")
+        # G1/G3.4：群里即使是主人也先裁决「该不该回」——未 @/引用机器人
+        # 的群消息只入时间线，不触发回复（主人在群里同样不提权不打扰）。
+        if event.conversation.startswith("group:"):
+            decision = target_resolver.decide(
+                conversation=event.conversation, sender_id=event.sender_id,
+                message_id=event.message_id, mentions=event.mentions,
+                reply_to=event.reply_to, sender_uid=event.sender_uid)
+            if decision.action != "reply":
+                print("  [旁观] 群消息未指向鲸鱼，仅记录时间线")
+                return
         try:
             result = workflow.handle_owner_event(event)
         except Exception as exc:  # AI/存储失败不打断监听（inbox 模式下按策略重试）
@@ -540,13 +619,33 @@ def cmd_run(args) -> int:
             # 语音产物先发（同步路径的 TTS 任务产物——「语音跟我说」这类）
             from whale_core.life.qq_workflow import _extract_audio_artifacts
             _send_audio_artifacts(_extract_audio_artifacts(result.get("receipts")))
-            # The dual-switch unattended mode is the only auto path that can reach
-            # the real port; the host authorizes this owner-derived draft explicitly.
-            owner_draft_ids.add(result["draft_id"])
-            approved_draft_ids.add(result["draft_id"])
-            receipt = plugin_gateway.dispatch(send_message_intent(
-                event.conversation, result["reply"], draft_id=result["draft_id"]))
-            print(f"  [插件网关] {receipt}")
+            # G3：语义分段多气泡；每段发送前校验 epoch——新消息已到达则
+            # 剩余片段作废（MSG-02：旧回复不越过新消息）。
+            from whale_core.life.segments import split_reply
+            from whale_core.life.batching import current_epoch
+            from whale_core.life.rhythm import RhythmStore, rhythm_key_for
+            # G4：分段上限取会话节奏卡配置（quiet = 单气泡）。
+            rhythm = RhythmStore(store).get(
+                rhythm_key_for("qq", event.conversation) or "")
+            ep = current_epoch(store, event.conversation)
+            segments = split_reply(
+                result["reply"],
+                is_group=event.conversation.startswith("group:"),
+                max_segments=rhythm.effective_max_segments(
+                    is_group=event.conversation.startswith("group:")))
+            for i, seg in enumerate(segments):
+                if not epoch_fresh(store, event.conversation, ep):
+                    print(f"  [分段] 会话已有新消息，剩余 {len(segments)-i} 段作废")
+                    break
+                seg_id = result["draft_id"] if len(segments) == 1 \
+                    else f"{result['draft_id']}#{i}"
+                owner_draft_ids.add(seg_id)
+                approved_draft_ids.add(seg_id)
+                receipt = plugin_gateway.dispatch(send_message_intent(
+                    event.conversation, seg, draft_id=seg_id))
+                print(f"  [插件网关] 段{i+1}/{len(segments)} {receipt}")
+                if i + 1 < len(segments):
+                    time.sleep(0.35)
         elif args.auto_approve:
             # --auto-approve remains isolated dry-run: no real Outbox or plugin executor.
             dispatch_dry_run(store, result["draft_id"])
@@ -559,11 +658,23 @@ def cmd_run(args) -> int:
     stranger_chat = os.environ.get("WHALE_QQ_STRANGER_CHAT", "").strip() == "1"
 
     def on_unpaired(incoming):
+        batcher.offer(incoming)
+
+    def _dispatch_unpaired(incoming, *, epoch: int = 0):
         is_private = str(incoming.conversation).startswith("private:")
         # S7 灰度：白名单群的成员消息也进入受限对话（匿名 ctx + 群上限，
         # resolver 强制；sudo 在群里永不验证）。
         if not is_private and not str(incoming.conversation).startswith("group:"):
             return  # 频道等其他形态：不处理
+        if not is_private:
+            # G1：群消息先裁决「该不该回」——未 @/未引用机器人 = 旁观，
+            # 只留时间线，不产生回复（防刷屏）。
+            decision = target_resolver.decide(
+                conversation=incoming.conversation, sender_id=incoming.account,
+                message_id=incoming.message_id, mentions=incoming.mentions,
+                reply_to=incoming.reply_to, sender_uid=incoming.sender_uid)
+            if decision.action != "reply":
+                return
         from whale_core.life.temporary_auth import maybe_intercept_sudo
         if maybe_intercept_sudo(incoming.text) is None and not stranger_chat:
             print(f"[未配对] account={incoming.account} conv={incoming.conversation} "
@@ -593,26 +704,72 @@ def cmd_run(args) -> int:
         # Outbox 账本 + port 锁定 owner 目标）。陌生人/群回复走端口的
         # 回复语义直发方法（目标 = 来件对端/白名单群，已在上方过安全审核）。
         port_inner = getattr(send_port, "_inner", send_port)
-        if str(incoming.conversation).startswith("group:"):
-            group_code = incoming.conversation.split(":", 1)[1]
-            ok = port_inner.send_group_text(group_code, reply) \
-                if hasattr(port_inner, "send_group_text") else False
-            print(f"  [群回复] {'已发送' if ok else '发送失败'} ← {group_code}")
-            return
-        peer_uid = incoming.conversation.split(":", 1)[1]
-        ok = port_inner.send_c2c(peer_uid, reply) \
-            if hasattr(port_inner, "send_c2c") else False
-        print(f"  [陌生人回复] {'已发送' if ok else '发送失败'} ← {peer_uid[:12]}…")
+        # G3：分段 + epoch 校验（新消息到达则剩余段作废）
+        from whale_core.life.segments import split_reply
+        from whale_core.life.batching import current_epoch, epoch_fresh
+        from whale_core.life.rhythm import RhythmStore, rhythm_key_for
+        ep = epoch or current_epoch(store, incoming.conversation)
+        is_group = incoming.conversation.startswith("group:")
+        # G4：分段上限取会话节奏卡配置（quiet = 单气泡）。
+        rhythm = RhythmStore(store).get(
+            rhythm_key_for("qq", incoming.conversation) or "")
+        segments = split_reply(
+            reply, is_group=is_group,
+            max_segments=rhythm.effective_max_segments(is_group=is_group))
+        for i, seg in enumerate(segments):
+            if not epoch_fresh(store, incoming.conversation, ep):
+                print(f"  [分段] 会话已有新消息，剩余 {len(segments)-i} 段作废")
+                break
+            if is_group:
+                group_code = incoming.conversation.split(":", 1)[1]
+                ok = port_inner.send_group_text(group_code, seg) \
+                    if hasattr(port_inner, "send_group_text") else False
+                print(f"  [群回复] 段{i+1}/{len(segments)} {'已发送' if ok else '发送失败'} ← {group_code}")
+            else:
+                peer_uid = incoming.conversation.split(":", 1)[1]
+                ok = port_inner.send_c2c(peer_uid, seg) \
+                    if hasattr(port_inner, "send_c2c") else False
+                print(f"  [陌生人回复] 段{i+1}/{len(segments)} {'已发送' if ok else '发送失败'} ← {peer_uid[:12]}…")
+            if i + 1 < len(segments):
+                time.sleep(0.35)
+        if is_group and ok:
+            # G1：自己的发言也进时间线（is_self），模型上下文才完整
+            timeline.append(incoming.conversation,
+                            message_id=f"self:{incoming.message_id}",
+                            sender_id=self_uin, text=reply, is_self=True)
 
     def on_mass(meta):
         print(f"[mass] {meta['chatType']}:{meta['convId']} seq {meta['fromSeq']}→{meta['toSeq']} "
               f"count={meta['count']}（合并事件，不进消息管道）")
+
+    # G1：群时间线 + 回复目标裁决（self uid 用于识别 @/引用机器人）
+    from whale_core.memory.timeline import GroupTimelineStore
+    from whale_core.life.reply_target import ReplyTargetResolver
+    timeline = GroupTimelineStore(store)
+    workflow.companion.timeline = timeline
+    self_uid = os.environ.get("QQ_SELF_UID", "").strip()
+    if not self_uid:
+        try:
+            import glob as _glob, json as _json
+            for f in _glob.glob(
+                    os.path.expanduser("~/.config/weq/config/accounts/*.json")):
+                cfg = _json.load(open(f))
+                if str(cfg.get("uin")) == self_uin and cfg.get("uid"):
+                    self_uid = str(cfg["uid"])
+                    break
+        except Exception:
+            pass
+    target_resolver = ReplyTargetResolver(self_uin=self_uin, self_uid=self_uid)
 
     listener = WeQSsePushListener(
         registry, expected_token=token, self_uin=self_uin,
         on_owner_event=on_owner, on_unpaired=on_unpaired, on_mass=on_mass,
         accept_group=args.accept_group,
         group_allow=frozenset(group_allow) if group_allow else None,
+        timeline=timeline,
+        # G2：群消息入时间线后自动提炼已授权成员的记忆（未授权 0 写入）
+        member_extractor=MemberMemoryExtractor(
+            store, timeline, MemberConsentStore(store), _bindings, _spaces),
         port=args.port, inbox=inbox)
     try:
         listener.start()

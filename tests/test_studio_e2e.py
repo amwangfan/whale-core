@@ -30,6 +30,12 @@ class Brain:
         return "收到：" + text[:20]
 
 
+def _prefs_no_quiet():
+    from datetime import time as _t
+    from whale_core.life.initiative import ProactivePrefs
+    return ProactivePrefs(quiet_start=_t(0), quiet_end=_t(0))
+
+
 def _world():
     store = InMemoryStore()
     spaces = SpaceStore(store)
@@ -112,7 +118,8 @@ def test_group_space_scoped_recall():
 
 def test_stranger_sudo_then_scoped_chat():
     store, spaces, bindings, auth, resolver, brain, orch = _world()
-    wf = QqInboundWorkflow(store, Brain(), orchestrator=orch, auth_service=auth)
+    wf = QqInboundWorkflow(store, Brain(), orchestrator=orch, auth_service=auth,
+                         prefs=_prefs_no_quiet())
     code = auth.create_code(allowed_scopes=("task.read:self",))
 
     class In:
@@ -159,7 +166,8 @@ def test_stranger_cannot_read_owner_memory():
 def test_stranger_group_sudo_gets_guidance_only():
     """群里 sudo 尝试：不验证、不回显、不落记忆，只提示私聊（N05/N17）。"""
     store, spaces, bindings, auth, resolver, brain, orch = _world()
-    wf = QqInboundWorkflow(store, Brain(), orchestrator=orch, auth_service=auth)
+    wf = QqInboundWorkflow(store, Brain(), orchestrator=orch, auth_service=auth,
+                         prefs=_prefs_no_quiet())
 
     class In:
         channel = "qq"
@@ -178,7 +186,8 @@ def test_stranger_group_sudo_gets_guidance_only():
 def test_group_member_chat_gets_group_ceiling_reply():
     """S7 灰度：群成员消息走匿名群上下文（chat.basic，无 sudo、无记忆）。"""
     store, spaces, bindings, auth, resolver, brain, orch = _world()
-    wf = QqInboundWorkflow(store, Brain(), orchestrator=orch, auth_service=auth)
+    wf = QqInboundWorkflow(store, Brain(), orchestrator=orch, auth_service=auth,
+                         prefs=_prefs_no_quiet())
 
     class In:
         channel = "qq"

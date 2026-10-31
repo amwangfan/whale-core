@@ -186,9 +186,24 @@ def sse_message_to_incoming(event: Mapping, *, self_uin: str,
         text = ""
     if len(text) > MAX_TEXT_CHARS:
         text = text[:MAX_TEXT_CHARS]
+    # G1：@/引用元数据（平台事件元素，不从正文猜）
+    mentions: list[str] = []
+    reply_to: tuple = ()
+    elements = event.get("elements")
+    if isinstance(elements, list):
+        for el in elements:
+            if not isinstance(el, dict):
+                continue
+            data = el.get("data") or {}
+            if el.get("type") == "at" and data.get("atTargetUid"):
+                mentions.append(str(data["atTargetUid"]))
+            elif el.get("type") == "reply":
+                reply_to = (str(data.get("origSenderUin") or ""),
+                            str(data.get("origSenderUid") or ""),
+                            str(data.get("origMsgId") or ""),
+                            str(data.get("origMsgSeq") or ""))
     # 附件：pic 元素带本机缓存路径（filePath）与 CDN 链接（originalUrl）
     attachments = []
-    elements = event.get("elements")
     rkeys: list[tuple[str, str]] = []
     if isinstance(elements, list) and any(
             isinstance(el, dict) and el.get("type") == "pic" for el in elements):
@@ -220,7 +235,10 @@ def sse_message_to_incoming(event: Mapping, *, self_uin: str,
     return Incoming(channel="qq", account=sender,
                     conversation=f"{conversation_kind}:{conv_id}",
                     message_id=msg_id, text=text, transport_authenticated=True,
-                    attachments=tuple(attachments))
+                    attachments=tuple(attachments),
+                    sender_uid=str(event.get("senderUid") or ""),
+                    send_time=str(event.get("sendTime") or ""),
+                    mentions=tuple(mentions), reply_to=reply_to)
 
 
 def mass_event_metadata(event: Mapping) -> dict:
@@ -252,6 +270,8 @@ class WeQSsePushListener:
                  on_mass: Callable[[dict], None] | None = None,
                  accept_group: bool = False,
                  group_allow: frozenset | None = None,
+                 timeline=None,
+                 member_extractor=None,
                  host: str = DEFAULT_WQ_PUSH_HOST, port: int = DEFAULT_WQ_PUSH_PORT,
                  async_dispatch: bool = True,
                  inbox: SqliteInbox | None = None) -> None:
@@ -267,6 +287,10 @@ class WeQSsePushListener:
         self.on_mass = on_mass
         self.accept_group = accept_group
         self.group_allow = frozenset(group_allow) if group_allow else None
+        self.timeline = timeline  # G1：群消息时间线（可选 GroupTimelineStore）
+        # G2：成员记忆提炼器（可选 MemberMemoryExtractor）；时间线追加后
+        # 触发本人自述提炼（consent 无效即 0 写入，管道内 fail closed）
+        self.member_extractor = member_extractor
         self.host = host
         self.requested_port = port
         self.async_dispatch = async_dispatch
@@ -314,6 +338,27 @@ class WeQSsePushListener:
                                                    group_allow=self.group_allow)
                 if incoming is None or incoming.message_id in self._seen:
                     continue
+                # G1：群消息先入时间线（短期公共证据；不等于个人长期记忆）
+                # G6 红队高-2：sudo 明文永不落时间线/提炼（N17）——截获先于
+                # 任何持久化；但私聊的 sudo 仍须正常流到工作流做验证。
+                from whale_core.life.temporary_auth import maybe_intercept_sudo
+                is_sudo = maybe_intercept_sudo(incoming.text) is not None
+                if (self.timeline is not None and not is_sudo
+                        and incoming.conversation.startswith("group:")):
+                    self.timeline.append(
+                        incoming.conversation, message_id=incoming.message_id,
+                        sender_id=incoming.account, text=incoming.text,
+                        sender_uid=incoming.sender_uid,
+                        send_time=incoming.send_time,
+                        mentions=incoming.mentions, reply_to=incoming.reply_to)
+                    if (self.member_extractor is not None and incoming.account
+                            and not is_sudo):
+                        try:
+                            self.member_extractor.extract_for_principal(
+                                f"anon:qq:{incoming.account}",
+                                incoming.conversation)
+                        except Exception:
+                            pass  # 提炼失败不阻断消息管道
                 owner_event = self.registry.accept(incoming)
                 if owner_event is None:
                     # Unpaired messages are intentionally consumed if no callback was configured.
@@ -333,6 +378,10 @@ class WeQSsePushListener:
                         account=incoming.account,
                         text=owner_event.text,
                         attachments=list(owner_event.attachments or ()),
+                        meta={"sender_uid": incoming.sender_uid,
+                              "send_time": incoming.send_time,
+                              "mentions": list(incoming.mentions or ()),
+                              "reply_to": list(incoming.reply_to or ())},
                     )
                     self._emit_wake(owner_event.message_id)
                     self._mark_seen(incoming.message_id)
@@ -391,6 +440,11 @@ class WeQSsePushListener:
                 # S1/S7：sender 必须穿透持久化排水路径——inbox 的 account
                 # 即真实发送者，丢失会把主人降级为匿名（记忆失效根因）。
                 sender_id=job.account,
+                # G1：@/引用/时间元数据穿透持久化路径
+                sender_uid=str((job.meta or {}).get("sender_uid") or ""),
+                send_time=str((job.meta or {}).get("send_time") or ""),
+                mentions=tuple((job.meta or {}).get("mentions") or ()),
+                reply_to=tuple((job.meta or {}).get("reply_to") or ()),
             )
             try:
                 self.on_owner_event(event)

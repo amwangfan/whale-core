@@ -145,6 +145,10 @@ class ForkService:
         meta = self.spaces.get(space_id)
         if meta is None:
             raise ForkError(f"unknown or retired space: {space_id}")
+        # G2/MEM-03：成员个人空间不参与 Fork——它只属于成员本人，连管理通道
+        # 也不能把他人私有记忆复制成可绑定的副本。
+        if meta.get("type") == MemorySpaceType.MEMBER_PRIVATE.value:
+            raise ForkError("member_private 空间不参与 Fork（成员私有记忆不复制）")
 
     def _require_record(self, source_space: str, key: str) -> MemoryRecord:
         rec = self.store.get_record(key)

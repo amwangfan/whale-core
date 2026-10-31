@@ -104,6 +104,17 @@
           "minimum": 0,
           "maximum": 4102444800000,
           "description": "会话/邀请过期时间（Unix 毫秒时间戳）"
+        },
+        "number": {
+          "type": "string",
+          "maxLength": 24,
+          "pattern": "^[+0-9*#* ]*$",
+          "description": "可选：来电号码（端侧白名单校验 ^\\+?[0-9*#]{1,23}$）；缺省显示占位"
+        },
+        "name": {
+          "type": "string",
+          "maxLength": 40,
+          "description": "可选：来电显示名；缺省 'Whale AI'"
         }
       },
       "description": "通话邀请，经 Control 信令协商（§1/§4）"

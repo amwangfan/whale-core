@@ -66,6 +66,32 @@ class MemorySpaceType(str, Enum):
     OWNER_WORKING_COPY = "owner_working_copy"
     GROUP_SPACE = "group_space"
     SHAREABLE_FORK = "shareable_fork"
+    # G2：群友个人记忆空间。按 Principal 归属，仅在本人已认证私聊召回；
+    # 群聊、其他成员与未认证身份永不可读（MEM-02/03）。
+    MEMBER_PRIVATE = "member_private"
+
+
+def principal_matches_private_conversation(
+    channel: str,
+    kind: ConversationKind,
+    conversation_id: str,
+    principal_id: str,
+) -> bool:
+    """判断私聊会话是否可证明属于某 Principal（G2 成员记忆归属校验）。
+
+    只允许结构性证据：QQ 私聊 conversation_id 形如 ``private:{uin}``，
+    其 uid 必须与 principal 的渠道账号一致（``anon:{channel}:{uid}`` /
+    ``paired:{channel}:{uid}``）。群会话一律 False；昵称、正文不构成证据。
+    """
+    if kind is ConversationKind.QQ_GROUP:
+        return False
+    if kind not in (ConversationKind.QQ_PRIVATE, ConversationKind.WEB):
+        return False
+    cid = conversation_id or ""
+    uid = cid[len("private:"):] if cid.startswith("private:") else cid
+    if not uid or not principal_id:
+        return False
+    return principal_id in (f"anon:{channel}:{uid}", f"paired:{channel}:{uid}")
 
 
 @dataclass(frozen=True)

@@ -95,6 +95,10 @@ class WeQEventAdapter:
                     # S1/S7：真实发送者必须随事件穿透——丢失它会让下游
                     # 身份解析退化为匿名（主人私聊记忆失效的根因）。
                     "sender_id": getattr(event, "sender_id", ""),
+                    # G1：@/引用/时间元数据同样穿透
+                    "sender_uid": getattr(event, "sender_uid", ""),
+                    "mentions": list(getattr(event, "mentions", ()) or ()),
+                    "reply_to": list(getattr(event, "reply_to", ()) or ()),
                 },
             )
         )

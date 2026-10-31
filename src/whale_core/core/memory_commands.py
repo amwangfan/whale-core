@@ -42,8 +42,17 @@ def handle_memory_command(
             fact = text[len(prefix):].strip()
             if not fact:
                 return "想让我记住什么？"
+            # 主体归属（生产实证 2026-11-01：裸文本「我最喜欢的…」被模型
+            # 误读成鲸鱼自己的偏好）。摘要带说话人，模型才能正确归因。
+            summary = f"用户自述：{fact}"
+            # 同空间内同义去重（同一事实不重复建档）
+            existing = cur.recall(fact, limit=3, allowed_spaces=allowed_spaces)
+            for hit in existing:
+                old = str(hit.record.content.get("summary", ""))
+                if old.removeprefix("用户自述：").strip() == fact:
+                    return f"这个我记着呢：{fact[:50]}"
             cur.remember(
-                fact, source=source, evidence_id=evidence_id,
+                summary, source=source, evidence_id=evidence_id,
                 importance=0.8, confidence=1.0, stable_fact=True, consent=True,
                 space_id=space_id,
             )
