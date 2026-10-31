@@ -42,10 +42,17 @@ GROUP_CEILING: Tuple[str, ...] = (SCOPE_CHAT_BASIC, SCOPE_TOOL_WEB_SEARCH)
 PRIVATE_ANON: Tuple[str, ...] = (SCOPE_CHAT_BASIC,)
 
 #: 已配对主人私聊：对话 + 常规工具 + 提交出站 + 查看本人任务 + 设备通知。
-#: 高风险动作（shell、记忆写 vault、支付）不在此列，仍需逐项审批（policy.py）。
+#: F-01 红队修复：capability scope 在执行端真校验后，主人私聊必须显式
+#: 保留其既有工具能力，否则生图/语音等回归。高风险动作（shell、支付、
+#: 记忆写 vault）不在此列，仍需既有审批链（policy.py）。
 PRIVATE_OWNER: Tuple[str, ...] = (
     SCOPE_CHAT_BASIC,
     SCOPE_TOOL_WEB_SEARCH,
+    "tool.web.fetch",
+    "tool.media.image.generate",
+    "tool.media.video.generate",
+    "tool.tts.synthesize",
+    "tool.asr.transcribe",
     SCOPE_OUTBOX_SUBMIT,
     SCOPE_TASK_READ_SELF,
     SCOPE_DEVICE_NOTIFY,
@@ -147,6 +154,7 @@ class ConversationContextResolver:
                     scopes = tuple(s for s in scopes if s in set(narrowed))
 
         grant_refs: Tuple[TemporaryGrantRef, ...] = ()
+        grant_scopes: Tuple[str, ...] = ()
         if self._grants is not None:
             now = time.time()
             grant_refs = tuple(
@@ -164,6 +172,8 @@ class ConversationContextResolver:
                         continue
                     if s not in scopes:
                         scopes = scopes + (s,)
+                    if s not in grant_scopes:
+                        grant_scopes = grant_scopes + (s,)
 
         spaces: Tuple[MemorySpaceRef, ...] = ()
         persona_id: Optional[str] = None
@@ -203,6 +213,7 @@ class ConversationContextResolver:
             allowed_memory_spaces=spaces,
             capability_scopes=scopes,
             grants=grant_refs,
+            grant_scopes=grant_scopes,
             policy_version=self._policy_version,
         )
 

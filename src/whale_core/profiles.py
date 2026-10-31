@@ -284,9 +284,10 @@ def assemble_runtime(
         grants=_auth,
         owner_id="owner",
         owner_default_space=_owner_space)
-    def _grant_gate(grant_ids, fingerprint):
-        return any(_auth.consume_grant_use(g, action_fingerprint=fingerprint)
-                   for g in grant_ids)
+    def _grant_gate(grant_ids, fingerprint, required_scope=None):
+        return any(_auth.consume_grant_use(
+            g, action_fingerprint=fingerprint, required_scope=required_scope)
+            for g in grant_ids)
     orchestrator = ConversationOrchestrator(store, companion, tools=tools,
                                             intent_model=intent_model, gateway=gateway,
                                             executor_model=executor_model,

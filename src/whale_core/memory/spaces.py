@@ -173,6 +173,8 @@ def migrate_legacy_to_vault(
     """
     moved = 0
     for kind in MemoryKind:
+        if kind is MemoryKind.PERSONA_CONTINUITY:
+            continue  # F-05：人格连续性快照是全局基线人格，不收进 vault
         for rec in store.list_by_kind(kind, space_ids=("",)):
             moved += 1
             if not dry_run:

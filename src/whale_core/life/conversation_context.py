@@ -130,6 +130,9 @@ class ResolvedContext:
     allowed_memory_spaces: Tuple[MemorySpaceRef, ...] = ()
     capability_scopes: Tuple[str, ...] = (SCOPE_CHAT_BASIC,)
     grants: Tuple[TemporaryGrantRef, ...] = ()
+    # 其中由临时租约贡献的 scope 子集：这些能力每次执行都要经 grant_gate
+    # 消耗操作次数（F-01/红队：租约能力不是免费基础能力）。
+    grant_scopes: Tuple[str, ...] = ()
     policy_version: int = 1
 
     def allows_memory_read(self, space: MemorySpaceRef) -> bool:

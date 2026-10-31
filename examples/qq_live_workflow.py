@@ -303,9 +303,10 @@ def cmd_run(args) -> int:
         owner_id="owner",
         owner_default_space=_owner_space)
 
-    def _grant_gate(grant_ids, fingerprint):
-        return any(auth_service.consume_grant_use(g, action_fingerprint=fingerprint)
-                   for g in grant_ids)
+    def _grant_gate(grant_ids, fingerprint, required_scope=None):
+        return any(auth_service.consume_grant_use(
+            g, action_fingerprint=fingerprint, required_scope=required_scope)
+            for g in grant_ids)
     prefs = risk_prefs()
     print(policy_summary(prefs))
 
@@ -342,7 +343,8 @@ def cmd_run(args) -> int:
 
     inbox = build_inbox(args.inbox)
     workflow = QqInboundWorkflow(store, build_brain(), prefs=prefs,
-                                 auth_service=auth_service)
+                                 auth_service=auth_service,
+                                 context_resolver=context_resolver)
 
     def _send_audio_artifacts(audio_ids) -> None:
         """把任务产生的音频产物发成 QQ 语音消息。"""
@@ -506,8 +508,13 @@ def cmd_run(args) -> int:
             attachments=tuple(payload.get("attachments") or ()),
             sender_id=str(payload.get("sender_id") or ""),
         )
+        # F-03（红队）：sudo 验证尝试的明文永不进日志（拦截在工作流内，
+        # 但宿主打印发生得更早——在这里就脱敏）。
+        from whale_core.life.temporary_auth import maybe_intercept_sudo
+        shown = "<sudo 验证尝试>" if maybe_intercept_sudo(event.text) is not None \
+            else event.text[:60]
         print(f"\n← [owner] conv={event.conversation} msg={event.message_id} "
-              f"text={event.text[:60]!r}")
+              f"text={shown!r}")
         try:
             result = workflow.handle_owner_event(event)
         except Exception as exc:  # AI/存储失败不打断监听（inbox 模式下按策略重试）

@@ -123,7 +123,10 @@ def _authz_snapshot(context) -> dict | None:
             "principal_id": principal.principal_id,
             "paired": bool(principal.paired),
             "conversation_key": conversation.as_key(),
-            "scopes": sorted(context.capability_scopes),
+            "scopes": sorted(
+                set(context.capability_scopes)
+                - set(getattr(context, "grant_scopes", ()))),
+            "grant_scopes": sorted(getattr(context, "grant_scopes", ())),
             "memory_spaces": sorted(
                 s.space_id for s in context.allowed_memory_spaces),
             "write_space": default_write_space(context.allowed_memory_spaces),
@@ -367,9 +370,15 @@ class ConversationOrchestrator:
         if self.context_resolver is None:
             return env
         channel = env.channel or ("api" if env.source == "api" else env.source)
+        sender_id = env.sender_id
+        if not sender_id and env.source in ("runtime", "cli"):
+            # 本机宿主入口（无渠道 sender）：映射为受信本地管理主体，
+            # 由配对表（cli/local → owner）决定身份（F-01 修复的回归保护）。
+            channel = "cli"
+            sender_id = "local"
         ctx = self.context_resolver.resolve(
             channel=channel,
-            sender_id=env.sender_id,
+            sender_id=sender_id,
             conversation_id=env.conversation_id,
         )
         return replace(env, context=ctx)
@@ -1141,13 +1150,23 @@ class ConversationOrchestrator:
         action = replace(action, reason=token, payload={**action.payload,
             "runtime_manifest_version": manifest.version if manifest is not None else ""})
         fingerprint = _action_fingerprint(action)
-        # S4/INV-09：任务携带临时租约时，每次工具执行前重验并原子消耗
-        # 操作次数；租约过期/撤销/用尽/参数指纹不符即拒（快照不作扩权依据）。
+        # F-01（红队）：capability scope 在执行端强制——任务携带授权快照时，
+        # 工具能力与快照 scope 必须匹配（陌生人/群上限/会话收窄在此生效）。
+        # 快照缺失时（S4 租约）可尝试用租约补 scope：租约须覆盖该能力并
+        # 原子消耗操作次数；过期/撤销/用尽/参数指纹不符即拒（INV-06/09）。
         authz = (self.store.get(f"runtime:task:{task_id}") or {}).get("authz") or {}
-        grant_ids = tuple(authz.get("grant_ids") or ())
-        if grant_ids and spec.risk_class != "read_only":
-            if self.grant_gate is None or not self.grant_gate(grant_ids, fingerprint):
-                return "denied", f"tool-denied:{spec.name}:grant-invalid-or-exhausted"
+        if authz:
+            required = f"tool.{spec.capability}"
+            base_scopes = set(authz.get("scopes") or ())
+            grant_scopes = set(authz.get("grant_scopes") or ())
+            grant_ids = tuple(authz.get("grant_ids") or ())
+            if required not in base_scopes:
+                # 租约贡献的能力：每次执行都要经 grant_gate 原子消耗次数
+                if (required not in grant_scopes
+                        or not grant_ids
+                        or self.grant_gate is None
+                        or not self.grant_gate(grant_ids, fingerprint, required)):
+                    return "denied", f"tool-denied:{spec.name}:scope-{required}"
         with self._task_lock:
             record = self.store.get(f"task:{task_id}") or {}
             if record.get("cancel_requested"):
