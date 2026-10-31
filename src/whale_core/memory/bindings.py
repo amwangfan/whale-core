@@ -12,6 +12,7 @@ MEM-HARD-01（protected_original 直接拒绝）；读取时对缺失/已注销/
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from dataclasses import replace
 from typing import Optional, Tuple
 
 from whale_core.life.conversation_context import MemorySpaceRef, MemorySpaceType
@@ -67,7 +68,7 @@ class BindingStore:
             # MEM-HARD-01 第二道墙：绑定表被污染也不下发 vault。
             if ref.type is MemorySpaceType.PROTECTED_ORIGINAL:
                 continue
-            out.append(ref)
+            out.append(replace(ref, can_write=row.get('can_write') is True))
         return tuple(out)
 
     # -- 管理操作（S5 API 复用同一层） -------------------------------------
@@ -91,6 +92,8 @@ class BindingStore:
         if ref.type is MemorySpaceType.PROTECTED_ORIGINAL:
             raise BindingError(
                 "个人原始库不能直接连接任何会话；请先创建受控副本（Fork）")
+        if can_write and not can_read:
+            raise BindingError("写权限必须同时授予读取权限")
         if ref.type is MemorySpaceType.SHAREABLE_FORK and can_write:
             raise BindingError("共享副本默认只读；不允许写绑定")
         key = f"bind:mem:{conversation_key}"
