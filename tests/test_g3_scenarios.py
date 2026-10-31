@@ -280,3 +280,42 @@ def test_voice_session_scope_progress_and_hangup_release():
     # 挂断：会话撤销 → 绑定失效 → 不再可查
     assert reg.revoke_session("call-1") is True
     assert reg.resolve_session("call-1") is None
+
+
+# ---------- 回归：附件在 收件→配对→inbox→重建 全链不丢（生产图片输入断链） ----------
+
+
+def test_attachments_survive_registry_and_inbox_roundtrip(tmp_path):
+    """生产 bug 回归：图片附件曾在 registry.accept 与 SqliteInbox 两处被丢弃。"""
+    from whale_core.life.channels import Incoming, OwnerChannelRegistry
+    from whale_core.life.inbox import SqliteInbox
+
+    att = ({"kind": "pic", "file_path": "/cache/x.png",
+            "url": "https://cdn.example.com/x.png", "name": "x"},)
+    incoming = Incoming(channel="qq", account="u1", conversation="private:c1",
+                        message_id="m-att", text="看图",
+                        transport_authenticated=True, attachments=att)
+    reg = OwnerChannelRegistry(owner_id="owner-1",
+                               bindings={("qq", "u1"): "owner-1"})
+    event = reg.accept(incoming)
+    assert event is not None and event.attachments == att  # 配对不丢附件
+
+    inbox = SqliteInbox(str(tmp_path / "inbox.sqlite3"))
+    assert inbox.enqueue(message_id=event.message_id, conversation=event.conversation,
+                         account="u1", text=event.text,
+                         attachments=list(event.attachments))
+    job = inbox.claim_next()
+    assert job is not None and job.attachments == att  # inbox 持久化往返不丢
+    inbox.close()
+    # 老库迁移：无 attachments_json 列的库打开后自动补列
+    import sqlite3
+    db = sqlite3.connect(str(tmp_path / "legacy.sqlite3"))
+    db.execute("CREATE TABLE inbox (message_id TEXT PRIMARY KEY, conversation TEXT, "
+               "account TEXT, text TEXT, status TEXT, attempts INTEGER, last_error TEXT, "
+               "created_at TEXT, updated_at TEXT, lease_expires_at TEXT)")
+    db.commit(); db.close()
+    legacy = SqliteInbox(str(tmp_path / "legacy.sqlite3"))
+    assert legacy.enqueue(message_id="m1", conversation="c", account="a", text="t",
+                          attachments=[{"kind": "pic", "url": "https://x"}])
+    assert legacy.claim_next().attachments == ({"kind": "pic", "url": "https://x"},)
+    legacy.close()

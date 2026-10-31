@@ -2072,3 +2072,281 @@ code,
   padding-top: 10px;
   margin-top: 6px;
 }
+
+/* ---------- Whale Studio（S6 卡牌画布） ---------- */
+.banner.info {
+  background: #eef4f3;
+  border-color: #d7e4e0;
+  color: #37615a;
+}
+.studio-canvas {
+  height: 520px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  overflow: hidden;
+}
+.studio-card {
+  width: 220px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 10px 12px;
+  font-size: 12px;
+  box-shadow: 0 1px 4px rgba(38, 62, 55, 0.08);
+}
+.studio-card-kind {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+.studio-card-title {
+  font-weight: 600;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.studio-card-desc {
+  margin: 6px 0 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.studio-card-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 6px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.studio-card.restricted {
+  border-style: dashed;
+  border-color: var(--warn);
+  background: #fdfaf2;
+}
+.studio-grant {
+  width: auto;
+  margin-bottom: 8px;
+}
+.studio-edge-memory {
+  stroke: var(--accent);
+}
+.studio-edge-persona {
+  stroke: #6b7fd7;
+}
+.studio-edge.dangling {
+  stroke-dasharray: 4 4;
+  stroke: var(--bad);
+}
+.studio-hint {
+  font-size: 12px;
+}
+.studio-inspector {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 12px 14px;
+  margin-top: 12px;
+}
+.studio-inspector dl {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  gap: 4px 10px;
+  margin: 8px 0;
+  font-size: 12px;
+}
+.studio-inspector dt {
+  color: var(--muted);
+}
+.studio-inspector dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.studio-danger {
+  border: 1px solid #f2d8cf;
+  background: #fff3ef;
+  color: var(--bad);
+  border-radius: 8px;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+.studio-cap-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 5px 10px;
+  margin: 0 8px 8px 0;
+  background: var(--panel-2);
+  font-size: 12px;
+}
+.studio-cap-card.over-ceiling {
+  opacity: 0.55;
+}
+.studio-cap-note {
+  color: var(--warn);
+}
+.studio-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(30, 45, 40, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 40;
+}
+.studio-modal {
+  width: min(560px, 92vw);
+  max-height: 86vh;
+  overflow: auto;
+  background: var(--panel);
+  border-radius: 12px;
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.studio-modal label {
+  font-size: 12px;
+  color: var(--muted);
+}
+.studio-modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+.studio-fork-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 220px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.studio-fork-list label {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 12px;
+}
+.studio-confirm {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--text);
+}
+.studio-grants {
+  margin-top: 24px;
+}
+.studio-code-form fieldset {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.studio-code-mode {
+  display: flex;
+  gap: 16px;
+}
+.studio-scope-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 12px;
+}
+.studio-code-nums {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.studio-code-nums label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.studio-code-nums input {
+  width: 120px;
+}
+.studio-code-reveal {
+  border: 1px solid var(--warn);
+  background: #fdfaf2;
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-top: 12px;
+}
+.studio-code-reveal code {
+  display: block;
+  font-size: 15px;
+  padding: 8px;
+  background: var(--panel);
+  border-radius: 6px;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+.studio-code-list {
+  list-style: none;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+}
+.studio-code-list li {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.studio-grant-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 10px;
+}
+.studio-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.studio-list-conv {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.studio-list-conv fieldset {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.studio-list-space {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+  margin: 4px 0;
+}
+.studio-list-space.restricted {
+  justify-content: space-between;
+  color: var(--muted);
+}
+
+/* 动效尊重 prefers-reduced-motion：静态画布，无过渡动画。 */
+@media (prefers-reduced-motion: reduce) {
+  .studio-card,
+  .studio-edge,
+  .react-flow__edge-path {
+    transition: none !important;
+    animation: none !important;
+  }
+}

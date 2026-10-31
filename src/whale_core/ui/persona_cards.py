@@ -69,6 +69,12 @@ class PersonaCard:
     source_url: str = ""
     license: str = ""  # 第三方卡的许可证标识（如 "MIT"）；内置原创卡为空
     external_prompt: str = ""  # 导入的第三方卡原文；原创内置卡为空
+    # ---- S3 极简卡字段（PRD §4.1）：纯人格表达，永不含权限/安全规则 ----
+    summary: str = ""  # 简短设定（50–300 字自然语言，非硬性长度）
+    temperament: str = ""  # 气质 / 性情倾向
+    relationship_style: str = ""  # 与用户的关系倾向
+    voice_hint: str = ""  # 音色偏好提示（空则回退 timbre_hint）
+    artwork_ref: str = ""  # 可选形象引用
 
     def __post_init__(self) -> None:
         if not self.card_id.strip() or not self.title.strip():
@@ -132,6 +138,11 @@ class PersonaCard:
             "source_url": self.source_url,
             "license": self.license,
             "external_prompt": self.external_prompt[:MAX_EXTERNAL_PROMPT_CHARS],
+            "summary": self.summary,
+            "temperament": self.temperament,
+            "relationship_style": self.relationship_style,
+            "voice_hint": self.voice_hint,
+            "artwork_ref": self.artwork_ref,
         }
 
     @classmethod
@@ -154,6 +165,11 @@ class PersonaCard:
             source_url=str(d.get("source_url") or ""),
             license=str(d.get("license") or ""),
             external_prompt=str(d.get("external_prompt") or ""),
+            summary=str(d.get("summary") or ""),
+            temperament=str(d.get("temperament") or ""),
+            relationship_style=str(d.get("relationship_style") or ""),
+            voice_hint=str(d.get("voice_hint") or ""),
+            artwork_ref=str(d.get("artwork_ref") or ""),
         )
 
 

@@ -35,6 +35,16 @@ class RecallHit:
     reasons: tuple[str, ...]
 
 
+def _space_ids(allowed_spaces) -> tuple[str, ...] | None:
+    """从 MemorySpaceRef / 字符串元组提取 space_id；None 原样透传（兼容期）。"""
+    if allowed_spaces is None:
+        return None
+    out: list[str] = []
+    for item in allowed_spaces:
+        out.append(str(getattr(item, "space_id", item)))
+    return tuple(dict.fromkeys(out))
+
+
 class MemoryCurator:
     """Explicit candidate promotion and retrieval; never consumes audio or raw logs."""
 
@@ -47,7 +57,8 @@ class MemoryCurator:
     def remember(self, summary: str, *, source: str, evidence_id: str,
                  importance: float = 0.5, confidence: float = 1.0,
                  stable_fact: bool = False, consent: bool = False,
-                 key: str | None = None, now: datetime | None = None) -> MemoryRecord:
+                 key: str | None = None, now: datetime | None = None,
+                 space_id: str = "") -> MemoryRecord:
         if not consent:
             raise PermissionError("Explicit memory consent required")
         if not summary.strip() or not source.strip() or not evidence_id.strip():
@@ -68,19 +79,27 @@ class MemoryCurator:
                      "last_confirmed": stamp.isoformat()},
             created_at=stamp,
             tags=("curated", "stable" if stable_fact else "episode"),
+            space_id=space_id,
         )
         self.store.put_record(record)
         return record
 
     def recall(self, query: str, *, limit: int = 5,
-               now: datetime | None = None) -> tuple[RecallHit, ...]:
+               now: datetime | None = None,
+               allowed_spaces=None) -> tuple[RecallHit, ...]:
+        """召回。S2：``allowed_spaces`` 为 MemorySpaceRef 元组（服务端
+        ResolvedContext 提供）；空元组 fail closed；None 为兼容期旧行为
+        （仍不含 protected_original，存储层硬排除）。"""
         if limit <= 0:
             return ()
+        space_ids = _space_ids(allowed_spaces)
+        if space_ids is not None and not space_ids:
+            return ()  # 已解析但零授权空间：查询前即止
         current = now or datetime.now(timezone.utc)
         query_terms = _terms(query)
         matches: list[RecallHit] = []
-        records = (self.store.list_by_kind(MemoryKind.EPISODE) +
-                   self.store.list_by_kind(MemoryKind.PREFERENCE))
+        records = (self.store.list_by_kind(MemoryKind.EPISODE, space_ids=space_ids) +
+                   self.store.list_by_kind(MemoryKind.PREFERENCE, space_ids=space_ids))
         for rec in records:
             if "curated" not in rec.tags:
                 continue

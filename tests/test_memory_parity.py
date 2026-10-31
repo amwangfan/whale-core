@@ -81,6 +81,7 @@ def test_get_peeks_record_view_same_shape(store):
         "record_id": rec.record_id,
         "created_at": rec.created_at.isoformat(),
         "tags": ["t1"],
+        "space_id": "",  # S2：窥视视图携带空间归属（双后端同形状）
     }
 
 

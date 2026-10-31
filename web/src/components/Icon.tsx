@@ -10,6 +10,7 @@ const paths: Record<string, string> = {
   explore: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18 M16 8l-2 6-6 2 2-6z",
 
   overview: "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z",
+  studio: "M4 4h6v6H4z M14 4h6v6h-6z M9 14h6v6H9z M10 7h4 M12 10v4 M7 10v7h2",
   chat: "M21 11.5a8.5 8.5 0 0 1-8.5 8.5H3l2-5a8.5 8.5 0 1 1 16-3.5Z M8 10h8 M8 14h5",
   plugins: "M9 3h6v5h5v6h-5v7H9v-7H4V8h5z",
   memory: "M5 4h11l3 3v13H5z M8 9h8 M8 13h8 M8 17h5",

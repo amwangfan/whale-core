@@ -58,7 +58,8 @@ class QqInboundWorkflow:
                  orchestrator=None,
                  safety_reviewer=None,
                  completion_sender=None,
-                 media_validator=None) -> None:
+                 media_validator=None,
+                 auth_service=None) -> None:
         self.store = store
         self.companion = WhaleCompanion(store, brain, curator=MemoryCurator(store))
         self.outbox = ProactiveOutbox(store)
@@ -76,6 +77,9 @@ class QqInboundWorkflow:
         # 可选补发回调（两段式慢任务）：callable(event, reply) -> None。
         # 由宿主注入真实发送路径（草稿+审批+网关）；慢任务 ack 后的结果经此补发。
         self._completion_sender = completion_sender
+        # S4：临时授权服务（一次性口令 sudo）；None = 未启用，口令消息按
+        # 普通文本处理。
+        self._auth_service = auth_service
         # 媒体输入可信边界（G0-B）：附件路径白名单/SSRF/格式与尺寸校验统一走
         # core.media_input.ImageInputValidator；未注入时构造默认实例
         # （本地路径 fail-closed——无白名单即拒绝本地读取，仅走受门控的 https）。
@@ -105,10 +109,18 @@ class QqInboundWorkflow:
                 except MediaInputError as exc:
                     print(f"  [附件] 本地图片被拒：{exc}")
             if image is None:
-                url = str(att.get("url") or "")
-                if url.startswith("https://"):
+                # 候选下载链：attachments 可带 urls 有序列表（QQ CDN 相对路径
+                # 已被渠道适配器补全为多个 rkey 候选），逐个尝试。
+                candidates = att.get("urls") or ()
+                if not candidates:
+                    single = str(att.get("url") or "")
+                    candidates = (single,) if single else ()
+                for url in candidates[:4]:
+                    if not str(url).startswith("https://"):
+                        continue
                     try:
-                        image = self._media_validator.from_url(url)
+                        image = self._media_validator.from_url(str(url))
+                        break
                     except MediaInputError as exc:
                         print(f"  [附件] 远端图片被拒：{exc}")
             if image is not None:
@@ -126,7 +138,13 @@ class QqInboundWorkflow:
         reply = getattr(result, "reply", "") or ""
         if not reply.strip():
             return
-        audio_ids = _extract_audio_artifacts(getattr(result, "receipts", ()))
+        receipts = getattr(result, "receipts", ())
+        # 生图任务：模型未必把图片链接写进答复——产物 id 兜底注入，
+        # 保证补发里必有图片段（本地字节直发，不经过网络/代理）。
+        image_ids = _extract_image_artifacts(receipts)
+        if image_ids and not _has_image_ref(reply):
+            reply = reply.rstrip() + f"\n![图](/api/v1/artifacts/{image_ids[0]})"
+        audio_ids = _extract_audio_artifacts(receipts)
         if self._safety_reviewer is not None:
             concern = self._safety_reviewer(reply)
             if concern:
@@ -155,11 +173,25 @@ class QqInboundWorkflow:
                 self.orchestrator.mark_delivered(task_id, channel="qq")
 
     def _memory_command_reply(self, text: str, event: OwnerEvent) -> str | None:
-        """委托给 core.memory_commands 的共享实现（QQ 侧只提供来源与证据链）。"""
+        """委托给 core.memory_commands 的共享实现（QQ 侧提供来源与证据链）。
+
+        S2：编排器注入了 resolver 时按服务端上下文选择写入空间
+        （工作副本优先，未绑定时落主人受保护库——安全但暂不进对话召回）。
+        """
+        space_id, allowed = "", None
+        resolver = getattr(self.orchestrator, "context_resolver", None)
+        if resolver is not None:
+            ctx = resolver.resolve(channel=event.channel,
+                                   sender_id=event.sender_id or event.owner_id,
+                                   conversation_id=event.conversation)
+            from whale_core.memory.spaces import (
+                DEFAULT_VAULT_ID, default_write_space)
+            space_id = default_write_space(ctx.allowed_memory_spaces) or DEFAULT_VAULT_ID
+            allowed = ctx.allowed_memory_spaces
         return handle_memory_command(
             self.store, text, source="qq:owner",
             evidence_id=f"qq:{event.conversation}:{event.message_id}",
-            curator=self._curator,
+            curator=self._curator, space_id=space_id, allowed_spaces=allowed,
         )
 
     def handle_owner_event(self, event: OwnerEvent) -> dict:
@@ -180,6 +212,29 @@ class QqInboundWorkflow:
         if not text:
             return {"skipped": "empty_text"}
 
+        # S4：sudo 验证尝试在进入 LLM/记忆/历史/日志之前截获（N17）。
+        # 明文口令只用于验证，绝不向后续链路传递。
+        if self._auth_service is not None:
+            from whale_core.life.context_resolver import derive_kind
+            from whale_core.life.temporary_auth import maybe_intercept_sudo
+            attempt = maybe_intercept_sudo(text)
+            if attempt is not None:
+                grant = self._auth_service.verify(
+                    attempt, channel=event.channel,
+                    sender_id=event.sender_id or event.owner_id,
+                    conversation_kind=derive_kind(event.channel, event.conversation),
+                    conversation_id=event.conversation)
+                if grant is not None:
+                    mins = max(1, int((grant.expires_at - __import__("time").time()) / 60))
+                    return {"reply": (
+                        "验证通过，本次私聊已获得临时授权："
+                        f"可用能力 {('、'.join(grant.scopes)) or '无'}，"
+                        f"{mins} 分钟内最多 {grant.max_uses} 次操作。"
+                        "到期或用尽自动恢复普通权限。"),
+                        "draft_id": None, "auth_grant": grant.grant_id}
+                return {"reply": "验证失败（口令无效、已使用或已过期）。",
+                        "draft_id": None, "auth_grant": None}
+
         turn_receipts: list = []
         # owner 显式记忆指令（记住/忘掉）：不调模型，确定性处理（省 token、可测试）。
         # owner 直聊的显式指令即 consent（单 owner 陪伴场景，docs/gap-analysis §4 R4）；
@@ -193,7 +248,8 @@ class QqInboundWorkflow:
             images = self._attachment_images(event) if event.attachments else ()
             envelope = InputEnvelope(
                 conversation_id=event.conversation, text=text, source="qq:owner",
-                channel="qq", owner_id=event.owner_id, images=images)
+                channel="qq", owner_id=event.owner_id, images=images,
+                sender_id=event.sender_id)
             if self._completion_sender is not None:
                 result = self.orchestrator.handle_envelope_async(
                     envelope,
@@ -235,6 +291,94 @@ class QqInboundWorkflow:
                 result["safety_concern"] = str(concern)[:200]
                 result["reason"] = f"{result['reason']}｜安全审核：{result['safety_concern']}"
         return result
+
+    # -- S7：陌生账号私聊（受限入口） -----------------------------------------
+
+    def handle_stranger_event(self, event) -> dict:
+        """处理**未配对**账号的私聊消息（S7；宿主须显式开门）。
+
+        纪律：
+        - 仅私聊；群里的陌生人消息不进入（群门由适配器 prefs 控制）。
+        - sudo 尝试优先截获（口令明文不进入 LLM/记忆/历史/日志）。
+        - 普通对话走编排器，ResolvedContext = 匿名主体（chat.basic +
+          可能的有效租约 scope）；无记忆空间、无写回、无工具提权。
+        - 回复由宿主直接发送到该私聊（不经 owner 草稿/审批链）。
+        """
+        from whale_core.core.runtime import InputEnvelope
+        from whale_core.life.context_resolver import derive_kind
+        from whale_core.life.temporary_auth import maybe_intercept_sudo
+
+        # 兼容 Incoming（account 字段）与 OwnerEvent（sender_id 字段）两种形状
+        sender = str(getattr(event, "sender_id", "") or getattr(event, "account", ""))
+        channel = str(getattr(event, "channel", "qq") or "qq")
+        text = (event.text or "").strip()
+        if not text:
+            return {"skipped": "empty_text"}
+        if not str(event.conversation).startswith("private:"):
+            return {"skipped": "stranger_group_ignored"}
+
+        if self._auth_service is not None:
+            attempt = maybe_intercept_sudo(text)
+            if attempt is not None:
+                grant = self._auth_service.verify(
+                    attempt, channel=channel, sender_id=sender,
+                    conversation_kind=derive_kind(channel, event.conversation),
+                    conversation_id=event.conversation)
+                if grant is not None:
+                    import time as _time
+                    mins = max(1, int((grant.expires_at - _time.time()) / 60))
+                    return {"reply": (
+                        "验证通过，本次私聊已获得临时授权："
+                        f"可用能力 {('、'.join(grant.scopes)) or '无'}，"
+                        f"{mins} 分钟内最多 {grant.max_uses} 次操作。"
+                        "到期或用尽自动恢复普通权限。"),
+                        "auth_grant": grant.grant_id}
+                return {"reply": "验证失败（口令无效、已使用或已过期）。",
+                        "auth_grant": None}
+
+        if self.orchestrator is None:
+            return {"skipped": "no_orchestrator"}
+        envelope = InputEnvelope(
+            conversation_id=event.conversation, text=text, source="qq:stranger",
+            channel=channel, sender_id=sender)
+        result = self.orchestrator.handle_envelope(envelope)
+        reply = (result.reply or "").strip()
+        if not reply:
+            return {"empty_reply": True}
+        return {"reply": reply}
+
+
+def _extract_image_artifacts(receipts) -> tuple:
+    """从回执里提图片产物 id（生图工具 JSON 回执的 images 列表）。"""
+    import json as _json
+    ids: list = []
+    for r in receipts or ():
+        text = str(r)
+        if ":ok:" not in text or "/api/v1/artifacts/" not in text:
+            continue
+        payload = text.split(":ok:", 1)[-1]
+        try:
+            data = _json.loads(payload)
+        except Exception:
+            continue
+        for ref in (data.get("images") or [])[:2]:
+            ref = str(ref)
+            if "/api/v1/artifacts/" in ref:
+                ids.append(ref.rsplit("/", 1)[-1])
+    return tuple(ids)
+
+
+_IMG_REF_RE = None
+
+
+def _has_image_ref(text: str) -> bool:
+    import re
+    global _IMG_REF_RE
+    if _IMG_REF_RE is None:
+        _IMG_REF_RE = re.compile(
+            r"https?://[^\s)\]<>'\"]+\.(?:png|jpe?g|webp|gif)|/api/v1/artifacts/",
+            re.IGNORECASE)
+    return bool(_IMG_REF_RE.search(text or ""))
 
 
 def _extract_audio_artifacts(receipts) -> tuple:

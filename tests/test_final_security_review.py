@@ -192,7 +192,9 @@ def test_voice_api_inherits_persona_records_only_final_text_and_never_calls_text
             return self.session
     bundle = assemble_runtime("local", config_dir=str(tmp_path), env={})
     bundle.store.put_persona_continuity(PersonaContinuity(persona_name="测试鲸鱼人格", tone="温暖简短"))
-    remember_episode(bundle.store, summary="昨天约定去图书馆", key="ep:test")
+    # S2/S7：语音（owner 通道）召回限域授权空间——主人记忆写入默认工作副本
+    remember_episode(bundle.store, summary="昨天约定去图书馆", key="ep:test",
+                     space_id="owner-working")
     provider = Provider()
     bundle.registry.register(PluginManifest(plugin_id="voice_realtime", name="Voice", version="1",
         kind="model", provides=("voice.realtime",)), provider=provider)

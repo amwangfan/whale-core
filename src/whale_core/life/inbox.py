@@ -13,7 +13,8 @@
 
 边界（与仓内既有约定一致）：
 - 只有**已配对 owner** 的消息进 inbox；未配对内容不落盘（身份门边界）；
-- 库里只存重放所需最小字段（message_id / conversation / account / text），
+- 库里只存重放所需最小字段（message_id / conversation / account / text /
+  attachments 附件元数据 JSON——**只存路径与 URL 等引用，不存字节本体**），
   不存 token；日志与 last_error 不含私聊正文；
 - 入站处理按受控策略重试（attempts 上限）；**出站发送结果 unknown 仍不可
   盲目重发**——那是 ProactiveOutbox 的既有语义，本模块不触碰出站；
@@ -49,6 +50,7 @@ class InboxJob:
     conversation: str
     account: str
     text: str
+    attachments: tuple = ()  # 附件元数据（{"kind","file_path","url"}）
     status: str = STATUS_PENDING
     attempts: int = 0
     last_error: str = ""
@@ -87,6 +89,11 @@ class SqliteInbox:
                  lease_expires_at TEXT
                )"""
         )
+        # 附件列迁移（老库就地升级；只存附件元数据 JSON 引用，不存字节）
+        cols = {row[1] for row in self.db.execute("PRAGMA table_info(inbox)")}
+        if "attachments_json" not in cols:
+            self.db.execute(
+                "ALTER TABLE inbox ADD COLUMN attachments_json TEXT NOT NULL DEFAULT '[]'")
         self.db.commit()
         if self.path != ":memory:" and os.name == "posix":
             # Inbox contains private message text; do not leave the main DB world-readable.
@@ -94,16 +101,28 @@ class SqliteInbox:
 
     # ── 入队 / 认领 ────────────────────────────────────────────
 
-    def enqueue(self, *, message_id: str, conversation: str, account: str, text: str) -> bool:
-        """幂等入队：新任务返回 True；message_id 已存在返回 False（不重置状态）。"""
+    def enqueue(self, *, message_id: str, conversation: str, account: str, text: str,
+                attachments=()) -> bool:
+        """幂等入队：新任务返回 True；message_id 已存在返回 False（不重置状态）。
+
+        ``attachments`` 只接受可 JSON 序列化的附件元数据（路径/URL 引用），
+        非法内容抛 TypeError——附件字节本体永不落库。
+        """
+        import json as _json
+
         mid = (message_id or "").strip()
         if not mid:
             raise ValueError("message_id required")
+        attachments_json = _json.dumps(
+            [dict(a) for a in (attachments or ())][:8], ensure_ascii=False)
+        if len(attachments_json) > 20000:
+            raise ValueError("attachments metadata too large")
         now = _iso(_utc_now())
         with self._lock, self.db:
             cur = self.db.execute(
-                "INSERT OR IGNORE INTO inbox VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (mid, conversation, account, text, STATUS_PENDING, 0, "", now, now, None),
+                "INSERT OR IGNORE INTO inbox VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (mid, conversation, account, text, STATUS_PENDING, 0, "",
+                 now, now, None, attachments_json),
             )
             return cur.rowcount > 0
 
@@ -114,7 +133,7 @@ class SqliteInbox:
         with self._lock, self.db:
             row = self.db.execute(
                 "SELECT message_id, conversation, account, text, status, attempts, "
-                "last_error, created_at, updated_at FROM inbox "
+                "last_error, created_at, updated_at, attachments_json FROM inbox "
                 "WHERE status=? ORDER BY created_at, rowid LIMIT 1",
                 (STATUS_PENDING,),
             ).fetchone()
@@ -124,6 +143,12 @@ class SqliteInbox:
                 "UPDATE inbox SET status=?, updated_at=?, lease_expires_at=? WHERE message_id=?",
                 (STATUS_PROCESSING, _iso(now), lease, row[0]),
             )
+        import json as _json
+
+        try:
+            attachments = tuple(_json.loads(row[9] or "[]"))
+        except (ValueError, TypeError):
+            attachments = ()
         return InboxJob(
             message_id=row[0],
             conversation=row[1],
@@ -134,6 +159,7 @@ class SqliteInbox:
             last_error=row[6],
             created_at=row[7],
             updated_at=row[8],
+            attachments=attachments,
         )
 
     # ── 结果落账 ───────────────────────────────────────────────

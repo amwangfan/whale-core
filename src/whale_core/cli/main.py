@@ -176,10 +176,13 @@ def _build_api_server(args: argparse.Namespace) -> tuple[Any, str, str]:
     bundle = assemble_runtime(profile, config_dir=str(config_dir))
     token, token_source = _resolve_api_token(config_dir)
     from whale_core.configuration import SettingsController
+    from whale_core.api.studio import StudioServices
     ctx = ApiContext(
         store=bundle.store, manager=bundle.manager,
         orchestrator=bundle.orchestrator, curator=bundle.companion.curator,
         profile=profile, settings=SettingsController(config_dir, bundle), optional=bundle.optional,
+        # S5：Studio 服务与 S1 resolver 共用同一 MemoryStore（profiles 装配点）。
+        studio=StudioServices.from_store(bundle.store),
     )
     server = WhaleApiServer(
         ctx, host=args.host, port=args.port, token=token,
