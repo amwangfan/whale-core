@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, getToken, isUnauthorized, onUnauthorized, setToken } from "./api";
+import { api, getToken, isUnauthorized, onUnauthorized, setToken, type RuntimeSettings } from "./api";
 import Overview from "./components/Overview";
 import Plugins from "./components/Plugins";
 import MemoryView from "./components/Memory";
@@ -9,6 +9,7 @@ import Tasks from "./components/Tasks";
 import Events from "./components/Events";
 import Icon from "./components/Icon";
 import Settings from "./components/Settings";
+import FirstRunSetup from "./components/FirstRunSetup";
 import Media from "./components/Media";
 import Workflows from "./components/Workflows";
 import Studio from "./components/Studio";
@@ -93,6 +94,8 @@ export default function App() {
   const [sending, setSending] = useState(false);
   const [showToken, setShowToken] = useState(false);
   const [session, setSession] = useState(0);
+  const [setupSettings, setSetupSettings] = useState<RuntimeSettings | null>(null);
+  const [showSetup, setShowSetup] = useState(false);
   const chatSession = useRef(new AbortController());
 
   const connect = useCallback(async (token: string) => {
@@ -118,6 +121,15 @@ export default function App() {
       } catch (historyError) {
         if (isUnauthorized(historyError))
           throw historyError; /* History errors must not prevent diagnostics. */
+      }
+      // Server-side completion is shared across browsers; never store keys here.
+      try {
+        const settings = await api.settings();
+        setSetupSettings(settings);
+        setShowSetup(settings.setup_completed === false);
+      } catch (settingsError) {
+        if (isUnauthorized(settingsError)) throw settingsError;
+        setShowSetup(false); // Existing installations can still open Settings.
       }
       chatSession.current.abort();
       chatSession.current = new AbortController();
@@ -153,6 +165,8 @@ export default function App() {
     chatSession.current.abort();
     setToken("");
     setAuthed(false);
+    setShowSetup(false);
+    setSetupSettings(null);
     setTokenInput("");
     setError("");
     setMsgs([]);
@@ -251,6 +265,10 @@ export default function App() {
       </div>
     );
 
+  if (showSetup && setupSettings)
+    return <FirstRunSetup initial={setupSettings}
+      onComplete={() => { setShowSetup(false); setSession((n) => n + 1); }} />;
+
   return (
     <div className="app">
       <aside className="sidebar">
@@ -328,7 +346,7 @@ export default function App() {
           )}
           {tab === "tasks" && <Tasks />}
           {tab === "events" && <Events />}
-          {tab === "settings" && <Settings onDisconnect={disconnect} />}
+          {tab === "settings" && <Settings onDisconnect={disconnect} onRunSetup={() => setShowSetup(true)} />}
           {tab === "media" && <Media />}
           {tab === "workflows" && <Workflows />}
         </main>
