@@ -87,6 +87,32 @@ SCOPE_TOOL_SHELL_SAFE = "tool.shell.safe"
 SCOPE_TASK_READ_SELF = "task.read:self"
 SCOPE_DEVICE_NOTIFY = "device.notify"
 
+# ---- 设备面（whale-mobile，D3）scope 族 --------------------------------
+# 命名与 contracts/v1/PROTOCOL.md §5 能力枚举逐字一致；裁决矩阵见
+# context_resolver（screen.* 仅 owner 私聊 / API owner 可授，群聊硬上限拒绝）。
+SCOPE_SCREEN_CONTEXT_READ = "screen.context.read"
+SCOPE_SCREEN_HISTORY_SEARCH = "screen.history.search"
+SCOPE_SCREEN_EVIDENCE_READ = "screen.evidence.read"
+SCOPE_SCREEN_LIVE_SUBSCRIBE = "screen.live.subscribe"
+SCOPE_PHONE_NOTIFICATION_POST = "phone.notification.post"
+SCOPE_PHONE_NOTIFICATION_READ = "phone.notification.read"
+SCOPE_PHONE_CALL_RING = "phone.call.ring"
+SCOPE_PHONE_CALL_AUDIO = "phone.call.audio"
+SCOPE_PHONE_DEVICE_SAFE_ACTION = "phone.device.safe_action"
+
+#: 设备面 scope 全集（screen.* + phone.*）。
+DEVICE_SCOPES: Tuple[str, ...] = (
+    SCOPE_SCREEN_CONTEXT_READ,
+    SCOPE_SCREEN_HISTORY_SEARCH,
+    SCOPE_SCREEN_EVIDENCE_READ,
+    SCOPE_SCREEN_LIVE_SUBSCRIBE,
+    SCOPE_PHONE_NOTIFICATION_POST,
+    SCOPE_PHONE_NOTIFICATION_READ,
+    SCOPE_PHONE_CALL_RING,
+    SCOPE_PHONE_CALL_AUDIO,
+    SCOPE_PHONE_DEVICE_SAFE_ACTION,
+)
+
 
 def scope_memory_read(space_id: str) -> str:
     return f"memory.read:{space_id}"

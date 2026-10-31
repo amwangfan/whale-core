@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://whale.example.internal/contracts/v1/messages/call.state.schema.json",
+  "title": "call.state",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "id",
+    "type",
+    "ts",
+    "seq",
+    "dir",
+    "payload"
+  ],
+  "properties": {
+    "v": {
+      "type": "string",
+      "pattern": "^1\\.[0-9]+$",
+      "description": "协议版本 major.minor；未知 major 必须拒绝并回 error.protocol_version（§2）"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 64,
+      "pattern": "^[0-9A-Za-z-]+$",
+      "description": "消息 ID（ULID/UUID）"
+    },
+    "type": {
+      "const": "call.state",
+      "description": "消息类型"
+    },
+    "ts": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4102444800000,
+      "description": "发送端发送时间（Unix 毫秒时间戳）"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991,
+      "description": "每方向各自单调递增序号，用于丢帧检测与乱序识别（§2）"
+    },
+    "dir": {
+      "type": "string",
+      "enum": [
+        "uplink",
+        "downlink"
+      ],
+      "description": "uplink=机→云 / downlink=云→机（§2）"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "state"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 64,
+          "pattern": "^[0-9A-Za-z-]+$",
+          "description": "通话会话 ID，挂断即撤销会话临时 scope（§4）"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "ringing",
+            "active",
+            "held",
+            "ended",
+            "failed"
+          ],
+          "description": "通话状态机快照（协议未显式列举取值，本 schema 约定此枚举）"
+        },
+        "media_params": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "codec",
+            "sample_rate",
+            "channels"
+          ],
+          "properties": {
+            "codec": {
+              "const": "pcm_s16le",
+              "description": "音频编码，V1 固定 PCM s16le（§7）"
+            },
+            "sample_rate": {
+              "const": 16000,
+              "description": "采样率，V1 固定 16kHz（§7）"
+            },
+            "channels": {
+              "const": 1,
+              "description": "声道数，V1 固定 mono（§7）"
+            },
+            "frame_ms": {
+              "type": "integer",
+              "enum": [
+                20,
+                40,
+                60
+              ],
+              "description": "媒体帧时长（毫秒），可选"
+            }
+          },
+          "description": "媒体参数协商结果"
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4102444800000,
+          "description": "会话过期时间（Unix 毫秒时间戳）"
+        }
+      },
+      "description": "通话状态同步"
+    }
+  }
+}

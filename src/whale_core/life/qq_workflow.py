@@ -333,10 +333,10 @@ class QqInboundWorkflow:
         text = (event.text or "").strip()
         if not text:
             return {"skipped": "empty_text"}
-        if not str(event.conversation).startswith("private:"):
-            return {"skipped": "stranger_group_ignored"}
-
-        if self._auth_service is not None:
+        is_private = str(event.conversation).startswith("private:")
+        # 群成员消息：不开放 sudo，直接走匿名群上下文对话（resolver 保证群上限）。
+        # 私聊：sudo 验证尝试优先截获。
+        if is_private and self._auth_service is not None:
             attempt = maybe_intercept_sudo(text)
             if attempt is not None:
                 grant = self._auth_service.verify(
@@ -354,6 +354,10 @@ class QqInboundWorkflow:
                         "auth_grant": grant.grant_id}
                 return {"reply": "验证失败（口令无效、已使用或已过期）。",
                         "auth_grant": None}
+
+        if not is_private and maybe_intercept_sudo(text) is not None:
+            # 群里的 sudo 尝试：不验证、不回显、不落记忆——只提示私聊（N05/N17）
+            return {"reply": "验证身份请私聊我（群里不做这个）。"}
 
         if self.orchestrator is None:
             return {"skipped": "no_orchestrator"}

@@ -44,6 +44,12 @@ LOW_ENTROPY_SCOPES = frozenset({SCOPE_CHAT_BASIC, SCOPE_TASK_READ_SELF})
 GRANTABLE_SCOPES = frozenset({
     SCOPE_CHAT_BASIC, SCOPE_TASK_READ_SELF,
     "tool.web.search", "outbox.submit", "device.notify",
+    # D3：设备面 scope 族（screen.* / phone.*）纳入可授予集合；
+    # 实际能否生效仍由 context_resolver 矩阵裁决（screen.* 仅 owner
+    # 私聊/API owner，群聊硬上限拒绝）——列入此处只是「允许租约携带」。
+    "screen.context.read", "screen.history.search", "screen.evidence.read",
+    "screen.live.subscribe", "phone.notification.post", "phone.notification.read",
+    "phone.call.ring", "phone.call.audio", "phone.device.safe_action",
 })
 
 MAX_ACTIVE_CODES = 64

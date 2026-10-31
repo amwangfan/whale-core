@@ -149,12 +149,15 @@ def _pic_download_urls(data: Mapping, *, chat_type: str,
 
 
 def sse_message_to_incoming(event: Mapping, *, self_uin: str,
-                            accept_group: bool = False) -> Incoming | None:
+                            accept_group: bool = False,
+                            group_allow: frozenset | None = None) -> Incoming | None:
     """WeQ SSE 单条 message 事件 → Incoming；不收/解析不了的一律 None（宁缺勿错）。
 
     - 只认 type=message（mass 合并事件走独立回调，不进消息管道）；
     - self_uin 自己发的消息过滤（防自激回路）；
-    - 群聊默认拒收；c2c → conversation=private:<convId>，group → group:<convId>；
+    - 群聊默认拒收；``group_allow`` 非空时只收白名单内的群
+      （S7 灰度：先只开一个测试群）；
+    - c2c → conversation=private:<convId>，group → group:<convId>；
     - transport_authenticated=True：调用前提是 HTTP 层 Bearer 已通过。
     """
     if event.get("type") != "message":
@@ -175,6 +178,9 @@ def sse_message_to_incoming(event: Mapping, *, self_uin: str,
     conv_id = str(event.get("convId") or "")
     if not conv_id:
         return None
+    if conversation_kind == "group" and group_allow is not None \
+            and conv_id not in group_allow:
+        return None  # 灰度白名单外的群一律不收
     text = event.get("text")
     if not isinstance(text, str):
         text = ""
@@ -245,6 +251,7 @@ class WeQSsePushListener:
                  on_unpaired: Callable[[Incoming], None] | None = None,
                  on_mass: Callable[[dict], None] | None = None,
                  accept_group: bool = False,
+                 group_allow: frozenset | None = None,
                  host: str = DEFAULT_WQ_PUSH_HOST, port: int = DEFAULT_WQ_PUSH_PORT,
                  async_dispatch: bool = True,
                  inbox: SqliteInbox | None = None) -> None:
@@ -259,6 +266,7 @@ class WeQSsePushListener:
         self.on_unpaired = on_unpaired
         self.on_mass = on_mass
         self.accept_group = accept_group
+        self.group_allow = frozenset(group_allow) if group_allow else None
         self.host = host
         self.requested_port = port
         self.async_dispatch = async_dispatch
@@ -302,7 +310,8 @@ class WeQSsePushListener:
                         overloaded = True
                     continue
                 incoming = sse_message_to_incoming(event, self_uin=self.self_uin,
-                                                   accept_group=self.accept_group)
+                                                   accept_group=self.accept_group,
+                                                   group_allow=self.group_allow)
                 if incoming is None or incoming.message_id in self._seen:
                     continue
                 owner_event = self.registry.accept(incoming)

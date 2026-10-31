@@ -114,6 +114,7 @@ class WeQWebSendPort:
                  expected_account_uin: str | None = None,
                  expected_account_config_id: str | None = None,
                  allowed_hosts: Sequence[str] | None = None,
+                 allowed_groups: Sequence[str] | None = None,
                  timeout: float = 15.0,
                  opener: Callable[..., object] | None = None) -> None:
         if not token:
@@ -121,6 +122,9 @@ class WeQWebSendPort:
         # 安全校验先于任何凭据保存/发出（#15）：地址不合法直接构造失败
         self.base_url = validate_base_url(base_url, allowed_hosts=allowed_hosts)
         self.target_uid = validate_target_uid(target_uid)
+        # S7 灰度：群发送白名单（宿主显式配置；不接受消息内容动态指定）
+        self.allowed_groups = frozenset(str(g).strip() for g in (allowed_groups or ())
+                                        if str(g).strip())
         self.expected_account_uin = expected_account_uin
         self.expected_account_config_id = expected_account_config_id
         self.timeout = timeout
@@ -247,6 +251,88 @@ class WeQWebSendPort:
         return isinstance(outcome, dict) and bool(outcome.get("ok"))
 
     # ── OutboundPort ─────────────────────────────────────────
+
+    def send_c2c(self, uid: str, text: str) -> bool:
+        """向指定 c2c 对端发文本（S7：陌生人私聊回复）。
+
+        目标只能是**回复语义**下的对端（由宿主从来件会话传入），uid 形状
+        强校验；不走这个方法主动群发。
+        """
+        uid = str(uid or "").strip()
+        if not UID_RE.match(uid):
+            self.last_receipt = {"ok": False, "error": "bad-uid"}
+            return False
+        text = (text or "").strip()
+        if not text or len(text) > MAX_TEXT_CHARS:
+            return False
+        payload = {
+            "json": {
+                "peerType": "c2c",
+                "targetId": uid,
+                "elements": [{"kind": "text", "textContent": text}],
+            }
+        }
+        if self.expected_account_uin:
+            payload["json"]["expectedAccountUin"] = self.expected_account_uin
+        if self.expected_account_config_id:
+            payload["json"]["expectedAccountConfigId"] = self.expected_account_config_id
+        try:
+            if self._cookie is None:
+                self.login()
+            status, body, _ = self._post("/trpc/account.sendElements", payload, auth=True)
+            if status == 401:
+                self.login()
+                status, body, _ = self._post("/trpc/account.sendElements", payload, auth=True)
+        except WeQSendError:
+            return False
+        if status != 200 or not isinstance(body, dict):
+            return False
+        outcome = (((body.get("result") or {}).get("data") or {}).get("json"))
+        if not isinstance(outcome, dict):
+            return False
+        self.last_receipt = outcome
+        return bool(outcome.get("ok"))
+
+    def send_group_text(self, group_code: str, text: str) -> bool:
+        """发群文本消息（S7 灰度）。
+
+        group_code 必须在构造期白名单内——群目标与 owner uid 一样属于
+        宿主配置，消息内容/模型输出永远不能指定发送目标。
+        """
+        group_code = str(group_code or "").strip()
+        if not group_code or group_code not in self.allowed_groups:
+            self.last_receipt = {"ok": False, "error": "group-not-allowed"}
+            return False
+        text = (text or "").strip()
+        if not text or len(text) > MAX_TEXT_CHARS:
+            return False
+        payload = {
+            "json": {
+                "peerType": "group",
+                "targetId": group_code,
+                "elements": [{"kind": "text", "textContent": text}],
+            }
+        }
+        if self.expected_account_uin:
+            payload["json"]["expectedAccountUin"] = self.expected_account_uin
+        if self.expected_account_config_id:
+            payload["json"]["expectedAccountConfigId"] = self.expected_account_config_id
+        try:
+            if self._cookie is None:
+                self.login()
+            status, body, _ = self._post("/trpc/account.sendElements", payload, auth=True)
+            if status == 401:
+                self.login()
+                status, body, _ = self._post("/trpc/account.sendElements", payload, auth=True)
+        except WeQSendError:
+            return False
+        if status != 200 or not isinstance(body, dict):
+            return False
+        outcome = (((body.get("result") or {}).get("data") or {}).get("json"))
+        if not isinstance(outcome, dict):
+            return False
+        self.last_receipt = outcome
+        return bool(outcome.get("ok"))
 
     def send(self, draft: ProactiveDraft) -> bool:
         if draft.channel != "direct_message":

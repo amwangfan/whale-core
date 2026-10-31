@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://whale.example.internal/contracts/v1/messages/error.schema.json",
+  "title": "error",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "id",
+    "type",
+    "ts",
+    "seq",
+    "dir",
+    "payload"
+  ],
+  "properties": {
+    "v": {
+      "type": "string",
+      "pattern": "^1\\.[0-9]+$",
+      "description": "协议版本 major.minor；未知 major 必须拒绝并回 error.protocol_version（§2）"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 64,
+      "pattern": "^[0-9A-Za-z-]+$",
+      "description": "消息 ID（ULID/UUID）"
+    },
+    "type": {
+      "const": "error",
+      "description": "消息类型"
+    },
+    "ts": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4102444800000,
+      "description": "发送端发送时间（Unix 毫秒时间戳）"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991,
+      "description": "每方向各自单调递增序号，用于丢帧检测与乱序识别（§2）"
+    },
+    "dir": {
+      "type": "string",
+      "enum": [
+        "uplink",
+        "downlink"
+      ],
+      "description": "uplink=机→云 / downlink=云→机（§2）"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ref_id",
+        "code",
+        "message"
+      ],
+      "properties": {
+        "ref_id": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 64,
+          "pattern": "^[0-9A-Za-z-]+$",
+          "description": "触发错误的消息 ID"
+        },
+        "code": {
+          "type": "string",
+          "enum": [
+            "protocol_version",
+            "auth_failed",
+            "device_revoked",
+            "scope_denied",
+            "capability_unknown",
+            "expired",
+            "duplicate",
+            "rate_limited",
+            "unavailable",
+            "invalid_message",
+            "permission_missing",
+            "internal"
+          ],
+          "description": "V1 错误码全集（§4）"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "description": "脱敏的人类可读错误描述，禁止含密钥/路径/隐私内容（§4）"
+        }
+      },
+      "description": "协议级错误"
+    }
+  }
+}

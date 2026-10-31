@@ -61,6 +61,11 @@ PRIVATE_OWNER: Tuple[str, ...] = (
 #: 管理 API / CLI（持有本地 token 的通道）：等同主人私聊。
 API_OWNER: Tuple[str, ...] = PRIVATE_OWNER
 
+#: D3：screen.* 族只允许主人本人在非群会话持有（群聊硬上限拒绝，INV-03 一致）。
+#: 注意它们不在 PRIVATE_OWNER 基础集里——默认最小权限（§5），只能经临时
+#: 租约显式授予；本守卫保证租约也无法把它们带进群聊或非主人会话。
+SCREEN_SCOPE_PREFIX = "screen."
+
 
 class BindingLookup(Protocol):
     """会话绑定查询（S2/S5 提供真实存储；S1 允许为空实现）。
@@ -99,6 +104,10 @@ def derive_kind(channel: str, conversation_id: str) -> ConversationKind:
         return ConversationKind.WEB
     if channel in ("voice", "phone"):
         return ConversationKind.VOICE
+    if channel == "mobile":
+        # D3：whale-mobile 设备面归一渠道；类型走 PHONE，基础 scope 仍由
+        # _base_scopes 决定（默认最小权限，screen.* 须经租约显式授予）。
+        return ConversationKind.PHONE
     if channel in ("api", "cli"):
         return ConversationKind.API
     return ConversationKind.UNKNOWN
@@ -169,6 +178,11 @@ class ConversationContextResolver:
             for g in grant_refs:
                 for s in g.scopes:
                     if ceiling is not None and s not in ceiling:
+                        continue
+                    # D3：screen.* 仅 owner 私聊 / API owner 可授；
+                    # 群聊与非主人会话硬上限拒绝（INV-03 一致）。
+                    if s.startswith(SCREEN_SCOPE_PREFIX) and (
+                            _is_group(kind) or not principal.is_owner):
                         continue
                     if s not in scopes:
                         scopes = scopes + (s,)
