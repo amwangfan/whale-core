@@ -291,8 +291,22 @@ def test_member_self_service_full_cycle():
 
 
 def test_member_commands_group_chat_not_management():
-    """群里发管理指令按普通消息处理（管理只在私聊）。"""
+    """群里的记忆管理短语只能作为普通消息，不能改变成员本人设置。"""
     store, spaces, bindings, auth, resolver, brain, orch = _world()
-    wf = QqInboundWorkflow(store, Brain(), orchestrator=orch, auth_service=auth)
-    out = wf.handle_stranger_event(_In("u_s", "同意记录我", conv="group:7"))
-    assert "同意记录" not in str(out.get("reply", ""))
+    from whale_core.memory.consent import MemberConsentStore
+
+    principal_id = "anon:qq:u_s"
+    consents = MemberConsentStore(store)
+    consents.opt_out(principal_id)  # 建立明确基线：该成员此前已退出记忆
+    wf = QqInboundWorkflow(
+        store, Brain(), orchestrator=orch, auth_service=auth,
+        prefs=_prefs_no_quiet())
+    out = wf.handle_stranger_event(
+        _In("u_s", "同意记录我", conv="group:7"))
+
+    # Brain 是回显测试替身，回复正文出现原短语不代表执行了管理指令。
+    # 应断言群聊不能替成员本人重新开启记忆，而不是限制回复复述输入。
+    assert out.get("reply") == "收到：同意记录我"
+    assert consents.is_opted_out(principal_id)
+    assert consents.list_for(principal_id) == ()
+    assert bindings.member_binding_for(principal_id) is None
