@@ -91,34 +91,49 @@ class ForkService:
         if not record_keys:
             raise ForkError("未选择任何记录")
 
-        # 先校验全部记录存在且属于源空间，再建空间——不产生残空间。
-        records = [self._require_record(source_space, k) for k in record_keys]
-        target = self.spaces.create(
-            target_type,
-            name=(target_name or "").strip()[:120]
-                 or _default_target_name(target_type, source_space),
-            owner=created_by)
+        # Source lookup, content transformation, target metadata and all record
+        # writes must commit as ONE unit. A failed redactor/JSON serializer
+        # cannot leave a half-populated, readable memory space.
         now = datetime.now(timezone.utc).isoformat()
-        for rec in records:
-            content = dict(rec.content)
-            if redact is not None:
-                content = dict(redact(content))
-            # 派生元数据：只保留空间类型与时间，不含原记录键/摘要。
-            content["fork_provenance"] = {
-                "source_space_type": self._source_type(source_space),
-                "forked_at": now,
-            }
-            forked = MemoryRecord(
-                kind=rec.kind,
-                key=f"sp:{target.space_id}:{uuid4().hex}",
-                content=content,
-                created_at=rec.created_at,
-                tags=tuple(t for t in rec.tags if t != "superseded") + ("forked",),
-                space_id=target.space_id,
-            )
-            self.store.put_record(forked)
-        self.spaces.bump_version(target.space_id)
-        return target.space_id
+        target_id = f"sp-{uuid4().hex[:16]}"
+        target_meta = {
+            "space_id": target_id, "type": target_type.value,
+            "name": (target_name or "").strip()[:120]
+                    or _default_target_name(target_type, source_space),
+            "owner": created_by, "version": 2,
+            "created_at": now, "retired_at": None,
+        }
+        source_kind = self._source_type(source_space)
+
+        def _commit(tx):
+            if tx.get(f"space:{target_id}") is not None:
+                raise ForkError("new memory space id collision")
+            records = []
+            for key in record_keys:
+                rec = tx.get_record(key)
+                if rec is None or rec.space_id != source_space:
+                    raise ForkError("source record changed before Fork confirmation")
+                content = dict(rec.content)
+                if redact is not None:
+                    content = dict(redact(content))
+                content["fork_provenance"] = {
+                    "source_space_type": source_kind,
+                    "forked_at": now,
+                }
+                records.append(MemoryRecord(
+                    kind=rec.kind,
+                    key=f"sp:{target_id}:{uuid4().hex}",
+                    content=content,
+                    created_at=rec.created_at,
+                    tags=tuple(t for t in rec.tags if t != "superseded") + ("forked",),
+                    space_id=target_id,
+                ))
+            tx.put(f"space:{target_id}", target_meta)
+            for record in records:
+                tx.put_record(record)
+            return target_id
+
+        return self.store.transact(_commit)
 
     # -- 内部 ---------------------------------------------------------------
 
