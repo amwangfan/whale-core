@@ -157,6 +157,21 @@ class SqliteMemoryStore:
                     "INSERT OR REPLACE INTO kv VALUES (?,?)",
                     (key, json.dumps(value, ensure_ascii=False)))
 
+            def get_record(self, key: str):
+                row = store.db.execute(
+                    "SELECT key,kind,content,record_id,created_at,tags,space_id "
+                    "FROM records WHERE key=?", (key,)).fetchone()
+                return store._decode(row) if row else None
+
+            def put_record(self, record: MemoryRecord) -> None:
+                # No nested transaction/commit; part of the surrounding BEGIN.
+                store.db.execute(
+                    "INSERT OR REPLACE INTO records VALUES (?,?,?,?,?,?,?)",
+                    (record.key, record.kind.value,
+                     json.dumps(dict(record.content), ensure_ascii=False),
+                     record.record_id, record.created_at.isoformat(),
+                     json.dumps(record.tags, ensure_ascii=False), record.space_id))
+
         with self._lock:
             self.db.execute("BEGIN IMMEDIATE")
             try:
