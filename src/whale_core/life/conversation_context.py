@@ -76,6 +76,8 @@ def principal_matches_private_conversation(
     kind: ConversationKind,
     conversation_id: str,
     principal_id: str,
+    *,
+    store=None,
 ) -> bool:
     """判断私聊会话是否可证明属于某 Principal（G2 成员记忆归属校验）。
 
@@ -91,7 +93,14 @@ def principal_matches_private_conversation(
     uid = cid[len("private:"):] if cid.startswith("private:") else cid
     if not uid or not principal_id:
         return False
-    return principal_id in (f"anon:{channel}:{uid}", f"paired:{channel}:{uid}")
+    direct = principal_id in (f"anon:{channel}:{uid}", f"paired:{channel}:{uid}")
+    if direct or store is None:
+        return direct
+    # uid ↔ uin 映射（传输层同源证据）：会话 uid → uin 再比 principal 账号
+    from whale_core.life.channels import uid_to_uin
+    mapped = uid_to_uin(store, uid)
+    return bool(mapped) and principal_id in (
+        f"anon:{channel}:{mapped}", f"paired:{channel}:{mapped}")
 
 
 @dataclass(frozen=True)
@@ -190,7 +199,10 @@ class ResolvedContext:
 
     def allows_memory_read(self, space: MemorySpaceRef) -> bool:
         if space.type is MemorySpaceType.PROTECTED_ORIGINAL:
-            return False  # MEM-HARD-01，无例外
+            # owner 决策 2026-11-01：主人**本人大号**的私聊/控制台可直连主库；
+            # 其余任何会话/身份依旧硬拒（群、成员、陌生人、未配对均无例外）。
+            return bool(self.principal.is_owner) and self.conversation.kind in (
+                ConversationKind.QQ_PRIVATE, ConversationKind.API)
         return any(s.space_id == space.space_id for s in self.allowed_memory_spaces)
 
     def has_scope(self, scope: str) -> bool:

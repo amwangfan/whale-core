@@ -26,6 +26,7 @@ import StudioCanvas from "./Canvas";
 import ForkWizard from "./ForkWizard";
 import GrantsPanel from "./GrantsPanel";
 import StudioListMode from "./ListMode";
+import PersonaPanel from "./PersonaPanel";
 import { CapabilityCard, RhythmEditor } from "./cards";
 import { executeIntent, type DropIntent } from "./connect";
 
@@ -442,6 +443,18 @@ export default function Studio() {
             />
           )}
         </>
+      )}
+
+      {!loading && (
+        <PersonaPanel
+          personas={personas}
+          busy={busy}
+          onChanged={(message) => {
+            setNotice(message);
+            void refresh();
+          }}
+          onError={setNotice}
+        />
       )}
 
       {!loading && (

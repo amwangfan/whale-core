@@ -341,6 +341,96 @@ class QqInboundWorkflow:
         self.store.put(key, count + 1)
         return None
 
+    # -- 成员自助记忆管理（私聊指令；G2.4 的渠道内流程） --------------------
+
+    #: 指令 → 处理器（在 handle_stranger_event 中优先于闲聊路径）
+    _MEMBER_CMDS = (
+        (("同意记录我", "同意记忆同步", "同意记住我", "恢复记录我"), "grant"),
+        (("撤销记忆同步", "不同意记录我", "取消记忆同步", "撤销记录授权",
+          "别记我了", "不要记录我"), "revoke"),
+        (("我的记忆", "我的记忆有什么", "你记得我什么"), "list"),
+        (("删掉我的记忆", "删除我的记忆", "忘掉我的一切"), "wipe"),
+    )
+
+    def _member_command_reply(self, text: str, *, principal_id: str,
+                              conversation_key: str) -> str | None:
+        """成员本人私聊的授权/记忆管理指令。非指令返回 None。
+
+        身份证据 = 当前私聊会话本身（只有本人能在这个会话里发消息）。
+        全部确定性处理，不调模型。
+        """
+        from whale_core.memory.consent import MemberConsentStore
+        from whale_core.memory.spaces import SpaceStore
+
+        matched = None
+        for prefixes, action in self._MEMBER_CMDS:
+            if text.strip() in prefixes:
+                matched = action
+                break
+        if matched is None:
+            return None
+
+        consents = MemberConsentStore(self.store)
+        spaces = SpaceStore(self.store)
+        from whale_core.memory.bindings import BindingStore
+        bindings = BindingStore(self.store, spaces)
+        timeline = getattr(self.companion, "timeline", None)
+
+        if matched == "grant":
+            # owner 决策 2026-11-01：私聊即同意，默认在记；此指令用于
+            # 「别记我了」之后的恢复。
+            if consents.is_opted_out(principal_id):
+                consents.opt_in(principal_id)
+                bindings.ensure_member_space(
+                    principal_id, conversation_key=conversation_key,
+                    granted_by=principal_id)
+                return "好，重新开始记啦。"
+            bindings.ensure_member_space(
+                principal_id, conversation_key=conversation_key,
+                granted_by=principal_id)
+            return ("我一直在记着呢（你说的和我聊的）。想停就说「别记我了」，"
+                    "想清光说「删掉我的记忆」。")
+
+        if matched == "revoke":
+            consents.opt_out(principal_id)
+            return ("好，我以后不记了。之前记下的还在你小本本里，"
+                    "说「删掉我的记忆」可以一并清掉。")
+
+        if matched == "list":
+            binding = bindings.member_binding_for(principal_id)
+            if not binding:
+                return "还没有你的个人记忆空间——你还没授权过我记录。"
+            ref = spaces.ref(str(binding["space_id"]))
+            if ref is None:
+                return "还没有你的个人记忆空间——你还没授权过我记录。"
+            from whale_core.memory.store import MemoryKind
+            items = []
+            for kind in (MemoryKind.EPISODE, MemoryKind.PREFERENCE):
+                for rec in self.store.list_by_kind(kind, space_ids=(ref.space_id,)):
+                    if "member" in rec.tags and "superseded" not in rec.tags:
+                        items.append(str(rec.content.get("summary", ""))[:60])
+            if not items:
+                return "你的小本本现在还是空的。"
+            return "我现在记着你的这些：\n" + "\n".join(f"· {s}" for s in items[:10])
+
+        if matched == "wipe":
+            binding = bindings.member_binding_for(principal_id)
+            n_del = 0
+            if binding:
+                ref = spaces.ref(str(binding["space_id"]))
+                if ref is not None:
+                    from whale_core.memory.store import MemoryKind
+                    for kind in (MemoryKind.EPISODE, MemoryKind.PREFERENCE):
+                        for rec in list(self.store.list_by_kind(
+                                kind, space_ids=(ref.space_id,))):
+                            if "member" in rec.tags:
+                                self.store.delete(rec.key)  # 真删
+                                n_del += 1
+            consents.opt_out(principal_id)
+            return (f"清掉了 {n_del} 条，以后我也不再记了。"
+                    "（已经发出去的聊天记录收不回。）想说重新开始就说「恢复记录我」。")
+        return None
+
     def handle_stranger_event(self, event) -> dict:
         """处理**未配对**账号的私聊消息（S7；宿主须显式开门）。
 
@@ -387,6 +477,34 @@ class QqInboundWorkflow:
             # 群里的 sudo 尝试：不验证、不回显、不落记忆——只提示私聊（N05/N17）
             return {"reply": "验证身份请私聊我（群里不做这个）。"}
 
+        # owner 决策 2026-11-01：成员私聊即默认记录其个人记忆（自动建档；
+        # 「别记我了」持久退出）。先建档再进 resolver，当轮即可回忆。
+        if is_private and sender:
+            try:
+                from whale_core.memory.consent import MemberConsentStore
+                consents = MemberConsentStore(self.store)
+                principal_id = f"anon:{channel}:{sender}"
+                if not consents.is_opted_out(principal_id):
+                    from whale_core.memory.spaces import SpaceStore
+                    from whale_core.memory.bindings import BindingStore
+                    spaces = SpaceStore(self.store)
+                    BindingStore(self.store, spaces).ensure_member_space(
+                        principal_id,
+                        conversation_key=f"qq:qq_private:{event.conversation}",
+                        granted_by=principal_id)
+            except Exception:
+                pass  # 建档失败不阻断对话（fail soft；记忆缺席非致命）
+
+        # G2.4：成员本人私聊的授权/记忆管理指令（先于预算闸门与闲聊——
+        # 隐私管理权不消耗对话额度、不被静默时段拦）。
+        if is_private:
+            principal_id = f"anon:{channel}:{sender}"
+            member_reply = self._member_command_reply(
+                text, principal_id=principal_id,
+                conversation_key=f"qq:qq_private:{event.conversation}")
+            if member_reply is not None:
+                return {"reply": member_reply}
+
         # G6 红队高-1：陌生人/群成员回复自带预算与静默闸门（直发路径不经
         # Outbox，必须前置）。sudo 验证回复不计额度（那是安全功能）。
         gate = self._stranger_gate(sender, str(event.conversation))
@@ -395,9 +513,13 @@ class QqInboundWorkflow:
 
         if self.orchestrator is None:
             return {"skipped": "no_orchestrator"}
+        # 附件图片与 owner 路径同一可信边界（白名单/嗅探/SSRF 门控）；
+        # 陌生人发的图可读，但不写入任何记忆（写作仍受空间纪律约束）。
+        images = self._attachment_images(event) if getattr(
+            event, "attachments", None) else ()
         envelope = InputEnvelope(
             conversation_id=event.conversation, text=text, source="qq:stranger",
-            channel=channel, sender_id=sender)
+            channel=channel, sender_id=sender, images=images)
         result = self.orchestrator.handle_envelope(envelope)
         reply = (result.reply or "").strip()
         if not reply:

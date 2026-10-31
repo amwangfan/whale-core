@@ -236,3 +236,63 @@ def test_persona_differs_by_conversation():
     ctx8 = resolver.resolve(channel="qq", sender_id="m", conversation_id="group:8")
     assert ctx7.persona_id == "whale-playful"
     assert ctx8.persona_id is None
+
+
+# ---------------------------------------------------------------------------
+# G2.4：成员私聊自助指令（授权/撤销/查看/清除）
+# ---------------------------------------------------------------------------
+
+
+class _In:
+    def __init__(self, sender, text, conv=None):
+        self.channel = "qq"
+        self.account = sender
+        self.conversation = conv or f"private:u_{sender}"
+        self.text = text
+        self.sender_id = sender
+
+
+def test_member_self_service_full_cycle():
+    """授权（有共同群证据）→ 群里自述被提炼 → 私聊可回忆 → 撤销 → 清除。"""
+    store, spaces, bindings, auth, resolver, brain, orch = _world()
+    from whale_core.memory.timeline import GroupTimelineStore
+    timeline = GroupTimelineStore(store)
+    orch.companion.timeline = timeline
+    from whale_core.life.channels import record_uid_mapping
+    record_uid_mapping(store, "u_s", "u_s")  # 测试形态：uin==uid 恒等映射
+    timeline.append("group:7", message_id="m1", sender_id="u_s",
+                    text="我明天要交论文，电脑还卡死了")
+    wf = QqInboundWorkflow(store, Brain(), orchestrator=orch, auth_service=auth)
+    wf.companion.timeline = timeline
+
+    # 默认在记（owner 决策 2026-11-01）：授权指令=恢复/确认语义
+    out1 = wf.handle_stranger_event(_In("u_s", "同意记录我", conv="private:u_s"))
+    assert "记" in out1["reply"]
+    from whale_core.memory.consent import MemberConsentStore
+    from whale_core.memory.bindings import BindingStore
+    # 新模型：无 opt-out 标记 + 已建档（默认开启，不再要求 consent 记录）
+    assert not MemberConsentStore(store).is_opted_out("anon:qq:u_s")
+    assert BindingStore(store, spaces).member_binding_for("anon:qq:u_s")
+
+    # 提炼（时间线里已有自述）→ 本人私聊可读
+    from whale_core.memory.extraction import MemberMemoryExtractor
+    MemberMemoryExtractor(store, timeline, MemberConsentStore(store),
+                          bindings, spaces).extract_for_principal(
+                              "anon:qq:u_s", "group:7")
+    out2 = wf.handle_stranger_event(_In("u_s", "我的记忆", conv="private:u_s"))
+    assert "论文" in out2["reply"]
+
+    # 清除：真删 + 撤销 + 不可再召回
+    out3 = wf.handle_stranger_event(_In("u_s", "删掉我的记忆", conv="private:u_s"))
+    assert "清掉" in out3["reply"]
+    assert MemberConsentStore(store).is_opted_out("anon:qq:u_s")
+    out4 = wf.handle_stranger_event(_In("u_s", "我的记忆", conv="private:u_s"))
+    assert "空的" in out4["reply"] or "没授权" in out4["reply"]
+
+
+def test_member_commands_group_chat_not_management():
+    """群里发管理指令按普通消息处理（管理只在私聊）。"""
+    store, spaces, bindings, auth, resolver, brain, orch = _world()
+    wf = QqInboundWorkflow(store, Brain(), orchestrator=orch, auth_service=auth)
+    out = wf.handle_stranger_event(_In("u_s", "同意记录我", conv="group:7"))
+    assert "同意记录" not in str(out.get("reply", ""))

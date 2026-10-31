@@ -81,9 +81,12 @@ from whale_core.memory.spaces import (
 )
 from whale_core.memory.store import MemoryKind, MemoryStore
 from whale_core.ui.persona_cards import (
+    ACTIVE_CARD_KEY,
     CARD_KEY_PREFIX,
+    MAX_EXTERNAL_PROMPT_CHARS,
     PersonaCard,
     PersonaCardLibrary,
+    switch_card,
 )
 
 # ---------------------------------------------------------------------------
@@ -122,6 +125,16 @@ _CAPS_PREFIX = "bind:caps:"
 #: 内置脱敏（首版占位回调）：手机号 / 邮箱。
 _PHONE_RE = re.compile(r"(?<!\d)(1[3-9]\d)\d{4}(\d{4})(?!\d)")
 _EMAIL_RE = re.compile(r"\b([A-Za-z0-9._%+\-]{1,64})@([A-Za-z0-9.\-]+\.[A-Za-z]{2,})\b")
+
+
+def _owner_convs() -> frozenset:
+    """owner 大号可直连 vault 的会话集合（owner 决策 2026-11-01）。"""
+    import os
+    uid = os.environ.get("OWNER_UID", "").strip()
+    out = {"api:api:api", "cli:cli:local"}
+    if uid:
+        out.add(f"qq:qq_private:private:{uid}")
+    return frozenset(out)
 
 
 def builtin_redactor(content: dict) -> dict:
@@ -171,7 +184,7 @@ class StudioServices:
     @classmethod
     def from_store(cls, store: MemoryStore) -> "StudioServices":
         spaces = SpaceStore(store)
-        bindings = BindingStore(store, spaces)
+        bindings = BindingStore(store, spaces, owner_conversations=_owner_convs())
         consents = MemberConsentStore(store)
         return cls(
             spaces=spaces,
@@ -497,6 +510,152 @@ def _list_personas(handler, ctx, svc: StudioServices) -> None:
     handler._send(200, _ok({"personas": out}))
 
 
+# ---- 人物卡管理（owner 决策 2026-11-01：工作台可直接添加/修改人物卡）----
+
+#: 自定义卡 id 白名单（小写 slug；内置卡 id 不可占用）。
+_CARD_ID_RE = re.compile(r"^[a-z0-9][a-z0-9\-]{0,63}$")
+
+#: 可编辑字符串字段（严格字段表，未知字段 422；与 PersonaCard 字段同名）。
+_PERSONA_STR_FIELDS = frozenset({
+    "title", "name", "summary", "description", "temperament",
+    "relationship_style", "voice_hint", "category", "tone",
+    "address_user_as", "timbre_hint", "artwork_ref",
+    "author", "source_url", "license", "external_prompt",
+})
+_PERSONA_LIST_FIELDS = frozenset({"style_rules", "extra_taboos"})
+_PERSONA_EDITABLE = _PERSONA_STR_FIELDS | _PERSONA_LIST_FIELDS | {"speaking_rate"}
+
+#: 单字段长度硬上限（external_prompt 另由 PersonaCard 截断到
+#: MAX_EXTERNAL_PROMPT_CHARS）；列表条数/单条长度上限。
+_MAX_PERSONA_FIELD_CHARS = MAX_EXTERNAL_PROMPT_CHARS
+_MAX_PERSONA_LIST_ITEMS = 50
+_MAX_PERSONA_LIST_ITEM_CHARS = 300
+
+
+def _persona_detail_view(card: PersonaCard, *, builtin: bool) -> dict:
+    """编辑用完整视图。管理面仅 owner Bearer 可达，故含 external_prompt
+    （列表视图 _persona_view 仍不回显内部文本）。"""
+    view = _persona_view(card, builtin=builtin)
+    view.update({
+        "description": card.description,
+        "tone": card.tone,
+        "address_user_as": card.address_user_as,
+        "style_rules": list(card.style_rules),
+        "extra_taboos": list(card.extra_taboos),
+        "timbre_hint": card.timbre_hint,
+        "speaking_rate": card.speaking_rate,
+        "artwork_ref": card.artwork_ref,
+        "external_prompt": card.external_prompt,
+        "channels": list(card.channels),
+    })
+    return view
+
+
+def _get_persona_detail(handler, ctx, svc: StudioServices, card_id: str) -> None:
+    if not _ID_RE.match(card_id):
+        raise StudioError(404, "not_found", "unknown persona")
+    card = _find_persona(ctx, svc, card_id)
+    if card is None:
+        raise StudioError(404, "not_found", f"人物卡不存在: {card_id!r}")
+    handler._send(200, _ok({
+        "persona": _persona_detail_view(
+            card, builtin=svc.personas.get(card_id) is not None),
+    }))
+
+
+def _parse_persona_fields(body: dict) -> dict:
+    """严格字段表 + 类型/长度校验；返回 PersonaCard 可接受的字段子集。"""
+    _reject_unknown_fields(body, _PERSONA_EDITABLE | {"card_id"})
+    fields: dict = {}
+    for key in sorted(_PERSONA_STR_FIELDS):
+        if key not in body:
+            continue
+        value = body[key]
+        if not isinstance(value, str):
+            raise StudioError(422, "invalid_request", f"{key} 必须是字符串")
+        fields[key] = value[:_MAX_PERSONA_FIELD_CHARS]
+    for key in sorted(_PERSONA_LIST_FIELDS):
+        if key not in body:
+            continue
+        value = body[key]
+        if not isinstance(value, list) \
+                or not all(isinstance(v, str) for v in value):
+            raise StudioError(422, "invalid_request", f"{key} 必须是字符串数组")
+        cleaned = tuple(
+            v.strip()[:_MAX_PERSONA_LIST_ITEM_CHARS] for v in value if v.strip())
+        if len(cleaned) > _MAX_PERSONA_LIST_ITEMS:
+            raise StudioError(422, "invalid_request",
+                              f"{key} 最多 {_MAX_PERSONA_LIST_ITEMS} 条")
+        fields[key] = cleaned
+    if "speaking_rate" in body:
+        rate = body["speaking_rate"]
+        if isinstance(rate, bool) or not isinstance(rate, (int, float)):
+            raise StudioError(422, "invalid_request", "speaking_rate 必须是数字")
+        if not 0.5 <= float(rate) <= 2.0:
+            raise StudioError(422, "invalid_request",
+                              "speaking_rate 须在 [0.5, 2.0] 内")
+        fields["speaking_rate"] = float(rate)
+    return fields
+
+
+def _create_persona(handler, ctx, svc: StudioServices) -> None:
+    body = _require_json_body(handler)
+    fields = _parse_persona_fields(body)
+    title = (fields.get("title") or "").strip()
+    if not title:
+        raise StudioError(422, "invalid_request", "title 不能为空")
+    fields["title"] = title
+    cid = str(body.get("card_id") or "").strip().lower()
+    if cid and not _CARD_ID_RE.match(cid):
+        raise StudioError(422, "invalid_request",
+                          "card_id 只能含小写字母/数字/连字符（≤64 字符）")
+    if not cid:
+        cid = f"custom-{uuid4().hex[:8]}"
+    if svc.personas.get(cid) is not None:
+        raise StudioError(409, "builtin_immutable",
+                          f"card_id 与内置卡冲突: {cid!r}")
+    with ctx.lock:
+        if ctx.store.get(f"{CARD_KEY_PREFIX}{cid}"):
+            raise StudioError(409, "duplicate_card", f"card_id 已存在: {cid!r}")
+        card = PersonaCard(card_id=cid, **fields)
+        ctx.store.put(f"{CARD_KEY_PREFIX}{cid}", card.as_dict())
+        _audit(ctx, "persona.create", card_id=cid, title=title)
+    handler._send(201, _ok({"persona": _persona_detail_view(card, builtin=False)}))
+
+
+def _update_persona(handler, ctx, svc: StudioServices, card_id: str) -> None:
+    if not _ID_RE.match(card_id):
+        raise StudioError(404, "not_found", "unknown persona")
+    body = _require_json_body(handler)
+    fields = _parse_persona_fields(body)
+    if not fields:
+        raise StudioError(422, "invalid_request", "没有需要修改的字段")
+    if "title" in fields and not str(fields["title"]).strip():
+        raise StudioError(422, "invalid_request", "title 不能为空")
+    if svc.personas.get(card_id) is not None:
+        raise StudioError(403, "builtin_immutable",
+                          "内置卡不可修改；请以其为底稿新建一张自定义卡")
+    with ctx.lock:
+        raw = ctx.store.get(f"{CARD_KEY_PREFIX}{card_id}")
+        if not isinstance(raw, dict):
+            raise StudioError(404, "not_found", f"人物卡不存在: {card_id!r}")
+        data = dict(raw)
+        data.update(fields)
+        try:
+            updated = PersonaCard.from_dict(data)
+        except (ValueError, TypeError) as exc:
+            raise StudioError(422, "invalid_request", f"字段值非法: {exc}")
+        ctx.store.put(f"{CARD_KEY_PREFIX}{card_id}", updated.as_dict())
+        _audit(ctx, "persona.update", card_id=card_id, fields=sorted(fields))
+        # 若改的是当前活跃卡，立即重渲 PersonaContinuity 快照，
+        # 让修改对下游（companion/voice 渲染）当轮生效。
+        active = str((ctx.store.get(ACTIVE_CARD_KEY) or {}).get("card_id") or "")
+        if active == card_id:
+            switch_card(ctx.store, card_id, library=svc.personas)
+    handler._send(200, _ok({
+        "persona": _persona_detail_view(updated, builtin=False)}))
+
+
 def _put_persona(handler, ctx, svc: StudioServices, raw_key: str) -> None:
     ref = _parse_conversation_key(raw_key)
     body = _require_json_body(handler)
@@ -731,14 +890,17 @@ def _put_memories(handler, ctx, svc: StudioServices, raw_key: str) -> None:
     if space_ref is None and not remove:
         raise StudioError(404, "not_found", "空间不存在或已注销")
     # remove=True 且空间已注销：放行——这是清理残绑定的管理路径。
-    # MEM-HARD-01：vault 直接 403，且绝不落边（INV-01）。
+    # MEM-HARD-01（owner 决策 2026-11-01 修订）：vault 仅可绑主人本人大号
+    # 私聊/控制台会话（宿主配置的 owner_conversations）；其余一律 403。
     if space_ref is not None and space_ref.type is MemorySpaceType.PROTECTED_ORIGINAL:
-        _audit(ctx, "memory.unbind" if remove else "memory.bind",
-               outcome="denied", reason="vault_not_bindable",
-               conversation_key=ref.as_key(), space_id=space_id)
-        raise StudioError(403, "vault_not_bindable",
-                          "个人原始库不能直接连接任何会话；"
-                          "请先创建受控副本（Fork）")
+        conv_key = ref.as_key()
+        if conv_key not in svc.bindings.owner_conversations:
+            _audit(ctx, "memory.unbind" if remove else "memory.bind",
+                   outcome="denied", reason="vault_not_bindable",
+                   conversation_key=conv_key, space_id=space_id)
+            raise StudioError(403, "vault_not_bindable",
+                              "个人原始库只能连接主人本人的私聊会话；"
+                              "其余会话请先创建受控副本（Fork）")
     key = ref.as_key()
     ver_key = f"{_MEMVER_PREFIX}{key}"
     with ctx.lock:
@@ -1293,10 +1455,13 @@ def _member_consent_revoke(handler, ctx, svc: StudioServices) -> None:
                                      or not _GROUP_ID_RE.match(source_group)):
         raise StudioError(422, "invalid_request", "source_group 非法")
     with ctx.lock:
+        # owner 决策 2026-11-01：撤销语义 = opt-out（停止召回与写入）。
+        # 管理通道撤销是安全正向操作，无需成员证据；grant 才要。
         if source_group:
             revoked = 1 if svc.consents.revoke(principal_raw, source_group) else 0
         else:
             revoked = svc.consents.revoke_all(principal_raw)
+        svc.consents.opt_out(principal_raw)
         _audit(ctx, "member.consent.revoke", principal_id=principal_raw,
                source_group=source_group or "*", revoked=revoked)
     handler._send(200, _ok({"principal_id": principal_raw,
@@ -1477,6 +1642,15 @@ def _dispatch_studio(handler, method: str, parts: list[str]) -> None:
         _list_conversations(handler, ctx, svc)
     elif rest == ["personas"] and method == "GET":
         _list_personas(handler, ctx, svc)
+    elif rest == ["personas"] and method == "POST":
+        _create_persona(handler, ctx, svc)
+    elif len(rest) == 2 and rest[0] == "personas":
+        if method == "GET":
+            _get_persona_detail(handler, ctx, svc, rest[1])
+        elif method == "PUT":
+            _update_persona(handler, ctx, svc, rest[1])
+        else:
+            raise StudioError(405, "method_not_allowed", "use GET or PUT")
     elif rest == ["memory-spaces"] and method == "GET":
         _list_memory_spaces(handler, ctx, svc)
     elif rest == ["graph"] and method == "GET":
@@ -1543,6 +1717,8 @@ def _path_known(rest: list[str]) -> bool:
                 ["members", "consent"], ["members", "consent", "revoke"],
                 ["members", "memory"], ["members", "memory", "correct"],
                 ["members", "memory", "delete"]):
+        return True
+    if len(rest) == 2 and rest[0] == "personas":
         return True
     return len(rest) == 3 and rest[0] == "conversations" \
         and rest[2] in ("persona", "memories", "capabilities", "rhythm")

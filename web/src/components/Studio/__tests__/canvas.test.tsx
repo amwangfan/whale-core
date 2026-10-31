@@ -32,9 +32,10 @@ describe("Studio 画布", () => {
     expect(screen.getByTestId("card-space:vault")).toBeTruthy();
 
     // 文案来自后端 label/name，不是前端编造
+    // （人物卡管理面板也会列出同名卡标题，故用 getAllByText 不断言唯一）
     expect(screen.getByText("qq:group:g1")).toBeTruthy();
-    expect(screen.getByText("活泼鲸鱼")).toBeTruthy();
-    expect(screen.getByText("课程副本")).toBeTruthy();
+    expect(screen.getAllByText("活泼鲸鱼").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("课程副本").length).toBeGreaterThan(0);
 
     // INV-08：vault 卡只有「存在 + 名称」，不展示记录数等私密元数据
     const vault = screen.getByTestId("card-space:vault");

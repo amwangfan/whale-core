@@ -195,8 +195,8 @@ def test_address_and_boundaries_from_self_facts(env):
     state = env["rel"].state_for(_resolve(env, A_UIN, A_PRIVATE))
     assert state.address_as == "阿夜"
     assert any("被催" in b for b in state.boundaries)
-    # 撤销 consent → resolver 不再下发成员空间 → 自述全部消失（撤销即失效）
-    env["consents"].revoke(A_PRINCIPAL, GROUP)
+    # opt-out → resolver 不再下发成员空间 → 自述全部消失（退出即失效）
+    env["consents"].opt_out(A_PRINCIPAL)
     state2 = env["rel"].state_for(_resolve(env, A_UIN, A_PRIVATE))
     assert state2.self_facts == ()
     assert state2.address_as == ""

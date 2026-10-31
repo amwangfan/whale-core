@@ -198,15 +198,16 @@ class MemberMemoryExtractor:
         uid = sender_id_for_principal(principal_id)
         if not uid:
             return stats
-        # G6 红队低-4：consent 先行——未授权时零扫描（每条群消息都全量扫
-        # 时间线会被刷屏放大 CPU/IO）；群级范围在后续管道仍逐项校验。
-        if not self.consents.has_valid(principal_id, now=current):
+        # owner 决策 2026-11-01：成员记忆默认开启（私聊即同意）；
+        # 「别记我了」写持久退出标记——退出者零扫描零写入。
+        if self.consents.is_opted_out(principal_id):
             return stats
         entries = [e for e in self.timeline.recent(source_group, limit=1000)
                    if str(e.get("sender_id") or "") == uid
                    and not e.get("is_self")]
         stats.scanned = len(entries)
 
+        # consent 记录只作审计/版本证据，不再是写入闸门（owner 决策）。
         consent = self.consents.valid_for_group(
             principal_id, source_group, now=current)
 
@@ -224,10 +225,11 @@ class MemberMemoryExtractor:
                                 or entry.get("recorded_at") or "")))
         stats.candidates = len(candidates)
 
+        # owner 决策 2026-11-01：默认采集（私聊即同意）；consent 记录只作
+        # 审计/版本证据，不再作写入闸门。退出（opt-out）在上方已零扫描早退。
         if consent is None:
-            # MEM-02：consent 无效即丢弃，0 写入。
-            stats.dropped_no_consent = len(candidates)
-            return stats
+            consent_version = 0  # 默认采集路径：无 consent 记录
+        # 继续写入（binding/空间校验在下方）
 
         binding = self.bindings.member_binding_for(principal_id)
         space_id = str(binding.get("space_id") or "") if binding else ""

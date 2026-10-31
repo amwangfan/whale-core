@@ -31,6 +31,9 @@ FORKABLE_TARGET_TYPES = frozenset({
 WRITABLE_TYPES = frozenset({
     MemorySpaceType.OWNER_WORKING_COPY,
     MemorySpaceType.GROUP_SPACE,
+    # owner 决策 2026-11-01：成员本人私聊的自动写回落其 member_private
+    # （绑定层已保证只能绑到本人私聊，群聊永不可绑）。
+    MemorySpaceType.MEMBER_PRIVATE,
 })
 
 

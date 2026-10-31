@@ -3,6 +3,26 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+def record_uid_mapping(store, uin: str, uid: str) -> None:
+    """G2：传输层已验证的 uin↔uid 映射（同一事件里两者同源出现）。
+
+    QQ 私聊会话 id 用 u_ 形态 uid，配对表用数字 uin——不做映射，「本人
+    私聊」结构校验永远对不上。只记录非空且形状合法的映射。
+    """
+    uin, uid = str(uin or ""), str(uid or "")
+    if not uin or not uid or uin == uid:
+        return
+    if not uid.startswith("u_"):
+        return
+    store.put(f"uidmap:uin:{uin}", uid)
+    store.put(f"uidmap:uid:{uid}", uin)
+
+
+def uid_to_uin(store, uid: str) -> str:
+    val = store.get(f"uidmap:uid:{uid}")
+    return str(val) if isinstance(val, str) else ""
+
+
 @dataclass(frozen=True)
 class Incoming:
     channel: str

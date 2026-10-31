@@ -56,7 +56,7 @@ def _assert_member_private_bindable(
     if kind is ConversationKind.QQ_GROUP:
         raise BindingError("member_private 空间永不绑定群聊（MEM-03）")
     if not owner or not principal_matches_private_conversation(
-            channel, kind, cid, owner):
+            channel, kind, cid, owner, store=spaces.store):
         raise BindingError(
             "member_private 只能绑定空间所属成员本人的已认证私聊")
 
@@ -64,9 +64,13 @@ def _assert_member_private_bindable(
 class BindingStore:
     """会话绑定存储（同时充当 resolver 的 BindingLookup）。"""
 
-    def __init__(self, store: MemoryStore, spaces: SpaceStore):
+    def __init__(self, store: MemoryStore, spaces: SpaceStore,
+                 *, owner_conversations: frozenset | None = None):
         self.store = store
         self.spaces = spaces
+        # owner 决策 2026-11-01：这些会话（主人本人大号私聊/控制台）允许
+        # 直连 vault；其余会话绑 vault 仍拒绝。由宿主显式配置。
+        self.owner_conversations = frozenset(owner_conversations or ())
 
     # -- BindingLookup 协议（resolver 消费） -------------------------------
 
@@ -123,8 +127,9 @@ class BindingStore:
         if ref is None:
             raise BindingError(f"unknown or retired space: {space_id}")
         if ref.type is MemorySpaceType.PROTECTED_ORIGINAL:
-            raise BindingError(
-                "个人原始库不能直接连接任何会话；请先创建受控副本（Fork）")
+            if conversation_key not in self.owner_conversations:
+                raise BindingError(
+                    "个人原始库只能连接主人本人的私聊会话；其余会话请先创建受控副本（Fork）")
         # G2：member_private 只许本人私聊（群聊在这里一律被拒）。
         _assert_member_private_bindable(self.spaces, space_id, conversation_key)
         if can_write and not can_read:

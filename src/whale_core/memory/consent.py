@@ -130,6 +130,22 @@ class MemberConsentStore:
         consent = self.get(principal_id, source_group)
         return consent if self.is_valid(consent, now=now) else None
 
+    _OPTOUT_PREFIX = "member:optout:"
+
+    def opt_out(self, principal_id: str) -> None:
+        """owner 决策 2026-11-01：成员记忆默认开启（私聊即同意），
+        「别记我了」= 持久退出标记。"""
+        self.store.put(f"{self._OPTOUT_PREFIX}{principal_id}",
+                       {"opted_out": True, "at": _now().isoformat()})
+        self.revoke_all(principal_id)
+
+    def opt_in(self, principal_id: str) -> None:
+        self.store.delete(f"{self._OPTOUT_PREFIX}{principal_id}")
+
+    def is_opted_out(self, principal_id: str) -> bool:
+        rec = self.store.get(f"{self._OPTOUT_PREFIX}{principal_id}")
+        return isinstance(rec, dict) and bool(rec.get("opted_out"))
+
     def has_valid(self, principal_id: str, *,
                   now: Optional[datetime] = None) -> bool:
         """该成员是否存在任一有效授权（私聊召回的下发闸门）。"""
@@ -219,7 +235,9 @@ class MemberMemoryDirectory:
         ref = self._spaces.ref(str(binding.get("space_id") or ""))
         if ref is None or ref.type is not MemorySpaceType.MEMBER_PRIVATE:
             return None
-        if not self._consents.has_valid(principal_id, now=now):
+        # owner 决策 2026-11-01：私聊即同意，退出用「别记我了」；
+        # consent 仍是撤销/审计证据链，但不再作为默认门槛。
+        if self._consents.is_opted_out(principal_id):
             return None
         # 空间本身可写（提炼管道/本人管理操作），但 member_private 不在
         # spaces.WRITABLE_TYPES 中——会话闲聊的自动写回不会落进成员空间。

@@ -616,3 +616,24 @@ def test_create_code_with_search_scope(api):
     result = _json(raw)["result"]
     assert set(result["scopes"]) == {"tool.web.search", "task.read:self"}
     assert result["code"]  # 明文仅此一次
+
+
+def test_vault_bindable_for_owner_private_only(api):
+    """owner 决策 2026-11-01：主人大号私聊可直连 vault；他人/群仍 403。"""
+    server, store = api
+    from whale_core.memory.bindings import BindingStore
+    from whale_core.memory.spaces import SpaceStore
+    spaces = SpaceStore(store)
+    owner_key = "qq:qq_private:private:u_owner"
+    b = BindingStore(store, spaces, owner_conversations=frozenset({owner_key}))
+    # 主人私聊：可绑
+    row = b.bind_memory(owner_key, "vault-1", granted_by="owner")
+    assert row["space_id"] == "vault-1"
+    # 他人私聊/群：仍拒
+    import pytest
+    from whale_core.memory.bindings import BindingError
+    with pytest.raises(BindingError):
+        b.bind_memory("qq:qq_private:private:u_stranger", "vault-1",
+                      granted_by="owner")
+    with pytest.raises(BindingError):
+        b.bind_memory(GROUP_KEY, "vault-1", granted_by="owner")

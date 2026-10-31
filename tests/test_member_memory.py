@@ -191,13 +191,23 @@ def test_consent_grant_revoke_ttl(env):
 # ---------------------------------------------------------------------------
 
 
-def test_extraction_requires_consent(env):
+def test_extraction_default_on_and_optout_stops(env):
+    """owner 决策 2026-11-01：成员记忆默认开启（私聊即同意）；退出即停。
+
+    MEM-02 修订：默认采集仅本人自述；「别记我了」写持久退出标记，
+    退出后零扫描零写入。
+    """
     store, spaces, bindings, consents, _, tl, extractor = env
     _fill_timeline(tl)
-    # 未授权：0 写入（MEM-02）；G6 低-4 起 consent 先行早退，零扫描
+    _, ref = _grant_self(env)  # 建档（空间+绑定）
+    # 默认在记：无需显式 consent 即写入
     stats = extractor.extract_for_principal(A_PRINCIPAL, GROUP)
-    assert stats.written == 0 and stats.scanned == 0
-    assert store.list_by_kind(MemoryKind.EPISODE) == []
+    assert stats.written >= 1
+    # 退出：零扫描零写入
+    consents.opt_out(A_PRINCIPAL)
+    tl.append(GROUP, message_id="m-a9", sender_id=A_UIN, text="我又来了一句自述")
+    stats2 = extractor.extract_for_principal(A_PRINCIPAL, GROUP)
+    assert stats2.written == 0 and stats2.scanned == 0
 
 
 def test_extraction_writes_only_self_sourced(env):
@@ -258,12 +268,11 @@ def test_extraction_idempotent_and_revoke_stops(env):
     s2 = extractor.extract_for_principal(A_PRINCIPAL, GROUP)
     assert s1.written >= 1
     assert s2.written == 0 and s2.skipped_duplicate == s2.candidates
-    # 撤销后：新消息不再写入（ consent 无效即丢弃）
-    consents.revoke(A_PRINCIPAL, GROUP)
+    # 退出后：新消息不再写入（opt-out 持久标记）
+    consents.opt_out(A_PRINCIPAL)
     tl.append(GROUP, message_id="m-a4", sender_id=A_UIN,
               text="我下周要出差答辩。")
     s3 = extractor.extract_for_principal(A_PRINCIPAL, GROUP)
-    # 撤销后：0 写入（G6 低-4 起 consent 先行，零扫描）
     assert s3.written == 0 and s3.candidates == 0
 
 
@@ -313,8 +322,8 @@ def test_resolver_member_space_only_in_own_private(env):
                              conversation_id="private:99999")
     assert not [s for s in ctx_x.allowed_memory_spaces
                 if s.type is MemorySpaceType.MEMBER_PRIVATE]
-    # 撤销 → 不再下发
-    env[3].revoke_all(A_PRINCIPAL)
+    # opt-out → 不再下发
+    env[3].opt_out(A_PRINCIPAL)
     ctx_a2 = resolver.resolve(channel="qq", sender_id=A_UIN,
                               conversation_id=f"private:{A_UIN}")
     assert not [s for s in ctx_a2.allowed_memory_spaces

@@ -185,13 +185,18 @@ def test_bindings_surface_persona_and_spaces():
 
 
 def test_vault_binding_filtered_even_if_misconfigured():
-    """MEM-HARD-01：即使绑定存储被错误配置，vault 也不下发。"""
+    """MEM-HARD-01（2026-11-01 修订）：主人私聊 vault 可下发（大号例外）；
+    群聊即使绑定表被污染也永不下发。"""
     b = _Bindings(spaces={"qq:qq_private:private:10001": (VAULT, OWNER_COPY)})
     ctx = make_resolver(bindings=b).resolve(
         channel="qq", sender_id=OWNER_QQ, conversation_id="private:10001")
-    assert VAULT not in ctx.allowed_memory_spaces
     assert OWNER_COPY in ctx.allowed_memory_spaces
-    assert ctx.allows_memory_read(VAULT) is False
+    assert ctx.allows_memory_read(VAULT) is True  # 主人本人私聊
+    # 群聊：vault 仍被剥离
+    ctx_g = make_resolver(bindings=b).resolve(
+        channel="qq", sender_id=OWNER_QQ, conversation_id="group:9")
+    assert VAULT not in ctx_g.allowed_memory_spaces
+    assert ctx_g.allows_memory_read(VAULT) is False
 
 
 def test_group_binding_strips_private_spaces():

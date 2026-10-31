@@ -97,7 +97,7 @@ class MemoryCurator:
 
     def recall(self, query: str, *, limit: int = 5,
                now: datetime | None = None,
-               allowed_spaces=None) -> tuple[RecallHit, ...]:
+               allowed_spaces=None, include_protected: bool = False) -> tuple[RecallHit, ...]:
         """召回。S2：``allowed_spaces`` 为 MemorySpaceRef 元组（服务端
         ResolvedContext 提供）；空元组 fail closed；None 为兼容期旧行为
         （仍不含 protected_original，存储层硬排除）。"""
@@ -109,8 +109,10 @@ class MemoryCurator:
         current = now or datetime.now(timezone.utc)
         query_terms = _terms(query)
         matches: list[RecallHit] = []
-        records = (self.store.list_by_kind(MemoryKind.EPISODE, space_ids=space_ids) +
-                   self.store.list_by_kind(MemoryKind.PREFERENCE, space_ids=space_ids))
+        records = (self.store.list_by_kind(MemoryKind.EPISODE, space_ids=space_ids,
+                                           include_protected=include_protected) +
+                   self.store.list_by_kind(MemoryKind.PREFERENCE, space_ids=space_ids,
+                                           include_protected=include_protected))
         for rec in records:
             if "curated" not in rec.tags:
                 continue

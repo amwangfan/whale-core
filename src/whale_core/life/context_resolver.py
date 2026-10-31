@@ -216,11 +216,14 @@ class ConversationContextResolver:
                     if s.type
                     in (MemorySpaceType.GROUP_SPACE, MemorySpaceType.SHAREABLE_FORK)
                 )
-            # MEM-HARD-01：无论绑定配置如何，protected_original 永不下发。
+            # MEM-HARD-01（owner 决策 2026-11-01 修订）：protected_original
+            # 只允许在主人本人私聊下发；其余一律剥离。
+            owner_priv = principal.is_owner and not _is_group(kind)
             spaces = tuple(
                 s
                 for s in bound
                 if s.type is not MemorySpaceType.PROTECTED_ORIGINAL
+                or owner_priv
             )
         # 首版默认策略：已认证主人的非群会话自动挂上主人工作副本
         # （绑定为空时）；群会话永不享受此默认（INV-03）。
@@ -242,7 +245,8 @@ class ConversationContextResolver:
             self._member_memory is not None
             and not _is_group(kind)
             and principal_matches_private_conversation(
-                channel, kind, conversation_id, principal.principal_id)
+                channel, kind, conversation_id, principal.principal_id,
+                store=getattr(self._bindings, "store", None))
         ):
             try:
                 member_ref = self._member_memory.member_space_for(

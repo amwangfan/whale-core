@@ -35,10 +35,24 @@ def _recall(curator, query: str, allowed_spaces, **kwargs):
 
     Legacy no-context callers may use the older signature; an authorized
     conversation must use a scope-aware curator or fail closed.
+    include_protected=False 时不向下游传该参数（兼容旧 curator 签名）。
     """
+    if not kwargs.get("include_protected"):
+        kwargs.pop("include_protected", None)
     if allowed_spaces is None:
+        kwargs.pop("include_protected", None)
         return curator.recall(query, **kwargs)
     return curator.recall(query, allowed_spaces=allowed_spaces, **kwargs)
+
+
+def _spaces_include_vault(spaces) -> bool:
+    """授权空间集合里是否含受保护原始库（resolver 已按主人私聊规则过滤）。"""
+    try:
+        from whale_core.life.conversation_context import MemorySpaceType
+        return any(getattr(s, "type", None) is MemorySpaceType.PROTECTED_ORIGINAL
+                   for s in (spaces or ()))
+    except Exception:
+        return False
 
 class WhaleCompanion:
     def __init__(self, store: MemoryStore, model: TextCompanion, *, curator: MemoryCurator | None = None,
@@ -115,7 +129,8 @@ class WhaleCompanion:
                     "G4 relationship/expression hint failed; continuing without")
         if self.curator is not None:
             memories = [str(hit.record.content.get("summary", ""))
-                        for hit in _recall(self.curator, original, spaces)]
+                        for hit in _recall(self.curator, original, spaces,
+                                           include_protected=_spaces_include_vault(spaces))]
             # 近期对话情节补充注入的纪律（owner 反馈 2026-10-31「总重复图片的事」）：
             # 1. **只取本会话**的情节——别会话的旧情节会把话题带偏；
             # 2. 规范化去重（同主题多条情节只留最新一条）；

@@ -120,7 +120,7 @@ class HybridCurator:
         self.half_life_days = half_life_days
 
     def recall(self, query: str, *, limit: int = 5,
-               allowed_spaces=None) -> tuple[HybridHit, ...]:
+               allowed_spaces=None, include_protected: bool = False) -> tuple[HybridHit, ...]:
         """召回。S2：allowed_spaces 限域（MemorySpaceRef 元组）；空元组 fail
         closed；嵌入按空间分组，缓存命名空间=space_id（INV-08）。"""
         if limit <= 0:
@@ -130,8 +130,10 @@ class HybridCurator:
             return ()
         current = datetime.now(timezone.utc)
         query_terms = _terms(query)
-        records = (self.store.list_by_kind(MemoryKind.EPISODE, space_ids=space_ids) +
-                   self.store.list_by_kind(MemoryKind.PREFERENCE, space_ids=space_ids))
+        records = (self.store.list_by_kind(MemoryKind.EPISODE, space_ids=space_ids,
+                                           include_protected=include_protected) +
+                   self.store.list_by_kind(MemoryKind.PREFERENCE, space_ids=space_ids,
+                                           include_protected=include_protected))
         candidates = [r for r in records if "curated" in r.tags
                       and "superseded" not in r.tags
                       and not _is_expired(r.content, current)]
