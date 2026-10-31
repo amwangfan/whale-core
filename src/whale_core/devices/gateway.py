@@ -27,7 +27,7 @@ import time
 import uuid
 from typing import Any
 
-from whale_core.devices.perception import DevicePerceptionAdapter
+from whale_core.devices.perception import DevicePerceptionAdapter, DurableDevicePerceptionAdapter
 from whale_core.devices.registry import DeviceRegistry, now_ms
 from whale_core.devices.schema import (
     PROTOCOL_VERSION,
@@ -106,7 +106,7 @@ class DeviceGateway:
         self.registry = registry
         self.store = store
         self.host = host
-        self.adapter = adapter or DevicePerceptionAdapter()
+        self.adapter = adapter if adapter is not None else DurableDevicePerceptionAdapter(store)
         if not (1 <= heartbeat_interval <= 3600):
             raise ValueError("heartbeat_interval 须在 1..3600（hello_ack schema）")
         if not (1 <= challenge_ttl <= 300):
