@@ -124,6 +124,12 @@
           "minLength": 8,
           "maxLength": 128,
           "description": "幂等键，端侧按它去重（§6）"
+        },
+        "correlation_id": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 64,
+          "description": "EV-02 可选：事件→决策→动作的关联键（通常取触发事件的 event_id）；端侧回执 provider_ref 回显 corr:<id> 供审计"
         }
       },
       "description": "下行动作请求；端侧校验白名单+有效期+scope"
