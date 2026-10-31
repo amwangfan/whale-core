@@ -187,10 +187,14 @@ class QqInboundWorkflow:
             ctx = resolver.resolve(channel=event.channel,
                                    sender_id=event.sender_id or event.owner_id,
                                    conversation_id=event.conversation)
-            from whale_core.memory.spaces import (
-                DEFAULT_VAULT_ID, default_write_space)
-            space_id = default_write_space(ctx.allowed_memory_spaces) or DEFAULT_VAULT_ID
+            from whale_core.memory.spaces import default_write_space
+            space_id = default_write_space(ctx.allowed_memory_spaces)
             allowed = ctx.allowed_memory_spaces
+            # A group with no writable memory must NEVER fall back to the
+            # owner's protected vault. Forget is also a write operation.
+            from whale_core.core.memory_commands import REMEMBER_PREFIXES, FORGET_PREFIXES
+            if not space_id and text.strip().startswith(REMEMBER_PREFIXES + FORGET_PREFIXES):
+                return "当前会话没有可写记忆库，请先在工作台绑定有写权限的记忆空间。"
         return handle_memory_command(
             self.store, text, source="qq:owner",
             evidence_id=f"qq:{event.conversation}:{event.message_id}",
