@@ -63,3 +63,74 @@ class DevicePerceptionAdapter:
             batch = list(self._queue)
             self._queue.clear()
         return iter(batch)
+
+
+class DurableDevicePerceptionAdapter(DevicePerceptionAdapter):
+    """At-least-once sensor inbox backed by the gateway's persisted event records.
+
+    The gateway commits device:event:* BEFORE acknowledging to the device.
+    This adapter reconstructs pending work after restart, and only removes it
+    after the consumer explicitly acknowledges successful processing.
+    """
+
+    def __init__(self, store, *, max_queued: int = MAX_QUEUED_EVENTS):
+        super().__init__(max_queued=max_queued)
+        self.store = store
+
+    def offer(self, *, device_id: str, payload: Mapping[str, Any]) -> PerceptionEvent:
+        # Gateway owns durable write and dedup; no second volatile enqueue.
+        return self._event(device_id, payload)
+
+    @staticmethod
+    def _event(device_id: str, payload: Mapping[str, Any]) -> PerceptionEvent:
+        occurred_ms = int(payload.get("occurred_at") or 0)
+        return PerceptionEvent(
+            kind=str(payload.get("kind") or "device.unknown"),
+            event_id=str(payload.get("event_id")),
+            occurred_at=datetime.fromtimestamp(occurred_ms / 1000, tz=timezone.utc),
+            payload={
+                "source": "screenmemo",
+                "device_id": device_id,
+                "privacy_class": str(payload.get("privacy_class") or ""),
+                "summary": str(payload.get("summary") or ""),
+                "evidence_ref": payload.get("evidence_ref"),
+                "schema_version": str(payload.get("schema_version") or ""),
+                "occurred_at_ms": occurred_ms,
+            },
+        )
+
+    def poll(self) -> Iterator[PerceptionEvent]:
+        # Intentionally non-destructive; callers MUST ack after processing.
+        # If a process crashes after poll, the next process sees the same work.
+        entries = []
+        for key in self.store.keys():
+            if not key.startswith("device:event:"):
+                continue
+            record = self.store.get(key)
+            if not isinstance(record, dict):
+                continue
+            device_id = str(record.get("device_id") or "")
+            event_id = str(record.get("event_id") or "")
+            if not device_id or not event_id:
+                continue
+            if self.store.get(self._ack_key(device_id, event_id)):
+                continue
+            entries.append(record)
+        entries.sort(key=lambda r: (int(r.get("received_at") or 0),
+                                    str(r.get("device_id") or ""),
+                                    str(r.get("event_id") or "")))
+        return iter(self._event(str(p["device_id"]), p)
+                    for p in entries[:self._max_queued])
+
+    @staticmethod
+    def _ack_key(device_id: str, event_id: str) -> str:
+        return f"device:processed:{device_id}:{event_id}"
+
+    def ack(self, *, device_id: str, event_id: str) -> None:
+        """Mark a successfully consumed event; do not ack merely on poll."""
+        if not device_id or not event_id:
+            raise ValueError("device_id and event_id are required")
+        key = f"device:event:{device_id}:{event_id}"
+        if self.store.get(key) is None:
+            raise ValueError("cannot acknowledge an unknown sensor event")
+        self.store.put(self._ack_key(device_id, event_id), {"processed": True})
