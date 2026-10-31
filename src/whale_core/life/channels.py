@@ -11,6 +11,8 @@ class Incoming:
     message_id: str
     text: str
     transport_authenticated: bool = False
+    # 附件（图片等）：{"kind": "pic", "file_path": "...", "url": "..."} 元组
+    attachments: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -20,6 +22,8 @@ class OwnerEvent:
     conversation: str
     message_id: str
     text: str
+    # 附件（图片等）：{"kind": "pic", "file_path"|"url"} 元组——宿主负责取字节
+    attachments: tuple = ()
 
 
 class OwnerChannelRegistry:

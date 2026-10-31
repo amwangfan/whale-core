@@ -5,7 +5,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Mapping, Protocol, runtime_checkable
@@ -151,21 +152,29 @@ class InMemoryStore:
         return sorted(set(self._data) | set(self._records))
 
     def put_record(self, record: MemoryRecord) -> None:
-        self._records[record.key] = record
+        # JSON 往返归一 content/tags（与 SqliteMemoryStore 序列化语义对齐）：
+        # 非 JSON 可序列化内容在此抛 TypeError；tuple 等类型归一为 list。
+        # created_at 保持 datetime 对象，不参与往返。
+        content = json.loads(json.dumps(dict(record.content), ensure_ascii=False))
+        tags = tuple(json.loads(json.dumps(list(record.tags), ensure_ascii=False)))
+        normalized = replace(record, content=content, tags=tags)
+        self._records[record.key] = normalized
         # 同步一份可序列化视图，便于旧 get() 调用方窥视
         self._data[record.key] = {
-            "kind": record.kind.value,
-            "content": dict(record.content),
-            "record_id": record.record_id,
-            "created_at": record.created_at.isoformat(),
-            "tags": list(record.tags),
+            "kind": normalized.kind.value,
+            "content": dict(normalized.content),
+            "record_id": normalized.record_id,
+            "created_at": normalized.created_at.isoformat(),
+            "tags": list(normalized.tags),
         }
 
     def get_record(self, key: str) -> MemoryRecord | None:
         return self._records.get(key)
 
     def list_by_kind(self, kind: MemoryKind) -> list[MemoryRecord]:
-        return [r for r in self._records.values() if r.kind == kind]
+        # created_at 倒序（新的在前）；sorted 稳定，同 created_at 保持插入顺序。
+        records = [r for r in self._records.values() if r.kind == kind]
+        return sorted(records, key=lambda r: r.created_at, reverse=True)
 
     def get_persona_continuity(self, key: str = "persona:default") -> PersonaContinuity | None:
         rec = self.get_record(key)

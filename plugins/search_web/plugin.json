@@ -1,0 +1,12 @@
+{
+  "plugin_id": "search_web",
+  "name": "网页搜索与抓取（web.search / web.fetch）",
+  "version": "1.0.0",
+  "api_version": "1",
+  "kind": "output",
+  "actions": ["search", "fetch"],
+  "action_risk": {"search": "read_only", "fetch": "read_only"},
+  "entrypoint": "main.py",
+  "description": "可插拔搜索 provider（Tavily/Brave/DDG 回退链）+ SSRF 防护网页正文提取",
+  "homepage": "https://github.com/amwangfan/whale-core"
+}

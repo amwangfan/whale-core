@@ -57,11 +57,12 @@ for _stream in (sys.stdout, sys.stderr):
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
+sys.path.insert(0, str(REPO_ROOT / "plugins"))
 
 from whale_core.life.channels import OwnerChannelRegistry, OwnerEvent  # noqa: E402
 from whale_core.life.initiative import ProactiveOutbox, ProactivePrefs  # noqa: E402
 from whale_core.life.qq_workflow import QqInboundWorkflow           # noqa: E402
-from whale_core.life.wq_push import WeQSsePushListener              # noqa: E402
+from weq_channel.wq_push import WeQSsePushListener              # noqa: E402
 from whale_core.memory.store import InMemoryStore                   # noqa: E402
 
 DEFAULT_SECRETS = REPO_ROOT / "secrets" / "qq_workflow.env"
@@ -200,7 +201,7 @@ def build_send_port(*, live_ok: bool):
     或已打开双开关的无人值守发送；环境变量配齐本身**不**改变 run 的审批策略。
     """
     if live_ok and weq_live_configured():
-        from whale_core.life.weq_send import WeQWebSendPort
+        from weq_channel.weq_send import WeQWebSendPort
         url = os.environ.get("WEQ_WEB_URL", "").strip()
         uid = os.environ.get("OWNER_UID", "").strip()
         allowed = tuple(
@@ -212,6 +213,19 @@ def build_send_port(*, live_ok: bool):
                               allowed_hosts=allowed)
         # Do not log the configured URL (it may contain sensitive query parameters) or UID.
         print("[出站] WeQ Web 真实发送已启用（地址校验通过；目标固定为已配置 owner）")
+        # 按需完整模式窗口（full-mode window）：QQ_FULLMODE_ONDEMAND=1 时包装——
+        # 开窗=发送时自动，关窗=空闲超时；跨进程协调只靠 state_file。
+        if os.environ.get("QQ_FULLMODE_ONDEMAND", "").strip() == "1":
+            from weq_channel.full_mode_window import (
+                STATE_FILE_DEFAULT, FullModeWindow, WindowedSendPort)
+            window = FullModeWindow(
+                url, os.environ.get("WEQ_WEB_TOKEN", "").strip(),
+                state_file=STATE_FILE_DEFAULT,
+                ready_timeout_s=float(os.environ.get("QQ_FULLMODE_READY_TIMEOUT_S", "25")),
+                grace_s=float(os.environ.get("QQ_FULLMODE_GRACE_S", "4")))
+            port = WindowedSendPort(
+                port, window,
+                idle_min=float(os.environ.get("QQ_FULLMODE_IDLE_MIN", "10")))
         return port
     print("[出站] [!] console stub（不真实发送；真实端=配齐 WEQ_WEB_* 后走 approve "
           "或 --live-auto-send 双开关）")
@@ -294,24 +308,162 @@ def cmd_run(args) -> int:
               "真实发送用 approve 子命令（人工逐条）。")
     send_port = build_send_port(live_ok=live_auto)
 
+    # 按需完整模式窗口：启动即关窗定基线（幂等）；closer 只在 runner 主进程起——
+    # approve 子进程是独立短命进程，只开窗/续期，关窗由本 closer 跨进程兜底。
+    if os.environ.get("QQ_FULLMODE_ONDEMAND", "").strip() == "1":
+        from weq_channel.full_mode_window import FullModeWindowError, WindowedSendPort
+        if isinstance(send_port, WindowedSendPort):
+            try:
+                send_port.window.close()
+                print("[完整模式] 启动基线：窗口已关闭（attach 离线，收消息不受影响）")
+            except FullModeWindowError as exc:
+                print(f"[完整模式] 启动基线关窗失败（closer 将兜底重试）：{exc}")
+            send_port.start_closer()
+            print(f"[完整模式] 按需窗口 idle={send_port.idle_min:g}min")
+
     inbox = build_inbox(args.inbox)
     workflow = QqInboundWorkflow(store, build_brain(), prefs=prefs)
+
+    def _send_audio_artifacts(audio_ids) -> None:
+        """把任务产生的音频产物发成 QQ 语音消息。"""
+        if not audio_ids or cap.artifacts is None:
+            return
+        for aid in audio_ids[:2]:
+            try:
+                blob = cap.artifacts.read(aid)
+                data = blob[1] if isinstance(blob, tuple) else blob
+                ok = send_port.send_voice(data, filename=f"{aid[:8]}.wav")
+                print(f"  [语音] {aid[:8]} → {'已发' if ok else '发送失败'}")
+            except Exception as exc:
+                print(f"  [语音] {aid[:8]} 读取失败：{type(exc).__name__}")
+
+    def _send_completion(event, reply: str, audio_ids=()) -> None:
+        """两段式补发：草稿+审批+网关发送（与主回复同一条发送链）。"""
+        if not live_auto:
+            return
+        # 语音产物先发（单独一条语音消息），文字补发随后
+        _send_audio_artifacts(audio_ids)
+        draft_id = f"qq-followup:{event.message_id}"
+        from whale_core.life.initiative import ProactiveDraft
+        workflow.outbox.propose(ProactiveDraft(
+            draft_id=draft_id, text=reply,
+            reason="两段式慢任务完成后的补发（ack 已发）",
+            evidence=(f"qq:{event.conversation}:{event.message_id}",),
+            channel="direct_message"))
+        owner_draft_ids.add(draft_id)
+        approved_draft_ids.add(draft_id)
+        receipt = plugin_gateway.dispatch(send_message_intent(
+            event.conversation, reply, draft_id=draft_id))
+        print(f"  [补发] {draft_id} → {receipt}")
     registry = OwnerChannelRegistry(owner_id="owner", bindings=bindings)
 
     # QQ/WeQ is registered as a channel plugin. The input adapter is consumed here
     # immediately; live unattended sends use PluginGateway + the same workflow Outbox.
-    from whale_core.life.qq_weq_plugin import (
+    from weq_channel.qq_weq_plugin import (
         QQ_WEQ_PLUGIN_ID, build_qq_weq_gateway, register_qq_weq_plugin, send_message_intent)
     from whale_core.plugins import PluginRegistry
     plugin_registry = PluginRegistry()
     adapter, _executor = register_qq_weq_plugin(
         plugin_registry, port=send_port, outbox=workflow.outbox, prefs=prefs)
+
+    # 媒体/语音能力：统一走 configure_optional_capabilities——
+    # 支持 WHALE_MEDIA_BASE_URL/WHALE_MEDIA_API_KEY 一个平台全覆盖，也可各能力
+    # 专属覆盖（WHALE_IMAGE_*/WHALE_SPEECH_*/WHALE_VIDEO_*）；供应商类型可选
+    # dashscope（阿里云百炼 / AgentScope 平台）或 openai。配了端点就注册，
+    # 没配完全不出现（无 mock 冒充）。
+    from whale_core.core.runtime import ToolRegistry
+    from whale_core.plugins.capability_setup import configure_optional_capabilities
+    tools = ToolRegistry()
+    cap = configure_optional_capabilities(
+        plugin_registry, tools, store, env=os.environ,
+        artifact_dir=Path(args.store).parent / "artifacts")
+    for note in cap.notes:
+        print(f"[能力] {note}")
+
+    # 意图模型（可选，默认关）：QQ_INTENT_MODEL=<模型 id> 开启——同 AgentScope
+    # 平台的 OpenAI 兼容端点复用 DEEPSEEK_* 凭据；规则优先（显式搜索指令本地
+    # 识别零额外调用），LLM 规划用于其余消息。实测选型记录见 gap-analysis。
+    intent_model_id = os.environ.get("QQ_INTENT_MODEL", "").strip()
+    if intent_model_id:
+        from whale_core.core.deepseek import DeepSeekCompanion  # build_brain 同款局部导入
+        from whale_core.core.intent_router import SearchIntentRouter
+        from whale_core.core.runtime import ConversationOrchestrator, ToolRegistry
+        intent_brain = DeepSeekCompanion(model=intent_model_id)  # 同平台不同模型
+        if (os.environ.get("TAVILY_API_KEY") or os.environ.get("BRAVE_API_KEY")
+                or os.environ.get("WHALE_SEARCH_PROVIDER")):
+            from search_web.web_fetch import register_web_fetch
+            from search_web.web_search import register_web_search, select_provider
+            register_web_search(plugin_registry, tools, provider=select_provider(os.environ))
+            register_web_fetch(plugin_registry, tools)
+            tool_note = "搜索/抓取已挂载"
+        else:
+            tool_note = "搜索未挂载（无 TAVILY/BRAVE key，搜索意图会诚实报不可用）"
+        workflow.orchestrator = ConversationOrchestrator(
+            store, workflow.companion,
+            intent_model=SearchIntentRouter(model=intent_brain, enable_llm=True, tools=tools),
+            tools=tools)
+        print(f"[意图] 模型={intent_model_id}（规则优先+LLM 规划；{tool_note}）")
+
+    # 安全审核模型（可选，默认关）：QQ_SAFETY_MODEL=<模型 id> 开启——
+    # 回复发送前由该模型复核；有顾虑的草稿强制转人工审批（不自动发）。
+    safety_model_id = os.environ.get("QQ_SAFETY_MODEL", "").strip()
+    if not safety_model_id and intent_model_id:
+        safety_model_id = intent_model_id  # 审核与意图同一插件（owner 决策）
+    if safety_model_id.lower() == "off":
+        safety_model_id = ""               # 显式关闭
+    if safety_model_id:
+        from whale_core.core.deepseek import DeepSeekCompanion as _DS
+        safety_brain = _DS(model=safety_model_id)
+
+        def _review(reply: str) -> str | None:
+            prompt = (
+                "你是发送前审核员。审核下面这条要发给主人的陪伴机器人回复。"
+                "只有两类问题需要拦截：泄露密钥/隐私信息、或明显伤害用户的攻击性内容。"
+                "注意：图片/文件链接里的 OSS 签名参数（Expires/OSSAccessKeyId/Signature 等）"
+                "是平台生成的临时分享参数，属正常分享链接，不算泄露密钥，不要误拦。"
+                "都没问题只回答 OK；有问题用一句话说明顾虑。\n\n待审回复：" + reply[:800])
+            try:
+                answer = safety_brain.reply(prompt).strip()
+            except Exception:
+                return None  # 审核服务故障不阻塞正常回复（审核是增强层，非闸门）
+            return None if answer.upper().startswith("OK") else answer[:200]
+
+        workflow._safety_reviewer = _review
+        print(f"[审核] 安全审核模型={safety_model_id}（发送前复核；顾虑转人工）")
     owner_draft_ids: set[str] = set()
     approved_draft_ids: set[str] = set()
     plugin_gateway = build_qq_weq_gateway(
         plugin_registry, owner_draft_ids=owner_draft_ids,
         approved_draft_ids=approved_draft_ids)
     print(f"[插件] {QQ_WEQ_PLUGIN_ID} channel 已注册（send_message=communicate，网关门控+共享账本）")
+    # 编排器接上真实网关——否则 read_only 工具因 manifest 风险无法核验被拒
+    # （unverified-plugin-risk，生产实证：fetch_url 被拒）
+    if workflow.orchestrator is not None:
+        workflow.orchestrator.gateway = plugin_gateway
+    # 两段式慢任务补发（owner 决策 2026-10-31）：ack 先回，结果后台好了再补
+    workflow._completion_sender = _send_completion
+    # 语音产物补发：workflow 的补发回调现在带音频产物 id 列表
+
+    # 启动恢复：上次进程重启掐断的在途任务——未派发的重跑补发、已派发的诚实告知
+    def _send_recovery(conversation_id: str, reply: str) -> None:
+        if not live_auto or not reply.strip():
+            return
+        from whale_core.life.initiative import ProactiveDraft
+        draft_id = f"qq-recover:{uuid.uuid4().hex[:12]}"
+        workflow.outbox.propose(ProactiveDraft(
+            draft_id=draft_id, text=reply,
+            reason="进程重启打断的在途任务恢复补发",
+            evidence=(f"recover:{conversation_id}",), channel="direct_message"))
+        owner_draft_ids.add(draft_id)
+        approved_draft_ids.add(draft_id)
+        receipt = plugin_gateway.dispatch(send_message_intent(conversation_id, reply, draft_id=draft_id))
+        print(f"  [恢复补发] {draft_id} → {receipt}")
+
+    if workflow.orchestrator is not None:
+        recovered = workflow.orchestrator.recover_interrupted_tasks(
+            on_complete=lambda cid, reply, status: _send_recovery(cid, reply))
+        if recovered:
+            print(f"[恢复] 处理被上次重启打断的任务：{len(recovered)} 个")
 
     def on_owner(event):
         if not adapter.feed(event):
@@ -324,6 +476,7 @@ def cmd_run(args) -> int:
             owner_id=str(payload["owner_id"]), channel=str(payload["channel"]),
             conversation=str(payload["conversation"]), message_id=str(payload["message_id"]),
             text=str(payload["text"]),
+            attachments=tuple(payload.get("attachments") or ()),
         )
         print(f"\n← [owner] conv={event.conversation} msg={event.message_id} "
               f"text={event.text[:60]!r}")
@@ -339,7 +492,14 @@ def cmd_run(args) -> int:
         print(f"  {result['reply'][:300]}")
         if result["verdict"] != "needs_approval":
             return
+        if result.get("safety_concern"):
+            # 安全审核有顾虑：不自动发送，留人工终审
+            print(f"  [安全审核] 顾虑：{result['safety_concern'][:120]} → 不自动发送，待人工 approve")
+            return
         if live_auto:
+            # 语音产物先发（同步路径的 TTS 任务产物——「语音跟我说」这类）
+            from whale_core.life.qq_workflow import _extract_audio_artifacts
+            _send_audio_artifacts(_extract_audio_artifacts(result.get("receipts")))
             # The dual-switch unattended mode is the only auto path that can reach
             # the real port; the host authorizes this owner-derived draft explicitly.
             owner_draft_ids.add(result["draft_id"])

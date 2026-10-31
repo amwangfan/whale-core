@@ -14,7 +14,7 @@ import pytest
 from whale_core.life.channels import OwnerChannelRegistry
 from whale_core.life.initiative import ProactivePrefs
 from whale_core.life.qq_workflow import QqInboundWorkflow
-from whale_core.life.wq_push import (
+from weq_channel.wq_push import (
     MAX_BODY_BYTES,
     WeQSsePushListener,
     parse_push_events,

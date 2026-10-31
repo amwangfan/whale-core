@@ -17,7 +17,7 @@ from whale_core.life.inbox import (
     STATUS_SUCCEEDED,
     SqliteInbox,
 )
-from whale_core.life.wq_push import WeQSsePushListener
+from weq_channel.wq_push import WeQSsePushListener
 
 
 @pytest.fixture()

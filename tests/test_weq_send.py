@@ -7,7 +7,7 @@ import json
 import pytest
 
 from whale_core.life.initiative import ProactiveDraft
-from whale_core.life.weq_send import MAX_TEXT_CHARS, WeQSendError, WeQWebSendPort
+from weq_channel.weq_send import MAX_TEXT_CHARS, WeQSendError, WeQWebSendPort
 
 BASE = "http://127.0.0.1:7690"
 TOKEN = "synthetic-web-token"
@@ -200,7 +200,7 @@ def test_unsafe_config_rejected_before_any_request():
 
 
 def test_redirects_never_followed():
-    from whale_core.life.weq_send import _NoRedirect
+    from weq_channel.weq_send import _NoRedirect
     handler = _NoRedirect()
     assert handler.redirect_request(None, None, 302, "Found", {},
                                     "http://evil.example") is None
@@ -221,3 +221,57 @@ def test_error_messages_never_contain_token():
         with pytest.raises(ValueError) as exc2:
             WeQWebSendPort(bad, TOKEN, target_uid=UID)
         assert TOKEN not in str(exc2.value)
+
+
+def test_split_image_parts_markdown():
+    from weq_channel.weq_send import _split_image_parts
+    parts = _split_image_parts("画好啦 ![图](https://cdn.example.com/a.png) 看看")
+    assert parts == [("text", "画好啦"), ("image", "https://cdn.example.com/a.png"),
+                     ("text", "看看")]
+
+
+def test_split_image_parts_bare_url():
+    from weq_channel.weq_send import _split_image_parts
+    parts = _split_image_parts("图在这 https://cdn.example.com/b.jpg?x=1 完事")
+    assert ("image", "https://cdn.example.com/b.png") not in parts
+    assert any(k == "image" and "b.jpg" in v for k, v in parts)
+
+
+def test_split_image_parts_no_image():
+    from weq_channel.weq_send import _split_image_parts
+    parts = _split_image_parts("纯文本没有图")
+    assert parts == [("text", "纯文本没有图")]
+
+
+def test_mixed_send_sends_image_then_text(monkeypatch):
+    """图文混排：图片走 send_image，文字走 _send_text_payload，按序。"""
+    from weq_channel.weq_send import WeQWebSendPort
+    calls = []
+    port = WeQWebSendPort.__new__(WeQWebSendPort)
+    monkeypatch.setattr(WeQWebSendPort, "send_image",
+                        lambda self, b, **kw: (calls.append(("img", len(b))), True)[1])
+    monkeypatch.setattr(WeQWebSendPort, "_send_text_payload",
+                        lambda self, t: (calls.append(("text", t)), True)[1])
+    monkeypatch.setattr("weq_channel.weq_send._download_image",
+                        lambda url: b"png-bytes")
+    from whale_core.life.initiative import ProactiveDraft
+    draft = ProactiveDraft(draft_id="d1", text="前缀 ![图](https://cdn.example.com/a.png) 后缀",
+                           reason="t", evidence=("t",), channel="direct_message")
+    assert port.send(draft)
+    assert calls == [("text", "前缀"), ("img", 9), ("text", "后缀")]
+
+
+def test_mixed_send_image_failure_falls_back_to_link(monkeypatch):
+    """图片下载失败 → 兜底发文字链接，不丢内容。"""
+    from weq_channel.weq_send import WeQWebSendPort
+    calls = []
+    port = WeQWebSendPort.__new__(WeQWebSendPort)
+    monkeypatch.setattr(WeQWebSendPort, "send_image", lambda self, b, **kw: False)
+    monkeypatch.setattr(WeQWebSendPort, "_send_text_payload",
+                        lambda self, t: (calls.append(t), True)[1])
+    monkeypatch.setattr("weq_channel.weq_send._download_image", lambda url: None)
+    from whale_core.life.initiative import ProactiveDraft
+    draft = ProactiveDraft(draft_id="d2", text="图 ![图](https://cdn.example.com/a.png)",
+                           reason="t", evidence=("t",), channel="direct_message")
+    assert port.send(draft)
+    assert "https://cdn.example.com/a.png" in calls  # 兜底发了链接

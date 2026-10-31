@@ -1,0 +1,111 @@
+name: installed release smoke
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'web/**'
+      - 'scripts/**'
+      - 'pyproject.toml'
+      - 'Dockerfile'
+      - 'compose.yaml'
+      - '.github/workflows/release-smoke.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'web/**'
+      - 'scripts/**'
+      - 'pyproject.toml'
+      - 'Dockerfile'
+      - 'compose.yaml'
+      - '.github/workflows/release-smoke.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: whale-release-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  wheel:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.8.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: python -m pip install hatchling
+      - run: pnpm -C web install --frozen-lockfile --ignore-scripts
+      - run: pnpm -C web test
+      - run: python scripts/build_release.py --no-build-isolation
+      - name: Verify installed wheel outside checkout
+        run: python scripts/verify_wheel.py dist/*.whl
+      - uses: actions/upload-artifact@v4
+        if: matrix.os == 'ubuntu-latest'
+        with:
+          name: whale-core-internal-test-wheel
+          path: dist/*.whl
+          retention-days: 7
+  frozen:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.8.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: python -m venv .freeze-venv
+      - run: .freeze-venv/bin/python -m pip install 'pyinstaller>=6,<7' 'websockets>=14,<17'
+      - run: pnpm -C web install --frozen-lockfile --ignore-scripts
+      - run: .freeze-venv/bin/python scripts/freeze_desktop.py
+      - run: python scripts/verify_frozen.py dist/frozen/whale-core/whale-core
+      - name: Archive internal evaluation package with executable permissions
+        run: tar -czf dist/whale-core-${{ runner.os }}-${{ runner.arch }}.tar.gz -C dist/frozen .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: whale-core-internal-${{ runner.os }}-${{ runner.arch }}
+          path: dist/whale-core-*.tar.gz
+          retention-days: 7
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build non-root container
+        run: docker build -t whale-core:ci .
+      - name: Validate compose configuration
+        run: docker compose config --quiet
+      - name: Verify image user and authenticated health
+        shell: bash
+        run: |
+          docker run --detach --name whale-smoke --env WHALE_API_TOKEN=ci-health-token whale-core:ci
+          trap 'docker rm --force whale-smoke' EXIT
+          test "$(docker exec whale-smoke id -u)" != 0
+          for attempt in {1..15}; do
+            if docker exec whale-smoke python /opt/whale/healthcheck.py; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs whale-smoke
+          exit 1

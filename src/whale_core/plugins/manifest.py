@@ -97,6 +97,10 @@ class PluginManifest:
     只 inputs → input；只 actions → output）；processor 必须显式声明
     kind="processor" 且给出 ``provides`` 能力名。显式 kind 与声明能力
     不一致时拒绝（防止「自称只读却带动作」的错标）。
+
+    ``api_version`` 声明清单 API 版本（如 ``"1"`` / ``"1.2"``）；加载方
+    （PluginManager）按 major 部分（``"."`` 前）判定兼容性，major 不一致
+    拒绝加载。默认 ``"1"``。
     """
 
     plugin_id: str
@@ -111,6 +115,7 @@ class PluginManifest:
     action_risk: Mapping[str, str] = field(default_factory=dict)
     provides: tuple[str, ...] = ()  # 仅 processor：能力名，如 "operation_execution"
     process_model: str = "external"  # external（外置进程，推荐）| in_process（owner 自写）
+    api_version: str = "1"  # 清单 API 版本；加载方按 major（"." 前）判定兼容性
 
     def __post_init__(self) -> None:
         if not PLUGIN_ID_RE.fullmatch(self.plugin_id or ""):
@@ -119,6 +124,9 @@ class PluginManifest:
             raise ValueError("manifest requires name and version")
         if self.process_model not in ("external", "in_process"):
             raise ValueError(f"invalid process_model: {self.process_model!r}")
+        major = self.api_version.split(".", 1)[0] if isinstance(self.api_version, str) else ""
+        if not major or not (major.isascii() and major.isdigit()):
+            raise ValueError(f"invalid api_version: {self.api_version!r}")
 
         seen_inputs: set[str] = set()
         for kind in self.inputs:

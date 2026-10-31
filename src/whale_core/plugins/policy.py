@@ -55,6 +55,7 @@ class PluginActionPolicy:
         max_transaction_amount: float | None = None,
         max_daily_transactions: int | None = None,
         transaction_count_today: Callable[[], int] | None = None,
+        auto_approve_risks: frozenset[str] | None = None,
     ) -> None:
         if max_transaction_amount is not None and (
             not math.isfinite(max_transaction_amount) or max_transaction_amount < 0
@@ -62,6 +63,15 @@ class PluginActionPolicy:
             raise ValueError("max_transaction_amount must be finite and non-negative")
         if max_daily_transactions is not None and max_daily_transactions < 0:
             raise ValueError("max_daily_transactions must be non-negative")
+        # 按风险级的免审配置（gap-analysis §4 R1，owner 定「合理放宽」）：
+        # 单 owner 场景可把 communicate 配成自动；**transaction 永不可自动**
+        # （钱的边界不松）；read_only 本就免审。配置在宿主装配层注入并公示。
+        auto = frozenset(auto_approve_risks or ())
+        if RiskClass.TRANSACTION.value in auto:
+            raise ValueError("transaction risk can never be auto-approved")
+        self.auto_approve_risks = frozenset(
+            RiskClass(r).value for r in auto  # 非法值在此抛 ValueError
+        )
         self.registry = registry
         self.max_transaction_amount = max_transaction_amount
         self.max_daily_transactions = max_daily_transactions
@@ -107,6 +117,11 @@ class PluginActionPolicy:
         if risk is RiskClass.COMMUNICATE:
             if explicitly_approved:
                 return PluginVerdict("ready", "approved outbound", risk.value, plugin_id, action)
+            if risk.value in self.auto_approve_risks:
+                return PluginVerdict(
+                    "ready", "communicate auto-approved by host policy (R1)",
+                    risk.value, plugin_id, action,
+                )
             return PluginVerdict(
                 "needs_approval", "outbound message requires human review",
                 risk.value, plugin_id, action,

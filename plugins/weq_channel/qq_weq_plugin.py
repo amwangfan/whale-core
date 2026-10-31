@@ -91,6 +91,7 @@ class WeQEventAdapter:
                     "conversation": event.conversation,
                     "message_id": event.message_id,
                     "text": event.text,
+                    "attachments": list(getattr(event, "attachments", ())),
                 },
             )
         )

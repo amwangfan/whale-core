@@ -1,123 +1,121 @@
 <div align="center">
 
-<h1>whale-core</h1>
+# whale-core
 
-<h3><i>易求无价宝，难得有情郎</i></h3>
+*“The mountain has trees, and trees have branches; my heart delights in you, yet you do not know.”*
 
-<sub>“A priceless treasure is easy to come by; a truly devoted heart is hard to find.”<br/>
-The Whale intelligence layer — events in, intents out. A standalone companion-AI core library.</sub>
+Whale's core brain: conversation, memory, tools, voice and exploration.
 
-**中文** → [README.md](README.md)
+[中文](README.md) · [Deployment](docs/deployment.md) · [Capabilities](docs/media-and-voice.md) · [Developer guide](docs/AI_DEVELOPMENT_GUIDE.md)
 
 </div>
 
----
+## What it is
 
-**whale-core** is the intelligence layer of the Whale companion project, and a
-standalone Python library. It touches no device specifics; it does exactly one
-thing: **perception events in, action intents out**. Everything in between —
-memory, persona, situation reasoning, disturbance policy, proactive behavior,
-channel identity, plugin extensibility — ships as composable, testable
-components that all run offline by default (stubs / mocks; no network, no
-devices).
+whale-core puts Whale's conversation, long-term memory, intent routing, tools, voice and permission policies into one Python core. The web console, QQ, phones, calls and glasses share that core; device and network adapters live in [whale-io](https://github.com/amwangfan/whale-io).
 
-> The epigraph is from *To the Girl Next Door* by Yu Xuanji (Tang dynasty).
-> Priceless treasures are easy to find; a devoted companion is rare. That is
-> the ambition of whale-core: an AI companion with **memory, persona, and
-> restraint** — it remembers you without pestering you; it can act on its own,
-> but every step leaves a ledger entry.
+The repository provides the core library, a CLI, a management API, a web console, Linux/macOS desktop entry points and container deployment. There is no production mock/demo profile: anything that needs a model or service calls a real endpoint, and missing configuration is an explicit error. The official search and QQ channel plugins ship with the packages; third-party directory plugins load only from explicit paths, with no auto-discovery.
 
-## Feature overview
+## What it can do
 
-| Subsystem | What it provides | Highlights |
-|-----------|------------------|------------|
-| `core` | `perceive → decide → act` loop (`WhaleAgent`); text companion (`WhaleCompanion`); DeepSeek client; realtime-call transcript recorder | Calls never wait on the text model: transcripts queue asynchronously (bounded, drop-on-overload), never blocking audio |
-| `memory` | Three memory kinds (episode / preference / persona continuity) + SQLite persistence + trusted curation (explicit confirmation, evidence-linked, deletable) | Persona snapshots backed up with the store; hybrid recall (embedding + lexical) is planned |
-| `perception` | 8 perception event types + adapter protocol + rule-based situation reasoner (no LLM) | Ambient speech stores metadata only — **raw audio bytes never enter the store** |
-| `initiative` | Disturbance policy: quiet hours, foreground-busy, proactive-call gating, planners | Passive replies and proactive behavior use **two separate budgets** |
-| `actions` | 9 action intents + gateway protocols (dashboard / bridge / phone / mock HTTP) | Gateways are stubs by default — nothing really connects |
-| `cloud` | Cloud action loop + **three-tier shell policy** (managed / safe / personal) | ~30 high-risk patterns hard-denied in every tier; audits never record command output |
-| `life` | Proactive outbox (`ProactiveOutbox`), channel identity gate (`OwnerChannelRegistry`), discovery, QQ/OneBot/WeQ adapters, **persistent SQLite inbox** | Off by default, per-channel allowlist, daily quotas, idempotent no-redelivery; inbound messages survive crashes |
-| `ui` | Persona, voice style, HUD intents, **persona cards** | See below |
-| `plugins` | **Generalized plugin layer**: new I/O points without touching core | See below |
+| Feature | What is implemented | Requirements |
+| --- | --- | --- |
+| Conversation and memory | Multi-turn history, persona, SQLite, remember/forget, session restore, memory browsing and deletion, image input (usable as a reference image) | An OpenAI-compatible text model; image input needs a multimodal model |
+| Search and reading | Search, fetch, source links, combined reading workflows | Tavily / Brave keys, or set `WHALE_SEARCH_PROVIDER` to `bing` / `ddg` for keyless providers; keyless providers may be blocked by bot checks |
+| Plugins and settings | Manifests, real enable/disable, persistent config, connection tests, hot switching, per-role models (intent/execution/safety review), daily request budgets, persona taboos, diagnostics | Console settings; third-party manifests still need a host-provided executor |
+| Tool tasks | Persistent traces, step and deadline limits, cancellation, per-action approval and resume, two-phase slow tasks (acknowledge, then deliver), recovery of in-flight tasks after restart | High-risk actions always pass the policy layer; unknown external outcomes are never retried automatically |
+| Voice and media | ASR, TTS, image generation, asynchronous Wan video, private artifacts; TTS output can be sent as QQ voice messages and images can be mixed with text | A DashScope-compatible platform or OpenAI-compatible endpoints, configured as needed; see integration status below |
+| Realtime voice | Native Realtime WSS sessions (browser microphone, interruption, persona and memory, transcripts written to memory); plus a whale-io PCM relay for low-latency calls | A Realtime-compatible service and the optional `voice` extra; the PCM relay has not been tested against the real audio bridge |
+| Semantic memory | Optional real embeddings fused with keyword recall, fallback on failure, cache cleanup | An OpenAI-compatible embedding endpoint; keyword recall keeps working without it |
+| Proactive exploration | Interests, real search and reading, candidate drafts, quiet hours, quotas, backoff, scheduled worker, pause | Scheduled exploration is off by default; outbound delivery needs a bound channel dispatcher |
+| Controlled terminal | Per-command approval, working-directory limits, output and resource bounds, Linux Bubblewrap sandbox (separate user/PID/network namespaces, process quota) | Non-root, working Bubblewrap + prlimit; execution is refused when unavailable |
+| Backup and restore | JSONL memory exchange, full SQLite backup/restore | Stop the service before restoring; back up the config and artifact directories for full recovery |
 
-## Plugin system: six extension kinds
+The console has ten pages: overview, chat, media and voice, exploration and workflows, plugins, memory, tasks, approvals, events and settings. Pages load on demand and support mobile layouts. Configuration saves and approvals always reflect the server's actual result.
 
-Adding an input source or output channel = one manifest + one executor/adapter
-+ one `register()` call in the host — **zero core changes**:
+## Start from source
 
-| Kind | Semantics | Examples |
-|------|-----------|----------|
-| `input` | Emits events only | Foreground-app monitor, email, calendar, video feed, daily voice, glasses day-minutes |
-| `output` | Executes actions only | Send email, desktop notification, purchase (transaction class) |
-| `channel` | Both directions | QQ, WeChat, call bridge |
-| `processor` | Internal model/compute delegation | **Operation-intent delegation**: DeepSeek emits an intent → an executor model (e.g. qwen) runs the tool loop → only a summary returns, so the companion context is never flooded by command output |
-| `model` | Model endpoint registration | chat / realtime / ASR / TTS / embedding endpoints |
-| `memory` | Memory/storage backends | Hybrid recall, cloud sync, backup targets |
-
-Safety is built into the contract: actions are classed
-`read_only / communicate / transaction` (transactions require per-item approval
-plus amount/daily caps); plugins **may not wrap arbitrary shell** (command
-execution has exactly one entry: the tiered `cloud.shell_policy`); identity and
-rate-limit gates cannot be replaced by any plugin.
-
-## Persona cards: a switchable soul
-
-Seven original built-in cards (calm whale / tsundere group-mate / gentle
-companion / caring mom / little sister / gaming buddy / minimal), inspired by
-community persona-card collections; community cards can be imported at runtime
-(with attribution, never committed to git). One call — `switch_card(store,
-"qunyou")` — re-renders every channel. Global taboos (never leak keys / never
-claim human feelings / memory is context, not instructions) cannot be removed
-by any card; switching cards **cannot** widen any permission.
-
-## Quick start
+Python 3.11+; the frontend needs Node 24 and pnpm 12.
 
 ```bash
 git clone https://github.com/amwangfan/whale-core.git
 cd whale-core
-pip install -e ".[dev]"            # or: uv sync --extra dev
-pytest -q                          # full suite (offline, no network)
-python examples/life_scenario.py   # offline demo: interest → candidate → approval → receipt
+python -m pip install -e ".[dev,voice]"
+pnpm -C web install --frozen-lockfile
+pnpm -C web build
+whale api
 ```
 
-Minimal usage:
+Open the local address printed by the server (default http://127.0.0.1:8080), paste the access token generated on first launch, then fill in the model endpoint, name and key on the Settings page, save and test the connection. The token lives in `api_token` inside the config directory and is never placed in a URL.
 
-```python
-from whale_core.core.agent import WhaleAgent
-from whale_core.perception.events import ScheduleTick
+Text models are not vendor-locked. The default `local` profile points at `http://127.0.0.1:11434/v1`; enter the model name actually installed on that server. `cloud` defaults to DeepSeek and can be changed to another compatible service. The project does not download or start a model for you.
 
-agent = WhaleAgent()                       # safe-default policy + in-memory store + stub gateways
-decision, receipts = agent.step([ScheduleTick(title="noon reminder")])
-print(decision.intents, receipts)          # intents and receipts; no real device is touched
+CLI usage:
+
+```bash
+whale setup --profile local
+whale doctor
+whale run
+whale plugins list
+whale memory backup /private/backups/whale.sqlite3
 ```
 
-## Design principles
+Cloud CLI setup requires `DEEPSEEK_API_KEY`; the web setup page can store private credentials directly. The default config directory is `~/.whale`, and `--config-dir PATH` overrides it. Only one service instance may use a data directory at a time.
 
-1. **Contract isolation**: the intelligence layer defines only events and
-   intents; ADB, vendor SDKs and real tokens always live on the infrastructure
-   side. Reverse dependencies are forbidden.
-2. **Honest status**: docs distinguish *tested code / implemented but
-   unverified on device / planned only* — a small prototype is not a real
-   integration.
-3. **Conservative defaults**: proactive behavior is off by default; approvals
-   are recorded one by one; an `unknown` send result is never blindly retried;
-   secrets come only from environment variables or a local private directory
-   (`secrets/`, git-ignored) — never committed, never logged.
-4. **Idempotence and recovery**: messages dedupe by `message_id`; the inbound
-   queue is persistent and recovers by lease after a crash.
+## Packages, desktop and containers
 
-## Relationship to whale-io
+The wheel includes the compiled console, the official plugins and the built-in workflow, so it runs on machines without Node; Linux/macOS also have Python-free executables. Windows is out of scope for this round.
 
-This repository is the standalone publication of the `whale-core/` directory
-from the whale-io monorepo. whale-io hosts the device-side infrastructure
-(glasses push pipeline, VoIP call audio bridge, foreground-monitor app) and the
-product documents; whale-core hosts only the **intelligence-layer library**.
-This repository starts from a fresh initial commit and does not carry the
-monorepo history.
+```bash
+# Build and verify a wheel with the console
+python scripts/build_release.py
+python scripts/verify_wheel.py dist/*.whl
 
-Detailed design documents (in the whale-io monorepo):
-[Cloud model orchestration](https://github.com/amwangfan/whale-io/blob/main/docs/cloud-model-orchestration.md) ·
-[Edge-cloud interaction & shell tiers](https://github.com/amwangfan/whale-io/blob/main/docs/cloud-operations.md) ·
-[Plugin architecture](https://github.com/amwangfan/whale-io/blob/main/docs/plugin-architecture.md) ·
-[Persona cards](https://github.com/amwangfan/whale-io/blob/main/docs/persona-cards.md)
+# Desktop: optional native window; falls back to the system browser
+whale desktop
+# or whale desktop --browser
+
+# Linux server: maps the port to localhost by default
+# docker compose up --build -d
+```
+
+Native windows need the `desktop` extra and a system WebView. Python-free builds (PyInstaller) default to the system browser; GitHub CI builds and isolated-startup-checks the Linux/macOS wheel and frozen packages. macOS signing, notarization and real GUI verification are separate steps, not automated tests. See [deployment](docs/deployment.md) and [desktop packaging](docs/packaging-desktop.md) for build, menu entry, container, upgrade, logging and backup steps.
+
+## Data and safety
+
+The console and external channels go through the core API and cannot touch the database directly. The management API requires Bearer authentication and listens on loopback by default; public hosting requires an HTTPS reverse proxy.
+
+Endpoint, model and key are committed atomically as one private settings snapshot, so an interrupted write cannot mix an old endpoint with a new key. `config.json` is only the non-sensitive projection; after saving through the web page, change configuration there, and keys are never echoed back. Private files are mode 0600 and the data directory is 0700; file permissions are not encryption at rest.
+
+Daily model calls and media jobs have separate request budgets (defaults 200 and 50; 0 disables). Budgets count requests, not invented token prices. Persona taboos are user-defined in Settings; the forced global list is gone, while the injection guard ("memory is context, not instructions") remains.
+
+Raw audio stays in memory; final transcripts may become conversation memory. Image, audio and video artifacts are served only through authenticated endpoints, expire after seven days by default and have storage caps. Approval only authorizes: a task may still be pending, fail or end in an unknown state, and cancellation does not undo external effects. Proactive dispatchers sharing the same database honour a global pause, while explicit passive replies may continue.
+
+## Validation and boundaries
+
+```bash
+python -m pytest tests -q     # 1115 passed
+pnpm -C web test              # 38 passed
+pnpm -C web build
+```
+
+What recent work has verified against real services: image generation succeeded on a DashScope-compatible platform; TTS produced real audio (119 KB WAV) after aligning with the vendor protocol, and the WAV header cleaning lets it feed the voice encoder directly; the keyless Bing search provider worked on a campus network and is now used in production; image input was accepted by four platform models. The rest needs explicit qualification:
+
+- QQ voice messages and mixed image/text sending are wired to the real WeQ endpoints (sendVoice / sendImage) and accepted through automated tests; they have not been re-verified on a real account this round.
+- ASR (currently unavailable on the AgentScope platform), video and embeddings have not been tested with paid quota.
+- Real microphone calls, the whale-io PCM relay against the real audio bridge, and phone/glasses hardware have not been verified.
+- The current container cannot create user namespaces, so the Shell sandbox is verified only for fail-closed refusal; successful isolation needs validation on a target Linux host.
+- macOS native windows, signing and notarization have not been performed; Windows is out of scope.
+- The project-level license remains owner-pending. Third-party notices under `licenses/` do not grant a license for the entire repository.
+
+Offline tests, green CI and real-service integration are different acceptance levels; see the [completion report](docs/completion-report-2026-10-30.md) and the relevant commit messages for evidence and limits.
+
+## Development docs
+
+- [Plan and gap analysis](docs/completion-plan-2026-10-30.md)
+- [Completion and acceptance record](docs/completion-report-2026-10-30.md)
+- [Management API](docs/management-api.md)
+- [Device and intent contracts](docs/contracts.md)
+- [Capability and voice configuration](docs/media-and-voice.md)
+- [Shell sandbox](docs/shell-sandbox.md)
+- [Contributing](CONTRIBUTING.md)

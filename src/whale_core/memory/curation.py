@@ -19,9 +19,10 @@ def _terms(text: str) -> set[str]:
     parts: set[str] = set()
     for tok in tokens:
         if re.fullmatch(r"[\u4e00-\u9fff]+", tok):
+            # 中文词项 = 单字 + 二元组：单字查询（如「辣」）也要能命中
+            # 多字事实（「我怕辣」）；召回靠交集，精确度交给打分排序。
+            parts.update(tok)
             parts.update(tok[i:i + 2] for i in range(max(0, len(tok) - 1)))
-            if len(tok) == 1:
-                parts.add(tok)
         else:
             parts.add(tok)
     return parts
