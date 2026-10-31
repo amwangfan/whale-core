@@ -42,6 +42,17 @@ class BindingStore:
             return str(data["persona_id"])
         return None
 
+    def capabilities_for(self, conversation_key: str) -> Optional[Tuple[str, ...]]:
+        """会话能力允许列表（S5 配置的 bind:caps:）。
+
+        None = 未配置（按会话类型默认上限）；元组 = 收窄到该集合
+        （只能收窄，永不放宽——S5 API 已校验上限）。
+        """
+        data = self.store.get(f"bind:caps:{conversation_key}")
+        if isinstance(data, dict) and isinstance(data.get("scopes"), list):
+            return tuple(str(s) for s in data["scopes"])
+        return None
+
     def memory_spaces_for(self, conversation_key: str) -> Tuple[MemorySpaceRef, ...]:
         rows = self.store.get(f"bind:mem:{conversation_key}")
         if not isinstance(rows, list):

@@ -541,9 +541,45 @@ def cmd_run(args) -> int:
         else:
             print(f"  → 批准发送记录：python examples/qq_live_workflow.py approve {result['draft_id']}")
 
+    # S7：陌生人私聊入口。WHALE_QQ_STRANGER_CHAT=1 开受限对话；sudo 验证
+    # 尝试无论开关都受理（口令验证本身就是门）。群聊陌生人永不进入。
+    stranger_chat = os.environ.get("WHALE_QQ_STRANGER_CHAT", "").strip() == "1"
+
     def on_unpaired(incoming):
-        print(f"[未配对] account={incoming.account} conv={incoming.conversation} "
-              f"msg={incoming.message_id}（在 secrets 设 OWNER_QQ={incoming.account} 并重启即可配对）")
+        is_private = str(incoming.conversation).startswith("private:")
+        if not is_private:
+            return  # 群/频道陌生人：不处理
+        from whale_core.life.temporary_auth import maybe_intercept_sudo
+        if maybe_intercept_sudo(incoming.text) is None and not stranger_chat:
+            print(f"[未配对] account={incoming.account} conv={incoming.conversation} "
+                  f"msg={incoming.message_id}（在 secrets 设 OWNER_QQ 并重启即可配对；"
+                  "或发送 sudo <一次性口令> 申请临时授权）")
+            return
+        try:
+            result = workflow.handle_stranger_event(incoming)
+        except Exception as exc:
+            print(f"  [陌生人处理失败] {type(exc).__name__}")
+            return
+        reply = (result.get("reply") or "").strip()
+        if not reply:
+            print(f"  [陌生人] skipped={result.get('skipped', 'empty_reply')}")
+            return
+        if result.get("auth_grant"):
+            print(f"  [临时授权] 已签发租约 {result['auth_grant']} ← {incoming.account}")
+        if not live_auto:
+            print(f"  [陌生人回复-未发送] {reply[:120]}")
+            return
+        if workflow._safety_reviewer is not None:
+            concern = workflow._safety_reviewer(reply)
+            if concern:
+                print(f"  [安全审核] 陌生人回复有顾虑：{concern[:120]} → 不发送")
+                return
+        draft_id = f"qq-stranger:{incoming.message_id}"
+        owner_draft_ids.add(draft_id)
+        approved_draft_ids.add(draft_id)
+        receipt = plugin_gateway.dispatch(
+            send_message_intent(incoming.conversation, reply, draft_id=draft_id))
+        print(f"  [陌生人回复] {receipt}")
 
     def on_mass(meta):
         print(f"[mass] {meta['chatType']}:{meta['convId']} seq {meta['fromSeq']}→{meta['toSeq']} "

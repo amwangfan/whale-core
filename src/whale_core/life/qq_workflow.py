@@ -292,6 +292,61 @@ class QqInboundWorkflow:
                 result["reason"] = f"{result['reason']}｜安全审核：{result['safety_concern']}"
         return result
 
+    # -- S7：陌生账号私聊（受限入口） -----------------------------------------
+
+    def handle_stranger_event(self, event) -> dict:
+        """处理**未配对**账号的私聊消息（S7；宿主须显式开门）。
+
+        纪律：
+        - 仅私聊；群里的陌生人消息不进入（群门由适配器 prefs 控制）。
+        - sudo 尝试优先截获（口令明文不进入 LLM/记忆/历史/日志）。
+        - 普通对话走编排器，ResolvedContext = 匿名主体（chat.basic +
+          可能的有效租约 scope）；无记忆空间、无写回、无工具提权。
+        - 回复由宿主直接发送到该私聊（不经 owner 草稿/审批链）。
+        """
+        from whale_core.core.runtime import InputEnvelope
+        from whale_core.life.context_resolver import derive_kind
+        from whale_core.life.temporary_auth import maybe_intercept_sudo
+
+        # 兼容 Incoming（account 字段）与 OwnerEvent（sender_id 字段）两种形状
+        sender = str(getattr(event, "sender_id", "") or getattr(event, "account", ""))
+        channel = str(getattr(event, "channel", "qq") or "qq")
+        text = (event.text or "").strip()
+        if not text:
+            return {"skipped": "empty_text"}
+        if not str(event.conversation).startswith("private:"):
+            return {"skipped": "stranger_group_ignored"}
+
+        if self._auth_service is not None:
+            attempt = maybe_intercept_sudo(text)
+            if attempt is not None:
+                grant = self._auth_service.verify(
+                    attempt, channel=channel, sender_id=sender,
+                    conversation_kind=derive_kind(channel, event.conversation),
+                    conversation_id=event.conversation)
+                if grant is not None:
+                    import time as _time
+                    mins = max(1, int((grant.expires_at - _time.time()) / 60))
+                    return {"reply": (
+                        "验证通过，本次私聊已获得临时授权："
+                        f"可用能力 {('、'.join(grant.scopes)) or '无'}，"
+                        f"{mins} 分钟内最多 {grant.max_uses} 次操作。"
+                        "到期或用尽自动恢复普通权限。"),
+                        "auth_grant": grant.grant_id}
+                return {"reply": "验证失败（口令无效、已使用或已过期）。",
+                        "auth_grant": None}
+
+        if self.orchestrator is None:
+            return {"skipped": "no_orchestrator"}
+        envelope = InputEnvelope(
+            conversation_id=event.conversation, text=text, source="qq:stranger",
+            channel=channel, sender_id=sender)
+        result = self.orchestrator.handle_envelope(envelope)
+        reply = (result.reply or "").strip()
+        if not reply:
+            return {"empty_reply": True}
+        return {"reply": reply}
+
 
 def _extract_image_artifacts(receipts) -> tuple:
     """从回执里提图片产物 id（生图工具 JSON 回执的 images 列表）。"""

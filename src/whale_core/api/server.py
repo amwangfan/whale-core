@@ -559,10 +559,25 @@ class _Handler(BaseHTTPRequestHandler):
                 bridge = self.ctx.voice_bridge
             if len(parts) == 2:
                 from whale_core.memory.continuity import build_continuity_context
-                from whale_core.core.companion import RealtimeTranscriptRecorder
-                context = build_continuity_context(self.ctx.store)
+                from whale_core.core.companion import RealtimeTranscriptRecorder, _recall
+                # S7：语音会话同样经服务端上下文解析（token=owner 通道）；
+                # 记忆召回限域授权空间，不再跨群空间杂取。
+                resolver = getattr(self.ctx.orchestrator, 'context_resolver', None)
+                voice_ctx = None
+                if resolver is not None:
+                    try:
+                        voice_ctx = resolver.resolve(channel='voice', sender_id='console',
+                                                     conversation_id='voice')
+                    except Exception:
+                        voice_ctx = None
+                spaces = getattr(voice_ctx, 'allowed_memory_spaces', None)
+                space_ids = (tuple(getattr(s, 'space_id', s) for s in spaces)
+                             if spaces is not None else None)
+                context = build_continuity_context(self.ctx.store,
+                                                   allowed_space_ids=space_ids)
                 memories = [str(hit.record.content.get('summary', ''))[:300]
-                            for hit in self.ctx.curator.recall('', limit=5)] if self.ctx.curator else []
+                            for hit in _recall(self.ctx.curator, '', spaces, limit=5)] \
+                    if self.ctx.curator else []
                 memories.extend(str(r.content.get('summary', ''))[:300] for r in context.recent_episodes[:3])
                 instructions = ('你是鲸鱼，一个有连续记忆的陪伴好友。保持以下人格与表达规则。'
                     '语音会话无工具授权，不得声称执行未实际完成的操作。\n人格：' + context.persona_summary[:4000]

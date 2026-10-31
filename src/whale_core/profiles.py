@@ -278,7 +278,8 @@ def assemble_runtime(
     _auth = TemporaryAuthService(store, owner_id="owner")
     context_resolver = ConversationContextResolver(
         pairing_lookup=pairing_lookup_from_mapping(
-            {("api", "console"): "owner", ("cli", "local"): "owner"}),
+            {("api", "console"): "owner", ("cli", "local"): "owner",
+             ("voice", "console"): "owner"}),
         bindings=BindingStore(store, _spaces),
         grants=_auth,
         owner_id="owner",

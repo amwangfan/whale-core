@@ -65,6 +65,8 @@ class BindingLookup(Protocol):
 
     def memory_spaces_for(self, conversation_key: str) -> Tuple[MemorySpaceRef, ...]: ...
 
+    def capabilities_for(self, conversation_key: str) -> Optional[Tuple[str, ...]]: ...
+
 
 class GrantLookup(Protocol):
     """S4 提供：查询某主体在某会话中的有效临时租约。"""
@@ -136,6 +138,13 @@ class ConversationContextResolver:
         conv = ConversationRef(channel, kind, conversation_id)
         principal = self._resolve_principal(channel, sender_id)
         scopes = self._base_scopes(kind, principal)
+        # S7：会话级能力收窄（S5 bind:caps:）——只许收窄，不许放宽。
+        if self._bindings is not None:
+            caps_fn = getattr(self._bindings, "capabilities_for", None)
+            if caps_fn is not None:
+                narrowed = caps_fn(conv.as_key())
+                if narrowed is not None:
+                    scopes = tuple(s for s in scopes if s in set(narrowed))
 
         grant_refs: Tuple[TemporaryGrantRef, ...] = ()
         if self._grants is not None:
