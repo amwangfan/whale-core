@@ -508,8 +508,10 @@ class ConversationOrchestrator:
         if ctx is None or getattr(ctx.principal, "is_owner", False) or trusted_host:
             write_space = _ctx_write_space(ctx)
             if ctx is not None and not write_space:
-                from whale_core.memory.spaces import DEFAULT_VAULT_ID
-                write_space = DEFAULT_VAULT_ID
+                from whale_core.core.memory_commands import REMEMBER_PREFIXES, FORGET_PREFIXES
+                if text.strip().startswith(REMEMBER_PREFIXES + FORGET_PREFIXES):
+                    return _Decision(route="memory", memory_reply=(
+                        "当前会话没有可写记忆库，请先绑定有写权限的记忆空间。"))
             command = handle_memory_command(
                 self.store, text, source=env.source, curator=self.companion.curator,
                 evidence_id=f"{env.source}:{env.conversation_id}:{uuid4().hex}",
