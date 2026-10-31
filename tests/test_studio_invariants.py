@@ -131,9 +131,36 @@ def test_inv05_grant_not_portable_across_conversations():  # N06/N16
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(reason="S2：空间限域检索")
 def test_inv08_no_cross_space_leak_via_cache_or_embedding():  # N02/N09
-    raise AssertionError
+    """S2 已点亮：跨空间检索在查询层拒绝；向量缓存按空间分区。"""
+    from whale_core.memory.curation import MemoryCurator
+    from whale_core.memory.hybrid import HybridCurator
+    from whale_core.memory.store import InMemoryStore, MemoryKind, MemoryRecord
+    from whale_core.plugins.embedding import OpenAICompatibleEmbedding
+
+    store = InMemoryStore()
+    for sid, secret in (("space-a", "甲群专属暗号"), ("space-b", "乙群专属暗号")):
+        store.put_record(MemoryRecord(
+            kind=MemoryKind.EPISODE, key=f"k-{sid}",
+            content={"summary": secret, "importance": 0.9, "confidence": 1.0},
+            tags=("curated",), space_id=sid))
+    ref_a = MemorySpaceRef("space-a", MemorySpaceType.GROUP_SPACE, 1)
+    ref_b = MemorySpaceRef("space-b", MemorySpaceType.GROUP_SPACE, 1)
+    cur = MemoryCurator(store)
+    # 乙群任何查询都看不到甲群记录（命中的只能是本空间自己的记录）
+    for q in ("甲群", "专属暗号", ""):
+        assert all(h.record.space_id == "space-b"
+                   for h in cur.recall(q, allowed_spaces=(ref_b,)))
+    assert [h.record.key for h in cur.recall("甲群", allowed_spaces=(ref_a,))] == ["k-space-a"]
+    # 向量缓存分区：同文本在不同 namespace 是不同缓存键
+    emb = OpenAICompatibleEmbedding(base_url="http://127.0.0.1:9", cache_size=8)
+    k_a = emb._key("相同文本", "space-a")
+    k_b = emb._key("相同文本", "space-b")
+    assert k_a != k_b
+    # Hybrid 路径同样限域（无 embedder → 纯词项；结论一致）
+    hyb = HybridCurator(store)
+    assert all(h.record.space_id == "space-b"
+               for h in hyb.recall("甲群", allowed_spaces=(ref_b,)))
 
 
 @pytest.mark.skip(reason="S4+S7：异步任务恢复前重校验")

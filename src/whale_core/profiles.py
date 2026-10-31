@@ -270,10 +270,16 @@ def assemble_runtime(
     # 其他渠道由各自宿主注入自己的 resolver（如 qq_live_workflow 的配对表）。
     from whale_core.life.context_resolver import (
         ConversationContextResolver, pairing_lookup_from_mapping)
+    from whale_core.memory.bindings import BindingStore
+    from whale_core.memory.spaces import SpaceStore, ensure_owner_working_copy
+    _spaces = SpaceStore(store)
+    _owner_space = ensure_owner_working_copy(store, owner="owner")
     context_resolver = ConversationContextResolver(
         pairing_lookup=pairing_lookup_from_mapping(
             {("api", "console"): "owner", ("cli", "local"): "owner"}),
-        owner_id="owner")
+        bindings=BindingStore(store, _spaces),
+        owner_id="owner",
+        owner_default_space=_owner_space)
     orchestrator = ConversationOrchestrator(store, companion, tools=tools,
                                             intent_model=intent_model, gateway=gateway,
                                             executor_model=executor_model,

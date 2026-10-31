@@ -169,11 +169,25 @@ class QqInboundWorkflow:
                 self.orchestrator.mark_delivered(task_id, channel="qq")
 
     def _memory_command_reply(self, text: str, event: OwnerEvent) -> str | None:
-        """委托给 core.memory_commands 的共享实现（QQ 侧只提供来源与证据链）。"""
+        """委托给 core.memory_commands 的共享实现（QQ 侧提供来源与证据链）。
+
+        S2：编排器注入了 resolver 时按服务端上下文选择写入空间
+        （工作副本优先，未绑定时落主人受保护库——安全但暂不进对话召回）。
+        """
+        space_id, allowed = "", None
+        resolver = getattr(self.orchestrator, "context_resolver", None)
+        if resolver is not None:
+            ctx = resolver.resolve(channel=event.channel,
+                                   sender_id=event.sender_id or event.owner_id,
+                                   conversation_id=event.conversation)
+            from whale_core.memory.spaces import (
+                DEFAULT_VAULT_ID, default_write_space)
+            space_id = default_write_space(ctx.allowed_memory_spaces) or DEFAULT_VAULT_ID
+            allowed = ctx.allowed_memory_spaces
         return handle_memory_command(
             self.store, text, source="qq:owner",
             evidence_id=f"qq:{event.conversation}:{event.message_id}",
-            curator=self._curator,
+            curator=self._curator, space_id=space_id, allowed_spaces=allowed,
         )
 
     def handle_owner_event(self, event: OwnerEvent) -> dict:

@@ -31,7 +31,12 @@ class MemoryKind(str, Enum):
 
 @dataclass(frozen=True)
 class MemoryRecord:
-    """一条记忆事件 / 记录（智能层侧；不含设备密钥）。"""
+    """一条记忆事件 / 记录（智能层侧；不含设备密钥）。
+
+    ``space_id``（S2 / Whale Studio）：所属记忆空间。空串 = 迁移前遗留的
+    未分区记录；受保护空间（protected_original）在存储层即被召回路径
+    排除（MEM-HARD-01）。
+    """
 
     kind: MemoryKind
     key: str
@@ -39,6 +44,7 @@ class MemoryRecord:
     record_id: str = field(default_factory=_new_id)
     created_at: datetime = field(default_factory=_utc_now)
     tags: tuple[str, ...] = ()
+    space_id: str = ""
 
 
 @dataclass
@@ -119,7 +125,15 @@ class MemoryStore(Protocol):
     def get_record(self, key: str) -> MemoryRecord | None:
         ...
 
-    def list_by_kind(self, kind: MemoryKind) -> list[MemoryRecord]:
+    def list_by_kind(
+        self, kind: MemoryKind, *, space_ids: tuple[str, ...] | None = None
+    ) -> list[MemoryRecord]:
+        """按类别列举记录。
+
+        S2：``space_ids`` 为 None 时返回全部**非受保护**空间（兼容旧调用方，
+        但 protected_original 永不出现）；显式传入元组时只返回这些空间
+        （空元组 = 不返回任何记录，fail closed）。
+        """
         ...
 
     def get_persona_continuity(self, key: str = "persona:default") -> PersonaContinuity | None:
@@ -166,14 +180,34 @@ class InMemoryStore:
             "record_id": normalized.record_id,
             "created_at": normalized.created_at.isoformat(),
             "tags": list(normalized.tags),
+            "space_id": normalized.space_id,
         }
 
     def get_record(self, key: str) -> MemoryRecord | None:
         return self._records.get(key)
 
-    def list_by_kind(self, kind: MemoryKind) -> list[MemoryRecord]:
+    def _protected_space_ids(self) -> set[str]:
+        """S2：从 kv 空间元数据读取 protected_original 空间集合。"""
+        protected: set[str] = set()
+        for key, value in self._data.items():
+            if not isinstance(key, str) or not key.startswith("space:"):
+                continue
+            if isinstance(value, Mapping) and value.get("type") == "protected_original":
+                protected.add(str(value.get("space_id") or key[6:]))
+        return protected
+
+    def list_by_kind(
+        self, kind: MemoryKind, *, space_ids: tuple[str, ...] | None = None
+    ) -> list[MemoryRecord]:
         # created_at 倒序（新的在前）；sorted 稳定，同 created_at 保持插入顺序。
         records = [r for r in self._records.values() if r.kind == kind]
+        # MEM-HARD-01：protected_original 永不进入列举（无论调用方是谁）。
+        protected = self._protected_space_ids()
+        if protected:
+            records = [r for r in records if r.space_id not in protected]
+        if space_ids is not None:
+            allowed = set(space_ids)
+            records = [r for r in records if r.space_id in allowed]
         return sorted(records, key=lambda r: r.created_at, reverse=True)
 
     def get_persona_continuity(self, key: str = "persona:default") -> PersonaContinuity | None:

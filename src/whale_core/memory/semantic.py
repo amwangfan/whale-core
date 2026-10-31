@@ -16,22 +16,24 @@ class DynamicHybridCurator:
         # source/evidence/consent semantics rather than duplicating fact-writing code.
         return getattr(self.base,name)
 
-    def recall(self,query: str,*,limit: int=5,now=None):
+    def recall(self,query: str,*,limit: int=5,now=None,allowed_spaces=None):
         if limit <= 0:
             return ()
         providers=self.registry.providers_for('embedding.embed')
         provider=next((item for _,item in providers if item is not None),None)
         # Empty queries are stable-fact lookup; sending them to /embeddings is wasteful
         # and most endpoints reject empty input. Explicit historical time stays lexical.
+        # S2：allowed_spaces 原样透传——回退只在**已授权空间集合内**发生，
+        # 能力降级（向量→词项）绝不扩大空间范围（TH-06）。
         if provider is None or not query.strip() or now is not None:
-            return self.base.recall(query,limit=limit,now=now)
+            return self.base.recall(query,limit=limit,now=now,allowed_spaces=allowed_spaces)
         try:
             hybrid=HybridCurator(self.store,embedder=provider,alpha=self.alpha,
                                  half_life_days=self.base.half_life_days)
-            return hybrid.recall(query,limit=limit)
+            return hybrid.recall(query,limit=limit,allowed_spaces=allowed_spaces)
         except Exception:
             # External optional retrieval never takes down the local memory path.
-            return self.base.recall(query,limit=limit,now=now)
+            return self.base.recall(query,limit=limit,now=now,allowed_spaces=allowed_spaces)
 
     def forget(self,key: str) -> bool:
         record=self.store.get_record(key)

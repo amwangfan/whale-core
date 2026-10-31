@@ -285,13 +285,20 @@ def cmd_run(args) -> int:
         print("[配对] [!] 观察模式：OWNER_QQ 未配置，所有来件只报告不处理（不会喂 AI）。")
     else:
         print(f"[配对] owner 绑定：(qq, {owner_qq}) → owner")
-    # S1：服务端会话上下文解析器——群里主人不提权、未配对即普通主体。
+    store = build_store(args.store)
+    # S1：服务端会话上下文解析器——群里主人不提权、未配对即普通主体；
+    # S2：绑定存储接入（会话 → 记忆空间/角色卡，vault 硬拒）。
     from whale_core.life.context_resolver import (
         ConversationContextResolver, pairing_lookup_from_mapping)
+    from whale_core.memory.bindings import BindingStore
+    from whale_core.memory.spaces import SpaceStore, ensure_owner_working_copy
+    _spaces = SpaceStore(store)
+    _owner_space = ensure_owner_working_copy(store, owner="owner")
     context_resolver = ConversationContextResolver(
-        pairing_lookup=pairing_lookup_from_mapping(bindings), owner_id="owner")
-
-    store = build_store(args.store)
+        pairing_lookup=pairing_lookup_from_mapping(bindings),
+        bindings=BindingStore(store, _spaces),
+        owner_id="owner",
+        owner_default_space=_owner_space)
     prefs = risk_prefs()
     print(policy_summary(prefs))
 

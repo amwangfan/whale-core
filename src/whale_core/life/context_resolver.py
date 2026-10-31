@@ -105,6 +105,7 @@ class ConversationContextResolver:
         bindings: Optional[BindingLookup] = None,
         grants: Optional[GrantLookup] = None,
         owner_id: str = "owner",
+        owner_default_space: Optional[MemorySpaceRef] = None,
         policy_version: int = 1,
     ) -> None:
         # pairing_lookup(channel, sender_id) -> owner_id | None
@@ -112,6 +113,8 @@ class ConversationContextResolver:
         self._bindings = bindings
         self._grants = grants
         self._owner_id = owner_id
+        # 主人私聊/控制台等已认证**非群**会话的默认工作副本（S2 首版策略）。
+        self._owner_default_space = owner_default_space
         self._policy_version = policy_version
 
     # -- 主入口 --------------------------------------------------------
@@ -172,6 +175,17 @@ class ConversationContextResolver:
                 for s in bound
                 if s.type is not MemorySpaceType.PROTECTED_ORIGINAL
             )
+        # 首版默认策略：已认证主人的非群会话自动挂上主人工作副本
+        # （绑定为空时）；群会话永不享受此默认（INV-03）。
+        if (
+            self._owner_default_space is not None
+            and principal.is_owner
+            and not _is_group(kind)
+            and self._owner_default_space.type is not MemorySpaceType.PROTECTED_ORIGINAL
+            and all(
+                s.space_id != self._owner_default_space.space_id for s in spaces)
+        ):
+            spaces = spaces + (self._owner_default_space,)
 
         return ResolvedContext(
             conversation=conv,

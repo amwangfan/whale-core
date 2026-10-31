@@ -65,7 +65,7 @@ def test_roundtrip_export_import(make_store):
     assert len(lines) == 3
     for line in lines:
         obj = json.loads(line)
-        assert set(obj) == {"key", "kind", "record_id", "created_at", "tags", "content"}
+        assert set(obj) == {"key", "kind", "record_id", "created_at", "tags", "content", "space_id"}  # S2
     assert "鲸鱼" in text  # ensure_ascii=False：非 ASCII 不转义
 
     dst = make_store()

@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Protocol, Sequence
 
-from whale_core.memory.curation import _terms
+from whale_core.memory.curation import _terms, _space_ids
 from whale_core.memory.store import MemoryKind, MemoryRecord, MemoryStore
 
 #: 词项零交集时，向量分至少达到该阈值才允许入选（防纯向量噪声）。
@@ -34,9 +34,13 @@ EMBEDDING_FLOOR = 0.3
 
 
 class EmbeddingProvider(Protocol):
-    """嵌入端点契约（model 类插件可提供 embedding.embed 能力；外部服务经 provider 注入）。"""
+    """嵌入端点契约（model 类插件可提供 embedding.embed 能力；外部服务经 provider 注入）。
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
+    S2：``namespace`` 为缓存分区键（=space_id）。相同文本在不同命名空间
+    的缓存项互不复用（INV-08：向量缓存不得跨空间泄漏可读结果）。
+    """
+
+    def embed(self, texts: list[str], *, namespace: str = "") -> list[list[float]]:
         ...
 
 
@@ -71,7 +75,8 @@ class HashEmbeddingProvider:
             raise ValueError("dim must be positive")
         self.dim = dim
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
+    def embed(self, texts: list[str], *, namespace: str = "") -> list[list[float]]:
+        # namespace 仅用于缓存分区语义对齐；本地散列无缓存、无状态，直接忽略。
         vectors: list[list[float]] = []
         for text in texts:
             vec = [0.0] * self.dim
@@ -114,27 +119,45 @@ class HybridCurator:
         self.alpha = alpha
         self.half_life_days = half_life_days
 
-    def recall(self, query: str, *, limit: int = 5) -> tuple[HybridHit, ...]:
+    def recall(self, query: str, *, limit: int = 5,
+               allowed_spaces=None) -> tuple[HybridHit, ...]:
+        """召回。S2：allowed_spaces 限域（MemorySpaceRef 元组）；空元组 fail
+        closed；嵌入按空间分组，缓存命名空间=space_id（INV-08）。"""
         if limit <= 0:
+            return ()
+        space_ids = _space_ids(allowed_spaces)
+        if space_ids is not None and not space_ids:
             return ()
         current = datetime.now(timezone.utc)
         query_terms = _terms(query)
-        records = (self.store.list_by_kind(MemoryKind.EPISODE) +
-                   self.store.list_by_kind(MemoryKind.PREFERENCE))
+        records = (self.store.list_by_kind(MemoryKind.EPISODE, space_ids=space_ids) +
+                   self.store.list_by_kind(MemoryKind.PREFERENCE, space_ids=space_ids))
         candidates = [r for r in records if "curated" in r.tags]
 
-        # 一次批量嵌入；任何异常 → 本次召回整体退化纯词项。
-        query_vec: list[float] | None = None
-        record_vecs: list[list[float]] | None = None
-        degraded = self.embedder is None
+        # 按空间分组嵌入：缓存键含 space_id，任何空间拿不到其他空间的
+        # 缓存向量；任何异常 → 该空间候选退化纯词项，不影响其他空间。
+        vecs_by_key: dict[str, tuple[list[float] | None, list[float] | None]] = {}
+        degraded_spaces: set[str] = set()
         if self.embedder is not None and candidates:
-            try:
-                summaries = [str(r.content.get("summary", "")) for r in candidates]
-                vectors = self.embedder.embed([query, *summaries])
-                query_vec, record_vecs = vectors[0], vectors[1:]
-            except Exception:
-                degraded = True
-                query_vec, record_vecs = None, None
+            groups: dict[str, list[int]] = {}
+            for idx, rec in enumerate(candidates):
+                groups.setdefault(rec.space_id, []).append(idx)
+            for sid, idxs in groups.items():
+                try:
+                    summaries = [str(candidates[i].content.get("summary", ""))
+                                 for i in idxs]
+                    try:
+                        vectors = self.embedder.embed([query, *summaries],
+                                                      namespace=sid)
+                    except TypeError:
+                        # 兼容未实现 namespace 分区的旧 embedder（退化为不分区，
+                        # 缓存隔离失效但功能可用；我们的 provider 均已支持）。
+                        vectors = self.embedder.embed([query, *summaries])
+                    qv = vectors[0]
+                    for pos, i in enumerate(idxs):
+                        vecs_by_key[rec_key(candidates, i)] = (qv, vectors[1 + pos])
+                except Exception:
+                    degraded_spaces.add(sid)
 
         matches: list[HybridHit] = []
         for idx, rec in enumerate(candidates):
@@ -142,8 +165,10 @@ class HybridCurator:
             stable = bool(content.get("stable_fact"))
             terms = _terms(str(content.get("summary", "")))
             common = terms & query_terms
-            embedding = (cosine(query_vec, record_vecs[idx])
-                         if query_vec is not None and record_vecs is not None else 0.0)
+            pair = vecs_by_key.get(rec_key(candidates, idx))
+            embedding = (cosine(pair[0], pair[1])
+                         if pair is not None and pair[0] is not None
+                         and pair[1] is not None else 0.0)
             if query_terms:
                 if not common and embedding < EMBEDDING_FLOOR:
                     continue
@@ -169,7 +194,13 @@ class HybridCurator:
                 "长期事实不衰减" if stable else f"距今{age:.0f}天",
                 f"来源:{content.get('source', 'unknown')}",
                 f"证据:{content.get('evidence_id', 'unknown')}",
-            ) + (("嵌入不可用，已退化纯词项",) if degraded and self.embedder is not None else ())
+            ) + (("嵌入不可用，已退化纯词项",)
+                  if self.embedder is not None
+                  and rec.space_id in degraded_spaces else ())
             matches.append(HybridHit(rec, score, lexical, embedding, reasons))
         matches.sort(key=lambda hit: (hit.score, hit.record.created_at), reverse=True)
         return tuple(matches[:limit])
+
+
+def rec_key(candidates: list, idx: int) -> str:
+    return str(candidates[idx].key)
