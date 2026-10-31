@@ -29,7 +29,7 @@ jobs:
         run: >-
           python -m pytest tests/test_pcm_voice.py tests/test_media_input.py
           tests/test_task_engine.py tests/test_tool_executor.py
-          tests/test_g2_memory_identity.py tests/test_g3_scenarios.py -q
+          tests/integration/test_memory_identity_governance.py tests/test_g3_scenarios.py -q
 
   nightly-full:
     if: github.event_name == 'schedule'

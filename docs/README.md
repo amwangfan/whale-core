@@ -98,3 +98,6 @@
 
 - 新增、移动或归档文档时同步更新本页，并在 [AI_DEVELOPMENT_GUIDE.md](AI_DEVELOPMENT_GUIDE.md) §9 登记维护责任。
 - 阶段文档归档到 `docs/archive/<日期>/`，用 `git mv` 保留历史；归档原文不改写。
+- 测试组织（issue #29 起）：新测试按领域与层级放入 `tests/unit/`、`tests/integration/`、
+  `tests/security/`、`tests/contract/`，命名 `test_<领域>_<主题>.py`，不再用里程碑名（P0/G2/G4…）；
+  组织约定与旧名→新名映射见 [tests/README.md](../tests/README.md)。

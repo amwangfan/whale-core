@@ -1,5 +1,7 @@
 """Authenticated API hosts can expose native realtime sessions through this bridge.
 
+分层：内置 provider 实现，非插件框架契约（builtin-provider，issue #31）。
+
 Session IDs are opaque, audio stays in memory, and idle sessions close automatically.
 This is a transport adapter; it never invokes the text model or authorizes tool calls.
 """

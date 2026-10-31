@@ -1,5 +1,7 @@
 """泛化插件事件：新输入点无需改核心事件类型。
 
+分层：插件框架契约（framework，issue #31）。
+
 ``PluginEvent`` 是 ``PerceptionEvent`` 子类，直接进 ``WhaleAgent.perceive`` /
 ``ContextReasoner`` 既有链路（未知 kind 只做摘要，不触发核心情境规则——
 插件语义由宿主在 router/policy 层消费）。

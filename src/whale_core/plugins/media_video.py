@@ -1,5 +1,7 @@
 """``media.video.generate`` 异步任务契约 + 任务生命周期管理器（PR-16，roadmap §8 P2-1）。
 
+分层：内置 provider 实现，非插件框架契约（builtin-provider，issue #31）。
+
 视频生成是异步任务形态：``submit`` 拿 task_id，``poll`` 查进度，终态拿产物 URL。
 真实异步视频服务（各家 API 形状差异大）经 :class:`VideoProvider` 协议注入；
 内置 DashScope Wan HTTP provider；是否已完成真实账号联调由部署验收记录说明。

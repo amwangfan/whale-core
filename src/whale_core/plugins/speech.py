@@ -1,5 +1,7 @@
 """ASR/TTS 能力契约与 OpenAI 兼容 provider 插件（PR-10，roadmap §8 P1-1/2）。
 
+分层：内置 provider 实现，非插件框架契约（builtin-provider，issue #31）。
+
 - 契约：``ASRProvider.transcribe`` / ``TTSProvider.synthesize`` 两个 Protocol，
   宿主按能力名 ``asr.transcribe`` / ``tts.synthesize`` 从 PluginRegistry 解析；
 - provider：``OpenAICompatibleASR``（/v1/audio/transcriptions，multipart/form-data

@@ -1,5 +1,20 @@
 """G5.4：Core 端模拟设备闭环 —— 可重放的 sensor.event → 情境 → 提醒/动作。
 
+位置（issue #27）：本模块由 ``life/device_bridge.py`` 迁入 devices 域
+（旧路径保留薄 shim，import 兼容）。它本质是 devices×life 的**边界模块**。
+
+依赖方向例外说明：本模块反向 import 了 ``life.autonomy``
+（``DeviceUnavailable`` 错误类型 / ``AutonomyController`` 类型标注）与
+``life.situation``（``FACT`` / ``SituationStore`` / ``SituationState``）。
+评估结论：**保留该 import 不做依赖注入**——理由：
+1. devices→life 的方向在仓内已有先例（``devices/event_consumer.py``
+   同样 import ``life.initiative``），且 life 侧不回指 devices，无环；
+2. 例外项都是运行期值（异常类型、常量、re-export），注入等于让调用方
+   传异常类/常量，只会污染 API 而不换得真实解耦；
+3. 彻底解耦需先抽取「动作回执语义 + 情境模型」稳定接口层，超出 #27
+   范围（issue 允许「必要时抽取稳定接口」，此处记录为后续候选）。
+``tests/test_arch_channels.py`` 以白名单方式冻结本模块允许的 life 依赖。
+
 生产路径是 ``devices/gateway.py`` 的 WSS 长连（验签/去重/持久化/回执
 状态机）。本模块提供**离线可重放**的同语义 Core 端通道，用于 CI 与
 验收回放（计划 §7.4：Core 端必须能用可重放的模拟设备事件完成一条

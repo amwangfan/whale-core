@@ -1,5 +1,7 @@
 """自定义服务桥的 HTTP 客户端：渠道消息桥 + 外置 manifest 插件执行器（PR#4 移植）。
 
+分层：内置 provider 实现，非插件框架契约（builtin-provider，issue #31）。
+
 线协议（PR#4 ``docs/service-bridges.md`` 定义，本模块只实现客户端传输层，
 不部署桥、不附带桥实现）：
 

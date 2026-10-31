@@ -1,5 +1,7 @@
 """PluginManager：显式清单加载 + 生命周期 + 健康检查 + 配置管理。
 
+分层：插件框架契约（framework，issue #31）。
+
 与仓内约定一致（见 registry.py）：**不做自动发现**——不扫 entry_points、
 不读环境变量自动接线。宿主把 manifest JSON 显式放进目录，``load_dir``
 只加载不启用；启用必须显式 ``enable()``。加载 ≠ 启用。

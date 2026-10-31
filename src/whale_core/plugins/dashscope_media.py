@@ -1,5 +1,7 @@
 """DashScope 兼容协议的媒体 provider（生图/ASR/TTS），多平台可用。
 
+分层：内置 provider 实现，非插件框架契约（builtin-provider，issue #31）。
+
 协议契约来源：whale-io 生产 bridge（infra/call-bridge/audio-bridge/agent_api.py）
 实测通过的形状 + AgentScope 平台媒体手册（docs/media-and-voice.md 口径）：
 

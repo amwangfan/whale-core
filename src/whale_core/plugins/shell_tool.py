@@ -1,4 +1,7 @@
-"""Official Shell tool. The manifest approval gate and OS sandbox both apply."""
+"""Official Shell tool. The manifest approval gate and OS sandbox both apply.
+
+分层：内置 provider 实现，非插件框架契约（builtin-provider，issue #31）。
+"""
 from __future__ import annotations
 from pathlib import Path
 from whale_core.core.runtime import ToolSpec

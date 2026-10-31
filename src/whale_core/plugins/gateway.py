@@ -1,5 +1,7 @@
 """插件网关：kind ``plugin_action`` 的单一执行点（策略内嵌，不可绕过）。
 
+分层：插件框架契约（framework，issue #31）。
+
 回执约定（可观测闭环，与 shell_denied 同款——拒绝不静默）：
 
 - denied        → ``plugin-denied:{plugin}:{action}:{reason}``

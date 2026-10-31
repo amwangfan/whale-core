@@ -3,6 +3,11 @@
 拆分自 src/whale_core/life/（2026-10-30 owner 决策：WeQ 功能独立为插件）。
 宿主（生产 runner）经 plugins/loader.py 显式加载；渠道依赖（发送端口/
 账本/策略）由宿主注入，本包不自带凭据。
+
+定位（issue #27）：本包是**官方 bundled plugin 的薄适配/注册层**——只做
+WeQ 传输适配（SSE 推送监听 / Web 发送端 / 完整模式窗口）与插件注册。
+QQ 渠道的领域入口是 ``whale_core.channels.qq``（实现仍在 ``whale_core.life``
+的 qq_onebot / qq_workflow）；本包不新增渠道领域语义。
 """
 from __future__ import annotations
 

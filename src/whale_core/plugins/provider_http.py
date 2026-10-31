@@ -1,4 +1,7 @@
-"""Bounded provider transport with redirects disabled to protect API credentials."""
+"""Bounded provider transport with redirects disabled to protect API credentials.
+
+分层：内置 provider 支撑设施，非插件框架契约（builtin-support，issue #31）。
+"""
 from __future__ import annotations
 import json
 import math

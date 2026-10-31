@@ -1,5 +1,7 @@
 """模型供给插件（model kind）的官方装配与能力解析。
 
+分层：内置 provider 实现，非插件框架契约（builtin-provider，issue #31）。
+
 ``llm.chat`` 能力由 model 插件提供；核心按能力解析 provider，业务逻辑不硬编码
 供应商型号（roadmap §4.2）。端点凭据只在宿主 env / 私有配置，manifest 不含。
 """

@@ -769,6 +769,25 @@ def build_parser() -> argparse.ArgumentParser:
     _add_config_dir(p_api)
     p_api.set_defaults(func=_cmd_api)
 
+    # issue #28：QQ 渠道运行器的正式 CLI 入口。参数原样转发给
+    # examples/qq_live_workflow.py 的 main（run/approve/show/jobs），
+    # 业务逻辑不在 CLI 复制；run 子命令由 whale_core.cli.qq 加单实例锁。
+    p_qq = sub.add_parser(
+        "qq",
+        help="QQ 渠道运行器（whale qq run|approve|show|jobs；"
+             "真实发送需 --live-auto-send + QQ_LIVE_AUTOSEND=1 双开关）",
+    )
+    p_qq.add_argument(
+        "qq_args", nargs=argparse.REMAINDER,
+        help="原样转发给 QQ 运行器的参数（如 run --auto-approve；"
+             "子命令帮助用 whale qq run --help）",
+    )
+
+    def qq(args: argparse.Namespace) -> int:
+        from whale_core.cli.qq import main as qq_main
+        return qq_main(args.qq_args)
+    p_qq.set_defaults(func=qq)
+
     p_memory = sub.add_parser("memory", help="记忆导出 / 导入（JSONL）")
     msub = p_memory.add_subparsers(dest="memory_command", required=True)
     me = msub.add_parser("export", help="导出记忆为 JSONL")

@@ -1,5 +1,7 @@
 """Native Realtime WebSocket sessions; audio never traverses the text LLM.
 
+分层：内置 provider 实现，非插件框架契约（builtin-provider，issue #31）。
+
 Works with the OpenAI-compatible event protocol used by whale-io's Omni bridge.
 The optional websockets dependency is loaded only when opening a session.
 """

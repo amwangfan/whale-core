@@ -9,6 +9,11 @@ WeQ Web 真实发送，需显式开启；见 docs/research-weq-deepseek-qq.md §
     python examples/qq_live_workflow.py show                # 查看待审草稿列表
     python examples/qq_live_workflow.py jobs                # 查看入站持久化队列（失败可 requeue）
 
+生产入口（issue #28）：生产请用 ``whale qq run``（``whale_core.cli.qq`` 把参数
+原样转发到本文件的 ``main(argv)``，子命令与双开关语义完全一致，并附加单实例
+flock）；本文件同时保留为可运行示例，生产 systemd 当前仍直接指向它
+（部署切换由后续统一处理）。
+
 审批与发送安全（issue #12）：
 - 普通 run 一律**人工批准**；环境变量配齐**不会**隐式开启任何自动发送。
 - ``--auto-approve`` 只是 **dry-run 演示**：草稿在影子账本走完整审批流并打印，
@@ -991,8 +996,13 @@ def add_shared_options(parser: argparse.ArgumentParser, *, store: bool = False,
         parser.add_argument("--inbox", default=argparse.SUPPRESS)
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+def main(argv: list[str] | None = None, *, prog: str | None = None) -> int:
+    """运行器入口：解析参数并分派，返回退出码（不自行 sys.exit）。
+
+    ``argv`` 缺省读 ``sys.argv``；``prog`` 供 CLI 入口（whale qq）传入，
+    让帮助/错误信息的 prog 名与调用面一致（issue #28）。
+    """
+    parser = argparse.ArgumentParser(prog=prog, description=__doc__.splitlines()[0])
     parser.add_argument("--secrets", default=str(DEFAULT_SECRETS))
     parser.add_argument("--store", default=str(DEFAULT_STORE),
                         help="记忆/账本存储（sqlite 路径或 :memory:）")
@@ -1024,7 +1034,7 @@ def main() -> int:
     p_jobs.add_argument("--requeue-failed", action="store_true",
                         help="把所有 failed 任务重新入队（下次 run 续处理）")
     p_jobs.set_defaults(fn=cmd_jobs)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     loaded = load_secrets(Path(args.secrets))
     if loaded:
         print(f"[secrets] 已载入键：{', '.join(loaded)}（值不打印）")
