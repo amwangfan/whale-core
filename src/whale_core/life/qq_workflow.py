@@ -58,7 +58,8 @@ class QqInboundWorkflow:
                  orchestrator=None,
                  safety_reviewer=None,
                  completion_sender=None,
-                 media_validator=None) -> None:
+                 media_validator=None,
+                 auth_service=None) -> None:
         self.store = store
         self.companion = WhaleCompanion(store, brain, curator=MemoryCurator(store))
         self.outbox = ProactiveOutbox(store)
@@ -76,6 +77,9 @@ class QqInboundWorkflow:
         # 可选补发回调（两段式慢任务）：callable(event, reply) -> None。
         # 由宿主注入真实发送路径（草稿+审批+网关）；慢任务 ack 后的结果经此补发。
         self._completion_sender = completion_sender
+        # S4：临时授权服务（一次性口令 sudo）；None = 未启用，口令消息按
+        # 普通文本处理。
+        self._auth_service = auth_service
         # 媒体输入可信边界（G0-B）：附件路径白名单/SSRF/格式与尺寸校验统一走
         # core.media_input.ImageInputValidator；未注入时构造默认实例
         # （本地路径 fail-closed——无白名单即拒绝本地读取，仅走受门控的 https）。
@@ -207,6 +211,29 @@ class QqInboundWorkflow:
         text = event.text.strip()
         if not text:
             return {"skipped": "empty_text"}
+
+        # S4：sudo 验证尝试在进入 LLM/记忆/历史/日志之前截获（N17）。
+        # 明文口令只用于验证，绝不向后续链路传递。
+        if self._auth_service is not None:
+            from whale_core.life.context_resolver import derive_kind
+            from whale_core.life.temporary_auth import maybe_intercept_sudo
+            attempt = maybe_intercept_sudo(text)
+            if attempt is not None:
+                grant = self._auth_service.verify(
+                    attempt, channel=event.channel,
+                    sender_id=event.sender_id or event.owner_id,
+                    conversation_kind=derive_kind(event.channel, event.conversation),
+                    conversation_id=event.conversation)
+                if grant is not None:
+                    mins = max(1, int((grant.expires_at - __import__("time").time()) / 60))
+                    return {"reply": (
+                        "验证通过，本次私聊已获得临时授权："
+                        f"可用能力 {('、'.join(grant.scopes)) or '无'}，"
+                        f"{mins} 分钟内最多 {grant.max_uses} 次操作。"
+                        "到期或用尽自动恢复普通权限。"),
+                        "draft_id": None, "auth_grant": grant.grant_id}
+                return {"reply": "验证失败（口令无效、已使用或已过期）。",
+                        "draft_id": None, "auth_grant": None}
 
         turn_receipts: list = []
         # owner 显式记忆指令（记住/忘掉）：不调模型，确定性处理（省 token、可测试）。

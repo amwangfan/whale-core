@@ -144,11 +144,21 @@ class MemoryStore(Protocol):
     ) -> None:
         ...
 
+    def transact(self, fn):
+        """S4：在单个原子事务中执行 ``fn(tx)`` 并返回其结果。
+
+        ``tx`` 提供 ``get(key)`` / ``put(key, value)``（仅 kv 区）。
+        用于一次性口令的「校验+核销+签发租约」原子序列（INV-05）。
+        """
+        ...
+
 
 class InMemoryStore:
     """简单 dict 后端，供本地开发与测试。"""
 
     def __init__(self) -> None:
+        import threading
+        self._lock = threading.RLock()
         self._data: dict[str, Any] = {}
         self._records: dict[str, MemoryRecord] = {}
 
@@ -220,3 +230,17 @@ class InMemoryStore:
         self, persona: PersonaContinuity, key: str = "persona:default"
     ) -> None:
         self.put_record(persona.as_record(key=key))
+
+    def transact(self, fn):
+        """进程内后端的事务实现：RLock 保护 kv 读写序列即可满足原子性。"""
+        store = self
+
+        class _Tx:
+            def get(self, key: str):
+                return store._data.get(key)
+
+            def put(self, key: str, value) -> None:
+                store._data[key] = value
+
+        with self._lock:
+            return fn(_Tx())

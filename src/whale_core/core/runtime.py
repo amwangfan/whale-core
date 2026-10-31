@@ -325,11 +325,13 @@ class ConversationOrchestrator:
         max_tool_rounds: int = MAX_TOOL_ROUNDS,
         executor_model=None,  # G1-C：可选多轮工具执行模型（llm.tool_executor 角色）
         context_resolver=None,  # S1：服务端会话上下文解析器（life.context_resolver）
+        grant_gate=None,  # S4：callable(grant_ids, fingerprint) -> bool；租约重验
     ) -> None:
         self.store = store
         self.companion = companion
         self.intent_model = intent_model
         self.context_resolver = context_resolver
+        self.grant_gate = grant_gate
         self.tools = tools or ToolRegistry()
         self.gateway = gateway
         self.executor_model = executor_model
@@ -1139,6 +1141,13 @@ class ConversationOrchestrator:
         action = replace(action, reason=token, payload={**action.payload,
             "runtime_manifest_version": manifest.version if manifest is not None else ""})
         fingerprint = _action_fingerprint(action)
+        # S4/INV-09：任务携带临时租约时，每次工具执行前重验并原子消耗
+        # 操作次数；租约过期/撤销/用尽/参数指纹不符即拒（快照不作扩权依据）。
+        authz = (self.store.get(f"runtime:task:{task_id}") or {}).get("authz") or {}
+        grant_ids = tuple(authz.get("grant_ids") or ())
+        if grant_ids and spec.risk_class != "read_only":
+            if self.grant_gate is None or not self.grant_gate(grant_ids, fingerprint):
+                return "denied", f"tool-denied:{spec.name}:grant-invalid-or-exhausted"
         with self._task_lock:
             record = self.store.get(f"task:{task_id}") or {}
             if record.get("cancel_requested"):

@@ -132,6 +132,35 @@ class SqliteMemoryStore:
             rows = self.db.execute("SELECT key FROM kv UNION SELECT key FROM records ORDER BY key").fetchall()
             return [row[0] for row in rows]
 
+    def transact(self, fn):
+        """S4：单事务执行 fn(tx)（BEGIN IMMEDIATE），tx 提供 kv get/put。
+
+        校验+核销+签发在同一事务内提交，并发/崩溃不会留下半状态
+        （INV-05 的 SQLite 落地）。
+        """
+        store = self
+
+        class _Tx:
+            def get(self, key: str):
+                row = store.db.execute(
+                    "SELECT value FROM kv WHERE key=?", (key,)).fetchone()
+                return json.loads(row[0]) if row else None
+
+            def put(self, key: str, value) -> None:
+                store.db.execute(
+                    "INSERT OR REPLACE INTO kv VALUES (?,?)",
+                    (key, json.dumps(value, ensure_ascii=False)))
+
+        with self._lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                result = fn(_Tx())
+                self.db.commit()
+                return result
+            except BaseException:
+                self.db.rollback()
+                raise
+
     # -- 记忆记录 ----------------------------------------------------------
 
     def put_record(self, record: MemoryRecord) -> None:

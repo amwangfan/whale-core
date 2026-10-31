@@ -272,18 +272,25 @@ def assemble_runtime(
         ConversationContextResolver, pairing_lookup_from_mapping)
     from whale_core.memory.bindings import BindingStore
     from whale_core.memory.spaces import SpaceStore, ensure_owner_working_copy
+    from whale_core.life.temporary_auth import TemporaryAuthService
     _spaces = SpaceStore(store)
     _owner_space = ensure_owner_working_copy(store, owner="owner")
+    _auth = TemporaryAuthService(store, owner_id="owner")
     context_resolver = ConversationContextResolver(
         pairing_lookup=pairing_lookup_from_mapping(
             {("api", "console"): "owner", ("cli", "local"): "owner"}),
         bindings=BindingStore(store, _spaces),
+        grants=_auth,
         owner_id="owner",
         owner_default_space=_owner_space)
+    def _grant_gate(grant_ids, fingerprint):
+        return any(_auth.consume_grant_use(g, action_fingerprint=fingerprint)
+                   for g in grant_ids)
     orchestrator = ConversationOrchestrator(store, companion, tools=tools,
                                             intent_model=intent_model, gateway=gateway,
                                             executor_model=executor_model,
-                                            context_resolver=context_resolver)
+                                            context_resolver=context_resolver,
+                                            grant_gate=_grant_gate)
     return RuntimeBundle(
         profile=profile, store=store, registry=registry, manager=manager,
         tools=tools, companion=companion, orchestrator=orchestrator, notes=notes, optional=optional,

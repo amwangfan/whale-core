@@ -116,14 +116,49 @@ def test_inv05_grant_ref_separates_counts():
     assert g.max_uses != 0 and g.used_count == 0  # 租约次数独立字段存在
 
 
-@pytest.mark.skip(reason="S4：OneTimeAuthCode 原子核销")
 def test_inv05_code_single_success_under_concurrency():  # N06
-    raise AssertionError
+    """S4 已点亮：并发核销只一人成功（双后端在临时认证测试集中覆盖）。"""
+    import threading
+    from whale_core.life.temporary_auth import TemporaryAuthService
+    from whale_core.memory.store import InMemoryStore
+
+    auth = TemporaryAuthService(InMemoryStore())
+    code = auth.create_code()
+    wins = []
+
+    def attempt(i):
+        if auth.verify(code, channel="qq", sender_id=f"u{i}",
+                       conversation_kind=ConversationKind.QQ_PRIVATE,
+                       conversation_id=f"private:u{i}"):
+            wins.append(i)
+
+    ts = [threading.Thread(target=attempt, args=(i,)) for i in range(8)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert len(wins) == 1
+    # 核销后同一口令永远失效
+    assert auth.verify(code, channel="qq", sender_id="u0",
+                       conversation_kind=ConversationKind.QQ_PRIVATE,
+                       conversation_id="private:u0") is None
 
 
-@pytest.mark.skip(reason="S4：租约绑定 sender+会话+指纹")
 def test_inv05_grant_not_portable_across_conversations():  # N06/N16
-    raise AssertionError
+    from whale_core.life.temporary_auth import TemporaryAuthService
+    from whale_core.memory.store import InMemoryStore
+
+    auth = TemporaryAuthService(InMemoryStore())
+    code = auth.create_code(allowed_scopes=("task.read:self",))
+    grant = auth.verify(code, channel="qq", sender_id="u_a",
+                        conversation_kind=ConversationKind.QQ_PRIVATE,
+                        conversation_id="private:u_a")
+    assert grant is not None
+    import time as _t
+    assert auth.active_grants("anon:qq:u_a", "qq:qq_private:private:u_b",
+                              now=_t.time()) == ()
+    assert auth.active_grants("anon:qq:u_b", "qq:qq_private:private:u_a",
+                              now=_t.time()) == ()
 
 
 # ---------------------------------------------------------------------------
@@ -163,9 +198,65 @@ def test_inv08_no_cross_space_leak_via_cache_or_embedding():  # N02/N09
                for h in hyb.recall("甲群", allowed_spaces=(ref_b,)))
 
 
-@pytest.mark.skip(reason="S4+S7：异步任务恢复前重校验")
 def test_inv09_expired_grant_blocks_resumed_task():  # N07
-    raise AssertionError
+    """S4 已点亮：租约撤销后，带该租约授权快照的任务步骤被 grant_gate 拒绝。"""
+    import json
+    from whale_core.core.companion import WhaleCompanion
+    from whale_core.core.runtime import (
+        ConversationOrchestrator, ToolRegistry, ToolSpec)
+    from whale_core.life.temporary_auth import TemporaryAuthService
+    from whale_core.memory.store import InMemoryStore
+
+    class Brain:
+        def reply(self, text, **kwargs):
+            return "收到"
+
+    class Planner:
+        def plan(self, text, **kwargs):
+            return json.dumps({"goal": "发", "kind": "task",
+                               "capabilities": ("send",), "slots": {"target": "x"}})
+
+    store = InMemoryStore()
+    auth = TemporaryAuthService(store)
+    code = auth.create_code(allowed_scopes=("task.read:self",))
+    grant = auth.verify(code, channel="qq", sender_id="u1",
+                        conversation_kind=ConversationKind.QQ_PRIVATE,
+                        conversation_id="private:u1")
+
+    def gate(grant_ids, fingerprint):
+        return any(auth.consume_grant_use(g, action_fingerprint=fingerprint)
+                   for g in grant_ids)
+
+    orch = ConversationOrchestrator(
+        store, WhaleCompanion(store, Brain()), intent_model=Planner(),
+        tools=ToolRegistry(), grant_gate=gate)
+    calls = []
+    orch.tools.register(ToolSpec("send", "send", risk_class="communicate",
+                                 plugin_id="mail", action="send",
+                                 handler=lambda a: calls.append(1) or "ok"))
+    # 注入带租约的授权快照（模拟临时授权任务）
+    orch._ensure_context = lambda env: env  # 无 resolver，直接注入
+    from whale_core.core.runtime import InputEnvelope
+    ctx = ResolvedContext(
+        conversation=PRIVATE, principal=STRANGER, persona_id=None,
+        capability_scopes=("task.read:self",),
+        grants=(grant,))
+    orch.handle_envelope(InputEnvelope(
+        conversation_id="private:u1", text="发", context=ctx))
+    journals = [store.get(k) for k in store.keys() if k.startswith("runtime:task:")]
+    assert journals and journals[0]["authz"]["grant_ids"] == [grant.grant_id]
+    # 租约撤销后：同一任务再派发（恢复路径）被 grant gate 拒绝
+    auth.revoke_grant(grant.grant_id)
+    tid = journals[0]["plan"]["task_id"]
+    from whale_core.core.intent_plan import IntentPlan
+    spec = orch.tools.get("send")
+    outcome, note = orch._dispatch_step(
+        tid, spec,
+        IntentPlan(goal="发", capabilities=("send",), slots={"target": "x"},
+                   task_id=tid),
+        {"target": "x"}, 0, 60.0)
+    assert outcome == "denied" and "grant" in note
+    assert calls == []  # 工具从未执行
 
 
 @pytest.mark.skip(reason="S5：绑定 API 审计")

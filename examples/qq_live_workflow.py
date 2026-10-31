@@ -292,13 +292,20 @@ def cmd_run(args) -> int:
         ConversationContextResolver, pairing_lookup_from_mapping)
     from whale_core.memory.bindings import BindingStore
     from whale_core.memory.spaces import SpaceStore, ensure_owner_working_copy
+    from whale_core.life.temporary_auth import TemporaryAuthService
     _spaces = SpaceStore(store)
     _owner_space = ensure_owner_working_copy(store, owner="owner")
+    auth_service = TemporaryAuthService(store, owner_id="owner")
     context_resolver = ConversationContextResolver(
         pairing_lookup=pairing_lookup_from_mapping(bindings),
         bindings=BindingStore(store, _spaces),
+        grants=auth_service,
         owner_id="owner",
         owner_default_space=_owner_space)
+
+    def _grant_gate(grant_ids, fingerprint):
+        return any(auth_service.consume_grant_use(g, action_fingerprint=fingerprint)
+                   for g in grant_ids)
     prefs = risk_prefs()
     print(policy_summary(prefs))
 
@@ -334,7 +341,8 @@ def cmd_run(args) -> int:
             print(f"[完整模式] 按需窗口 idle={send_port.idle_min:g}min")
 
     inbox = build_inbox(args.inbox)
-    workflow = QqInboundWorkflow(store, build_brain(), prefs=prefs)
+    workflow = QqInboundWorkflow(store, build_brain(), prefs=prefs,
+                                 auth_service=auth_service)
 
     def _send_audio_artifacts(audio_ids) -> None:
         """把任务产生的音频产物发成 QQ 语音消息。"""
@@ -419,7 +427,8 @@ def cmd_run(args) -> int:
         workflow.orchestrator = ConversationOrchestrator(
             store, workflow.companion,
             intent_model=SearchIntentRouter(model=intent_brain, enable_llm=True, tools=tools),
-            tools=tools, context_resolver=context_resolver)
+            tools=tools, context_resolver=context_resolver,
+            grant_gate=_grant_gate)
         print(f"[意图] 模型={intent_model_id}（规则优先+LLM 规划；{tool_note}）")
 
     # 安全审核模型（可选，默认关）：QQ_SAFETY_MODEL=<模型 id> 开启——
