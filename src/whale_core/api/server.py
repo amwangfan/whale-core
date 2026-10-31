@@ -43,6 +43,7 @@ class ApiContext:
     pcm_voice_gateway: Any = None  # api.voice.VoiceGateway（懒创建，可选 websockets）
     workflows: Any = None
     optional: Any = None       # OptionalCapabilities
+    studio: Any = None         # api.studio.StudioServices（S5；缺省由 ctx.store 现场构建）
     lock: Any = field(default_factory=threading.RLock)
     stopping: Any = field(default_factory=threading.Event)
     curator: Any = None        # MemoryCurator
@@ -139,6 +140,9 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         self._route("POST")
 
+    def do_PUT(self) -> None:
+        self._route("PUT")
+
     def do_DELETE(self) -> None:
         self._route("DELETE")
 
@@ -199,6 +203,12 @@ class _Handler(BaseHTTPRequestHandler):
             self._plugins(method, parts)
         elif head == "conversations":
             self._conversations(method, parts)
+        elif head == "studio":
+            from whale_core.api import studio as _studio
+            _studio.dispatch_studio(self, method, parts, query)
+        elif head == "auth":
+            from whale_core.api import studio as _studio
+            _studio.dispatch_auth(self, method, parts)
         elif head == "memory":
             self._memory(method, parts, query)
         elif parts == ["chat"] and method == "POST":

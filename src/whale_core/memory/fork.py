@@ -94,7 +94,9 @@ class ForkService:
         # 先校验全部记录存在且属于源空间，再建空间——不产生残空间。
         records = [self._require_record(source_space, k) for k in record_keys]
         target = self.spaces.create(
-            target_type, name=_default_target_name(target_type, source_space),
+            target_type,
+            name=(target_name or "").strip()[:120]
+                 or _default_target_name(target_type, source_space),
             owner=created_by)
         now = datetime.now(timezone.utc).isoformat()
         for rec in records:

@@ -129,6 +129,29 @@ class TemporaryAuthService:
         action_fingerprint: str | None = None,
     ) -> str:
         """创建口令，返回明文（仅这一次）。自定义短语过低熵时拒绝。"""
+        return str(self.create_code_ex(
+            allowed_scopes=allowed_scopes, ttl_s=ttl_s, created_by=created_by,
+            custom_phrase=custom_phrase, grant_ttl_s=grant_ttl_s,
+            grant_max_uses=grant_max_uses,
+            action_fingerprint=action_fingerprint)["code_text"])
+
+    def create_code_ex(
+        self,
+        *,
+        allowed_scopes: Tuple[str, ...] = (SCOPE_TASK_READ_SELF,),
+        ttl_s: float = 86400,
+        created_by: str = "owner",
+        custom_phrase: str | None = None,
+        grant_ttl_s: float = 600,
+        grant_max_uses: int = 1,
+        action_fingerprint: str | None = None,
+    ) -> dict:
+        """create_code 的扩展返回版（S5 管理 API 用）：明文 + 元数据。
+
+        返回 ``{"code_id", "code_text", "proof_strength", "allowed_scopes",
+        "expires_at"}``；``code_text`` 明文仅在这一份返回值里出现，
+        存储侧仍只有校验值（INV-05/INV-10）。
+        """
         scopes = tuple(s for s in allowed_scopes if s in GRANTABLE_SCOPES)
         if not scopes:
             raise TemporaryAuthError("allowed_scopes 不含任何可授权 scope")
@@ -156,11 +179,13 @@ class TemporaryAuthService:
             verifier = self._verifier(code_text, "high")
 
         code_id = f"oc-{uuid4().hex[:16]}"
+        expires_at = time.time() + ttl_s
+        proof_strength = "high" if custom_phrase is None else estimate_strength(code_text)
         self.store.put(f"otp:code:{code_id}", {
             "code_id": code_id,
             "verifier": verifier,
             "allowed_scopes": list(scopes),
-            "expires_at": time.time() + ttl_s,
+            "expires_at": expires_at,
             "consumed_at": None,
             "revoked_at": None,
             "failure_count": 0,
@@ -168,10 +193,15 @@ class TemporaryAuthService:
             "grant_ttl_s": grant_ttl_s,
             "grant_max_uses": grant_max_uses,
             "action_fingerprint": action_fingerprint,
-            "proof_strength": "high" if custom_phrase is None
-                              else estimate_strength(code_text),
+            "proof_strength": proof_strength,
         })
-        return code_text
+        return {
+            "code_id": code_id,
+            "code_text": code_text,
+            "proof_strength": proof_strength,
+            "allowed_scopes": list(scopes),
+            "expires_at": expires_at,
+        }
 
     def _active_code_count(self) -> int:
         now = time.time()
@@ -377,6 +407,47 @@ class TemporaryAuthService:
         rec["revoked_at"] = time.time()
         self.store.put(f"otp:grant:{grant_id}", rec)
         return True
+
+    def list_grants(self, *, active_only: bool = True) -> tuple[dict, ...]:
+        """管理视图（S5）：租约元数据列表。
+
+        只含元数据（id/主体/会话/scopes/次数/有效期/撤销状态），
+        租约本体不含任何秘密材料，无需额外脱敏；``active_only=True``
+        时排除已撤销 / 已过期 / 次数耗尽的租约。
+        """
+        now = time.time()
+        out = []
+        for key in sorted(self.store.keys()):
+            if not key.startswith("otp:grant:"):
+                continue
+            rec = self.store.get(key)
+            if not isinstance(rec, dict):
+                continue
+            revoked = bool(rec.get("revoked_at"))
+            expired = float(rec.get("expires_at") or 0) <= now
+            exhausted = int(rec.get("used_count") or 0) >= int(rec.get("max_uses") or 1)
+            if active_only and (revoked or expired or exhausted):
+                continue
+            out.append({
+                "grant_id": str(rec.get("grant_id") or ""),
+                "principal_id": str(rec.get("principal_id") or ""),
+                "channel": str(rec.get("channel") or ""),
+                "sender_id": str(rec.get("sender_id") or ""),
+                "conversation_id": str(rec.get("conversation_id") or ""),
+                "scopes": list(rec.get("scopes") or []),
+                "issued_at": float(rec.get("issued_at") or 0),
+                "expires_at": float(rec.get("expires_at") or 0),
+                "max_uses": int(rec.get("max_uses") or 1),
+                "used_count": int(rec.get("used_count") or 0),
+                "remaining_uses": max(
+                    0, int(rec.get("max_uses") or 1) - int(rec.get("used_count") or 0)),
+                "proof_method": str(rec.get("proof_method") or "otp"),
+                "proof_strength": str(rec.get("proof_strength") or ""),
+                "source_code_id": str(rec.get("source_code_id") or ""),
+                "revoked": revoked,
+                "expired": expired,
+            })
+        return tuple(out)
 
     # ---- 限流 ---------------------------------------------------------------
 

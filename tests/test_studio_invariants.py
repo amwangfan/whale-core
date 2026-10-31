@@ -10,6 +10,9 @@ PRD §9 的 INV-01..INV-12 与验收 N01..N17 的测试骨架。
 
 from __future__ import annotations
 
+import json
+from http.client import HTTPConnection
+
 import pytest
 
 from whale_core.life.conversation_context import (
@@ -46,6 +49,50 @@ def _ctx(principal: Principal, conv: ConversationRef, spaces=()) -> ResolvedCont
 
 
 # ---------------------------------------------------------------------------
+# S5 起点亮的 API 不变量：进程内真实 HTTP（回环 + 临时端口，不触外网）
+# ---------------------------------------------------------------------------
+
+_STUDIO_TOKEN = "inv-test-token"
+
+
+def _studio_server():
+    """装配一个带 vault + 群空间的最小 API 服务（与 profiles 同一 store 模式）。"""
+    from whale_core.api.server import ApiContext, WhaleApiServer
+    from whale_core.memory.spaces import SpaceStore
+    from whale_core.memory.store import InMemoryStore, MemoryKind, MemoryRecord
+
+    store = InMemoryStore()
+    spaces = SpaceStore(store)
+    store.put("space:vault-1", {
+        "space_id": "vault-1", "type": "protected_original",
+        "name": "默认私人原始库", "owner": "owner", "version": 1,
+        "created_at": "t", "retired_at": None})
+    store.put_record(MemoryRecord(
+        kind=MemoryKind.EPISODE, key="v-sec",
+        content={"summary": "私密正文不得进审计"}, tags=("curated",),
+        space_id="vault-1"))
+    spaces.create(MemorySpaceType.GROUP_SPACE, name="g", space_id="g-1")
+    ctx = ApiContext(store=store)
+    server = WhaleApiServer(ctx, port=0, token=_STUDIO_TOKEN)
+    server.start()
+    return server, store
+
+
+def _studio_req(server, method, path, *, body=None):
+    conn = HTTPConnection("127.0.0.1", server.port, timeout=5)
+    headers = {"Authorization": f"Bearer {_STUDIO_TOKEN}"}
+    payload = None
+    if body is not None:
+        payload = json.dumps(body)
+        headers["Content-Type"] = "application/json"
+    conn.request(method, path, body=payload, headers=headers)
+    resp = conn.getresponse()
+    raw = resp.read()
+    conn.close()
+    return resp.status, raw
+
+
+# ---------------------------------------------------------------------------
 # INV-01 / MEM-HARD-01：protected_original 永不进入会话（契约级，现役）
 # ---------------------------------------------------------------------------
 
@@ -62,9 +109,26 @@ def test_inv01_vault_denied_for_owner_private_and_group():
             assert _ctx(principal, conv).allows_memory_read(VAULT) is False
 
 
-@pytest.mark.skip(reason="S2：需要 MemorySpace 存储与 API")
 def test_inv01_api_bind_vault_returns_403():  # N01
-    raise AssertionError
+    """S5 已点亮：vault 绑定 API 直接拒绝（403 + 稳定码），且不留下边。"""
+    server, store = _studio_server()
+    try:
+        # 直连 / 对主人私聊 / 重复提交：一律 403 vault_not_bindable
+        for key in ("qq:qq_group:group:123", "qq:qq_private:private:u1",
+                    "qq:qq_group:group:123"):
+            status, raw = _studio_req(
+                server, "PUT",
+                f"/api/v1/studio/conversations/{key}/memories",
+                body={"space_id": "vault-1"})
+            assert status == 403
+            assert json.loads(raw)["error"]["code"] == "vault_not_bindable"
+        # 绑定表与关系图上都没有留下指向 vault 的边
+        assert store.get("bind:mem:qq:qq_group:group:123") is None
+        status, raw = _studio_req(server, "GET", "/api/v1/studio/graph")
+        graph = json.loads(raw)["result"]
+        assert not any(e.get("to") == "space:vault-1" for e in graph["edges"])
+    finally:
+        server.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -259,9 +323,46 @@ def test_inv09_expired_grant_blocks_resumed_task():  # N07
     assert calls == []  # 工具从未执行
 
 
-@pytest.mark.skip(reason="S5：绑定 API 审计")
 def test_inv10_audit_trail_for_grants_and_denials():
-    raise AssertionError
+    """S5 已点亮：授权与拒绝都有审计；审计不含秘密/正文。"""
+    phrase = "INV10 秘密口令不得落审计"
+    server, store = _studio_server()
+    try:
+        # 授权事件：创建口令（管理面 → 之后可签租约）
+        status, raw = _studio_req(
+            server, "POST", "/api/v1/auth/temporary/codes",
+            body={"custom_phrase": phrase, "scopes": ["task.read:self"]})
+        assert status == 200
+        code_id = json.loads(raw)["result"]["code_id"]
+        # 拒绝事件：vault 绑定 + 越限能力配置
+        _studio_req(server, "PUT",
+                    "/api/v1/studio/conversations/qq:qq_group:group:9/memories",
+                    body={"space_id": "vault-1"})
+        _studio_req(server, "PUT",
+                    "/api/v1/studio/conversations/qq:qq_group:group:9/capabilities",
+                    body={"capabilities": ["outbox.submit"]})
+        # 撤销事件
+        _studio_req(server, "POST",
+                    f"/api/v1/auth/temporary/codes/{code_id}/revoke")
+        keys = [k for k in store.keys() if k.startswith("audit:studio:")]
+        events = [store.get(k) for k in keys]
+        actions = {}
+        for e in events:
+            actions.setdefault(e["action"], []).append(e)
+        # 创建 / 拒绝 / 撤销 全部留痕
+        assert actions["auth.code.create"][0]["outcome"] == "ok"
+        denied = {(e["action"], e["reason"]) for e in events
+                  if e["outcome"] == "denied"}
+        assert ("memory.bind", "vault_not_bindable") in denied
+        assert ("capabilities.set", "scope_ceiling") in denied
+        assert actions["auth.code.revoke"][0]["outcome"] == "ok"
+        # INV-10：审计只有元数据——口令明文、verifier、记录正文均不出现
+        blob = json.dumps(events, ensure_ascii=False)
+        assert phrase not in blob
+        assert "verifier" not in blob
+        assert "私密" not in blob
+    finally:
+        server.stop()
 
 
 @pytest.mark.skip(reason="S3：角色卡与权限解耦")
