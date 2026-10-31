@@ -545,6 +545,44 @@ def cmd_run(args) -> int:
         workflow.orchestrator.gateway = plugin_gateway
     # 两段式慢任务补发（owner 决策 2026-10-31）：ack 先回，结果后台好了再补
     workflow._completion_sender = _send_completion
+
+    # issue #20：监督任务泵接入既有 Outbox/发送链（不建第二套运行时）。
+    # 任务完成草稿经 Outbox 裁决（reactive_completion：深夜不拦），
+    # 目标会话从任务授权快照解析（服务端记录，非模型输出）。
+    from whale_core.life.supervisor import AgentSupervisor
+    from whale_core.life.supervisor_runner import SupervisedTaskRunner
+    _supervisor = AgentSupervisor(store, outbox=workflow.outbox)
+    supervised_runner = SupervisedTaskRunner(_supervisor,
+                                             outbox=workflow.outbox)
+
+    class _FollowupPort:
+        """任务续答发送口：按 draft_id → 任务 → authz.conversation 解析目标。"""
+
+        def send(self, draft) -> bool:
+            task_id = str(draft.draft_id).removeprefix("task-followup:")
+            rec = _supervisor.get(task_id) or {}
+            conv = str((rec.get("authz") or {}).get("conversation") or "")
+            if not conv:
+                print(f"  [任务续答] {draft.draft_id} 无目标会话快照，不发送")
+                return False
+            receipt = plugin_gateway.dispatch(
+                send_message_intent(conv, draft.text, draft_id=draft.draft_id))
+            ok = bool(getattr(receipt, "accepted", False))
+            print(f"  [任务续答] {draft.draft_id} → {conv} "
+                  f"{'已受理' if ok else '被拒'}")
+            return ok
+
+    def _pump_followups():
+        """每轮入站处理后派发就绪的任务续答（宿主安全策略：QQ 私聊直发
+        前已由 send_message_intent 网关裁决；explicitly_approved 不预设）。"""
+        try:
+            from datetime import datetime as _dt2, timezone as _tz2
+            sent = supervised_runner.dispatch_ready_followups(
+                prefs, port=_FollowupPort(), now=_dt2.now(_tz2.utc))
+            if sent:
+                print(f"  [任务续答] 本轮派发 {len(sent)} 条")
+        except Exception as exc:
+            print(f"  [任务续答] 派发失败 fail-soft: {type(exc).__name__}")
     # 语音产物补发：workflow 的补发回调现在带音频产物 id 列表
 
     # 启动恢复：上次进程重启掐断的在途任务——未派发的重跑补发、已派发的诚实告知
@@ -600,6 +638,7 @@ def cmd_run(args) -> int:
             _dispatch_owner(event, epoch=batch.epoch)
         else:
             _dispatch_unpaired(event, epoch=batch.epoch)
+        _pump_followups()
 
     def _batch_error(key, exc):
         print(f"  [合批] 冲刷回调失败 {key}: {type(exc).__name__}（批次未处理，"

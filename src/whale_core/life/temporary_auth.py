@@ -218,6 +218,141 @@ class TemporaryAuthService:
             "expires_at": expires_at,
         }
 
+    # ---- 设备确认凭证（issue #10：proof_method=device） -------------------
+
+    #: 设备 challenge 默认有效期（秒）。
+    DEVICE_CHALLENGE_TTL_S = 120
+
+    def create_device_challenge(
+        self,
+        *,
+        device_id: str,
+        principal_id: str,
+        channel: str,
+        conversation_id: str,
+        scopes: Tuple[str, ...],
+        ttl_s: float | None = None,
+        grant_ttl_s: float = 600,
+        grant_max_uses: int = 1,
+        action_fingerprint: str | None = None,
+    ) -> dict:
+        """发起设备确认挑战（下发由宿主经 DeviceGateway 完成）。
+
+        挑战只含：随机 nonce、绑定的 principal/会话、scope、动作指纹、
+        过期时间——**不含任何不必要的私人内容**（INV-10）。
+        """
+        device_id = str(device_id or "").strip()
+        if not device_id:
+            raise TemporaryAuthError("device_id 必填")
+        scope_set = tuple(s for s in scopes if s in GRANTABLE_SCOPES)
+        if not scope_set:
+            raise TemporaryAuthError("scopes 不含任何可授权 scope")
+        if grant_max_uses < 1 or grant_ttl_s <= 0:
+            raise TemporaryAuthError("grant_max_uses/grant_ttl_s 必须为正")
+        ttl = float(ttl_s if ttl_s is not None else self.DEVICE_CHALLENGE_TTL_S)
+        if ttl <= 0:
+            raise TemporaryAuthError("ttl_s 必须为正")
+        challenge_id = f"dc-{uuid4().hex[:16]}"
+        self.store.put(f"otp:device-challenge:{challenge_id}", {
+            "challenge_id": challenge_id,
+            "state": "pending",
+            "device_id": device_id,
+            "principal_id": str(principal_id),
+            "channel": str(channel),
+            "conversation_id": str(conversation_id),
+            "scopes": list(scope_set),
+            "action_fingerprint": action_fingerprint,
+            "grant_ttl_s": grant_ttl_s,
+            "grant_max_uses": grant_max_uses,
+            "created_at": time.time(),
+            "expires_at": time.time() + ttl,
+            "resolved_at": None,
+        })
+        return {"challenge_id": challenge_id, "device_id": device_id,
+                "scopes": list(scope_set), "expires_at": time.time() + ttl}
+
+    def confirm_device_challenge(
+        self,
+        challenge_id: str,
+        *,
+        device_id: str,
+        device_verifier=None,
+    ) -> Optional[TemporaryGrantRef]:
+        """设备侧确认 → 原子一次核销 → 签发限时/限次/限域租约。
+
+        - ``device_verifier``（宿主注入，通常来自 DeviceGateway 的已认证
+          会话）``callable(challenge_id, device_id) -> bool``：核验设备
+          身份与 challenge 绑定；缺省/返回 False 一律拒绝（fail closed）。
+        - 重放/并发核销：单事务复查 state==pending，只一人成功。
+        """
+        now = time.time()
+        key = f"otp:device-challenge:{challenge_id}"
+        if device_verifier is None or not device_verifier(challenge_id,
+                                                          str(device_id)):
+            return None
+        grant_id = f"tg-{uuid4().hex[:16]}"
+
+        def _tx(tx):
+            fresh = tx.get(key)
+            if not isinstance(fresh, dict):
+                return None
+            if fresh.get("state") != "pending":
+                return None  # 已消费/已拒绝/不存在——不可重放
+            if str(fresh.get("device_id")) != str(device_id):
+                return None  # 换设备拒绝
+            if float(fresh.get("expires_at") or 0) <= now:
+                return None
+            fresh["state"] = "consumed"
+            fresh["resolved_at"] = now
+            tx.put(key, fresh)
+            grant = {
+                "grant_id": grant_id,
+                "principal_id": str(fresh["principal_id"]),
+                "channel": str(fresh["channel"]),
+                "sender_id": "",
+                "conversation_id": str(fresh["conversation_id"]),
+                "scopes": list(fresh["scopes"]),
+                "issued_at": now,
+                "expires_at": now + float(fresh.get("grant_ttl_s") or 600),
+                "max_uses": int(fresh.get("grant_max_uses") or 1),
+                "used_count": 0,
+                "proof_method": "device",
+                "proof_strength": "high",
+                "source_code_id": challenge_id,
+                "action_fingerprint": fresh.get("action_fingerprint"),
+                "revoked_at": None,
+            }
+            tx.put(f"otp:grant:{grant_id}", grant)
+            return grant
+
+        grant = self.store.transact(_tx)
+        if grant is None:
+            return None
+        return TemporaryGrantRef(
+            grant_id=grant_id,
+            principal_id=str(grant["principal_id"]),
+            conversation_key="",
+            scopes=tuple(grant["scopes"]),
+            expires_at=float(grant["expires_at"]),
+            max_uses=int(grant["max_uses"]),
+            used_count=0,
+            proof_method="device",
+        )
+
+    def deny_device_challenge(self, challenge_id: str, *,
+                              device_id: str) -> bool:
+        """设备侧拒绝：状态转 denied（幂等）。设备不匹配 → False。"""
+        key = f"otp:device-challenge:{challenge_id}"
+        rec = self.store.get(key)
+        if not isinstance(rec, dict) or str(rec.get("device_id")) != str(device_id):
+            return False
+        if rec.get("state") != "pending":
+            return True  # 幂等：已终结视为成功
+        rec["state"] = "denied"
+        rec["resolved_at"] = time.time()
+        self.store.put(key, rec)
+        return True
+
     def _active_code_count(self) -> int:
         now = time.time()
         n = 0

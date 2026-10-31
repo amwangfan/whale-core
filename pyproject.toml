@@ -43,4 +43,5 @@ artifacts = ["src/whale_core/static/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src", "plugins"]
+# "." 让仓库根的 evals 包（issue #19 回放基准）可被测试导入
+pythonpath = ["src", "plugins", "."]
