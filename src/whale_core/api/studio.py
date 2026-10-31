@@ -589,6 +589,43 @@ def _parse_target_type(body: dict) -> MemorySpaceType:
     return ttype
 
 
+def _vault_records(handler, ctx, svc: StudioServices) -> None:
+    """GET /studio/vault/records?space_id=…：可信管理通道的原始库记录浏览。
+
+    仅接受 protected_original 空间；摘要经内置脱敏；上限 500 条防大包。
+    这是 Fork 向导的选记录数据源（PRD §5.2「在可信管理界面选记录」）。
+    注意：list_by_kind 存储层硬排除 vault（MEM-HARD-01），管理读取只能
+    走 keys()+get_record 直读——这是刻意的管道分离，不是绕过。
+    """
+    space_id = str(handler.query.get("space_id", [""])[0] or "").strip() \
+        or "vault-default"
+    meta = svc.spaces.get(space_id)
+    if meta is None or meta.get("type") != "protected_original":
+        raise StudioError(404, "not_found", "受保护原始库不存在")
+    items: list[dict] = []
+    truncated = False
+    for key in sorted(ctx.store.keys()):
+        rec = ctx.store.get_record(key)
+        if rec is None or rec.space_id != space_id:
+            continue
+        redacted = builtin_redactor(dict(rec.content))
+        items.append({
+            "key": rec.key,
+            "kind": rec.kind.value,
+            "tags": list(rec.tags),
+            "summary": str(redacted.get("summary", ""))[:300],
+            "created_at": rec.created_at.isoformat(),
+        })
+        if len(items) >= 500:
+            truncated = True
+            break
+    else:
+        truncated = False
+    _audit(ctx, "vault.records", space_id=space_id, count=len(items))
+    handler._send(200, _ok({"space_id": space_id, "count": len(items),
+                            "truncated": truncated, "items": items}))
+
+
 def _fork_preview(handler, ctx, svc: StudioServices) -> None:
     body = _require_json_body(handler)
     source = str(body.get("source_space") or "").strip()
@@ -895,6 +932,14 @@ def _graph(handler, ctx, svc: StudioServices) -> None:
 
 def _create_code(handler, ctx, svc: StudioServices) -> None:
     body = _require_json_body(handler)
+    # 严格字段表：未知字段静默忽略会掩盖配置错误（生产实证 2026-10-31：
+    # 调用方传 allowed_scopes 被忽略，口令退化为默认 scope，租约搜索被拒）。
+    allowed_fields = {"scopes", "custom_phrase", "ttl_s", "grant_ttl_s",
+                      "grant_max_uses", "action_fingerprint"}
+    unknown_fields = sorted(set(body) - allowed_fields)
+    if unknown_fields:
+        raise StudioError(422, "invalid_request",
+                          f"未知字段: {unknown_fields!r}（允许: {sorted(allowed_fields)!r}）")
     raw_scopes = body.get("scopes")
     if raw_scopes is None:
         scopes = (SCOPE_TASK_READ_SELF,)
@@ -1007,6 +1052,7 @@ def _revoke_grant(handler, ctx, svc: StudioServices, grant_id: str) -> None:
 
 def dispatch_studio(handler, method: str, parts: list[str], query: dict) -> None:
     """``/api/v1/studio/*`` 路由。"""
+    handler.query = query  # GET 端点的查询参数（如 vault/records?space_id=）
     try:
         _dispatch_studio(handler, method, parts)
     except StudioError as exc:
@@ -1029,6 +1075,8 @@ def _dispatch_studio(handler, method: str, parts: list[str]) -> None:
         _fork_preview(handler, ctx, svc)
     elif rest == ["forks"] and method == "POST":
         _fork_create(handler, ctx, svc)
+    elif rest == ["vault", "records"] and method == "GET":
+        _vault_records(handler, ctx, svc)
     elif len(rest) == 3 and rest[0] == "conversations" and rest[2] == "persona":
         if method != "PUT":
             raise StudioError(405, "method_not_allowed", "use PUT")
@@ -1051,7 +1099,7 @@ def _dispatch_studio(handler, method: str, parts: list[str]) -> None:
 def _path_known(rest: list[str]) -> bool:
     """路径模板已知但方法不符 → 405（否则 404）。"""
     if rest in (["conversations"], ["personas"], ["memory-spaces"], ["graph"],
-                ["forks"], ["forks", "preview"]):
+                ["forks"], ["forks", "preview"], ["vault", "records"]):
         return True
     return len(rest) == 3 and rest[0] == "conversations" \
         and rest[2] in ("persona", "memories", "capabilities")

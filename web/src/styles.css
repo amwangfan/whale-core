@@ -2350,3 +2350,38 @@ code,
     animation: none !important;
   }
 }
+
+
+/* First-run model and service setup. Uses the existing console visual language. */
+.setup-screen {
+  min-height: 100vh;
+  background: radial-gradient(circle at 90% 0%, #deede1, transparent 47%), var(--bg);
+  display: flex;
+  justify-content: center;
+  padding: clamp(20px, 5vw, 52px) 18px;
+}
+.setup-shell { width: min(100%, 740px); }
+.setup-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 30px; gap: 18px; }
+.setup-counter { font-size: 12px; color: var(--muted); }
+.setup-panel { background: var(--panel); border: 1px solid var(--border); border-radius: 18px; padding: clamp(24px, 5vw, 42px); box-shadow: 0 12px 48px #254a3710; }
+.setup-panel h1 { font-size: clamp(24px, 4vw, 32px); font-weight: 500; margin-bottom: 10px; }
+.setup-intro { color: var(--muted); font-size: 13px; line-height: 1.8; margin-bottom: 26px; }
+.setup-fields { display: grid; gap: 17px; }
+.setup-fields .form-field { display: grid; gap: 7px; font-size: 13px; min-width: 0; }
+.setup-fields .form-field label { font-size: 12px; }
+.setup-fields .form-field small { color: var(--muted); line-height: 1.7; font-size: 11px; }
+.setup-fields .service-group { border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+.setup-fields .service-group summary { cursor: pointer; }
+.setup-fields .service-group .setup-fields { padding-top: 16px; }
+.setup-budgets { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.setup-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 28px; flex-wrap: wrap; }
+.setup-footer { border-top: 1px solid var(--border); margin-top: 26px; padding-top: 18px; display: flex; gap: 14px; justify-content: space-between; align-items: center; }
+.setup-finish .banner { margin-top: 16px; }
+@media (max-width: 600px) {
+  .setup-header .wordmark { font-size: 15px; }
+  .setup-panel { border-radius: 13px; }
+  .setup-budgets { grid-template-columns: 1fr; }
+  .setup-actions { flex-direction: column; }
+  .setup-actions button { justify-content: center; }
+  .setup-footer { align-items: flex-start; flex-direction: column; }
+}

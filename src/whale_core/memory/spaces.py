@@ -11,6 +11,7 @@ SqliteMemoryStore 双后端天然一致，无需额外表。硬规则：
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from dataclasses import replace
 from typing import Any, Mapping, Optional, Tuple
 from uuid import uuid4
 
@@ -136,10 +137,11 @@ def ensure_owner_working_copy(store: MemoryStore, *, owner: str = "owner") -> Me
     spaces = SpaceStore(store)
     existing = spaces.ref(OWNER_WORKING_SPACE_ID)
     if existing is not None:
-        return existing
-    return spaces.create(MemorySpaceType.OWNER_WORKING_COPY,
-                         name="主人工作副本", owner=owner,
-                         space_id=OWNER_WORKING_SPACE_ID)
+        return replace(existing, can_write=True)
+    created = spaces.create(MemorySpaceType.OWNER_WORKING_COPY,
+                            name="主人工作副本", owner=owner,
+                            space_id=OWNER_WORKING_SPACE_ID)
+    return replace(created, can_write=True)
 
 
 def assert_bindable(ref: MemorySpaceRef) -> None:
@@ -158,7 +160,7 @@ def default_write_space(
     fail closed——未授权会话不产生记忆沉淀）。
     """
     for ref in spaces:
-        if ref.type in WRITABLE_TYPES:
+        if ref.can_write and ref.type in WRITABLE_TYPES:
             return ref.space_id
     return ""
 
@@ -173,6 +175,8 @@ def migrate_legacy_to_vault(
     """
     moved = 0
     for kind in MemoryKind:
+        if kind is MemoryKind.PERSONA_CONTINUITY:
+            continue  # F-05：人格连续性快照是全局基线人格，不收进 vault
         for rec in store.list_by_kind(kind, space_ids=("",)):
             moved += 1
             if not dry_run:

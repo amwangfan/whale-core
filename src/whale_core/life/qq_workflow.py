@@ -59,7 +59,8 @@ class QqInboundWorkflow:
                  safety_reviewer=None,
                  completion_sender=None,
                  media_validator=None,
-                 auth_service=None) -> None:
+                 auth_service=None,
+                 context_resolver=None) -> None:
         self.store = store
         self.companion = WhaleCompanion(store, brain, curator=MemoryCurator(store))
         self.outbox = ProactiveOutbox(store)
@@ -80,6 +81,8 @@ class QqInboundWorkflow:
         # S4：临时授权服务（一次性口令 sudo）；None = 未启用，口令消息按
         # 普通文本处理。
         self._auth_service = auth_service
+        # F-06：回落路径的上下文解析器（编排器缺位时使用）
+        self._context_resolver = context_resolver
         # 媒体输入可信边界（G0-B）：附件路径白名单/SSRF/格式与尺寸校验统一走
         # core.media_input.ImageInputValidator；未注入时构造默认实例
         # （本地路径 fail-closed——无白名单即拒绝本地读取，仅走受门控的 https）。
@@ -184,10 +187,14 @@ class QqInboundWorkflow:
             ctx = resolver.resolve(channel=event.channel,
                                    sender_id=event.sender_id or event.owner_id,
                                    conversation_id=event.conversation)
-            from whale_core.memory.spaces import (
-                DEFAULT_VAULT_ID, default_write_space)
-            space_id = default_write_space(ctx.allowed_memory_spaces) or DEFAULT_VAULT_ID
+            from whale_core.memory.spaces import default_write_space
+            space_id = default_write_space(ctx.allowed_memory_spaces)
             allowed = ctx.allowed_memory_spaces
+            # A group with no writable memory must NEVER fall back to the
+            # owner's protected vault. Forget is also a write operation.
+            from whale_core.core.memory_commands import REMEMBER_PREFIXES, FORGET_PREFIXES
+            if not space_id and text.strip().startswith(REMEMBER_PREFIXES + FORGET_PREFIXES):
+                return "当前会话没有可写记忆库，请先在工作台绑定有写权限的记忆空间。"
         return handle_memory_command(
             self.store, text, source="qq:owner",
             evidence_id=f"qq:{event.conversation}:{event.message_id}",
@@ -216,13 +223,18 @@ class QqInboundWorkflow:
         # 明文口令只用于验证，绝不向后续链路传递。
         if self._auth_service is not None:
             from whale_core.life.context_resolver import derive_kind
+            from whale_core.life.conversation_context import ConversationKind
             from whale_core.life.temporary_auth import maybe_intercept_sudo
             attempt = maybe_intercept_sudo(text)
             if attempt is not None:
+                kind = derive_kind(event.channel, event.conversation)
+                if kind is ConversationKind.QQ_GROUP:
+                    # 群里不开放 sudo，也不把验证回执发进群（观感+最小披露）
+                    return {"skipped": "sudo_in_group_ignored"}
                 grant = self._auth_service.verify(
                     attempt, channel=event.channel,
                     sender_id=event.sender_id or event.owner_id,
-                    conversation_kind=derive_kind(event.channel, event.conversation),
+                    conversation_kind=kind,
                     conversation_id=event.conversation)
                 if grant is not None:
                     mins = max(1, int((grant.expires_at - __import__("time").time()) / 60))
@@ -259,7 +271,18 @@ class QqInboundWorkflow:
             reply = result.reply
             turn_receipts = list(getattr(result, "receipts", []) or [])
         else:
-            reply = self.companion.chat(text, conversation_id=event.conversation)
+            # F-06（红队）：无编排器的回落路径同样按服务端上下文限域，
+            # 不走「全空间兼容召回」旁路。
+            fallback_ctx = None
+            resolver = getattr(self.orchestrator, "context_resolver", None) \
+                or self._context_resolver
+            if resolver is not None:
+                fallback_ctx = resolver.resolve(
+                    channel=event.channel,
+                    sender_id=event.sender_id or event.owner_id,
+                    conversation_id=event.conversation)
+            reply = self.companion.chat(text, conversation_id=event.conversation,
+                                        context=fallback_ctx)
         if not reply or not reply.strip():
             return {"empty_reply": True, "draft_id": None}
 
@@ -314,10 +337,10 @@ class QqInboundWorkflow:
         text = (event.text or "").strip()
         if not text:
             return {"skipped": "empty_text"}
-        if not str(event.conversation).startswith("private:"):
-            return {"skipped": "stranger_group_ignored"}
-
-        if self._auth_service is not None:
+        is_private = str(event.conversation).startswith("private:")
+        # 群成员消息：不开放 sudo，直接走匿名群上下文对话（resolver 保证群上限）。
+        # 私聊：sudo 验证尝试优先截获。
+        if is_private and self._auth_service is not None:
             attempt = maybe_intercept_sudo(text)
             if attempt is not None:
                 grant = self._auth_service.verify(
@@ -335,6 +358,10 @@ class QqInboundWorkflow:
                         "auth_grant": grant.grant_id}
                 return {"reply": "验证失败（口令无效、已使用或已过期）。",
                         "auth_grant": None}
+
+        if not is_private and maybe_intercept_sudo(text) is not None:
+            # 群里的 sudo 尝试：不验证、不回显、不落记忆——只提示私聊（N05/N17）
+            return {"reply": "验证身份请私聊我（群里不做这个）。"}
 
         if self.orchestrator is None:
             return {"skipped": "no_orchestrator"}

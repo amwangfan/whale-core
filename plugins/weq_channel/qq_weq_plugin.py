@@ -92,6 +92,9 @@ class WeQEventAdapter:
                     "message_id": event.message_id,
                     "text": event.text,
                     "attachments": list(getattr(event, "attachments", ())),
+                    # S1/S7：真实发送者必须随事件穿透——丢失它会让下游
+                    # 身份解析退化为匿名（主人私聊记忆失效的根因）。
+                    "sender_id": getattr(event, "sender_id", ""),
                 },
             )
         )

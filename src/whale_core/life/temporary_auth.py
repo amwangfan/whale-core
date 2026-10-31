@@ -44,12 +44,24 @@ LOW_ENTROPY_SCOPES = frozenset({SCOPE_CHAT_BASIC, SCOPE_TASK_READ_SELF})
 GRANTABLE_SCOPES = frozenset({
     SCOPE_CHAT_BASIC, SCOPE_TASK_READ_SELF,
     "tool.web.search", "outbox.submit", "device.notify",
+    # D3：设备面 scope 族（screen.* / phone.*）纳入可授予集合；
+    # 实际能否生效仍由 context_resolver 矩阵裁决（screen.* 仅 owner
+    # 私聊/API owner，群聊硬上限拒绝）——列入此处只是「允许租约携带」。
+    "screen.context.read", "screen.history.search", "screen.evidence.read",
+    "screen.live.subscribe", "phone.notification.post", "phone.notification.read",
+    "phone.call.ring", "phone.call.audio", "phone.device.safe_action",
 })
 
 MAX_ACTIVE_CODES = 64
 FAIL_LIMIT = 5
 FAIL_LOCK_S = 600
 PBKDF2_ITERATIONS = 100_000
+
+#: F-08：常见弱口令黑名单（自定义短语额外拦截）
+_WEAK_PHRASES = frozenset({
+    "1234567890", "0123456789", "password", "password1", "qwertyuiop",
+    "1111111111", "iloveyou", "adminadmin", "letmein123",
+})
 
 
 class TemporaryAuthError(ValueError):
@@ -169,8 +181,11 @@ class TemporaryAuthService:
                         "低熵自定义口令只能承载低风险 scope；"
                         "请改用随机口令或叠加设备确认")
                 # 低熵也要求最低长度，防纯秒猜
-                if len(phrase) < 6:
-                    raise TemporaryAuthError("自定义口令太短")
+                # F-08（红队）：下限 10 + 常见弱口令黑名单
+                if len(phrase) < 10:
+                    raise TemporaryAuthError("自定义口令太短（至少 10 字符）")
+                if phrase.casefold() in _WEAK_PHRASES:
+                    raise TemporaryAuthError("该口令过于常见，请换一个")
             code_text = phrase
             salt = secrets.token_hex(16)
             verifier = self._verifier(code_text, strength, salt)
@@ -382,8 +397,13 @@ class TemporaryAuthService:
         return tuple(out)
 
     def consume_grant_use(self, grant_id: str, *,
-                          action_fingerprint: str | None = None) -> bool:
-        """租约操作次数原子消耗；模式 A（绑指纹）参数不符即拒。"""
+                          action_fingerprint: str | None = None,
+                          required_scope: str | None = None) -> bool:
+        """租约操作次数原子消耗；模式 A（绑指纹）参数不符即拒。
+
+        F-02（红队）：``required_scope`` 给定时，租约 scopes 必须覆盖之——
+        只含 chat.basic 的低权限租约不能为工具动作放行。
+        """
         def _tx(tx):
             rec = tx.get(f"otp:grant:{grant_id}")
             if not isinstance(rec, dict) or rec.get("revoked_at"):
@@ -392,6 +412,9 @@ class TemporaryAuthService:
                 return False
             if int(rec.get("used_count") or 0) >= int(rec.get("max_uses") or 1):
                 return False
+            if required_scope and required_scope not in tuple(
+                    rec.get("scopes") or ()):
+                return False  # F-02：scope 不覆盖即拒
             bound = rec.get("action_fingerprint")
             if bound and bound != action_fingerprint:
                 return False  # N16：换参数即拒
@@ -479,9 +502,16 @@ def maybe_intercept_sudo(text: str) -> Optional[str]:
 
     调用方（渠道宿主）必须在文本进入 LLM/记忆/历史/日志**之前**调用；
     返回非 None 的文本按验证请求处理，明文口令不再向后传递（INV-05/N17）。
+
+    F-03（红队）：大小写与全角空格归一化——手机首字母自动大写
+    （"Sudo …"）不得绕过拦截。
     """
     t = (text or "").strip()
-    for prefix in SUDO_PREFIXES:
-        if t.startswith(prefix):
-            return t[len(prefix):].strip()
+    # 先整体归一化再判定（sudo 四字母为 ASCII，casefold 不改变其长度，
+    # 因此原文第 5 位之后的切片即口令原文）。
+    norm = t.casefold().replace("　", " ")
+    if norm == "sudo":
+        return ""  # 光秃 sudo：按验证请求处理（会得到失败回复），原文不外传
+    if norm.startswith("sudo "):
+        return t[5:].strip()
     return None

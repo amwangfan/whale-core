@@ -195,7 +195,7 @@ class DryRunSendPort:
         return True
 
 
-def build_send_port(*, live_ok: bool):
+def build_send_port(*, live_ok: bool, group_allow=None):
     """出站通道选择（issue #12）：真实 WeQ Web 发送端**仅**在 live_ok=True 且
     WEQ_WEB_* 配齐时构建。live_ok 语义 = 本次调用是人工显式批准（approve 子命令）
     或已打开双开关的无人值守发送；环境变量配齐本身**不**改变 run 的审批策略。
@@ -207,10 +207,11 @@ def build_send_port(*, live_ok: bool):
         allowed = tuple(
             h.strip() for h in os.environ.get("WEQ_WEB_ALLOWED_HOSTS", "").split(",") if h.strip()
         ) or None
+        # S7 灰度：群白名单（收发同一集合；空 = 不收群也不发群）
         port = WeQWebSendPort(url, os.environ.get("WEQ_WEB_TOKEN", "").strip(),
                               target_uid=uid,
                               expected_account_uin=os.environ.get("QQ_SELF_UIN") or None,
-                              allowed_hosts=allowed)
+                              allowed_hosts=allowed, allowed_groups=group_allow)
         # Do not log the configured URL (it may contain sensitive query parameters) or UID.
         print("[出站] WeQ Web 真实发送已启用（地址校验通过；目标固定为已配置 owner）")
         # 按需完整模式窗口（full-mode window）：QQ_FULLMODE_ONDEMAND=1 时包装——
@@ -303,9 +304,10 @@ def cmd_run(args) -> int:
         owner_id="owner",
         owner_default_space=_owner_space)
 
-    def _grant_gate(grant_ids, fingerprint):
-        return any(auth_service.consume_grant_use(g, action_fingerprint=fingerprint)
-                   for g in grant_ids)
+    def _grant_gate(grant_ids, fingerprint, required_scope=None):
+        return any(auth_service.consume_grant_use(
+            g, action_fingerprint=fingerprint, required_scope=required_scope)
+            for g in grant_ids)
     prefs = risk_prefs()
     print(policy_summary(prefs))
 
@@ -325,7 +327,11 @@ def cmd_run(args) -> int:
     elif args.auto_approve:
         print("[审批] --auto-approve = dry-run 演示：影子账本走流程，不触网、不占额度；"
               "真实发送用 approve 子命令（人工逐条）。")
-    send_port = build_send_port(live_ok=live_auto)
+    # S7 灰度：群白名单（收发同一集合；空 = 不收群也不发群）
+    group_allow = tuple(
+        g.strip() for g in os.environ.get("WHALE_QQ_GROUP_ALLOW", "").split(",")
+        if g.strip()) or None
+    send_port = build_send_port(live_ok=live_auto, group_allow=group_allow)
 
     # 按需完整模式窗口：启动即关窗定基线（幂等）；closer 只在 runner 主进程起——
     # approve 子进程是独立短命进程，只开窗/续期，关窗由本 closer 跨进程兜底。
@@ -342,7 +348,8 @@ def cmd_run(args) -> int:
 
     inbox = build_inbox(args.inbox)
     workflow = QqInboundWorkflow(store, build_brain(), prefs=prefs,
-                                 auth_service=auth_service)
+                                 auth_service=auth_service,
+                                 context_resolver=context_resolver)
 
     def _send_audio_artifacts(audio_ids) -> None:
         """把任务产生的音频产物发成 QQ 语音消息。"""
@@ -504,9 +511,15 @@ def cmd_run(args) -> int:
             conversation=str(payload["conversation"]), message_id=str(payload["message_id"]),
             text=str(payload["text"]),
             attachments=tuple(payload.get("attachments") or ()),
+            sender_id=str(payload.get("sender_id") or ""),
         )
+        # F-03（红队）：sudo 验证尝试的明文永不进日志（拦截在工作流内，
+        # 但宿主打印发生得更早——在这里就脱敏）。
+        from whale_core.life.temporary_auth import maybe_intercept_sudo
+        shown = "<sudo 验证尝试>" if maybe_intercept_sudo(event.text) is not None \
+            else event.text[:60]
         print(f"\n← [owner] conv={event.conversation} msg={event.message_id} "
-              f"text={event.text[:60]!r}")
+              f"text={shown!r}")
         try:
             result = workflow.handle_owner_event(event)
         except Exception as exc:  # AI/存储失败不打断监听（inbox 模式下按策略重试）
@@ -547,8 +560,10 @@ def cmd_run(args) -> int:
 
     def on_unpaired(incoming):
         is_private = str(incoming.conversation).startswith("private:")
-        if not is_private:
-            return  # 群/频道陌生人：不处理
+        # S7 灰度：白名单群的成员消息也进入受限对话（匿名 ctx + 群上限，
+        # resolver 强制；sudo 在群里永不验证）。
+        if not is_private and not str(incoming.conversation).startswith("group:"):
+            return  # 频道等其他形态：不处理
         from whale_core.life.temporary_auth import maybe_intercept_sudo
         if maybe_intercept_sudo(incoming.text) is None and not stranger_chat:
             print(f"[未配对] account={incoming.account} conv={incoming.conversation} "
@@ -574,12 +589,20 @@ def cmd_run(args) -> int:
             if concern:
                 print(f"  [安全审核] 陌生人回复有顾虑：{concern[:120]} → 不发送")
                 return
-        draft_id = f"qq-stranger:{incoming.message_id}"
-        owner_draft_ids.add(draft_id)
-        approved_draft_ids.add(draft_id)
-        receipt = plugin_gateway.dispatch(
-            send_message_intent(incoming.conversation, reply, draft_id=draft_id))
-        print(f"  [陌生人回复] {receipt}")
+        # 陌生人回复：owner 定向的网关/Outbox 发送口不适用（draft 未入
+        # Outbox 账本 + port 锁定 owner 目标）。陌生人/群回复走端口的
+        # 回复语义直发方法（目标 = 来件对端/白名单群，已在上方过安全审核）。
+        port_inner = getattr(send_port, "_inner", send_port)
+        if str(incoming.conversation).startswith("group:"):
+            group_code = incoming.conversation.split(":", 1)[1]
+            ok = port_inner.send_group_text(group_code, reply) \
+                if hasattr(port_inner, "send_group_text") else False
+            print(f"  [群回复] {'已发送' if ok else '发送失败'} ← {group_code}")
+            return
+        peer_uid = incoming.conversation.split(":", 1)[1]
+        ok = port_inner.send_c2c(peer_uid, reply) \
+            if hasattr(port_inner, "send_c2c") else False
+        print(f"  [陌生人回复] {'已发送' if ok else '发送失败'} ← {peer_uid[:12]}…")
 
     def on_mass(meta):
         print(f"[mass] {meta['chatType']}:{meta['convId']} seq {meta['fromSeq']}→{meta['toSeq']} "
@@ -588,7 +611,9 @@ def cmd_run(args) -> int:
     listener = WeQSsePushListener(
         registry, expected_token=token, self_uin=self_uin,
         on_owner_event=on_owner, on_unpaired=on_unpaired, on_mass=on_mass,
-        accept_group=args.accept_group, port=args.port, inbox=inbox)
+        accept_group=args.accept_group,
+        group_allow=frozenset(group_allow) if group_allow else None,
+        port=args.port, inbox=inbox)
     try:
         listener.start()
     except OSError as exc:

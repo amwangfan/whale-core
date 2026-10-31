@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://whale.example.internal/contracts/v1/messages/envelope.schema.json",
+  "title": "envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "id",
+    "type",
+    "ts",
+    "seq",
+    "dir",
+    "payload"
+  ],
+  "properties": {
+    "v": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+$",
+      "description": "协议版本 major.minor；接收方对未知 major 必须拒绝并回 error.protocol_version（§2）。通用信封不限定 major，具体消息 schema 限定 ^1\\."
+    },
+    "id": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 64,
+      "pattern": "^[0-9A-Za-z-]+$",
+      "description": "消息 ID（ULID/UUID）"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "auth.challenge",
+        "device.hello",
+        "device.hello_ack",
+        "device.heartbeat",
+        "sensor.event",
+        "sensor.query",
+        "sensor.result",
+        "sensor.ack",
+        "action.request",
+        "action.receipt",
+        "call.invite",
+        "call.answer",
+        "call.hangup",
+        "call.state",
+        "error"
+      ],
+      "description": "消息类型（§4 消息目录）"
+    },
+    "ts": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4102444800000,
+      "description": "发送端发送时间（Unix 毫秒时间戳）"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991,
+      "description": "每方向各自单调递增序号（§2）"
+    },
+    "dir": {
+      "type": "string",
+      "enum": [
+        "uplink",
+        "downlink"
+      ],
+      "description": "uplink=机→云 / downlink=云→机（§2）"
+    },
+    "payload": {
+      "type": "object",
+      "description": "消息负载，结构由具体消息 schema 定义"
+    }
+  },
+  "description": "V1 通用信封（§2）；逐消息结构见同目录其他 schema"
+}

@@ -41,6 +41,9 @@ class ApiContext:
     transcript_ids: Any = field(default_factory=set)
     voice_bridge: Any = None
     pcm_voice_gateway: Any = None  # api.voice.VoiceGateway（懒创建，可选 websockets）
+    device_registry: Any = None    # devices.registry.DeviceRegistry（懒构建）
+    device_gateway: Any = None     # devices.gateway.DeviceGateway（懒创建，可选 websockets）
+    device_adapter: Any = None     # devices.perception.DevicePerceptionAdapter
     workflows: Any = None
     optional: Any = None       # OptionalCapabilities
     studio: Any = None         # api.studio.StudioServices（S5；缺省由 ctx.store 现场构建）
@@ -206,6 +209,9 @@ class _Handler(BaseHTTPRequestHandler):
         elif head == "studio":
             from whale_core.api import studio as _studio
             _studio.dispatch_studio(self, method, parts, query)
+        elif head == "devices":
+            from whale_core.api import devices_api as _devices
+            _devices.dispatch_devices(self, method, parts)
         elif head == "auth":
             from whale_core.api import studio as _studio
             _studio.dispatch_auth(self, method, parts)
@@ -1065,6 +1071,10 @@ class WhaleApiServer:
         # 约定：8080 → 8081）；port=0（临时端口）时中继也用临时端口。
         self._httpd.voice_relay_host = host                    # type: ignore[attr-defined]
         self._httpd.voice_relay_port = port + 1 if port else 0  # type: ignore[attr-defined]
+        # 设备面 WSS 长连（D2）懒监听在 API 端口 + 2（voice +1 的顺延约定）；
+        # port=0（临时端口）时同样用临时端口。
+        self._httpd.device_relay_host = host                    # type: ignore[attr-defined]
+        self._httpd.device_relay_port = port + 2 if port else 0  # type: ignore[attr-defined]
         # 静态目录词法归一 + resolve，供穿越校验
         from pathlib import Path
         self._httpd.static_dir = (  # type: ignore[attr-defined]
@@ -1115,6 +1125,9 @@ class WhaleApiServer:
         if self.ctx.pcm_voice_gateway is not None:
             self.ctx.pcm_voice_gateway.close()
             self.ctx.pcm_voice_gateway = None
+        if self.ctx.device_gateway is not None:
+            self.ctx.device_gateway.close()
+            self.ctx.device_gateway = None
         if self.ctx.transcript_recorder is not None:
             self.ctx.transcript_recorder.close()
             self.ctx.transcript_recorder = None

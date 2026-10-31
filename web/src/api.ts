@@ -119,6 +119,7 @@ export interface BudgetView {
 }
 
 export interface RuntimeSettings {
+  setup_completed?: boolean;
   profile: "cloud" | "local";
   model: { base_url: string; model: string; api_key_configured: boolean };
   intent_model_enabled: boolean;
@@ -417,6 +418,7 @@ export const api = {
 
   settings: () => request<RuntimeSettings>("/settings"),
   saveSettings: (settings: {
+    setup_completed?: boolean;
     profile?: "cloud" | "local";
     model?: { base_url?: string; model?: string; api_key?: string | null };
   intent_model_enabled?: boolean;
@@ -627,6 +629,15 @@ export interface StudioForkResult {
   fork: StudioMemorySpace & { auto_bound?: boolean };
 }
 
+/** S7+：Vault 管理管道的记录浏览项（摘要已脱敏）。 */
+export interface StudioVaultRecord {
+  key: string;
+  kind: string;
+  tags: string[];
+  summary: string;
+  created_at: string;
+}
+
 export interface StudioBindingResult {
   key: string;
   version: number;
@@ -709,6 +720,13 @@ export const studioApi = {
     (await request<{ conversations: StudioConversation[] }>(
       "/studio/conversations",
     )).conversations,
+  vaultRecords: async (spaceId: string) =>
+    (await request<{
+      space_id: string;
+      count: number;
+      truncated: boolean;
+      items: StudioVaultRecord[];
+    }>(`/studio/vault/records?space_id=${encodeURIComponent(spaceId)}`)).items,
   personas: async () =>
     (await request<{ personas: StudioPersona[] }>("/studio/personas")).personas,
   memorySpaces: async () =>

@@ -73,6 +73,7 @@ class MemorySpaceRef:
     space_id: str
     type: MemorySpaceType
     version: int  # 缓存分区键的一部分
+    can_write: bool = False  # 会话绑定实际写权限；类型本身不构成授权
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +87,32 @@ SCOPE_TOOL_WEB_SEARCH = "tool.web.search"
 SCOPE_TOOL_SHELL_SAFE = "tool.shell.safe"
 SCOPE_TASK_READ_SELF = "task.read:self"
 SCOPE_DEVICE_NOTIFY = "device.notify"
+
+# ---- 设备面（whale-mobile，D3）scope 族 --------------------------------
+# 命名与 contracts/v1/PROTOCOL.md §5 能力枚举逐字一致；裁决矩阵见
+# context_resolver（screen.* 仅 owner 私聊 / API owner 可授，群聊硬上限拒绝）。
+SCOPE_SCREEN_CONTEXT_READ = "screen.context.read"
+SCOPE_SCREEN_HISTORY_SEARCH = "screen.history.search"
+SCOPE_SCREEN_EVIDENCE_READ = "screen.evidence.read"
+SCOPE_SCREEN_LIVE_SUBSCRIBE = "screen.live.subscribe"
+SCOPE_PHONE_NOTIFICATION_POST = "phone.notification.post"
+SCOPE_PHONE_NOTIFICATION_READ = "phone.notification.read"
+SCOPE_PHONE_CALL_RING = "phone.call.ring"
+SCOPE_PHONE_CALL_AUDIO = "phone.call.audio"
+SCOPE_PHONE_DEVICE_SAFE_ACTION = "phone.device.safe_action"
+
+#: 设备面 scope 全集（screen.* + phone.*）。
+DEVICE_SCOPES: Tuple[str, ...] = (
+    SCOPE_SCREEN_CONTEXT_READ,
+    SCOPE_SCREEN_HISTORY_SEARCH,
+    SCOPE_SCREEN_EVIDENCE_READ,
+    SCOPE_SCREEN_LIVE_SUBSCRIBE,
+    SCOPE_PHONE_NOTIFICATION_POST,
+    SCOPE_PHONE_NOTIFICATION_READ,
+    SCOPE_PHONE_CALL_RING,
+    SCOPE_PHONE_CALL_AUDIO,
+    SCOPE_PHONE_DEVICE_SAFE_ACTION,
+)
 
 
 def scope_memory_read(space_id: str) -> str:
@@ -130,6 +157,9 @@ class ResolvedContext:
     allowed_memory_spaces: Tuple[MemorySpaceRef, ...] = ()
     capability_scopes: Tuple[str, ...] = (SCOPE_CHAT_BASIC,)
     grants: Tuple[TemporaryGrantRef, ...] = ()
+    # 其中由临时租约贡献的 scope 子集：这些能力每次执行都要经 grant_gate
+    # 消耗操作次数（F-01/红队：租约能力不是免费基础能力）。
+    grant_scopes: Tuple[str, ...] = ()
     policy_version: int = 1
 
     def allows_memory_read(self, space: MemorySpaceRef) -> bool:

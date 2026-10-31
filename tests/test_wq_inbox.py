@@ -110,6 +110,15 @@ def test_owner_message_persisted_and_dispatched(inbox):
     assert inbox.counts()[STATUS_SUCCEEDED] == 1
 
 
+def test_drained_event_preserves_sender_id(inbox):
+    """S1/S7 回归：持久化排水重建的 OwnerEvent 必须携带真实发送者。"""
+    seen = []
+    listener = make_listener(inbox, seen.append)
+    code, n = listener.process_payload(AUTH, payload("m-sender", sender="100"))
+    assert (code, n) == (200, 1)
+    assert seen and seen[0].sender_id == "100"
+
+
 def test_duplicate_delivery_single_effect(inbox):
     """上游至少一次投递：同一 msgId 重复推送只处理一次（幂等，不重复草稿）。"""
     seen = []

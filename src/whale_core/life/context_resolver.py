@@ -42,10 +42,17 @@ GROUP_CEILING: Tuple[str, ...] = (SCOPE_CHAT_BASIC, SCOPE_TOOL_WEB_SEARCH)
 PRIVATE_ANON: Tuple[str, ...] = (SCOPE_CHAT_BASIC,)
 
 #: 已配对主人私聊：对话 + 常规工具 + 提交出站 + 查看本人任务 + 设备通知。
-#: 高风险动作（shell、记忆写 vault、支付）不在此列，仍需逐项审批（policy.py）。
+#: F-01 红队修复：capability scope 在执行端真校验后，主人私聊必须显式
+#: 保留其既有工具能力，否则生图/语音等回归。高风险动作（shell、支付、
+#: 记忆写 vault）不在此列，仍需既有审批链（policy.py）。
 PRIVATE_OWNER: Tuple[str, ...] = (
     SCOPE_CHAT_BASIC,
     SCOPE_TOOL_WEB_SEARCH,
+    "tool.web.fetch",
+    "tool.media.image.generate",
+    "tool.media.video.generate",
+    "tool.tts.synthesize",
+    "tool.asr.transcribe",
     SCOPE_OUTBOX_SUBMIT,
     SCOPE_TASK_READ_SELF,
     SCOPE_DEVICE_NOTIFY,
@@ -53,6 +60,11 @@ PRIVATE_OWNER: Tuple[str, ...] = (
 
 #: 管理 API / CLI（持有本地 token 的通道）：等同主人私聊。
 API_OWNER: Tuple[str, ...] = PRIVATE_OWNER
+
+#: D3：screen.* 族只允许主人本人在非群会话持有（群聊硬上限拒绝，INV-03 一致）。
+#: 注意它们不在 PRIVATE_OWNER 基础集里——默认最小权限（§5），只能经临时
+#: 租约显式授予；本守卫保证租约也无法把它们带进群聊或非主人会话。
+SCREEN_SCOPE_PREFIX = "screen."
 
 
 class BindingLookup(Protocol):
@@ -92,6 +104,10 @@ def derive_kind(channel: str, conversation_id: str) -> ConversationKind:
         return ConversationKind.WEB
     if channel in ("voice", "phone"):
         return ConversationKind.VOICE
+    if channel == "mobile":
+        # D3：whale-mobile 设备面归一渠道；类型走 PHONE，基础 scope 仍由
+        # _base_scopes 决定（默认最小权限，screen.* 须经租约显式授予）。
+        return ConversationKind.PHONE
     if channel in ("api", "cli"):
         return ConversationKind.API
     return ConversationKind.UNKNOWN
@@ -147,6 +163,7 @@ class ConversationContextResolver:
                     scopes = tuple(s for s in scopes if s in set(narrowed))
 
         grant_refs: Tuple[TemporaryGrantRef, ...] = ()
+        grant_scopes: Tuple[str, ...] = ()
         if self._grants is not None:
             now = time.time()
             grant_refs = tuple(
@@ -162,8 +179,15 @@ class ConversationContextResolver:
                 for s in g.scopes:
                     if ceiling is not None and s not in ceiling:
                         continue
+                    # D3：screen.* 仅 owner 私聊 / API owner 可授；
+                    # 群聊与非主人会话硬上限拒绝（INV-03 一致）。
+                    if s.startswith(SCREEN_SCOPE_PREFIX) and (
+                            _is_group(kind) or not principal.is_owner):
+                        continue
                     if s not in scopes:
                         scopes = scopes + (s,)
+                    if s not in grant_scopes:
+                        grant_scopes = grant_scopes + (s,)
 
         spaces: Tuple[MemorySpaceRef, ...] = ()
         persona_id: Optional[str] = None
@@ -203,6 +227,7 @@ class ConversationContextResolver:
             allowed_memory_spaces=spaces,
             capability_scopes=scopes,
             grants=grant_refs,
+            grant_scopes=grant_scopes,
             policy_version=self._policy_version,
         )
 

@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://whale.example.internal/contracts/v1/messages/sensor.event.schema.json",
+  "title": "sensor.event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "id",
+    "type",
+    "ts",
+    "seq",
+    "dir",
+    "payload"
+  ],
+  "properties": {
+    "v": {
+      "type": "string",
+      "pattern": "^1\\.[0-9]+$",
+      "description": "协议版本 major.minor；未知 major 必须拒绝并回 error.protocol_version（§2）"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 64,
+      "pattern": "^[0-9A-Za-z-]+$",
+      "description": "消息 ID（ULID/UUID）"
+    },
+    "type": {
+      "const": "sensor.event",
+      "description": "消息类型"
+    },
+    "ts": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4102444800000,
+      "description": "发送端发送时间（Unix 毫秒时间戳）"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991,
+      "description": "每方向各自单调递增序号，用于丢帧检测与乱序识别（§2）"
+    },
+    "dir": {
+      "const": "uplink"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_id",
+        "kind",
+        "occurred_at",
+        "privacy_class",
+        "summary",
+        "schema_version"
+      ],
+      "properties": {
+        "event_id": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 64,
+          "pattern": "^[0-9A-Za-z-]+$",
+          "description": "事件唯一 ID，即幂等键，core 按它去重（§4/§6）"
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-z0-9_.]+$",
+          "description": "事件种类，点分小写命名（如 screen.memo.created）"
+        },
+        "occurred_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4102444800000,
+          "description": "事件真实发生时间，与信封 ts（发送时间）分离（§2）（Unix 毫秒时间戳）"
+        },
+        "privacy_class": {
+          "type": "string",
+          "enum": [
+            "public",
+            "owner_private",
+            "owner_sensitive"
+          ],
+          "description": "隐私级（§5）；device_secret 永不进感知事件，故不在枚举内"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000,
+          "description": "脱敏摘要；默认不含截图/完整 OCR（§4）"
+        },
+        "evidence_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "证据引用（可选，凭 screen.evidence.read 另行索取；不泄露本地路径）"
+        },
+        "schema_version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+$",
+          "description": "事件负载的数据结构版本"
+        }
+      },
+      "description": "上行感知事件；至少一次送达 + core 按 event_id 去重（§6）"
+    }
+  }
+}

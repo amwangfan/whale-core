@@ -156,7 +156,8 @@ def test_stranger_cannot_read_owner_memory():
     assert not any("辣" in m for m in brain.calls[-1]["memories"])
 
 
-def test_stranger_group_message_ignored():
+def test_stranger_group_sudo_gets_guidance_only():
+    """群里 sudo 尝试：不验证、不回显、不落记忆，只提示私聊（N05/N17）。"""
     store, spaces, bindings, auth, resolver, brain, orch = _world()
     wf = QqInboundWorkflow(store, Brain(), orchestrator=orch, auth_service=auth)
 
@@ -164,9 +165,32 @@ def test_stranger_group_message_ignored():
         channel = "qq"
         account = "u_x"
         conversation = "group:7"
-        text = "sudo anything"
+        text = "sudo 某个口令"
 
-    assert wf.handle_stranger_event(In())["skipped"] == "stranger_group_ignored"
+    out = wf.handle_stranger_event(In())
+    assert "私聊" in out["reply"]
+    assert out.get("auth_grant") is None
+    # 口令不进入任何记忆
+    assert all("某个口令" not in str(r.content)
+               for kind in MemoryKind for r in store.list_by_kind(kind))
+
+
+def test_group_member_chat_gets_group_ceiling_reply():
+    """S7 灰度：群成员消息走匿名群上下文（chat.basic，无 sudo、无记忆）。"""
+    store, spaces, bindings, auth, resolver, brain, orch = _world()
+    wf = QqInboundWorkflow(store, Brain(), orchestrator=orch, auth_service=auth)
+
+    class In:
+        channel = "qq"
+        account = "u_member"
+        conversation = "group:7"
+        text = "大家好"
+
+    out = wf.handle_stranger_event(In())
+    assert out["reply"].startswith("收到")
+    ctx = resolver.resolve(channel="qq", sender_id="u_member",
+                           conversation_id="group:7")
+    assert "outbox.submit" not in ctx.capability_scopes
 
 
 # ---------------------------------------------------------------------------

@@ -275,3 +275,60 @@ def test_mixed_send_image_failure_falls_back_to_link(monkeypatch):
                            reason="t", evidence=("t",), channel="direct_message")
     assert port.send(draft)
     assert "https://cdn.example.com/a.png" in calls  # 兜底发了链接
+
+
+# ── S7 灰度：群/陌生人回复发送端口 ──────────────────────────────
+
+def _port_with_recorder(**kw):
+    """构造离线端口：opener 记录请求体，不回网。"""
+    sent = []
+
+    class Resp:
+        status = 200
+        headers = {"Set-Cookie": "weq_session=s1"}
+
+        def read(self):
+            return json.dumps({"result": {"data": {"json": {"ok": True}}}}).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def opener(req, timeout):
+        sent.append(json.loads(req.data.decode()))
+        return Resp()
+
+    from weq_channel.weq_send import WeQWebSendPort
+    port = WeQWebSendPort("http://127.0.0.1:7690", "tok",
+                          target_uid="u_owner", opener=opener, **kw)
+    return port, sent
+
+
+def test_send_group_text_only_allowed_groups():
+    port, sent = _port_with_recorder(allowed_groups=("1124744261",))
+    assert port.send_group_text("1124744261", "大家好") is True
+    assert sent[-1]["json"]["peerType"] == "group"
+    assert sent[-1]["json"]["targetId"] == "1124744261"
+    # 非白名单群：拒绝且不发请求
+    n = len(sent)
+    assert port.send_group_text("999", "hi") is False
+    assert len(sent) == n
+    assert port.last_receipt["error"] == "group-not-allowed"
+
+
+def test_send_group_text_default_no_groups():
+    port, sent = _port_with_recorder()
+    assert port.send_group_text("1124744261", "hi") is False
+    assert sent == []
+
+
+def test_send_c2c_validates_uid_shape():
+    port, sent = _port_with_recorder()
+    assert port.send_c2c("u_abc123", "你好") is True
+    assert sent[-1]["json"]["targetId"] == "u_abc123"
+    n = len(sent)
+    assert port.send_c2c("not-a-uid", "hi") is False
+    assert port.send_c2c("", "hi") is False
+    assert len(sent) == n

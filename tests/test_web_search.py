@@ -276,3 +276,73 @@ def test_select_provider_bing():
     from search_web.web_search import BingHtmlProvider, select_provider
     p = select_provider({"WHALE_SEARCH_PROVIDER": "bing"})
     assert isinstance(p, BingHtmlProvider)
+
+
+# ---------- DeepSeek 官方 Search API（/v1/tools/search） ----------
+
+_DEEPSEEK_PAYLOAD = {
+    "results": [
+        {"title": "结果A", "url": "https://a.example/x",
+         "snippet": "A 短摘要", "summary": "A 的长摘要（给模型读）",
+         "rerank_score": 2.4, "date": "2026-06-01T00:00:00+00:00"},
+        {"title": "结果B", "url": "https://b.example/y",
+         "snippet": "B 短摘要"},
+        {"title": "无地址", "snippet": "缺 url 跳过"},
+    ],
+}
+
+
+def test_deepseek_search_wire_format_and_parse(monkeypatch):
+    captured = _fake_urlopen(monkeypatch, payload=_DEEPSEEK_PAYLOAD)
+    from search_web.web_search import DeepSeekSearchProvider
+    p = DeepSeekSearchProvider(api_key="k-test")
+    results = p.search("鲸鱼 最新", limit=5)
+    # 官方端点与 Bearer 鉴权
+    assert captured["url"] == "https://api.deepseek.com/v1/tools/search"
+    assert captured["headers"].get("Authorization") == "Bearer k-test"
+    assert captured["body"] == {"query": "鲸鱼 最新", "count": 5,
+                                "need_content": False}
+    # 解析：summary 优先于 snippet；缺 url 的项跳过
+    assert [r.url for r in results] == ["https://a.example/x",
+                                        "https://b.example/y"]
+    assert results[0].snippet == "A 的长摘要（给模型读）"
+    assert results[1].snippet == "B 短摘要"
+    assert results[0].source == "deepseek"
+
+
+def test_deepseek_search_empty_results_is_ok(monkeypatch):
+    """官方语义：无结果返回空数组且不计费——是正常结果不是错误。"""
+    _fake_urlopen(monkeypatch, payload={"results": []})
+    from search_web.web_search import DeepSeekSearchProvider
+    assert DeepSeekSearchProvider(api_key="k").search("冷门词") == []
+
+
+def test_deepseek_search_missing_key():
+    from search_web.web_search import DeepSeekSearchProvider, SearchError
+    import pytest
+    with pytest.raises(SearchError) as ei:
+        DeepSeekSearchProvider(api_key="").search("q")
+    assert ei.value.kind == "config"
+
+
+def test_deepseek_search_402_is_quota(monkeypatch):
+    _fake_urlopen(monkeypatch, status=402)
+    from search_web.web_search import DeepSeekSearchProvider, SearchError
+    import pytest
+    with pytest.raises(SearchError) as ei:
+        DeepSeekSearchProvider(api_key="k").search("q")
+    assert ei.value.kind == "quota"
+
+
+def test_select_provider_deepseek_explicit_and_auto():
+    from search_web.web_search import select_provider, DeepSeekSearchProvider
+    p = select_provider({"WHALE_SEARCH_PROVIDER": "deepseek",
+                         "DEEPSEEK_API_KEY": "k"})
+    assert isinstance(p, DeepSeekSearchProvider)
+    # 自动链：只有 DEEPSEEK_API_KEY 时选 deepseek（在 ddg 之前）
+    p2 = select_provider({"DEEPSEEK_API_KEY": "k"})
+    assert isinstance(p2, DeepSeekSearchProvider)
+    # 显式 bing 不被 DEEPSEEK key 抢占
+    from search_web.web_search import BingHtmlProvider
+    assert isinstance(select_provider({"WHALE_SEARCH_PROVIDER": "bing",
+                                       "DEEPSEEK_API_KEY": "k"}), BingHtmlProvider)

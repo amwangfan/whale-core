@@ -54,12 +54,18 @@ class SqliteMemoryStore:
                 "ON records(space_id, kind)")
             # 存量记录 → 受保护原始库（最小权限；不给任何会话自动授权）。
             # 仅当确有遗留记录时创建 vault 元数据——空库不引入多余键。
+            # F-05（红队）：人格连续性快照（persona:default 等）是全局基线人格
+            # 配置而非私人记忆——排除在 vault 收敛之外，否则其内容进了 vault
+            # 却仍被全局限域外路径读取，两头不靠。
             unspaced = self.db.execute(
-                "SELECT COUNT(*) FROM records WHERE space_id=''").fetchone()[0]
+                "SELECT COUNT(*) FROM records WHERE space_id='' "
+                "AND kind != 'persona_continuity'").fetchone()[0]
             if unspaced:
                 self._ensure_vault_meta_locked()
-                self.db.execute("UPDATE records SET space_id=? WHERE space_id=''",
-                                (DEFAULT_VAULT_ID,))
+                self.db.execute(
+                    "UPDATE records SET space_id=? WHERE space_id='' "
+                    "AND kind != 'persona_continuity'",
+                    (DEFAULT_VAULT_ID,))
             self.db.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
 
     def _ensure_vault_meta_locked(self) -> None:
@@ -150,6 +156,21 @@ class SqliteMemoryStore:
                 store.db.execute(
                     "INSERT OR REPLACE INTO kv VALUES (?,?)",
                     (key, json.dumps(value, ensure_ascii=False)))
+
+            def get_record(self, key: str):
+                row = store.db.execute(
+                    "SELECT key,kind,content,record_id,created_at,tags,space_id "
+                    "FROM records WHERE key=?", (key,)).fetchone()
+                return store._decode(row) if row else None
+
+            def put_record(self, record: MemoryRecord) -> None:
+                # No nested transaction/commit; part of the surrounding BEGIN.
+                store.db.execute(
+                    "INSERT OR REPLACE INTO records VALUES (?,?,?,?,?,?,?)",
+                    (record.key, record.kind.value,
+                     json.dumps(dict(record.content), ensure_ascii=False),
+                     record.record_id, record.created_at.isoformat(),
+                     json.dumps(record.tags, ensure_ascii=False), record.space_id))
 
         with self._lock:
             self.db.execute("BEGIN IMMEDIATE")
