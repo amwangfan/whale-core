@@ -1,0 +1,14 @@
+{
+  "v": "1.0",
+  "id": "f1d5a3c3b8b24de1a2e33c77198ac068",
+  "type": "device.confirm.response",
+  "ts": 1793490695436,
+  "seq": 9,
+  "dir": "uplink",
+  "payload": {
+    "challenge_id": "dc-0123456789abcdef",
+    "approved": true,
+    "signature": "abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
+    "responded_at": 1793490694936
+  }
+}

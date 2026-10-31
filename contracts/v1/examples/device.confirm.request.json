@@ -1,0 +1,19 @@
+{
+  "v": "1.0",
+  "id": "c18b3233f96c4a06a01399d43475793b",
+  "type": "device.confirm.request",
+  "ts": 1793490692436,
+  "seq": 7,
+  "dir": "downlink",
+  "payload": {
+    "challenge_id": "dc-0123456789abcdef",
+    "device_id": "ba4bb14c75917cfc0e69fb7a1caf8ba3",
+    "principal_id": "owner",
+    "channel": "qq",
+    "conversation_id": "conv-1",
+    "scopes": [
+      "device.notify"
+    ],
+    "expires_at": 1793490812436
+  }
+}

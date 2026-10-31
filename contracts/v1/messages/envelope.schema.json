@@ -43,6 +43,8 @@
         "call.answer",
         "call.hangup",
         "call.state",
+        "device.confirm.request",
+        "device.confirm.response",
         "error"
       ],
       "description": "消息类型（§4 消息目录）"

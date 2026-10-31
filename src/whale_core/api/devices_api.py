@@ -208,8 +208,108 @@ def dispatch_devices(handler, method: str, parts: list[str]) -> None:
         if len(parts) == 3 and parts[2] == "action" and method == "POST":
             _downlink(handler, gateway, device_id, op="action")
             return
+        if len(parts) == 3 and parts[2] == "confirm" and method == "POST":
+            _confirm(handler, gateway, registry, device_id)
+            return
 
     send(404, _error("not_found", "unknown endpoint"))
+
+
+def _confirm(handler, gateway: DeviceGateway | None, registry: DeviceRegistry,
+             device_id: str) -> None:
+    """AUTH-01：POST /devices/{id}/confirm —— 创建挑战 → 下发 → 等待设备确认 →
+    签名核验 → 原子核销签发限时租约。拒绝/超时/离线一律不签发。"""
+    send = handler._send
+    if gateway is None:
+        send(503, _error("unavailable", "device gateway not running"))
+        return
+    body = handler._body_json()
+    if body is None:
+        send(400, _error("bad_request", "JSON body required"))
+        return
+    scopes = body.get("scopes")
+    if not (isinstance(scopes, list)
+            and all(isinstance(x, str) for x in scopes) and scopes):
+        send(400, _error("bad_request", "scopes must be a non-empty list of strings"))
+        return
+    try:
+        from whale_core.life.temporary_auth import (TemporaryAuthError,
+                                                    TemporaryAuthService)
+        auth = TemporaryAuthService(registry.store)
+        ch = auth.create_device_challenge(
+            device_id=device_id,
+            principal_id=str(body.get("principal_id") or "owner"),
+            channel=str(body.get("channel") or "api"),
+            conversation_id=str(body.get("conversation_id") or ""),
+            scopes=tuple(scopes),
+            ttl_s=float(body.get("ttl_s") or 120),
+            grant_ttl_s=float(body.get("grant_ttl_s") or 600),
+            grant_max_uses=int(body.get("grant_max_uses") or 1),
+            action_fingerprint=body.get("action_fingerprint"),
+        )
+    except TemporaryAuthError as exc:
+        send(400, _error("bad_request", str(exc)))
+        return
+    except Exception as exc:  # 不暴露内部细节
+        send(500, _error("internal", "challenge create failed"))
+        return
+    payload = {
+        "challenge_id": ch["challenge_id"],
+        "device_id": device_id,
+        "principal_id": str(body.get("principal_id") or "owner"),
+        "channel": str(body.get("channel") or "api"),
+        "conversation_id": str(body.get("conversation_id") or ""),
+        "scopes": list(ch["scopes"]),
+        "expires_at": int(ch["expires_at"] * 1000),
+    }
+    if body.get("action_fingerprint"):
+        payload["action_fingerprint"] = str(body["action_fingerprint"])
+    try:
+        resp = gateway.send_confirm_request(
+            device_id, payload, timeout_s=float(body.get("ttl_s") or 120) + 5)
+    except GatewayError as exc:
+        send(_GATEWAY_STATUS.get(exc.code, 500), _error(exc.code, str(exc)))
+        return
+    if not resp.get("approved"):
+        send(409, _error("denied",
+                         f"设备未批准: {resp.get('reason') or 'user_denied'}"))
+        return
+    # 签名核验（Ed25519 over challenge_id UTF-8；设备注册公钥）→ 原子核销
+    meta = registry.get(device_id) or {}
+    pubkey = meta.get("pubkey_hex")
+    if not pubkey:
+        send(500, _error("internal", "device pubkey unavailable"))
+        return
+
+    def _verifier(challenge_id: str, dev_id: str) -> bool:
+        sig = resp.get("signature")
+        if not isinstance(sig, str):
+            return False
+        try:
+            from cryptography.exceptions import InvalidSignature
+            from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+                Ed25519PublicKey,
+            )
+            Ed25519PublicKey.from_public_bytes(bytes.fromhex(pubkey)).verify(
+                bytes.fromhex(sig), challenge_id.encode("utf-8"))
+            return True
+        except Exception:
+            return False
+
+    grant = auth.confirm_device_challenge(
+        ch["challenge_id"], device_id=device_id, device_verifier=_verifier)
+    if grant is None:
+        send(409, _error("denied", "签名核验失败或挑战已被消费/过期"))
+        return
+    handler.ctx.log_event("device:confirm", f"{device_id}:{ch['challenge_id']}")
+    send(200, _json_bytes({"result": {
+        "ok": True,
+        "grant_id": grant.grant_id,
+        "scopes": list(grant.scopes),
+        "expires_at": grant.expires_at,
+        "max_uses": grant.max_uses,
+        "proof_method": grant.proof_method,
+    }}))
 
 
 def _downlink(handler, gateway: DeviceGateway | None, device_id: str, *,

@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "messages/device.confirm.response.schema.json",
+  "title": "device.confirm.response",
+  "description": "设备可信确认回执（AUTH-01）：approved=true 时 signature 必填——对 challenge_id UTF-8 字节的 Ed25519 签名（hex）。",
+  "type": "object",
+  "required": [
+    "v",
+    "id",
+    "type",
+    "ts",
+    "seq",
+    "dir",
+    "payload"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "v": {
+      "type": "string",
+      "pattern": "^1\\.[0-9]+$"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 64
+    },
+    "type": {
+      "const": "device.confirm.response"
+    },
+    "ts": {
+      "type": "integer"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "dir": {
+      "const": "uplink"
+    },
+    "payload": {
+      "type": "object",
+      "required": [
+        "challenge_id",
+        "approved",
+        "responded_at"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "challenge_id": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 64
+        },
+        "approved": {
+          "type": "boolean"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{128}$"
+        },
+        "responded_at": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "reason": {
+          "type": "string",
+          "maxLength": 64
+        }
+      }
+    }
+  }
+}
