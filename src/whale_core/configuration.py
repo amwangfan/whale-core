@@ -171,8 +171,17 @@ class SettingsController:
         bundle = self.bundle
         model = resolve_chat_model(bundle.registry)
         env = configured_env(bundle.profile, self.config_dir, self.env)
+        saved_config, saved_private = read_settings_pair(self.config_dir)
+        # Legacy installations with an explicit saved model or model credential
+        # are already configured. New installs see the wizard until dismissed.
+        legacy_configured = bool(
+            saved_config.get('model') or saved_config.get('services')
+            or saved_private.get('model_api_key')
+            or (bundle.profile == 'cloud' and getattr(model, 'api_key', ''))
+        )
         return {
             'profile': bundle.profile,
+            'setup_completed': bool(saved_config.get('setup_completed', legacy_configured)),
             'model': {'base_url': getattr(model, 'base_url', ''), 'model': getattr(model, 'model', ''),
                       'api_key_configured': bool(getattr(model, 'api_key', ''))},
             'intent_model_enabled': env.get('WHALE_INTENT_MODEL_ENABLED') == '1',
@@ -200,7 +209,7 @@ class SettingsController:
 
     def _update_locked(self, patch: dict):
         from whale_core.profiles import assemble_runtime
-        if set(patch) - {'profile', 'model', 'models', 'intent_model_enabled', 'services', 'persona_taboos', 'budget'}:
+        if set(patch) - {'profile', 'model', 'models', 'intent_model_enabled', 'services', 'persona_taboos', 'budget', 'setup_completed'}:
             raise ValueError('unknown setting')
         with self.lock:
             if any(isinstance(r := self.bundle.store.get(k), dict) and (r.get('status') == 'running' or r.get('in_flight'))
@@ -234,6 +243,10 @@ class SettingsController:
                 elif key:
                     private['model_api_key'] = key
             config.update(profile=profile, model=model)
+            if 'setup_completed' in patch:
+                if not isinstance(patch['setup_completed'], bool):
+                    raise ValueError('setup_completed must be boolean')
+                config['setup_completed'] = patch['setup_completed']
             if 'intent_model_enabled' in patch:
                 if not isinstance(patch['intent_model_enabled'], bool):
                     raise ValueError('intent_model_enabled must be boolean')

@@ -31,6 +31,7 @@ from whale_core.life.conversation_context import (
     SCOPE_OUTBOX_SUBMIT,
     SCOPE_TASK_READ_SELF,
     SCOPE_TOOL_WEB_SEARCH,
+    principal_matches_private_conversation,
 )
 
 # ---- 能力上限（§6.2 权限矩阵的首版落地） ------------------------------
@@ -42,10 +43,17 @@ GROUP_CEILING: Tuple[str, ...] = (SCOPE_CHAT_BASIC, SCOPE_TOOL_WEB_SEARCH)
 PRIVATE_ANON: Tuple[str, ...] = (SCOPE_CHAT_BASIC,)
 
 #: 已配对主人私聊：对话 + 常规工具 + 提交出站 + 查看本人任务 + 设备通知。
-#: 高风险动作（shell、记忆写 vault、支付）不在此列，仍需逐项审批（policy.py）。
+#: F-01 红队修复：capability scope 在执行端真校验后，主人私聊必须显式
+#: 保留其既有工具能力，否则生图/语音等回归。高风险动作（shell、支付、
+#: 记忆写 vault）不在此列，仍需既有审批链（policy.py）。
 PRIVATE_OWNER: Tuple[str, ...] = (
     SCOPE_CHAT_BASIC,
     SCOPE_TOOL_WEB_SEARCH,
+    "tool.web.fetch",
+    "tool.media.image.generate",
+    "tool.media.video.generate",
+    "tool.tts.synthesize",
+    "tool.asr.transcribe",
     SCOPE_OUTBOX_SUBMIT,
     SCOPE_TASK_READ_SELF,
     SCOPE_DEVICE_NOTIFY,
@@ -53,6 +61,11 @@ PRIVATE_OWNER: Tuple[str, ...] = (
 
 #: 管理 API / CLI（持有本地 token 的通道）：等同主人私聊。
 API_OWNER: Tuple[str, ...] = PRIVATE_OWNER
+
+#: D3：screen.* 族只允许主人本人在非群会话持有（群聊硬上限拒绝，INV-03 一致）。
+#: 注意它们不在 PRIVATE_OWNER 基础集里——默认最小权限（§5），只能经临时
+#: 租约显式授予；本守卫保证租约也无法把它们带进群聊或非主人会话。
+SCREEN_SCOPE_PREFIX = "screen."
 
 
 class BindingLookup(Protocol):
@@ -76,6 +89,16 @@ class GrantLookup(Protocol):
     ) -> Tuple[TemporaryGrantRef, ...]: ...
 
 
+class MemberMemoryLookup(Protocol):
+    """G2 提供：查询某成员的 member_private 空间（绑定 + 有效 consent 双门）。
+
+    返回 None 表示该成员当前没有可下发的个人空间（未授权 / 已撤销 /
+    空间已注销）。本协议只读，永不抛错 widening 权限。
+    """
+
+    def member_space_for(self, principal_id: str) -> Optional[MemorySpaceRef]: ...
+
+
 def derive_kind(channel: str, conversation_id: str) -> ConversationKind:
     """从渠道与现有 conversation 字符串推导会话类型。
 
@@ -92,6 +115,10 @@ def derive_kind(channel: str, conversation_id: str) -> ConversationKind:
         return ConversationKind.WEB
     if channel in ("voice", "phone"):
         return ConversationKind.VOICE
+    if channel == "mobile":
+        # D3：whale-mobile 设备面归一渠道；类型走 PHONE，基础 scope 仍由
+        # _base_scopes 决定（默认最小权限，screen.* 须经租约显式授予）。
+        return ConversationKind.PHONE
     if channel in ("api", "cli"):
         return ConversationKind.API
     return ConversationKind.UNKNOWN
@@ -108,6 +135,7 @@ class ConversationContextResolver:
         grants: Optional[GrantLookup] = None,
         owner_id: str = "owner",
         owner_default_space: Optional[MemorySpaceRef] = None,
+        member_memory: Optional[MemberMemoryLookup] = None,
         policy_version: int = 1,
     ) -> None:
         # pairing_lookup(channel, sender_id) -> owner_id | None
@@ -115,6 +143,8 @@ class ConversationContextResolver:
         self._bindings = bindings
         self._grants = grants
         self._owner_id = owner_id
+        # G2：成员个人记忆目录（PrincipalMemoryBinding + 有效 consent 双门）。
+        self._member_memory = member_memory
         # 主人私聊/控制台等已认证**非群**会话的默认工作副本（S2 首版策略）。
         self._owner_default_space = owner_default_space
         self._policy_version = policy_version
@@ -147,6 +177,7 @@ class ConversationContextResolver:
                     scopes = tuple(s for s in scopes if s in set(narrowed))
 
         grant_refs: Tuple[TemporaryGrantRef, ...] = ()
+        grant_scopes: Tuple[str, ...] = ()
         if self._grants is not None:
             now = time.time()
             grant_refs = tuple(
@@ -162,8 +193,15 @@ class ConversationContextResolver:
                 for s in g.scopes:
                     if ceiling is not None and s not in ceiling:
                         continue
+                    # D3：screen.* 仅 owner 私聊 / API owner 可授；
+                    # 群聊与非主人会话硬上限拒绝（INV-03 一致）。
+                    if s.startswith(SCREEN_SCOPE_PREFIX) and (
+                            _is_group(kind) or not principal.is_owner):
+                        continue
                     if s not in scopes:
                         scopes = scopes + (s,)
+                    if s not in grant_scopes:
+                        grant_scopes = grant_scopes + (s,)
 
         spaces: Tuple[MemorySpaceRef, ...] = ()
         persona_id: Optional[str] = None
@@ -196,6 +234,28 @@ class ConversationContextResolver:
         ):
             spaces = spaces + (self._owner_default_space,)
 
+        # G2：成员本人已认证私聊 → 下发其 member_private 空间（MEM-03）。
+        # 闸门全部在服务端：私聊且会话可证明属于该 sender（结构性证据，
+        # 不看昵称/正文）→ 目录内有绑定 + 有效 consent。群聊永不进入此分支；
+        # 群聊的 INV-03 过滤上面也已把 member_private 排除（纵深防御）。
+        if (
+            self._member_memory is not None
+            and not _is_group(kind)
+            and principal_matches_private_conversation(
+                channel, kind, conversation_id, principal.principal_id)
+        ):
+            try:
+                member_ref = self._member_memory.member_space_for(
+                    principal.principal_id)
+            except Exception:
+                member_ref = None  # 证据源故障 = 不下发（fail closed）
+            if (
+                member_ref is not None
+                and member_ref.type is MemorySpaceType.MEMBER_PRIVATE
+                and all(s.space_id != member_ref.space_id for s in spaces)
+            ):
+                spaces = spaces + (member_ref,)
+
         return ResolvedContext(
             conversation=conv,
             principal=principal,
@@ -203,6 +263,7 @@ class ConversationContextResolver:
             allowed_memory_spaces=spaces,
             capability_scopes=scopes,
             grants=grant_refs,
+            grant_scopes=grant_scopes,
             policy_version=self._policy_version,
         )
 

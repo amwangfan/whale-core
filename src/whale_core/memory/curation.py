@@ -45,6 +45,17 @@ def _space_ids(allowed_spaces) -> tuple[str, ...] | None:
     return tuple(dict.fromkeys(out))
 
 
+def _is_expired(content, now: datetime) -> bool:
+    """G2/MEM-04：带 expires_at 的记录到期即退出召回（不删记录本身）。"""
+    exp = (content or {}).get("expires_at")
+    if not exp:
+        return False
+    try:
+        return datetime.fromisoformat(str(exp)) <= now
+    except (ValueError, TypeError):
+        return False  # 畸形时间戳不误杀（召回侧 fail open 仅限此字段）
+
+
 class MemoryCurator:
     """Explicit candidate promotion and retrieval; never consumes audio or raw logs."""
 
@@ -105,6 +116,8 @@ class MemoryCurator:
                 continue
             if "superseded" in rec.tags:
                 continue  # 被更正的旧记忆不再召回（G2）
+            if _is_expired(rec.content, current):
+                continue  # TTL 到期退出召回（MEM-04）
             content = rec.content
             stable = bool(content.get("stable_fact"))
             terms = _terms(str(content.get("summary", "")))

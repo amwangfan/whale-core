@@ -13,6 +13,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ApiError,
   studioApi,
+  type ConversationRhythm,
   type StudioConversation,
   type StudioGraph,
   type StudioGraphEdge,
@@ -25,7 +26,7 @@ import StudioCanvas from "./Canvas";
 import ForkWizard from "./ForkWizard";
 import GrantsPanel from "./GrantsPanel";
 import StudioListMode from "./ListMode";
-import { CapabilityCard } from "./cards";
+import { CapabilityCard, RhythmEditor } from "./cards";
 import { executeIntent, type DropIntent } from "./connect";
 
 function useMediaQuery(query: string): boolean {
@@ -287,6 +288,31 @@ export default function Studio() {
     [fail, refresh],
   );
 
+  // G4：会话节奏（只影响回复节奏；409 版本冲突提示并刷新）。
+  const setRhythm = useCallback(
+    (key: string, rhythm: ConversationRhythm, version?: number) => {
+      void (async () => {
+        setBusy(true);
+        try {
+          await studioApi.putRhythm(key, rhythm, version);
+          setNotice("节奏设置已保存。");
+          await refresh();
+        } catch (e) {
+          fail(
+            e instanceof ApiError && e.status === 409
+              ? "节奏设置已被并发修改，已刷新为最新状态。"
+              : e instanceof ApiError
+                ? e.message
+                : "保存失败。",
+          );
+        } finally {
+          setBusy(false);
+        }
+      })();
+    },
+    [fail, refresh],
+  );
+
   const edge = graph?.edges.find((e) => e.id === selectedEdge) ?? null;
   const node = graph?.nodes.find((n) => n.id === selectedNode) ?? null;
 
@@ -313,6 +339,7 @@ export default function Studio() {
           onBindPersona={bindPersona}
           onBindMemory={bindMemory}
           onSetCapabilities={setCapabilities}
+          onSetRhythm={setRhythm}
           onFork={setForkSpace}
         />
       )}
@@ -411,6 +438,7 @@ export default function Studio() {
                 if (intent) void handleIntent(intent);
               }}
               onSetCapabilities={setCapabilities}
+              onSetRhythm={setRhythm}
             />
           )}
         </>
@@ -437,7 +465,7 @@ export default function Studio() {
   );
 }
 
-/** 节点检查器：会话 → 能力编辑；角色/记忆 → 键盘连接表单。 */
+/** 节点检查器：会话 → 能力编辑 + 回复节奏；角色/记忆 → 键盘连接表单。 */
 function NodeInspector({
   nodeId,
   kind,
@@ -446,6 +474,7 @@ function NodeInspector({
   busy,
   onConnect,
   onSetCapabilities,
+  onSetRhythm,
 }: {
   nodeId: string;
   kind: string;
@@ -454,6 +483,7 @@ function NodeInspector({
   busy: boolean;
   onConnect: (conversationKey: string) => void;
   onSetCapabilities: (key: string, scopes: string[], version?: number) => void;
+  onSetRhythm: (key: string, rhythm: ConversationRhythm, version?: number) => void;
 }) {
   const [target, setTarget] = useState("");
   const [caps, setCaps] = useState<string[] | null>(null);
@@ -492,6 +522,12 @@ function NodeInspector({
         >
           保存能力配置
         </button>
+        <RhythmEditor
+          rhythm={conv.rhythm}
+          busy={busy}
+          resetKey={conv.key}
+          onSave={(rhythm) => onSetRhythm(conv.key, rhythm, conv.rhythm_version)}
+        />
       </section>
     );
   }

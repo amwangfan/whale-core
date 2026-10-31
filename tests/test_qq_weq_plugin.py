@@ -80,6 +80,16 @@ def test_registration_owns_kind_and_rejects_double():
 
 # ── adapter ─────────────────────────────────────────────────────────
 
+def test_adapter_feed_preserves_sender_id():
+    """S1 回归：sender_id 必须穿透适配器（丢失会把主人降级成匿名）。"""
+    adapter = WeQEventAdapter()
+    ev_in = owner_event("hi")
+    from dataclasses import replace as _replace
+    ev_in = _replace(ev_in, sender_id="u_owner")
+    assert adapter.feed(ev_in) is True
+    assert list(adapter.poll())[0].payload["sender_id"] == "u_owner"
+
+
 def test_adapter_feed_poll_and_trust():
     adapter = WeQEventAdapter()
     assert adapter.feed(owner_event("晚饭吃啥")) is True
@@ -91,6 +101,7 @@ def test_adapter_feed_poll_and_trust():
     assert ev.trust == "external"          # 固定 external，不能自升
     assert ev.payload["text"] == "晚饭吃啥"
     assert ev.payload["message_id"] == "m1"
+    assert ev.payload["sender_id"] == ""  # owner_event 未给 sender 时为空串
     assert list(adapter.poll()) == []      # 排空
 
 

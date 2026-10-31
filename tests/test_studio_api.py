@@ -550,3 +550,69 @@ def test_audit_trail_metadata_only(api):
     assert {e["reason"] for e in denied} >= {"vault_not_bindable",
                                              "scope_ceiling"}
     assert actions["persona.bind"]["conversation_key"] == GROUP_KEY
+
+
+# ---------------------------------------------------------------------------
+# Vault 管理管道：记录浏览（Fork 向导数据源）
+# ---------------------------------------------------------------------------
+
+
+def test_vault_records_listing_redacted(api):
+    server, store = api
+    status, raw = _req(server, "GET",
+                       "/api/v1/studio/vault/records?space_id=vault-1")
+    assert status == 200
+    result = _json(raw)["result"]
+    assert result["count"] == 2
+    by_key = {i["key"]: i for i in result["items"]}
+    assert set(by_key) == {"v-secret-1", "v-secret-2"}
+    # 脱敏生效：手机号/邮箱不现原形
+    assert "13800000001" not in json.dumps(result, ensure_ascii=False)
+    assert "whale@example.com" not in json.dumps(result, ensure_ascii=False)
+    assert "****" in by_key["v-secret-1"]["summary"]
+
+
+def test_vault_records_rejects_non_vault_space(api):
+    server, _ = api
+    status, raw = _req(server, "GET",
+                       "/api/v1/studio/vault/records?space_id=g-1")
+    assert status == 404  # 普通空间不走管理管道（也防形状探测）
+
+
+def test_vault_records_default_space_and_audit(api):
+    server, store = api
+    status, raw = _req(server, "GET", "/api/v1/studio/vault/records")
+    assert status == 404  # 默认 vault-default 在本 fixture 不存在
+    status, raw = _req(server, "GET",
+                       "/api/v1/studio/vault/records?space_id=vault-1")
+    assert status == 200
+    audit = [store.get(k) for k in store.keys()
+             if k.startswith("audit:studio:")]
+    assert any(e["action"] == "vault.records" for e in audit)
+
+
+def test_vault_records_require_token(api):
+    server, _ = api
+    status, _ = _req(server, "GET",
+                     "/api/v1/studio/vault/records?space_id=vault-1", token="")
+    assert status == 401
+
+
+def test_create_code_rejects_unknown_fields(api):
+    """回归：allowed_scopes 等未知字段必须 422（曾被静默忽略导致权限退化）。"""
+    server, _ = api
+    status, raw = _req(server, "POST", "/api/v1/auth/temporary/codes",
+                       body={"allowed_scopes": ["tool.web.search"]})
+    assert status == 422
+    assert _err_code(raw) == "invalid_request"
+    assert "allowed_scopes" in _json(raw)["error"]["message"]
+
+
+def test_create_code_with_search_scope(api):
+    server, _ = api
+    status, raw = _req(server, "POST", "/api/v1/auth/temporary/codes",
+                       body={"scopes": ["tool.web.search", "task.read:self"]})
+    assert status == 200
+    result = _json(raw)["result"]
+    assert set(result["scopes"]) == {"tool.web.search", "task.read:self"}
+    assert result["code"]  # 明文仅此一次

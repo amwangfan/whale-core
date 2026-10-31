@@ -120,7 +120,7 @@ def test_remember_command_stores_curated_fact_without_calling_brain():
     assert brain.calls == []  # 指令路径不调模型
     prefs = store.list_by_kind(MemoryKind.PREFERENCE)
     assert len(prefs) == 1
-    assert prefs[0].content["summary"] == "我喜欢蓝色"
+    assert prefs[0].content["summary"] == "用户自述：我喜欢蓝色"
     assert prefs[0].content["evidence_id"] == "qq:private:u_test:m1"
     assert "curated" in prefs[0].tags and "stable" in prefs[0].tags
 

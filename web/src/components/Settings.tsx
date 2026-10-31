@@ -60,8 +60,10 @@ const SERVICES = [
 ];
 export default function Settings({
   onDisconnect,
+  onRunSetup,
 }: {
   onDisconnect: () => void;
+  onRunSetup?: () => void;
 }) {
   const load = useCallback(() => api.settings(), []);
   const settings = useApi(load);
@@ -200,6 +202,11 @@ export default function Settings({
             <h2>模型与运行配置</h2>
             <Icon name="settings" size={18} />
           </div>
+          {onRunSetup && (
+            <button type="button" className="text-button" onClick={onRunSetup}>
+              重新打开首次配置向导
+            </button>
+          )}
           {draft && (
             <form
               className="settings-form"

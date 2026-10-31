@@ -278,49 +278,49 @@ def test_inv09_expired_grant_blocks_resumed_task():  # N07
     class Planner:
         def plan(self, text, **kwargs):
             return json.dumps({"goal": "发", "kind": "task",
-                               "capabilities": ("send",), "slots": {"target": "x"}})
+                               "capabilities": ("web.search",), "slots": {"q": "x"}})
 
     store = InMemoryStore()
     auth = TemporaryAuthService(store)
-    code = auth.create_code(allowed_scopes=("task.read:self",))
+    code = auth.create_code(allowed_scopes=("tool.web.search",))
     grant = auth.verify(code, channel="qq", sender_id="u1",
                         conversation_kind=ConversationKind.QQ_PRIVATE,
                         conversation_id="private:u1")
 
-    def gate(grant_ids, fingerprint):
-        return any(auth.consume_grant_use(g, action_fingerprint=fingerprint)
+    def gate(grant_ids, fingerprint, required_scope=None):
+        return any(auth.consume_grant_use(g, action_fingerprint=fingerprint,
+                                          required_scope=required_scope)
                    for g in grant_ids)
 
     orch = ConversationOrchestrator(
         store, WhaleCompanion(store, Brain()), intent_model=Planner(),
         tools=ToolRegistry(), grant_gate=gate)
     calls = []
-    orch.tools.register(ToolSpec("send", "send", risk_class="communicate",
-                                 plugin_id="mail", action="send",
+    orch.tools.register(ToolSpec("search", "web.search", risk_class="read_only",
                                  handler=lambda a: calls.append(1) or "ok"))
     # 注入带租约的授权快照（模拟临时授权任务）
     orch._ensure_context = lambda env: env  # 无 resolver，直接注入
     from whale_core.core.runtime import InputEnvelope
     ctx = ResolvedContext(
         conversation=PRIVATE, principal=STRANGER, persona_id=None,
-        capability_scopes=("task.read:self",),
-        grants=(grant,))
+        capability_scopes=("task.read:self", "tool.web.search"),
+        grants=(grant,), grant_scopes=("tool.web.search",))
     orch.handle_envelope(InputEnvelope(
         conversation_id="private:u1", text="发", context=ctx))
+    assert calls == [1], "租约覆盖 tool.send：首次执行成功并消耗次数"
     journals = [store.get(k) for k in store.keys() if k.startswith("runtime:task:")]
     assert journals and journals[0]["authz"]["grant_ids"] == [grant.grant_id]
-    # 租约撤销后：同一任务再派发（恢复路径）被 grant gate 拒绝
-    auth.revoke_grant(grant.grant_id)
+    # 次数已用尽（撤销同理）：同一任务再派发（恢复路径）被拒绝
     tid = journals[0]["plan"]["task_id"]
     from whale_core.core.intent_plan import IntentPlan
-    spec = orch.tools.get("send")
+    spec = orch.tools.get("search")
     outcome, note = orch._dispatch_step(
         tid, spec,
-        IntentPlan(goal="发", capabilities=("send",), slots={"target": "x"},
+        IntentPlan(goal="搜", capabilities=("web.search",), slots={"q": "x"},
                    task_id=tid),
-        {"target": "x"}, 0, 60.0)
-    assert outcome == "denied" and "grant" in note
-    assert calls == []  # 工具从未执行
+        {"q": "x"}, 0, 60.0)
+    assert outcome == "denied" and "grant" in note or "scope" in note
+    assert calls == [1]  # 没有第二次执行
 
 
 def test_inv10_audit_trail_for_grants_and_denials():

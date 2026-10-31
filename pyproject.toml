@@ -16,6 +16,11 @@ dev = ["pytest>=8.0"]
 # websockets 17 已验证兼容（PCM 中继 sync server/client 离线索引测试通过）
 voice = ["websockets>=14,<18"]
 desktop = ["pywebview>=5,<7"]
+# 设备面（whale-mobile D1-D4）最小依赖，均为可选、懒加载：
+# - websockets：/api/v1/devices/ws 长连服（与 voice 同一依赖、同一版本窗）；
+# - cryptography：Ed25519 挑战-应答验签（§3）。Python stdlib 无 Ed25519，
+#   自实现不安全，故引入这一个密码学依赖；registry/校验器本身仍是纯 stdlib。
+devices = ["websockets>=14,<18", "cryptography>=41"]
 
 [project.scripts]
 whale = "whale_core.cli.main:main"

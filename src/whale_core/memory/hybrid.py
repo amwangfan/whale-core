@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Protocol, Sequence
 
-from whale_core.memory.curation import _terms, _space_ids
+from whale_core.memory.curation import _is_expired, _terms, _space_ids
 from whale_core.memory.store import MemoryKind, MemoryRecord, MemoryStore
 
 #: 词项零交集时，向量分至少达到该阈值才允许入选（防纯向量噪声）。
@@ -132,7 +132,9 @@ class HybridCurator:
         query_terms = _terms(query)
         records = (self.store.list_by_kind(MemoryKind.EPISODE, space_ids=space_ids) +
                    self.store.list_by_kind(MemoryKind.PREFERENCE, space_ids=space_ids))
-        candidates = [r for r in records if "curated" in r.tags]
+        candidates = [r for r in records if "curated" in r.tags
+                      and "superseded" not in r.tags
+                      and not _is_expired(r.content, current)]
 
         # 按空间分组嵌入：缓存键含 space_id，任何空间拿不到其他空间的
         # 缓存向量；任何异常 → 该空间候选退化纯词项，不影响其他空间。

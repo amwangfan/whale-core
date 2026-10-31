@@ -3,8 +3,10 @@
  * 敏感卡（vault）后端只给「存在 + 名称」，前端不兜底猜元数据（INV-08）。
  */
 
+import { useEffect, useState } from "react";
 import { Handle, Position, type NodeProps, type Node } from "@xyflow/react";
 import type {
+  ConversationRhythm,
   StudioConversation,
   StudioGraphNode,
   StudioMemorySpace,
@@ -46,6 +48,23 @@ const SPACE_TYPE_LABEL: Record<string, string> = {
   shareable_fork: "共享副本",
 };
 
+const ACTIVITY_LABEL: Record<string, string> = {
+  quiet: "安静",
+  balanced: "均衡",
+  lively: "活跃",
+};
+
+/** 节奏摘要（会话卡展示）：安静/均衡/活跃 · 段上限 · 免打扰。 */
+export function rhythmSummary(rhythm?: ConversationRhythm): string {
+  if (!rhythm) return "默认";
+  const parts = [ACTIVITY_LABEL[rhythm.activity] ?? rhythm.activity];
+  parts.push(
+    rhythm.max_segments > 0 ? `≤${rhythm.max_segments} 段` : "默认分段",
+  );
+  if (rhythm.dnd) parts.push("免打扰");
+  return parts.join(" · ");
+}
+
 export function ConversationCard({ data }: NodeProps<StudioFlowNode>) {
   const { node, conv } = data as ConvNodeData;
   const kindLabel = KIND_LABEL[node.conversation_kind ?? ""] ?? node.conversation_kind;
@@ -58,6 +77,7 @@ export function ConversationCard({ data }: NodeProps<StudioFlowNode>) {
         <span>人格：{conv?.persona_id ?? "默认"}</span>
         <span>记忆副本：{conv?.memory_spaces?.length ?? 0}</span>
         <span>能力：{node.capabilities?.length ?? 0}</span>
+        <span>节奏：{rhythmSummary(conv?.rhythm)}</span>
       </div>
     </div>
   );
@@ -139,6 +159,89 @@ export function CapabilityCard({
       <span className="studio-cap-scope">{scope}</span>
       {!withinCeiling && <span className="studio-cap-note">超出会话上限</span>}
     </label>
+  );
+}
+
+/** G4 会话节奏编辑器：只调回复节奏，不含任何权限配置（服务端严格字段表兜底）。
+ *  本地草稿 + 保存按钮（与能力配置一致）；resetKey 变化时重置草稿。 */
+export function RhythmEditor({
+  rhythm,
+  busy,
+  resetKey,
+  onSave,
+}: {
+  rhythm?: ConversationRhythm;
+  busy?: boolean;
+  resetKey?: string;
+  onSave?: (rhythm: ConversationRhythm) => void;
+}) {
+  const server: ConversationRhythm = rhythm ?? {
+    activity: "balanced",
+    max_segments: 0,
+    dnd: false,
+  };
+  const [draft, setDraft] = useState<ConversationRhythm | null>(null);
+  useEffect(() => setDraft(null), [resetKey]);
+  const current = draft ?? server;
+  return (
+    <fieldset className="studio-rhythm" data-testid="rhythm-editor">
+      <legend>回复节奏（不影响能力/记忆授权）</legend>
+      <label>
+        活跃模式
+        <select
+          value={current.activity}
+          disabled={busy}
+          onChange={(e) =>
+            setDraft({
+              ...current,
+              activity: e.target.value as ConversationRhythm["activity"],
+            })
+          }
+        >
+          <option value="quiet">安静（单气泡）</option>
+          <option value="balanced">均衡</option>
+          <option value="lively">活跃</option>
+        </select>
+      </label>
+      <label>
+        单条回复分段上限（0 = 跟随默认）
+        <input
+          type="number"
+          min={0}
+          max={5}
+          value={current.max_segments}
+          disabled={busy}
+          onChange={(e) =>
+            setDraft({
+              ...current,
+              max_segments: Math.max(
+                0,
+                Math.min(5, Number(e.target.value) || 0),
+              ),
+            })
+          }
+        />
+      </label>
+      <label className="studio-rhythm-dnd">
+        <input
+          type="checkbox"
+          checked={current.dnd}
+          disabled={busy}
+          onChange={(e) => setDraft({ ...current, dnd: e.target.checked })}
+        />
+        免打扰（压制主动/补发消息）
+      </label>
+      <button
+        type="button"
+        disabled={busy || draft === null}
+        onClick={() => {
+          onSave?.(current);
+          setDraft(null);
+        }}
+      >
+        保存节奏设置
+      </button>
+    </fieldset>
   );
 }
 

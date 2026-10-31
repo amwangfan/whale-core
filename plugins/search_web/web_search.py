@@ -2,8 +2,12 @@
 
 provider 选择链（调研依据见 docs/gap-analysis-2026-10-30.md 与调研纪要）：
 
-- 显式 ``WHALE_SEARCH_PROVIDER``（tavily/brave/duckduckgo）优先；
-- 否则按 key 存在性：TAVILY_API_KEY → BRAVE_API_KEY → DuckDuckGo 免 key 回退；
+- 显式 ``WHALE_SEARCH_PROVIDER``（tavily/brave/deepseek/duckduckgo/bing）优先；
+- 否则按 key 存在性：TAVILY_API_KEY → BRAVE_API_KEY → DEEPSEEK_API_KEY →
+  DuckDuckGo 免 key 回退；
+- ``deepseek`` provider 走 DeepSeek 官方 Search API（自研搜索引擎，
+  ``POST /v1/tools/search``，按成功请求次数计费、结果非空才计费；
+  摘要 summary 字段直接适合模型阅读）；
 - **DuckDuckGo HTML 端点对数据中心 IP 会返回 202 + 反爬挑战页**
   （2026-10 实测 + 社区记录）——检测到该形态抛 ``SearchError(kind="blocked")``，
   诚实降级，绝不解析垃圾页面冒充结果；
@@ -93,6 +97,8 @@ def _http_json(req: urllib.request.Request, *, timeout: float, kind_map_auth: bo
             raise SearchError("auth", f"search auth failed ({status})") from exc
         if status == 429:
             raise SearchError("blocked", "search rate limited (429)") from exc
+        if status == 402:
+            raise SearchError("quota", "search balance exhausted (402)") from exc
         if 500 <= status < 600:
             raise SearchError("network", f"search server error ({status})") from exc
         if 300 <= status < 400:
@@ -335,14 +341,85 @@ class BingHtmlProvider:
         return out
 
 
+class DeepSeekSearchProvider:
+    """DeepSeek 官方 Search API（自研搜索引擎，原始 JSON 接口）。
+
+    官方文档（2026-10-31 核实，api-docs.deepseek.com/zh-cn/guides/search）：
+    - POST {base}/v1/tools/search，Bearer 鉴权（与对话模型共用 DEEPSEEK_API_KEY）；
+    - 请求：query（1-128 字，支持 site:/-/lang:/after:/before: 等语法）、
+      count（1-50）、need_content（要正文才计费有效载荷更大）；
+    - 响应 results[]：title/url/snippet（100-200 字展示用）/summary
+      （600-800 字给模型读）/rerank_score/authority/date；
+    - 计费按成功请求次数（结果非空才计费），搜索无结果返回空数组——
+      空结果是正常语义，返回 [] 不报错。
+
+    与 DSH 的 Anthropic 工具路线相比：按次计费（不烧模型回合）、结构化结果、
+    摘要直接可用——官方原始接口严格更优，故采用之。
+    """
+
+    DEFAULT_BASE_URL = "https://api.deepseek.com"
+
+    def __init__(self, *, api_key: str | None = None, base_url: str | None = None,
+                 timeout: float = 30.0, need_content: bool = False,
+                 env: Mapping[str, str] | None = None):
+        env = os.environ if env is None else env
+        # key 来源：WHALE_DEEPSEEK_SEARCH_API_KEY 优先（官方 api.deepseek.com
+        # 控制台签发的 key）；回落 DEEPSEEK_API_KEY（仅当它真的是官方 key 时
+        # 才可用——生产实证 2026-10-31：AgentScope relay key 在官方端点 401）。
+        self.api_key = api_key if api_key is not None else (
+            env.get("WHALE_DEEPSEEK_SEARCH_API_KEY")
+            or env.get("DEEPSEEK_API_KEY") or "")
+        self.base_url = (base_url or env.get("WHALE_DEEPSEEK_SEARCH_BASE_URL")
+                         or self.DEFAULT_BASE_URL).rstrip("/")
+        self.timeout = timeout
+        self.need_content = bool(need_content)
+
+    def search(self, query: str, *, limit: int = 5) -> list[SearchResult]:
+        if not self.api_key:
+            raise SearchError("config", "DEEPSEEK_API_KEY not configured")
+        q, n = _clamp(query, limit)
+        body = json.dumps({"query": q, "count": n,
+                           "need_content": self.need_content},
+                          ensure_ascii=False).encode()
+        req = urllib.request.Request(
+            self.base_url + "/v1/tools/search", data=body, method="POST",
+            headers={"Authorization": f"Bearer {self.api_key}",
+                     "Content-Type": "application/json",
+                     "Accept": "application/json",
+                     "User-Agent": USER_AGENT})
+        data = _http_json(req, timeout=self.timeout)
+        results = data.get("results") if isinstance(data, dict) else None
+        if not isinstance(results, list):
+            raise SearchError("bad_response", "deepseek response missing results")
+        out: list[SearchResult] = []
+        for item in results[:n]:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("url") or "")
+            if not url:
+                continue
+            # summary（600-800 字，官方标注「适用于给模型阅读」）优先于 snippet
+            snippet = str(item.get("summary") or item.get("snippet") or "")
+            out.append(SearchResult(
+                title=str(item.get("title") or "")[:300],
+                url=url[:2000],
+                snippet=snippet[:500],
+                source="deepseek",
+            ))
+        return out
+
+
 def select_provider(env: Mapping[str, str] | None = None) -> SearchProvider:
-    """显式 env 选择优先；否则按 key 存在性 tavily → brave → duckduckgo 回退。"""
+    """显式 env 选择优先；否则按 key 存在性 tavily → brave → deepseek →
+    duckduckgo 回退。"""
     env = os.environ if env is None else env
     explicit = (env.get("WHALE_SEARCH_PROVIDER") or "").strip().lower()
     if explicit == "tavily":
         return TavilyProvider(env=env)
     if explicit == "brave":
         return BraveProvider(env=env)
+    if explicit == "deepseek":
+        return DeepSeekSearchProvider(env=env)
     if explicit in ("duckduckgo", "ddg"):
         return DuckDuckGoHtmlProvider()
     if explicit == "bing":
@@ -351,6 +428,8 @@ def select_provider(env: Mapping[str, str] | None = None) -> SearchProvider:
         return TavilyProvider(env=env)
     if (env.get("BRAVE_API_KEY") or "").strip():
         return BraveProvider(env=env)
+    if (env.get("DEEPSEEK_API_KEY") or "").strip():
+        return DeepSeekSearchProvider(env=env)
     return DuckDuckGoHtmlProvider()
 
 

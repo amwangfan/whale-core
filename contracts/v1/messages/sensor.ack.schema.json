@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "messages/sensor.ack.schema.json",
+  "title": "sensor.ack",
+  "description": "事件上行确认（§6 幂等闭环）：服务端按 event_id 批量确认已收（含去重命中），端侧据此将队列 SENT→ACKED，停止重发。",
+  "type": "object",
+  "required": [
+    "v",
+    "id",
+    "type",
+    "ts",
+    "seq",
+    "dir",
+    "payload"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "v": {
+      "type": "string",
+      "pattern": "^1\\.[0-9]+$"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 64
+    },
+    "type": {
+      "const": "sensor.ack"
+    },
+    "ts": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4102444800000
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "dir": {
+      "const": "downlink"
+    },
+    "payload": {
+      "type": "object",
+      "required": [
+        "event_ids"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "event_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 200,
+          "items": {
+            "type": "string",
+            "minLength": 8,
+            "maxLength": 64
+          },
+          "description": "已接收（或去重命中）的 event_id 列表"
+        }
+      }
+    }
+  }
+}
