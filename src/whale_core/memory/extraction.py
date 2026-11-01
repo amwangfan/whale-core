@@ -144,6 +144,7 @@ class ExtractionStats:
     written: int = 0
     skipped_sensitive: int = 0
     skipped_duplicate: int = 0
+    skipped_paused: int = 0       # issue #38：空间暂停记录被跳过的候选数
     dropped_no_consent: int = 0   # consent 无效被丢弃的候选数
     record_keys: list = field(default_factory=list)
 
@@ -255,6 +256,12 @@ class MemberMemoryExtractor:
             if self.store.get(cand.idempotency_key) is not None:
                 stats.skipped_duplicate += 1
                 continue
+            # issue #38：空间级「停止继续记录」开关（管理面设置并审计）
+            from whale_core.memory.pause import is_recording_paused
+
+            if is_recording_paused(self.store, space_id):
+                stats.skipped_paused += 1
+                continue
             self._write_candidate(cand, space_id, current)
             stats.written += 1
             stats.record_keys.append(cand.record_key)
@@ -296,6 +303,7 @@ class MemberMemoryExtractor:
             total.written += stats.written
             total.skipped_sensitive += stats.skipped_sensitive
             total.skipped_duplicate += stats.skipped_duplicate
+            total.skipped_paused += stats.skipped_paused
             total.dropped_no_consent += stats.dropped_no_consent
             total.record_keys.extend(stats.record_keys)
         self.store.put(f"{BACKFILL_KEY_PREFIX}{principal_id}", {

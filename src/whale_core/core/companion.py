@@ -200,7 +200,14 @@ class WhaleCompanion:
                 target = default_write_space(spaces)
             else:
                 target = ""  # 纯 id 快照无法判定可写类型 → 不写
-            if spaces is None or target:
+            # issue #38：空间级「停止继续记录」开关（管理面设置并审计）；
+            # 目标空间被暂停时整段情节沉淀跳过（不写、不报错）。
+            paused = False
+            if target:
+                from whale_core.memory.pause import is_recording_paused
+
+                paused = is_recording_paused(self.store, target)
+            if (spaces is None or target) and not paused:
                 ep_key = (f"ep:chat:{conversation_id}:{turn_key}" if turn_key
                           else f"ep:chat:{uuid4().hex}")
                 remember_episode(self.store, summary=f"用户：{original[:500]}\n鲸鱼：{response[:500]}",

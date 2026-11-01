@@ -2507,3 +2507,111 @@ code,
   overflow: auto;
   font-size: 12.5px;
 }
+
+/* ---------- 记忆管理（主体优先视图） ---------- */
+.memory-subjects {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+  margin: 12px 0 16px;
+}
+.subject-group {
+  border: 1px solid #e3e8ee;
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #fff;
+}
+.subject-group h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+.subject-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.subject-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.subject-pick {
+  flex: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  text-align: left;
+  border: 1px solid #e3e8ee;
+  background: #f7f9fb;
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+.subject-pick:hover {
+  border-color: #7aa2ff;
+}
+.subject-pick.active {
+  border-color: #3b6ee0;
+  background: #eef3ff;
+}
+.subject-name {
+  font-weight: 600;
+}
+.memory-browse {
+  margin-top: 4px;
+}
+.memory-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0;
+}
+.memory-toolbar input,
+.memory-toolbar select {
+  padding: 6px 10px;
+  border: 1px solid #d7dce2;
+  border-radius: 8px;
+  font-size: 13px;
+  background: #fff;
+}
+.memory-toolbar input {
+  flex: 1;
+  min-width: 160px;
+}
+.record-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.record-summary {
+  margin: 2px 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.list-item.superseded {
+  opacity: 0.6;
+}
+.memory-pager {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+.memory-advanced {
+  margin-top: 22px;
+  border-top: 1px dashed #dfe5ec;
+  padding-top: 10px;
+}
+.memory-advanced summary {
+  cursor: pointer;
+  color: #556;
+}
+.memory-advanced .searchbar {
+  margin-top: 10px;
+}

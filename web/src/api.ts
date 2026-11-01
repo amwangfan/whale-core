@@ -107,6 +107,70 @@ export interface WhaleEvent {
   detail: string;
 }
 
+// ---- Trace 账本（issue #39）：诊断视图 /traces + 用户视图 /activity ----
+
+/** /traces 列表行（不含 spans）。 */
+export interface TraceItem {
+  trace_id: string;
+  kind: string;
+  conversation_id: string;
+  principal_id: string;
+  message_id: string;
+  task_id: string;
+  action_id: string;
+  receipt_id: string;
+  /** epoch 秒 */
+  started_at: number;
+  ended_at: number;
+  /** open / replied / silent / failed / partial */
+  status: string;
+  summary: string;
+}
+
+export interface TraceSpan {
+  span_id: string;
+  phase: string;
+  status: string;
+  reason_code: string;
+  detail: string;
+  started_at: number;
+  duration_ms: number;
+  attempt: number;
+}
+
+/** /traces/{id} 完整记录（含 spans）。 */
+export interface TraceDetail extends TraceItem {
+  spans: TraceSpan[];
+}
+
+export interface TracesListResult {
+  total: number;
+  offset: number;
+  limit: number;
+  traces: TraceItem[];
+}
+
+/** /activity 用户可读条目：自然语言解释行。 */
+export interface ActivityItem {
+  trace_id: string;
+  /** epoch 秒 */
+  at: number;
+  status: string;
+  lines: string[];
+}
+
+export interface TracesQuery {
+  kind?: string;
+  conversation_id?: string;
+  principal_id?: string;
+  status?: string;
+  /** epoch 秒 */
+  since?: number;
+  until?: number;
+  limit?: number;
+  offset?: number;
+}
+
 export interface BudgetLimits {
   model_calls: number;
   media_jobs: number;
@@ -518,6 +582,35 @@ export const api = {
       `/approvals/${encodeURIComponent(draftId)}/decision`,
       { method: "POST", body: JSON.stringify({ decision }) },
     ),
+
+  // ---- Trace 账本（诊断视图走 console API token，放 api 组） ----
+
+  tracesList: (params: TracesQuery = {}) => {
+    const qs = new URLSearchParams();
+    if (params.kind) qs.set("kind", params.kind);
+    if (params.conversation_id)
+      qs.set("conversation_id", params.conversation_id);
+    if (params.principal_id) qs.set("principal_id", params.principal_id);
+    if (params.status) qs.set("status", params.status);
+    if (params.since) qs.set("since", String(params.since));
+    if (params.until) qs.set("until", String(params.until));
+    if (params.limit !== undefined) qs.set("limit", String(params.limit));
+    if (params.offset !== undefined) qs.set("offset", String(params.offset));
+    const suffix = qs.toString();
+    return request<TracesListResult>(`/traces${suffix ? `?${suffix}` : ""}`);
+  },
+
+  tracesDetail: async (traceId: string) =>
+    (
+      await request<{ trace: TraceDetail }>(
+        `/traces/${encodeURIComponent(traceId)}`,
+      )
+    ).trace,
+
+  activityList: (limit = 30, offset = 0) =>
+    request<{ total: number; items: ActivityItem[] }>(
+      `/activity?limit=${limit}&offset=${offset}`,
+    ),
 };
 
 // ---------- Whale Studio（S6：关系画布；所有授权判断都在服务端） ----------
@@ -791,6 +884,80 @@ export interface StudioForkInput {
   confirmed?: boolean;
 }
 
+/** 记忆管理面「主体总览」中的空间条目（GET /studio/memory/subjects）。 */
+export interface MemorySpaceSubject {
+  space_id: string;
+  space_type: string;
+  name: string;
+  paused: boolean;
+  scope_note: string;
+  record_count: number;
+}
+
+/** 群友主体：principal → 其私有空间。 */
+export interface MemoryMemberSubject {
+  principal_id: string;
+  space_id: string;
+  record_count: number;
+  opted_out: boolean;
+  consent_active: boolean;
+  paused: boolean;
+  scope_note: string;
+}
+
+export interface MemorySubjects {
+  owner: { spaces: MemorySpaceSubject[]; vault_present: boolean };
+  members: MemoryMemberSubject[];
+  groups: MemorySpaceSubject[];
+  forks: MemorySpaceSubject[];
+  legacy_unscoped_records: number;
+}
+
+/** GET /studio/memory/browse 的记录行；metadata_only 时无 summary。 */
+export interface MemoryBrowseItem {
+  key: string;
+  kind: string;
+  space_id: string;
+  space_type: string;
+  scope_note: string;
+  created_at: string;
+  superseded: boolean;
+  confidence: number;
+  source: string;
+  source_group: string;
+  expires_at?: string | null;
+  last_confirmed?: string | null;
+  summary?: string;
+  source_message_ids?: string[];
+  tags?: string[];
+  restricted?: boolean;
+}
+
+export interface MemoryBrowseResult {
+  space_ids: string[];
+  metadata_only: boolean;
+  total: number;
+  offset: number;
+  limit: number;
+  items: MemoryBrowseItem[];
+}
+
+/** browse 查询参数：选择器三选一（space_id / principal_id / conversation_key）。 */
+export interface MemoryBrowseParams {
+  space_id?: string;
+  principal_id?: string;
+  conversation_key?: string;
+  /** 逗号分隔：episode / preference / persona_continuity。 */
+  kind?: string;
+  source?: string;
+  q?: string;
+  since?: string;
+  until?: string;
+  limit?: number;
+  offset?: number;
+  include_superseded?: boolean;
+}
+
 const studioConv = (key: string) =>
   `/studio/conversations/${encodeURIComponent(key)}`;
 
@@ -912,6 +1079,58 @@ export const studioApi = {
     request<StudioForkResult>("/studio/forks", {
       method: "POST",
       body: JSON.stringify({ ...input, confirmed: input.confirmed ?? true }),
+    }),
+
+  // ---- 记忆管理面（主体优先）：subjects 总览 + browse 浏览 + 治理操作 ----
+
+  memorySubjects: () =>
+    request<MemorySubjects>("/studio/memory/subjects"),
+
+  memoryBrowse: (params: MemoryBrowseParams) => {
+    const qs = new URLSearchParams();
+    if (params.space_id) qs.set("space_id", params.space_id);
+    else if (params.principal_id) qs.set("principal_id", params.principal_id);
+    else if (params.conversation_key)
+      qs.set("conversation_key", params.conversation_key);
+    if (params.kind) qs.set("kind", params.kind);
+    if (params.source) qs.set("source", params.source);
+    if (params.q) qs.set("q", params.q);
+    if (params.since) qs.set("since", params.since);
+    if (params.until) qs.set("until", params.until);
+    if (params.limit !== undefined) qs.set("limit", String(params.limit));
+    if (params.offset !== undefined) qs.set("offset", String(params.offset));
+    if (params.include_superseded) qs.set("include_superseded", "1");
+    const suffix = qs.toString();
+    return request<MemoryBrowseResult>(
+      `/studio/memory/browse${suffix ? `?${suffix}` : ""}`,
+    );
+  },
+
+  memoryCorrect: (key: string, newSummary: string) =>
+    request<{ corrected: boolean; old_key: string; new_key: string }>(
+      "/studio/memory/correct",
+      {
+        method: "POST",
+        body: JSON.stringify({ key, new_summary: newSummary }),
+      },
+    ),
+
+  memoryExpire: (key: string) =>
+    request<{ expired: boolean; key: string }>("/studio/memory/expire", {
+      method: "POST",
+      body: JSON.stringify({ key }),
+    }),
+
+  memoryDelete: (key: string) =>
+    request<{ deleted: boolean; key: string }>("/studio/memory/delete", {
+      method: "POST",
+      body: JSON.stringify({ key }),
+    }),
+
+  memoryPause: (spaceId: string, paused: boolean) =>
+    request<{ space_id: string; paused: boolean }>("/studio/memory/pause", {
+      method: "POST",
+      body: JSON.stringify({ space_id: spaceId, paused }),
     }),
 
   createCode: (input: StudioCodeCreateInput) =>
