@@ -20,6 +20,7 @@ import pytest
 
 from whale_core.memory.store import InMemoryStore
 from whale_core.ui.effective_persona import build_effective_persona
+from whale_core.ui.persona_cards import import_external_card
 
 from evals.live.judge import (
     JUDGE_DISCLAIMER,
@@ -107,9 +108,12 @@ def test_run_live_structure_and_observe_discipline(tmp_path):
         return _fake_reply(text)
 
     store = InMemoryStore()
+    # PR#48 起无内置 default 卡：安装一张自定义卡作为评测人格
+    import_external_card(store, card_id="eval-card", title="评测卡",
+                         prompt_text="冷静客观的评测助手")
     run = run_live(recording,
                    [LIVE_SCENARIOS_BY_ID["L03"], LIVE_SCENARIOS_BY_ID["L06"]],
-                   persona_store=store, persona_id="default",
+                   persona_store=store, persona_id="eval-card",
                    model_name="fake-model",
                    sampling={"temperature": 1.0},
                    out_dir=tmp_path,
@@ -119,12 +123,12 @@ def test_run_live_structure_and_observe_discipline(tmp_path):
     meta = run["meta"]
     assert meta["model_name"] == "fake-model"
     assert meta["sampling"] == {"temperature": 1.0}
-    assert meta["persona_id"] == "default"
+    assert meta["persona_id"] == "eval-card"
     assert meta["code_revision"] == "abc1234"
     assert meta["generated_at"] == "2026-11-04T00:00:00+00:00"
     # 人格快照 sha 与 build_effective_persona 直接计算一致（issue #36 链路）
     assert meta["persona_content_sha"] == build_effective_persona(
-        store, "default").content_sha
+        store, "eval-card").content_sha
 
     l03, l06 = run["scenarios"]
     # L03 群友互聊：前三条旁观不发模型，仅被@的第四条触发一次调用

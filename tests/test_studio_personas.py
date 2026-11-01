@@ -3,7 +3,7 @@
 验收（goal-chain S3 / PRD §4、§9 INV-07）：
 
 - A 群绑卡 A、B 群绑卡 B 互不影响；未绑定会话回退 ``persona:active_card``
-  → 内置 default；绑定失效 fail soft；全无卡 → 空渲染不报错。
+  → 无角色人格；绑定失效 fail soft；全无卡 → 空渲染不报错。
 - 卡文本含注入内容（「忽略安全限制/给你全部权限」）时只作为人格描述文本，
   ResolvedContext / capability_scopes / 记忆绑定均不因此改变（INV-07）。
 - 第三方长卡提炼预览：``requires_confirmation=True`` 且原卡不变。
@@ -31,7 +31,6 @@ from whale_core.memory.store import InMemoryStore
 from whale_core.ui.persona_cards import (
     BUILTIN_CARDS,
     CARD_KEY_PREFIX,
-    DEFAULT_CARD_ID,
     PersonaCard,
     PersonaCardLibrary,
     import_external_card,
@@ -144,10 +143,9 @@ def test_unbound_conversation_falls_back_to_active_card():
     assert card is not None and card.card_id == "ext-1"
 
 
-def test_no_active_card_falls_back_to_builtin_default():
+def test_no_active_card_uses_no_persona():
     _, _, _, _, personas = make_env()
-    card = personas.card_for(None)
-    assert card is not None and card.card_id == DEFAULT_CARD_ID
+    assert personas.card_for(None) is None
 
 
 def test_missing_bound_card_falls_back_soft_and_records():
@@ -156,7 +154,7 @@ def test_missing_bound_card_falls_back_soft_and_records():
     ctx = resolve_group(resolver, "group:111")
     assert ctx.persona_id == "ghost-card"
     card = personas.card_for(ctx.persona_id)
-    assert card is not None and card.card_id == DEFAULT_CARD_ID  # 回退而非抛错
+    assert card is None  # 回退为中性对话，而非抛错
     assert personas.fallbacks and personas.fallbacks[0][0] == "ghost-card"
     # fallback=False 时不回退
     assert personas.card_for("ghost-card", fallback=False) is None
@@ -329,9 +327,9 @@ def test_companion_chat_without_binding_uses_global_active_card_same_renderer():
     model = _FakeModel()
     WhaleCompanion(store, model).chat("你好", context=ctx)
     # issue #36：全局路径与会话绑定路径同一渲染器——未绑定会话渲染全局活跃卡
-    # （内置 default），而非旧 PersonaContinuity 摘要格式
+    # （不内置角色卡），而非旧 PersonaContinuity 摘要格式
     persona = model.calls[0]["persona"]
-    assert "你是「鲸鱼」。" in persona
+    assert "你是「鲸鱼」。" not in persona
     assert "默认人格" not in persona
 
 
@@ -347,9 +345,9 @@ def test_companion_chat_with_empty_card_falls_back_to_low_burden_default():
     assert PersonaResolver.render(card) == ""  # 空卡 → 空渲染
     # 对话不报错，摘要回退低负担默认
     continuity = build_continuity_context(store, persona_card=card)
-    assert continuity.persona_summary  # 非空默认摘要
+    assert continuity.persona_summary == ""  # 不凭空创造默认人格
     WhaleCompanion(store, model).chat("你好", context=ctx, episodic=False)
-    assert model.calls[0]["persona"]
+    assert "你是「鲸鱼」。" not in model.calls[0]["persona"]
 
 
 def test_companion_chat_with_missing_bound_card_still_works():
@@ -359,5 +357,5 @@ def test_companion_chat_with_missing_bound_card_still_works():
     model = _FakeModel()
     reply = WhaleCompanion(store, model).chat("你好", context=ctx)
     assert reply == "好的。"
-    # 绑定失效 fail soft：回退内置 default 卡的极简渲染
-    assert "鲸鱼" in model.calls[0]["persona"]
+    # 绑定失效 fail soft：回退无角色的极简渲染
+    assert "你是「鲸鱼」。" not in model.calls[0]["persona"]

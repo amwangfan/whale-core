@@ -1078,7 +1078,18 @@ def cmd_run(args) -> int:
         return ProactiveOutbox._is_quiet(
             _dt.now(ZoneInfo(prefs.tz)).time(), prefs)
 
-    group_turn_policy = GroupTurnPolicy(store, quiet_now=_quiet_now)
+    # 从显式选择的角色卡/宿主配置取得称呼，不在核心硬编码角色名。
+    from whale_core.ui.persona_cards import active_card
+    selected_card = active_card(store)
+    bot_aliases = tuple(dict.fromkeys(
+        n.strip() for n in (
+            (selected_card.name if selected_card else ""),
+            *os.environ.get("WHALE_BOT_NAMES", "").split(","),
+        ) if n.strip()
+    ))
+    group_turn_policy = GroupTurnPolicy(
+        store, bot_names=bot_aliases, quiet_now=_quiet_now,
+    )
 
     _member_extractor = MemberMemoryExtractor(
         store, timeline, MemberConsentStore(store), _bindings, _spaces)

@@ -86,7 +86,7 @@ class EffectivePersonaSnapshot:
 
     persona_id: str
     card_title: str
-    source: str                       # conversation_bound | global_active | builtin_default
+    source: str                       # conversation_bound | global_active | none
     model_context: str                # 注入模型请求的确切文本（人格部分）
     voice: dict = field(default_factory=dict)   # TTS 专用：timbre_hint / speaking_rate
     dispositions: tuple = ()          # tuple[FieldDisposition, ...]
@@ -225,47 +225,15 @@ def _clip_list(items: Sequence[str]) -> "list[str]":
 
 
 def _resolve_global(store: "MemoryStore", res: "PersonaResolver"):
-    """全局解析：kv/env 活跃卡 > 旧版 PersonaContinuity 快照 > 内置 default。
+    """Only an explicitly selected card may shape personality.
 
-    兼容说明：旧部署的 ``persona:default`` 快照（由旧版 switch_card 或手工
-    写入）在没有活跃卡时仍生效——映射为临时卡走同一渲染器（name/tone/
-    address_user_as/taboos/style_rules；快照里的 preamble 不再拼接，因为
-    正常迁移路径下活跃卡总是与快照并存，legacy 级只覆盖手写快照场景）。
+    A legacy persona:default continuity snapshot is not treated as an active
+    character: otherwise removing bundled cards would silently resurrect them.
     """
-    import os
-    from whale_core.ui.persona_cards import (
-        ACTIVE_CARD_KEY,
-        DEFAULT_CARD_ID,
-        ENV_CARD_VAR,
-        PersonaCard,
-        _load_stored_card,
-    )
+    from whale_core.ui.persona_cards import active_card
 
-    data = store.get(ACTIVE_CARD_KEY) or {}
-    active_id = str(data.get("card_id") or "").strip() or (
-        os.environ.get(ENV_CARD_VAR) or "").strip()
-    if active_id:
-        card = res.library.get(active_id) or _load_stored_card(store, active_id)
-        if card is not None:
-            return card, "global_active", ""
-    legacy = None
-    try:
-        legacy = store.get_persona_continuity()
-    except Exception:  # 快照损坏不阻塞
-        legacy = None
-    if legacy is not None:
-        traits = legacy.traits if isinstance(legacy.traits, dict) else {}
-        card = PersonaCard(
-            card_id="__legacy__",
-            title="旧版全局人格快照",
-            name=str(legacy.persona_name or "鲸鱼"),
-            tone=str(legacy.tone or ""),
-            address_user_as=str(legacy.address_user_as or "你"),
-            extra_taboos=tuple(legacy.taboos or ()),
-            style_rules=tuple(traits.get("style_rules") or ()),
-        )
-        return card, "global_legacy", ""
-    return res.library.require(DEFAULT_CARD_ID), "builtin_default", ""
+    card = active_card(store, library=res.library)
+    return (card, "global_active", "") if card is not None else (None, "none", "")
 
 
 def build_effective_persona(
@@ -278,7 +246,7 @@ def build_effective_persona(
     """构建不可变的有效人格快照。
 
     解析优先级（与 ``PersonaResolver.card_for`` 语义一致）：
-    会话绑定卡 > kv ``persona:active_card``（含 env）> 内置 default。
+    会话绑定卡 > kv ``persona:active_card``（含 env）> 无角色配置。
     ``card`` 显式传入时直接使用（调用方已完成解析），source 标记为
     conversation_bound。任何渲染异常都不抛出——返回空 model_context 的快照，
     由调用方回退低负担默认。
@@ -304,6 +272,15 @@ def build_effective_persona(
         host_taboos = get_custom_taboos(store)
     except Exception:  # 宿主禁忌读取失败不阻塞渲染
         host_taboos = ()
+    if card is None:
+        # Host-authored expression preferences may still apply without a card.
+        taboos = [str(t).strip()[:300] for t in host_taboos if str(t).strip()]
+        text = ("表达偏好：\n" + "\n".join(f"- {t}" for t in taboos)) if taboos else ""
+        return EffectivePersonaSnapshot(
+            persona_id="", card_title="", source="none", model_context=text,
+            content_sha=hashlib.sha256(text.encode("utf-8")).hexdigest()[:12],
+            fallback_reason=fallback_reason,
+        )
     text, dispositions = render_model_context(card, host_taboos=host_taboos)
     return EffectivePersonaSnapshot(
         persona_id=card.card_id,

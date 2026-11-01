@@ -149,13 +149,14 @@ class TestBuildEffectivePersona:
     def test_builtin_default(self):
         store = InMemoryStore()
         snap = build_effective_persona(store, None)
-        assert snap.source == "builtin_default"
-        assert "鲸鱼" in snap.model_context
+        assert snap.source == "none"
+        assert snap.model_context == ""
+        assert snap.persona_id == ""
 
     def test_missing_bound_card_falls_back_with_reason(self):
         store = InMemoryStore()
         snap = build_effective_persona(store, "ghost")
-        assert snap.source in ("global_active", "builtin_default")
+        assert snap.source in ("global_active", "none")
         assert "ghost" in snap.fallback_reason
 
     def test_switch_card_snapshot_matches_effective_render(self):
@@ -180,10 +181,7 @@ class TestBuildEffectivePersona:
     def test_builtin_card_renders(self):
         store = InMemoryStore()
         lib = PersonaCardLibrary()
-        for bid in lib.ids():
-            card = lib.require(bid)
-            text, _ = render_model_context(card)
-            assert "你是「" in text  # 每张内置卡都有可渲染人格
+        assert lib.ids() == []  # 不内置任何人物卡
 
 
 class TestEffectiveApi:
@@ -227,7 +225,7 @@ class TestEffectiveApi:
             status, body = self._get(
                 server, "/api/v1/studio/personas/active/effective")
             assert status == 200
-            assert body["result"]["effective"]["source"] == "builtin_default"
+            assert body["result"]["effective"]["source"] == "none"
 
     def test_unknown_card_404(self):
         with self._server() as (server, store):

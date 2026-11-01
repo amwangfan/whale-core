@@ -46,7 +46,7 @@ class ContinuityContext:
 
 def _summarize_persona(persona: PersonaContinuity | None) -> str:
     if persona is None:
-        return "默认人格：鲸鱼（未写入连续性快照）"
+        return ""
     taboos = "、".join(persona.taboos) if persona.taboos else "无"
     summary = (
         f"{persona.persona_name}｜语气：{persona.tone}｜"
@@ -104,7 +104,10 @@ def build_continuity_context(
 
         logging.getLogger(__name__).exception(
             "effective persona build failed; falling back to legacy summary")
-    if not summary:
+    # Preserve manually-authored legacy snapshots, but never resurrect a
+    # previously selected card when its active binding has been cleared.
+    legacy_traits = persona.traits if persona and isinstance(persona.traits, Mapping) else {}
+    if not summary and persona is not None and not legacy_traits.get("card_id"):
         summary = _summarize_persona(persona)
     if allowed_space_ids is not None and not allowed_space_ids:
         episodes: tuple[MemoryRecord, ...] = ()

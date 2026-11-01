@@ -20,7 +20,7 @@ T0 = datetime(2026, 11, 1, 12, 0, tzinfo=timezone.utc)
 
 
 def _policy(store, *, quiet=False, now=T0):
-    return GroupTurnPolicy(store, now_fn=lambda: now,
+    return GroupTurnPolicy(store, bot_names=("鲸鱼",), now_fn=lambda: now,
                            quiet_now=lambda: False if not quiet else True)
 
 
@@ -75,7 +75,7 @@ def test_cooldown_and_daily_budget():
     now = T0 + timedelta(minutes=25)
     joins = 0
     for i in range(10):
-        p2 = GroupTurnPolicy(store, now_fn=lambda: now,
+        p2 = GroupTurnPolicy(store, bot_names=("鲸鱼",), now_fn=lambda: now,
                              quiet_now=lambda: False)
         d = p2.maybe_join(conversation=GROUP, text=named, activity="balanced")
         now += timedelta(minutes=25)
@@ -128,3 +128,17 @@ def test_unknown_activity_falls_back_to_balanced():
     p = _policy(store)
     d = p.maybe_join(conversation=GROUP, text="鲸鱼看下", activity="bogus")
     assert d.action == "join"  # 按 balanced 判定（fail 到中间档）
+
+
+
+def test_no_bundled_aliases_and_no_empty_regex_match():
+    store = InMemoryStore()
+    policy = GroupTurnPolicy(store, now_fn=lambda: T0)
+    assert policy.maybe_join(
+        conversation=GROUP, text="鲸鱼帮我看下？", activity="balanced"
+    ).reason_code == "not_directed"
+    assert GroupTurnPolicy(InMemoryStore(), bot_names=("阿澜",),
+                           now_fn=lambda: T0).maybe_join(
+        conversation=GROUP, text="阿澜帮我看下？",
+        activity="balanced"
+    ).action == "join"

@@ -39,7 +39,6 @@ DAILY_QUOTA = {"quiet": 3, "balanced": 6, "lively": 12}
 COOLDOWN_MIN = {"quiet": 60, "balanced": 20, "lively": 8}
 
 #: 明确指向鲸鱼的文本信号（配合元数据 @；这里是「没 @ 但直呼其名提问」）。
-_NAME_RE = re.compile(r"鲸鱼|小鲸|大肥鱼")
 
 #: 提问/求助信号（lively 档的参与依据之一）。
 _QUESTION_RE = re.compile(
@@ -74,8 +73,10 @@ class GroupTurnPolicy:
                  now_fn: Optional[Callable[[], datetime]] = None,
                  quiet_now: Optional[Callable[[], bool]] = None):
         self.store = store
-        self._names = tuple(n for n in ("鲸鱼", "小鲸", "大肥鱼", *bot_names) if n)
-        self._name_re = re.compile("|".join(re.escape(n) for n in self._names))
+        # Host supplies explicit bot aliases; core ships no character names.
+        self._names = tuple(n for n in bot_names if n)
+        self._name_re = (re.compile("|".join(re.escape(n) for n in self._names))
+                         if self._names else None)
         self._now = now_fn or (lambda: datetime.now(timezone.utc))
         # 时间静默判定由宿主注入（ProactiveOutbox._is_quiet + prefs）；
         # 缺省 = 永不静默。
@@ -102,7 +103,7 @@ class GroupTurnPolicy:
             return self._record(group, JoinDecision("observe", REASON_QUIET_HOURS))
 
         text = str(text or "")
-        named = bool(self._name_re.search(text))
+        named = bool(self._name_re.search(text)) if self._name_re else False
         question = bool(_QUESTION_RE.search(text))
 
         if activity == "quiet":
