@@ -96,7 +96,10 @@ def _approvals_locked(handler, method: str, parts: list[str]) -> None:
             if not isinstance(draft, dict):
                 continue
             status = ledger.get("status", "draft")
-            if ledger.get("attempts", 0) > 0 or status in ("accepted", "unknown"):
+            # closed/superseded = 永不派发/已被分段取代的终态（2026-11-01
+            # 审批积压治理：沉默轮、多气泡主草稿、直发已送达不再占位）
+            if ledger.get("attempts", 0) > 0 or status in (
+                    "accepted", "unknown", "closed", "superseded"):
                 continue
             pending.append({
                 "kind": "draft",

@@ -348,6 +348,23 @@ class ProactiveOutbox:
                         "attempts": 1, "at": now.isoformat()})
         return DispatchVerdict(status, "sent to channel" if accepted else "uncertain; manual review", draft_id)
 
+    def close(self, draft_id: str, *, status: str = "closed",
+              reason: str = "") -> bool:
+        """终态关闭一个永不派发/已被取代的草稿（2026-11-01 审批积压治理）。
+
+        适用：沉默轮（[[沉默]] 规划不发送）、多气泡主草稿（实际派发由 #i 分段
+        草稿承担）、直发路径已送达的回复草稿（ stranger/群直发不过网关，台账
+        需要人工补终态）。控制台审批列表排除 closed/superseded/accepted/unknown。
+        """
+        if status not in ("closed", "superseded", "accepted"):
+            raise ValueError("close status must be closed|superseded|accepted")
+        if self.get(draft_id) is None:
+            return False
+        self.store.put(f"life:ledger:{draft_id}",
+                       {"status": status, "reason": reason,
+                        "attempts": 0, "at": self._now().isoformat()})
+        return True
+
     def feedback(self, draft_id: str, feedback: str) -> None:
         if feedback not in {"useful", "irrelevant", "dismissed", "not_now"}:
             raise ValueError("unsupported feedback")

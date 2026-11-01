@@ -590,6 +590,7 @@ def cmd_run(args) -> int:
             rhythm=rhythm)
         if _plan.silent:
             print("  [规划] 补发内容被规划为沉默，不发送")
+            workflow.outbox.close(draft_id, reason="silent_planned")
             return
         _sent_segs = 0
         for i, seg in enumerate(segments):
@@ -625,6 +626,11 @@ def cmd_run(args) -> int:
                                 is_self=True)
             except Exception:
                 pass
+        # 2026-11-01 审批积压治理：多段补发主草稿由 #i 分段取代，标 superseded
+        if len(segments) > 1:
+            workflow.outbox.close(
+                draft_id, status="superseded",
+                reason=f"由 {len(segments)} 个分段草稿派发（已送达 {_sent_segs} 段）")
     registry = OwnerChannelRegistry(owner_id="owner", bindings=bindings)
 
     # QQ/WeQ is registered as a channel plugin. The input adapter is consumed here
@@ -950,6 +956,8 @@ def cmd_run(args) -> int:
                 rhythm=rhythm)
             if _plan.silent:
                 print("  [规划] 本轮规划为沉默，不发送")
+                # 2026-11-01 审批积压治理：沉默轮的草稿终态关闭，不占审批列表
+                workflow.outbox.close(result["draft_id"], reason="silent_planned")
                 _tspan(_tid, "plan", "skipped", reason_code="silent_planned")
                 _tfin(_tid, "silent")
                 return
@@ -998,6 +1006,13 @@ def cmd_run(args) -> int:
             # issue #39：收尾——全段送达 replied；部分送达 partial
             _tfin(_tid, "replied" if _sent_segs == len(segments) else "partial",
                   summary=f"{_sent_segs}/{len(segments)} 段已发送")
+            # 2026-11-01 审批积压治理：多气泡主草稿已被 #i 分段取代（分段台账
+            # 各自 accepted），主草稿标 superseded 终态，不占审批列表。
+            if len(segments) > 1:
+                workflow.outbox.close(
+                    result["draft_id"], status="superseded",
+                    reason=f"由 {len(segments)} 个分段草稿派发（已送达 "
+                           f"{_sent_segs} 段）")
             # G1 补全（2026-11-01 生产实证：模型看不到自己回过什么，重复接旧话茬）：
             # 网关路径的群回复也回写时间线（is_self），记录**实际发出的净文本**
             # （分段内容，非带规划标记的原始回复）。
@@ -1115,6 +1130,8 @@ def cmd_run(args) -> int:
                                          rhythm=rhythm)
         if _plan.silent:
             print("  [规划] 本轮规划为沉默，不发送")
+            if result.get("draft_id"):
+                workflow.outbox.close(result["draft_id"], reason="silent_planned")
             _tspan(_tid, "plan", "skipped", reason_code="silent_planned")
             _tfin(_tid, "silent")
             return
@@ -1155,6 +1172,12 @@ def cmd_run(args) -> int:
               "failed" if _send_failed and _sent_segs == 0
               else ("replied" if _sent_segs == len(segments) else "partial"),
               summary=f"{_sent_segs}/{len(segments)} 段已发送")
+        # 2026-11-01 审批积压治理：直发路径不过网关/台账，回复草稿的
+        # 「draft」状态会永远悬在审批列表——发送成功后补终态。
+        if _sent_segs and result.get("draft_id"):
+            workflow.outbox.close(
+                result["draft_id"], status="accepted",
+                reason=f"直发路径已送达 {_sent_segs}/{len(segments)} 段")
         if is_group and _sent_segs:
             # G1：自己的发言也进时间线（is_self），模型上下文才完整。
             # 记实际发出的净文本（分段拼接），不记带 ◆ 规划标记的原始回复——
