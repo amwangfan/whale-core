@@ -503,6 +503,36 @@ def cmd_run(args) -> int:
     # 不在发送前重读 current_epoch 把中途新消息吞进基线。
     turn_epoch_by_msg: dict[str, int] = {}
 
+    # 两段式补发的顺序门闩（2026-11-02 生产实证：TTS 只花 8s，补发抢在
+    # ack 前面发出去——ack 当时还在等开窗）。补发等主流程（ack 发送侧）
+    # 收尾后再发；超时放行（宁可乱序也不丢补发）。
+    import threading as _threading
+    _turns_inflight: set[str] = set()
+    _turns_cv = _threading.Condition()
+
+    def _turn_begin(mid: str) -> None:
+        if mid:
+            with _turns_cv:
+                _turns_inflight.add(mid)
+
+    def _turn_end(mid: str) -> None:
+        if not mid:
+            return
+        with _turns_cv:
+            _turns_inflight.discard(mid)
+            _turns_cv.notify_all()
+
+    def _await_turn(mid: str, timeout: float = 90.0) -> None:
+        if not mid:
+            return
+        deadline = time.monotonic() + timeout
+        with _turns_cv:
+            while mid in _turns_inflight:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                _turns_cv.wait(remaining)
+
     def _note_turn_epoch(message_id: str, epoch: int) -> None:
         if not message_id or not epoch:
             return
@@ -515,6 +545,8 @@ def cmd_run(args) -> int:
         """两段式补发：草稿+审批+网关发送（与主回复同一条发送链）。"""
         if not live_auto:
             return
+        # 顺序门闩：主流程（ack）还在开窗/发送时等它收尾，补发不抢跑
+        _await_turn(str(getattr(event, "message_id", "") or ""))
         conv = str(getattr(event, "conversation", "") or "")
         peer_type = "group" if conv.startswith("group:") else "c2c"
         target = conv.split(":", 1)[1] if ":" in conv else ""
@@ -828,10 +860,15 @@ def cmd_run(args) -> int:
                             attachments=tuple(merged_attach))
         if batch.message_ids and len(batch.message_ids) > 1:
             print(f"  [合批] {len(batch.message_ids)} 条合并为一回合 ← {batch.sender_id}")
-        if isinstance(last, OwnerEvent):
-            _dispatch_owner(event, epoch=batch.epoch)
-        else:
-            _dispatch_unpaired(event, epoch=batch.epoch)
+        # 补发顺序门闩：主流程在途期间，两段式补发等待（见 _await_turn）
+        _turn_begin(str(getattr(event, "message_id", "") or ""))
+        try:
+            if isinstance(last, OwnerEvent):
+                _dispatch_owner(event, epoch=batch.epoch)
+            else:
+                _dispatch_unpaired(event, epoch=batch.epoch)
+        finally:
+            _turn_end(str(getattr(event, "message_id", "") or ""))
         _pump_followups()
 
     def _batch_error(key, exc):
