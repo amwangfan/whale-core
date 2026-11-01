@@ -423,3 +423,26 @@ def test_stranger_and_group_never_recall_vault():
         conversation_id="group:9", text="芒果？",
         channel="qq", sender_id="10001", source="qq:owner"))
     assert not any("芒果" in m for m in brain.calls[-1]["memories"])
+
+
+def test_stranger_daily_limit_overridable():
+    """宿主可上调/下调陌生人日额度（构造参数覆盖类缺省）。"""
+    from datetime import datetime, timezone
+    store, spaces, bindings, auth, resolver, brain, orch = _world()
+    wf = QqInboundWorkflow(store, Brain(), orchestrator=orch, auth_service=auth,
+                           prefs=_prefs_no_quiet(), stranger_daily_limit=2)
+
+    class In:
+        channel = "qq"
+        account = "u_cap"
+        conversation = "private:u_cap"
+        text = "hi"
+
+    assert "skipped" not in wf.handle_stranger_event(In())
+    assert "skipped" not in wf.handle_stranger_event(In())
+    assert wf.handle_stranger_event(In()).get("skipped") == "stranger_budget"
+    # 非法值拒绝
+    import pytest as _pt
+    with _pt.raises(ValueError):
+        QqInboundWorkflow(store, Brain(), orchestrator=orch,
+                          stranger_daily_limit=0)

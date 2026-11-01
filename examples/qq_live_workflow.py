@@ -366,9 +366,12 @@ def cmd_run(args) -> int:
             print(f"[完整模式] 按需窗口 idle={send_port.idle_min:g}min")
 
     inbox = build_inbox(args.inbox)
+    # 陌生人/成员被动回复日额度可用 env 覆盖（默认 20；测试期可调大）
+    _stranger_limit = int(os.environ.get("WHALE_QQ_STRANGER_DAILY_LIMIT", "20"))
     workflow = QqInboundWorkflow(store, build_brain(), prefs=prefs,
                                  auth_service=auth_service,
-                                 context_resolver=context_resolver)
+                                 context_resolver=context_resolver,
+                                 stranger_daily_limit=_stranger_limit)
 
     def _send_audio_artifacts(audio_ids) -> None:
         """把任务产生的音频产物发成 QQ 语音消息。"""
