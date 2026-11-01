@@ -537,6 +537,13 @@ def cmd_run(args) -> int:
                 print(f"  [补发] 会话已有新消息，剩余 {len(segments)-i} 段作废")
                 break
             seg_id = draft_id if len(segments) == 1 else f"{draft_id}#{i}"
+            if len(segments) > 1:
+                # 同主回复路径：多段各自入台账，否则网关查不到分段草稿
+                workflow.outbox.propose(ProactiveDraft(
+                    draft_id=seg_id, text=seg,
+                    reason=f"补发多气泡分段 {i+1}/{len(segments)}（主草稿 {draft_id}）",
+                    evidence=(f"qq:{event.conversation}:{event.message_id}",),
+                    channel="direct_message"))
             owner_draft_ids.add(seg_id)
             approved_draft_ids.add(seg_id)
             receipt = plugin_gateway.dispatch(send_message_intent(
@@ -864,6 +871,17 @@ def cmd_run(args) -> int:
                     break
                 seg_id = result["draft_id"] if len(segments) == 1 \
                     else f"{result['draft_id']}#{i}"
+                if len(segments) > 1:
+                    # 多气泡分段各自需要台账条目：网关 outbox 模式按 draft_id
+                    # 查台账，带 #i 后缀的分段 id 未 propose 会 fail:missing
+                    # （2026-11-01 生产实证：多段回复全段丢发）。
+                    from whale_core.life.initiative import ProactiveDraft as _PD
+                    workflow.outbox.propose(_PD(
+                        draft_id=seg_id, text=seg,
+                        reason=f"多气泡分段 {i+1}/{len(segments)}"
+                               f"（主草稿 {result['draft_id']}）",
+                        evidence=(f"qq:{event.conversation}:{event.message_id}",),
+                        channel="direct_message"))
                 owner_draft_ids.add(seg_id)
                 approved_draft_ids.add(seg_id)
                 receipt = plugin_gateway.dispatch(send_message_intent(
