@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import Studio from "..";
 import { setToken } from "../../../api";
 import {
@@ -22,6 +22,7 @@ describe("Studio 画布", () => {
   it("节点完全来自后端 graph：会话 / 角色 / 记忆 / vault 卡都渲染", async () => {
     const fetchMock = mockStudioFetch();
     render(<Studio />);
+    fireEvent.click(screen.getByRole("button", { name: "图谱" }));
 
     await waitFor(() =>
       expect(screen.getByTestId("card-conv:qq:group:g1")).toBeTruthy(),
@@ -54,6 +55,7 @@ describe("Studio 画布", () => {
   it("普通副本卡展示后端给的记录数与只读属性", async () => {
     mockStudioFetch();
     render(<Studio />);
+    fireEvent.click(screen.getByRole("button", { name: "图谱" }));
     await waitFor(() =>
       expect(screen.getByTestId("card-space:sp-copy")).toBeTruthy(),
     { timeout: 5000 },
@@ -88,6 +90,7 @@ describe("Studio 画布", () => {
         ),
     });
     const { container } = render(<Studio />);
+    fireEvent.click(screen.getByRole("button", { name: "图谱" }));
     await waitFor(() =>
       expect(screen.getByTestId("card-space:sp-copy")).toBeTruthy(),
     { timeout: 5000 },

@@ -106,6 +106,12 @@ class QqInboundWorkflow:
             )
         self._media_validator = media_validator
 
+    def _effective_prefs(self) -> ProactivePrefs:
+        """issue #42：kv 覆盖生效视图（单一配置来源——Studio 写入即生效，
+        无需重启）；kv 缺失时回落构造期的部署侧 prefs。"""
+        from whale_core.life.initiative import load_prefs
+        return load_prefs(self.store, self.prefs)
+
     def _attachment_images(self, event: OwnerEvent) -> tuple:
         """把消息附件读成已验证图片 ``(bytes, mime)``：本机缓存路径优先
         （白名单内），公网 URL 兜底（https + SSRF 门控）。最多取 4 张；
@@ -226,6 +232,7 @@ class QqInboundWorkflow:
             return {"skipped": "disabled"}
         if REPLY_CHANNEL not in self.prefs.allowed_channels:
             return {"skipped": "channel_denied"}
+        eff_prefs = self._effective_prefs()  # issue #42：kv 覆盖生效
 
         text = event.text.strip()
         if not text:
@@ -308,7 +315,7 @@ class QqInboundWorkflow:
         proposed = self.outbox.propose(draft)
         # QQ 入站回复是**被动回复**（owner 先说话）：走被动策略——静默时段是否
         # 豁免由 prefs.passive_reply_in_quiet 显式决定，配额走独立保险丝（issue #13）。
-        verdict = self.outbox.inspect(draft_id, self.prefs, now=self._now(),
+        verdict = self.outbox.inspect(draft_id, eff_prefs, now=self._now(),
                                       passive_reply=True)
         result = {
             "draft_id": draft_id,

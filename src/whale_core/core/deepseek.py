@@ -96,7 +96,8 @@ class DeepSeekCompanion:
 
     def reply(self, text: str, *, persona: str = "", memories: Sequence[str] = (),
               history: Sequence[Mapping[str, str]] = (),
-              images: Sequence = ()) -> str:
+              images: Sequence = (),
+              on_delta=None, should_stop=None, metrics: dict | None = None) -> str:
         if not self.api_key and not _is_local_or_private_http(self.base_url):
             # 回环/私网 http 端点（如本地 Ollama）允许无 key；云端端点必须配置
             raise ModelError("config", "DEEPSEEK_API_KEY not configured")
@@ -140,19 +141,102 @@ class DeepSeekCompanion:
             user_content = text[:4000]
         body = json.dumps({"model": self.model, "messages": [{"role": "system", "content": system}, *clean_history,
                                                                {"role": "user", "content": user_content}],
-                           "stream": False}, ensure_ascii=False).encode()
+                           "stream": on_delta is not None}, ensure_ascii=False).encode()
         last: ModelError | None = None
         for attempt in (0, 1):  # 瞬时错误重试一次
             try:
-                return self._post(body)
+                if on_delta is None:
+                    return self._post(body)
+                # issue #45：流式路径——SSE 增量 + 可取消 + 真实耗时观测。
+                # 取消/中断后只在首个 token 前允许重试；已出流后失败不重试
+                # （部分输出如实返回，metrics 标注 stopped）。
+                return self._post_stream(body, on_delta=on_delta,
+                                         should_stop=should_stop,
+                                         metrics=metrics)
             except ModelError as exc:
                 last = exc
-                if attempt == 0 and exc.retryable:
+                first_token_done = bool(metrics and metrics.get("ttft_ms"))
+                if attempt == 0 and exc.retryable and not first_token_done:
                     time.sleep(1.0)
                     continue
                 raise
         assert last is not None  # 不可达
         raise last
+
+    def _post_stream(self, body: bytes, *, on_delta, should_stop,
+                     metrics: "dict | None") -> str:
+        """SSE 流式读取：逐 chunk 回调 on_delta；should_stop() 为真即中止
+        （连接关闭即资源释放），返回已累计的部分文本。
+
+        观测（issue #45）：ttft_ms（首 token 延迟）/ total_ms / chunks /
+        stopped——全部实测，不伪造进度。
+        """
+        headers = {"Content-Type": "application/json",
+                   "Accept-Encoding": "identity"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        req = urllib.request.Request(self.base_url + "/chat/completions",
+                                     data=body, headers=headers, method="POST")
+        started = time.monotonic()
+        first_token_at: float | None = None
+        chunks = 0
+        parts: list[str] = []
+        stopped = False
+        try:
+            with _open_model_request(req, timeout=self.timeout) as response:
+                for raw_line in response:
+                    if should_stop is not None and should_stop():
+                        stopped = True
+                        break
+                    line = raw_line.decode("utf-8", "replace").strip()
+                    if not line or not line.startswith("data:"):
+                        continue
+                    payload = line[5:].strip()
+                    if payload == "[DONE]":
+                        break
+                    try:
+                        data = json.loads(payload)
+                        delta = (data.get("choices") or [{}])[0] \
+                            .get("delta") or {}
+                        piece = delta.get("content") or ""
+                    except (json.JSONDecodeError, IndexError, TypeError):
+                        continue
+                    if not piece:
+                        continue
+                    if first_token_at is None:
+                        first_token_at = time.monotonic()
+                    chunks += 1
+                    parts.append(piece)
+                    on_delta(piece)
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+            exc.close()
+            if status == 429:
+                raise ModelError("rate_limited", "model rate limited (429)",
+                                 status=429, retryable=True) from exc
+            if 500 <= status < 600:
+                raise ModelError("server", f"model server error ({status})",
+                                 status=status, retryable=True) from exc
+            if status in (401, 403):
+                raise ModelError("auth", f"model auth failed ({status})",
+                                 status=status) from exc
+            raise ModelError("bad_response",
+                             f"model HTTP error ({status})",
+                             status=status) from exc
+        except (urllib.error.URLError, TimeoutError, OSError,
+                http.client.HTTPException) as exc:
+            raise ModelError("network",
+                             f"model network error: {type(exc).__name__}",
+                             retryable=not parts) from exc
+        if metrics is not None:
+            metrics.update({
+                "ttft_ms": (round((first_token_at - started) * 1000)
+                            if first_token_at else None),
+                "total_ms": round((time.monotonic() - started) * 1000),
+                "chunks": chunks,
+                "stopped": stopped,
+            })
+        return "".join(parts)
 
     def _post(self, body: bytes) -> str:
         headers = {"Content-Type": "application/json", "Accept-Encoding": "identity"}

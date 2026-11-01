@@ -132,7 +132,16 @@ def build_inbox(path_str: str):
     return SqliteInbox(spec)
 
 
-def risk_prefs() -> ProactivePrefs:
+def risk_prefs(store=None) -> ProactivePrefs:
+    """生效主动策略：kv（Studio #42 写入）覆盖 env 默认。store=None 时仅 env。"""
+    base = _env_risk_prefs()
+    if store is None:
+        return base
+    from whale_core.life.initiative import load_prefs
+    return load_prefs(store, base)
+
+
+def _env_risk_prefs() -> ProactivePrefs:
     """风控策略（issue #13 统一口径）：被动回复与主动行为是两套预算。
 
     - 主动：DAILY_LIMIT 默认 10/天 + QUIET 22–7（与 docs/research §6.5 一致）；
@@ -253,7 +262,7 @@ def dispatch_dry_run(store, draft_id: str) -> str:
     shadow = InMemoryStore()
     shadow_outbox = ProactiveOutbox(shadow)
     shadow_outbox.propose(draft)
-    verdict = shadow_outbox.dispatch(draft_id, risk_prefs(), now=datetime.now(timezone.utc),
+    verdict = shadow_outbox.dispatch(draft_id, risk_prefs(store), now=datetime.now(timezone.utc),
                                      port=DryRunSendPort(), explicitly_approved=True,
                                      passive_reply=True)
     print(f"[dry-run 账本] {draft_id}: {verdict.status} ({verdict.reason})"
@@ -264,7 +273,7 @@ def dispatch_dry_run(store, draft_id: str) -> str:
 def dispatch_approved(store, draft_id: str, port=None) -> str:
     """人工批准派发：完整真实账本（attempt 先记账，unknown 不自动重试）。"""
     outbox = ProactiveOutbox(store)
-    verdict = outbox.dispatch(draft_id, risk_prefs(), now=datetime.now(timezone.utc),
+    verdict = outbox.dispatch(draft_id, risk_prefs(store), now=datetime.now(timezone.utc),
                               port=port or build_send_port(live_ok=True),
                               explicitly_approved=True, passive_reply=True)
     print(f"[账本] {draft_id}: {verdict.status} ({verdict.reason})")
@@ -293,6 +302,36 @@ def cmd_run(args) -> int:
     else:
         print(f"[配对] owner 绑定：(qq, {owner_qq}) → owner")
     store = build_store(args.store)
+    # issue #39：持久化行为 Trace（trace.sqlite3 与记忆库同目录）。
+    # 纪律：账本写入失败永不阻塞对话链路；不记录消息正文/Prompt/密钥。
+    from whale_core.life.trace import TraceLedger
+    try:
+        _trace_ledger = TraceLedger(
+            str(Path(args.store).with_name("trace.sqlite3")))
+    except Exception:
+        _trace_ledger = None
+
+    def _tbeg(**kw):
+        try:
+            return _trace_ledger.begin("qq_inbound", **kw) \
+                if _trace_ledger else ""
+        except Exception:
+            return ""
+
+    def _tspan(tid, phase, status, **kw):
+        if tid and _trace_ledger:
+            try:
+                _trace_ledger.span(tid, phase, status, **kw)
+            except Exception:
+                pass
+
+    def _tfin(tid, status, **kw):
+        if tid and _trace_ledger:
+            try:
+                _trace_ledger.finish(tid, status, **kw)
+            except Exception:
+                pass
+
     # S1：服务端会话上下文解析器——群里主人不提权、未配对即普通主体；
     # S2：绑定存储接入（会话 → 记忆空间/角色卡，vault 硬拒）。
     from whale_core.life.context_resolver import (
@@ -327,7 +366,7 @@ def cmd_run(args) -> int:
         return any(auth_service.consume_grant_use(
             g, action_fingerprint=fingerprint, required_scope=required_scope)
             for g in grant_ids)
-    prefs = risk_prefs()
+    prefs = risk_prefs(store)
     print(policy_summary(prefs))
 
     # issue #12：审批/发送模式判定（fail closed）
@@ -386,13 +425,20 @@ def cmd_run(args) -> int:
             except Exception as exc:
                 print(f"  [语音] {aid[:8]} 读取失败：{type(exc).__name__}")
 
-    def _plan_segments(text, *, is_group, rhythm):
+    def _plan_segments(text, *, is_group, rhythm, anxious=False,
+                       familiarity="stranger"):
         """issue #23：模型规划优先（◆ 分隔/[[沉默]]/[[稍后补充]]），
-        无标记回落 split_reply。返回 (bubbles, plan)。"""
-        from whale_core.life.response_planner import plan_reply
+        无标记回落 split_reply。返回 (bubbles, plan)。
+        issue #41：语气/长度目标由确定性信号推导（derive_plan_guidance），
+        随计划结构化返回（供 trace/宿主决策；模型不能自报目标）。"""
+        from whale_core.life.response_planner import (
+            derive_plan_guidance, plan_reply)
+        guidance = derive_plan_guidance(
+            familiarity=familiarity, anxious=anxious, is_group=is_group)
         plan = plan_reply(text, is_group=is_group,
                           max_segments=rhythm.effective_max_segments(
-                              is_group=is_group))
+                              is_group=is_group),
+                          **guidance)
         if plan.follow_up:
             # 「稍后补充」是意图声明：只有存在服务端可信的未完成任务/事件
             # 时才可能真的续聊（#20）；此处只记录，不产生任何后台行为。
@@ -585,8 +631,9 @@ def cmd_run(args) -> int:
         前已由 send_message_intent 网关裁决；explicitly_approved 不预设）。"""
         try:
             from datetime import datetime as _dt2, timezone as _tz2
+            # issue #42：kv 覆盖即时生效（Studio 改主动策略无需重启）
             sent = supervised_runner.dispatch_ready_followups(
-                prefs, port=_FollowupPort(), now=_dt2.now(_tz2.utc))
+                risk_prefs(store), port=_FollowupPort(), now=_dt2.now(_tz2.utc))
             if sent:
                 print(f"  [任务续答] 本轮派发 {len(sent)} 条")
         except Exception as exc:
@@ -679,6 +726,11 @@ def cmd_run(args) -> int:
             else event.text[:60]
         print(f"\n← [owner] conv={event.conversation} msg={event.message_id} "
               f"text={shown!r}")
+        # issue #39：Trace 开始（不含正文）
+        _tid = _tbeg(conversation_id=event.conversation,
+                     principal_id=event.sender_id or "owner",
+                     message_id=event.message_id)
+        _tspan(_tid, "received", "ok")
         # G1/G3.4：群里即使是主人也先裁决「该不该回」——未 @/引用机器人
         # 的群消息只入时间线，不触发回复（主人在群里同样不提权不打扰）。
         if event.conversation.startswith("group:"):
@@ -686,14 +738,16 @@ def cmd_run(args) -> int:
                 conversation=event.conversation, sender_id=event.sender_id,
                 message_id=event.message_id, mentions=event.mentions,
                 reply_to=event.reply_to, sender_uid=event.sender_uid)
-            if decision.action != "reply":
+            if decision.action == "reply":
+                _tspan(_tid, "decide", "ok", reason_code=decision.reason_code)
+            else:
                 # issue #18：quiet/balanced/lively 主动参与裁决（规则先行）。
                 from whale_core.life.rhythm import (
                     RhythmStore as _RhythmStore, rhythm_key_for)
                 from whale_core.life.reply_target import TurnDecision
                 RhythmStore = _RhythmStore
-                rhythm0 = RhythmStore(store).get(
-                    rhythm_key_for("qq", event.conversation) or "")
+                rhythm0 = RhythmStore(store).get_with_channel_default(
+                    rhythm_key_for("qq", event.conversation) or "", "qq")
                 join = group_turn_policy.maybe_join(
                     conversation=event.conversation, text=event.text,
                     activity=rhythm0.activity, dnd=rhythm0.dnd,
@@ -703,6 +757,9 @@ def cmd_run(args) -> int:
                     print(f"  [旁观] 群消息未指向鲸鱼"
                           f"（{decision.reason_code}/{join.reason_code}），"
                           f"仅记录时间线")
+                    _tspan(_tid, "decide", "observe",
+                           reason_code=join.reason_code or decision.reason_code)
+                    _tfin(_tid, "silent")
                     return
                 print(f"  [参与] {rhythm0.activity} 档主动接话 ← "
                       f"{event.sender_id}")
@@ -710,21 +767,32 @@ def cmd_run(args) -> int:
                     "reply", f"join:{rhythm0.activity}",
                     target_sender_id=event.sender_id,
                     reply_to_message_id=event.message_id)
+                _tspan(_tid, "decide", "ok", reason_code=decision.reason_code)
+        else:
+            _tspan(_tid, "decide", "ok", reason_code="private")
         try:
             result = workflow.handle_owner_event(event)
         except Exception as exc:  # AI/存储失败不打断监听（inbox 模式下按策略重试）
             print(f"  [工作流失败] {type(exc).__name__}")
+            _tspan(_tid, "workflow", "failed", reason_code="model_error",
+                   detail=type(exc).__name__)
+            _tfin(_tid, "failed")
             raise
         if "skipped" in result:
             print(f"  [闸门] skipped={result['skipped']}")
+            _tspan(_tid, "workflow", "skipped", reason_code=result["skipped"])
+            _tfin(_tid, "silent")
             return
         print(f"  [AI 草稿] {result['draft_id']} verdict={result['verdict']} ({result['reason']})")
         print(f"  {result['reply'][:300]}")
         if result["verdict"] != "needs_approval":
+            _tfin(_tid, "silent", summary="verdict 非 needs_approval，未发送")
             return
         if result.get("safety_concern"):
             # 安全审核有顾虑：不自动发送，留人工终审
             print(f"  [安全审核] 顾虑：{result['safety_concern'][:120]} → 不自动发送，待人工 approve")
+            _tspan(_tid, "workflow", "skipped", reason_code="safety_review")
+            _tfin(_tid, "silent")
             return
         if live_auto:
             # 语音产物先发（同步路径的 TTS 任务产物——「语音跟我说」这类）
@@ -736,8 +804,8 @@ def cmd_run(args) -> int:
             from whale_core.life.batching import current_epoch
             from whale_core.life.rhythm import RhythmStore, rhythm_key_for
             # G4：分段上限取会话节奏卡配置（quiet = 单气泡）。
-            rhythm = RhythmStore(store).get(
-                rhythm_key_for("qq", event.conversation) or "")
+            rhythm = RhythmStore(store).get_with_channel_default(
+                rhythm_key_for("qq", event.conversation) or "", "qq")
             ep = current_epoch(store, event.conversation)
             segments, _plan = _plan_segments(
                 result["reply"],
@@ -745,10 +813,15 @@ def cmd_run(args) -> int:
                 rhythm=rhythm)
             if _plan.silent:
                 print("  [规划] 本轮规划为沉默，不发送")
+                _tspan(_tid, "plan", "skipped", reason_code="silent_planned")
+                _tfin(_tid, "silent")
                 return
+            _sent_segs = 0
             for i, seg in enumerate(segments):
                 if not epoch_fresh(store, event.conversation, ep):
                     print(f"  [分段] 会话已有新消息，剩余 {len(segments)-i} 段作废")
+                    _tspan(_tid, "send", "skipped", reason_code="epoch_stale",
+                           detail=f"剩余 {len(segments)-i} 段作废")
                     break
                 seg_id = result["draft_id"] if len(segments) == 1 \
                     else f"{result['draft_id']}#{i}"
@@ -757,8 +830,17 @@ def cmd_run(args) -> int:
                 receipt = plugin_gateway.dispatch(send_message_intent(
                     event.conversation, seg, draft_id=seg_id))
                 print(f"  [插件网关] 段{i+1}/{len(segments)} {receipt}")
+                # issue #39：回执即真相——gateway 回执含 fail 时如实记 failed
+                _ok_send = ":fail" not in str(receipt)
+                _tspan(_tid, "send", "executed" if _ok_send else "failed",
+                       reason_code="" if _ok_send else "send_failed",
+                       detail=f"段{i+1}/{len(segments)}")
+                _sent_segs += 1 if _ok_send else 0
                 if i + 1 < len(segments):
                     time.sleep(0.35)
+            # issue #39：收尾——全段送达 replied；部分送达 partial
+            _tfin(_tid, "replied" if _sent_segs == len(segments) else "partial",
+                  summary=f"{_sent_segs}/{len(segments)} 段已发送")
         elif args.auto_approve:
             # --auto-approve remains isolated dry-run: no real Outbox or plugin executor.
             dispatch_dry_run(store, result["draft_id"])
@@ -779,6 +861,11 @@ def cmd_run(args) -> int:
         # resolver 强制；sudo 在群里永不验证）。
         if not is_private and not str(incoming.conversation).startswith("group:"):
             return  # 频道等其他形态：不处理
+        # issue #39：Trace 开始（不含正文）
+        _tid = _tbeg(conversation_id=str(incoming.conversation),
+                     principal_id=str(incoming.account),
+                     message_id=str(incoming.message_id))
+        _tspan(_tid, "received", "ok")
         if not is_private:
             # G1：群消息先裁决「该不该回」——未 @/未引用机器人时再过
             # issue #18 的主动参与策略（quiet/balanced/lively）；
@@ -790,41 +877,58 @@ def cmd_run(args) -> int:
             if decision.action != "reply":
                 from whale_core.life.rhythm import (
                     RhythmStore as _RS2, rhythm_key_for as _rkf2)
-                _rhythm2 = _RS2(store).get(
-                    _rkf2("qq", incoming.conversation) or "")
+                _rhythm2 = _RS2(store).get_with_channel_default(
+                    _rkf2("qq", incoming.conversation) or "", "qq")
                 join = group_turn_policy.maybe_join(
                     conversation=incoming.conversation, text=incoming.text,
                     activity=_rhythm2.activity, dnd=_rhythm2.dnd,
                     timeline_entries=timeline.recent(incoming.conversation,
                                                      limit=5))
                 if join.action != "join":
+                    _tspan(_tid, "decide", "observe",
+                           reason_code=join.reason_code or decision.reason_code)
+                    _tfin(_tid, "silent")
                     return
                 print(f"  [参与] {_rhythm2.activity} 档主动接话 ← "
                       f"{incoming.account}（{join.reason_code}）")
+                _tspan(_tid, "decide", "ok", reason_code=join.reason_code)
         from whale_core.life.temporary_auth import maybe_intercept_sudo
         if maybe_intercept_sudo(incoming.text) is None and not stranger_chat:
             print(f"[未配对] account={incoming.account} conv={incoming.conversation} "
                   f"msg={incoming.message_id}（在 secrets 设 OWNER_QQ 并重启即可配对；"
                   "或发送 sudo <一次性口令> 申请临时授权）")
+            _tspan(_tid, "decide", "skipped", reason_code="unpaired_no_consent")
+            _tfin(_tid, "silent")
             return
         try:
             result = workflow.handle_stranger_event(incoming)
         except Exception as exc:
             print(f"  [陌生人处理失败] {type(exc).__name__}")
+            _tspan(_tid, "workflow", "failed", reason_code="model_error",
+                   detail=type(exc).__name__)
+            _tfin(_tid, "failed")
             return
         reply = (result.get("reply") or "").strip()
         if not reply:
             print(f"  [陌生人] skipped={result.get('skipped', 'empty_reply')}")
+            _tspan(_tid, "workflow", "skipped",
+                   reason_code=str(result.get("skipped", "empty_reply")))
+            _tfin(_tid, "silent")
             return
         if result.get("auth_grant"):
             print(f"  [临时授权] 已签发租约 {result['auth_grant']} ← {incoming.account}")
         if not live_auto:
             print(f"  [陌生人回复-未发送] {reply[:120]}")
+            _tspan(_tid, "send", "planned",
+                   detail="live_auto 未开启：仅规划不真实发送")
+            _tfin(_tid, "silent", summary="dry-run 未发送")
             return
         if workflow._safety_reviewer is not None:
             concern = workflow._safety_reviewer(reply)
             if concern:
                 print(f"  [安全审核] 陌生人回复有顾虑：{concern[:120]} → 不发送")
+                _tspan(_tid, "workflow", "skipped", reason_code="safety_review")
+                _tfin(_tid, "silent")
                 return
         # 陌生人回复：owner 定向的网关/Outbox 发送口不适用（draft 未入
         # Outbox 账本 + port 锁定 owner 目标）。陌生人/群回复走端口的
@@ -837,16 +941,22 @@ def cmd_run(args) -> int:
         ep = epoch or current_epoch(store, incoming.conversation)
         is_group = incoming.conversation.startswith("group:")
         # G4：分段上限取会话节奏卡配置（quiet = 单气泡）。
-        rhythm = RhythmStore(store).get(
-            rhythm_key_for("qq", incoming.conversation) or "")
+        rhythm = RhythmStore(store).get_with_channel_default(
+            rhythm_key_for("qq", incoming.conversation) or "", "qq")
         segments, _plan = _plan_segments(reply, is_group=is_group,
                                          rhythm=rhythm)
         if _plan.silent:
             print("  [规划] 本轮规划为沉默，不发送")
+            _tspan(_tid, "plan", "skipped", reason_code="silent_planned")
+            _tfin(_tid, "silent")
             return
+        _sent_segs = 0
+        _send_failed = False
         for i, seg in enumerate(segments):
             if not epoch_fresh(store, incoming.conversation, ep):
                 print(f"  [分段] 会话已有新消息，剩余 {len(segments)-i} 段作废")
+                _tspan(_tid, "send", "skipped", reason_code="epoch_stale",
+                       detail=f"剩余 {len(segments)-i} 段作废")
                 break
             if is_group:
                 group_code = incoming.conversation.split(":", 1)[1]
@@ -858,8 +968,17 @@ def cmd_run(args) -> int:
                 ok = port_inner.send_c2c(peer_uid, seg) \
                     if hasattr(port_inner, "send_c2c") else False
                 print(f"  [陌生人回复] 段{i+1}/{len(segments)} {'已发送' if ok else '发送失败'} ← {peer_uid[:12]}…")
+            _tspan(_tid, "send", "executed" if ok else "failed",
+                   reason_code="" if ok else "send_failed",
+                   detail=f"段{i+1}/{len(segments)}")
+            _send_failed = _send_failed or not ok
+            _sent_segs += 1 if ok else 0
             if i + 1 < len(segments):
                 time.sleep(0.35)
+        _tfin(_tid,
+              "failed" if _send_failed and _sent_segs == 0
+              else ("replied" if _sent_segs == len(segments) else "partial"),
+              summary=f"{_sent_segs}/{len(segments)} 段已发送")
         if is_group and ok:
             # G1：自己的发言也进时间线（is_self），模型上下文才完整
             timeline.append(incoming.conversation,

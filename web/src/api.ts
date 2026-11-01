@@ -107,6 +107,104 @@ export interface WhaleEvent {
   detail: string;
 }
 
+// ---- Trace 账本（issue #39）：诊断视图 /traces + 用户视图 /activity ----
+
+/** /traces 列表行（不含 spans）。 */
+export interface TraceItem {
+  trace_id: string;
+  kind: string;
+  conversation_id: string;
+  principal_id: string;
+  message_id: string;
+  task_id: string;
+  action_id: string;
+  receipt_id: string;
+  /** epoch 秒 */
+  started_at: number;
+  ended_at: number;
+  /** open / replied / silent / failed / partial */
+  status: string;
+  summary: string;
+}
+
+export interface TraceSpan {
+  span_id: string;
+  phase: string;
+  status: string;
+  reason_code: string;
+  detail: string;
+  started_at: number;
+  duration_ms: number;
+  attempt: number;
+}
+
+/** /traces/{id} 完整记录（含 spans）。 */
+export interface TraceDetail extends TraceItem {
+  spans: TraceSpan[];
+}
+
+export interface TracesListResult {
+  total: number;
+  offset: number;
+  limit: number;
+  traces: TraceItem[];
+}
+
+/** /activity 用户可读条目：自然语言解释行。 */
+export interface ActivityItem {
+  trace_id: string;
+  /** epoch 秒 */
+  at: number;
+  status: string;
+  lines: string[];
+}
+
+export interface TracesQuery {
+  kind?: string;
+  conversation_id?: string;
+  principal_id?: string;
+  status?: string;
+  /** epoch 秒 */
+  since?: number;
+  until?: number;
+  limit?: number;
+  offset?: number;
+}
+
+// ---- 任务时间线（issue #43）：GET /tasks/{id}/timeline ----
+
+export interface TaskTimelineEvent {
+  /** epoch 秒 */
+  at: number;
+  at_text: string;
+  kind: string;
+  text: string;
+  detail: Record<string, unknown>;
+}
+
+export interface TaskTimeline {
+  task_id: string;
+  goal: string;
+  phase: string;
+  status: string;
+  current: { label: string; explanation: string; next_step: string };
+  timeline: TaskTimelineEvent[];
+  receipts: string[];
+  delivery: {
+    state: string;
+    attempts: number;
+    last_error: string;
+    channel: string;
+  };
+  retry: {
+    allowed: boolean;
+    kind: "resume" | "redeliver" | "inspect" | "none" | string;
+    reason: string;
+  };
+  trace_ids: string[];
+  capabilities: string[];
+}
+
 export interface BudgetLimits {
   model_calls: number;
   media_jobs: number;
@@ -518,6 +616,39 @@ export const api = {
       `/approvals/${encodeURIComponent(draftId)}/decision`,
       { method: "POST", body: JSON.stringify({ decision }) },
     ),
+
+  // ---- Trace 账本（诊断视图走 console API token，放 api 组） ----
+
+  tracesList: (params: TracesQuery = {}) => {
+    const qs = new URLSearchParams();
+    if (params.kind) qs.set("kind", params.kind);
+    if (params.conversation_id)
+      qs.set("conversation_id", params.conversation_id);
+    if (params.principal_id) qs.set("principal_id", params.principal_id);
+    if (params.status) qs.set("status", params.status);
+    if (params.since) qs.set("since", String(params.since));
+    if (params.until) qs.set("until", String(params.until));
+    if (params.limit !== undefined) qs.set("limit", String(params.limit));
+    if (params.offset !== undefined) qs.set("offset", String(params.offset));
+    const suffix = qs.toString();
+    return request<TracesListResult>(`/traces${suffix ? `?${suffix}` : ""}`);
+  },
+
+  tracesDetail: async (traceId: string) =>
+    (
+      await request<{ trace: TraceDetail }>(
+        `/traces/${encodeURIComponent(traceId)}`,
+      )
+    ).trace,
+
+  activityList: (limit = 30, offset = 0) =>
+    request<{ total: number; items: ActivityItem[] }>(
+      `/activity?limit=${limit}&offset=${offset}`,
+    ),
+
+  /** issue #43：任务执行时间线（可读阶段/回执/送达/重试建议/Trace 关联）。 */
+  taskTimeline: (id: string) =>
+    request<TaskTimeline>(`/tasks/${encodeURIComponent(id)}/timeline`),
 };
 
 // ---------- Whale Studio（S6：关系画布；所有授权判断都在服务端） ----------
@@ -608,7 +739,29 @@ export interface StudioPersonaDetail extends StudioPersona {
   speaking_rate?: number;
   artwork_ref?: string;
   external_prompt?: string;
+  /** issue #37：示例对话（进模型上下文）。 */
+  example_dialogue?: string;
   channels?: string[];
+}
+
+
+/** issue #36：有效人格快照——保存的设定实际进入模型请求的确切内容。 */
+export interface PersonaFieldDisposition {
+  field: string;
+  destination: "model_context" | "tts_only" | "metadata_only";
+  applied: string;
+  used_value: boolean;
+}
+
+export interface PersonaEffectiveSnapshot {
+  persona_id: string;
+  card_title: string;
+  source: "conversation_bound" | "global_active" | "global_legacy" | "builtin_default";
+  model_context: string;
+  voice: { timbre_hint?: string; speaking_rate?: number };
+  content_sha: string;
+  fallback_reason: string;
+  dispositions: PersonaFieldDisposition[];
 }
 
 /** 新建/修改人物卡的可编辑字段（严格字段表；全可选，新建时 title 必填）。 */
@@ -630,9 +783,56 @@ export interface PersonaCardInput {
   source_url?: string;
   license?: string;
   external_prompt?: string;
+  /** issue #37：示例对话（进模型上下文）。 */
+  example_dialogue?: string;
   style_rules?: string[];
   extra_taboos?: string[];
   speaking_rate?: number;
+}
+
+/** issue #37：导入预览解析出的字段（SillyTavern v1/v2 JSON 或纯文本）。 */
+export interface PersonaImportParsed {
+  name?: string;
+  summary?: string;
+  temperament?: string;
+  example_dialogue?: string;
+  external_prompt?: string;
+  relationship_style?: string;
+}
+
+export interface PersonaImportUnmapped {
+  field: string;
+  note: string;
+  preview: string;
+}
+
+/** POST /studio/personas/import-preview 的结果（预览不写库）。 */
+export interface PersonaImportPreview {
+  parsed: PersonaImportParsed;
+  suggested_card_id: string;
+  mapping: Record<string, string>;
+  unmapped: PersonaImportUnmapped[];
+  missing: string[];
+  conflicts: string[];
+  warnings: string[];
+  requires_confirmation: boolean;
+}
+
+/** issue #37：试玩一侧结果（reply 与 error 二选一）。 */
+export interface PersonaPlaytestSide {
+  persona_id: string;
+  source: string;
+  content_sha?: string;
+  reply?: string;
+  error?: string;
+  fields_used?: string[];
+}
+
+export interface PersonaPlaytestResult {
+  input: string;
+  baseline: PersonaPlaytestSide;
+  trial: PersonaPlaytestSide;
+  note: string;
 }
 
 export interface StudioGraphNode {
@@ -771,6 +971,142 @@ export interface StudioForkInput {
   confirmed?: boolean;
 }
 
+/** 记忆管理面「主体总览」中的空间条目（GET /studio/memory/subjects）。 */
+export interface MemorySpaceSubject {
+  space_id: string;
+  space_type: string;
+  name: string;
+  paused: boolean;
+  scope_note: string;
+  record_count: number;
+}
+
+/** 群友主体：principal → 其私有空间。 */
+export interface MemoryMemberSubject {
+  principal_id: string;
+  space_id: string;
+  record_count: number;
+  opted_out: boolean;
+  consent_active: boolean;
+  paused: boolean;
+  scope_note: string;
+}
+
+export interface MemorySubjects {
+  owner: { spaces: MemorySpaceSubject[]; vault_present: boolean };
+  members: MemoryMemberSubject[];
+  groups: MemorySpaceSubject[];
+  forks: MemorySpaceSubject[];
+  legacy_unscoped_records: number;
+}
+
+/** GET /studio/memory/browse 的记录行；metadata_only 时无 summary。 */
+export interface MemoryBrowseItem {
+  key: string;
+  kind: string;
+  space_id: string;
+  space_type: string;
+  scope_note: string;
+  created_at: string;
+  superseded: boolean;
+  confidence: number;
+  source: string;
+  source_group: string;
+  expires_at?: string | null;
+  last_confirmed?: string | null;
+  summary?: string;
+  source_message_ids?: string[];
+  tags?: string[];
+  restricted?: boolean;
+}
+
+export interface MemoryBrowseResult {
+  space_ids: string[];
+  metadata_only: boolean;
+  total: number;
+  offset: number;
+  limit: number;
+  items: MemoryBrowseItem[];
+}
+
+/** browse 查询参数：选择器三选一（space_id / principal_id / conversation_key）。 */
+export interface MemoryBrowseParams {
+  space_id?: string;
+  principal_id?: string;
+  conversation_key?: string;
+  /** 逗号分隔：episode / preference / persona_continuity。 */
+  kind?: string;
+  source?: string;
+  q?: string;
+  since?: string;
+  until?: string;
+  limit?: number;
+  offset?: number;
+  include_superseded?: boolean;
+}
+
+// ---- 主动行为控制面板（issue #42）：GET/PUT /studio/initiative ----
+
+/** 单个全局字段视图：当前生效值 + 来源 + 影响说明。 */
+export interface InitiativeFieldView {
+  /** daily_limit/passive_daily_limit 为整数；quiet_start/quiet_end 为 "HH:MM"。 */
+  value: number | string;
+  source: "console" | "default" | string;
+  note: string;
+}
+
+export interface InitiativeGlobalView {
+  fields: Record<string, InitiativeFieldView>;
+  quiet_hours_rule: string;
+  editable: string[];
+  locked_by_deploy: string[];
+}
+
+export interface RhythmChannelDefault {
+  activity: string;
+  max_segments: number;
+  dnd: boolean;
+}
+
+export interface RhythmConversationView {
+  conversation_key: string;
+  activity: string;
+  max_segments: number;
+  dnd: boolean;
+  version: number;
+}
+
+export interface InitiativeRhythmView {
+  channels: Record<string, RhythmChannelDefault>;
+  conversations: RhythmConversationView[];
+  activity_modes: string[];
+}
+
+export interface InitiativeDecision {
+  trace_id: string;
+  /** epoch 秒 */
+  at: number;
+  conversation_id: string;
+  status: string;
+  reason_code: string;
+  reason_text: string;
+}
+
+export interface InitiativeView {
+  global: InitiativeGlobalView;
+  rhythm: InitiativeRhythmView;
+  recent_decisions: InitiativeDecision[];
+}
+
+/** PUT /studio/initiative/global 的字段补丁；null = 删除该字段覆盖。 */
+export interface InitiativeGlobalPatch {
+  daily_limit?: number | null;
+  passive_daily_limit?: number | null;
+  quiet_start?: string | null;
+  quiet_end?: string | null;
+  reset?: boolean;
+}
+
 const studioConv = (key: string) =>
   `/studio/conversations/${encodeURIComponent(key)}`;
 
@@ -794,6 +1130,12 @@ export const studioApi = {
         `/studio/personas/${encodeURIComponent(id)}`,
       )
     ).persona,
+  personaEffective: async (id: string) =>
+    (
+      await request<{ effective: PersonaEffectiveSnapshot }>(
+        `/studio/personas/${encodeURIComponent(id)}/effective`,
+      )
+    ).effective,
   createPersona: async (input: PersonaCardInput) =>
     (
       await request<{ persona: StudioPersonaDetail }>("/studio/personas", {
@@ -808,6 +1150,25 @@ export const studioApi = {
         { method: "PUT", body: JSON.stringify(input) },
       )
     ).persona,
+  /** issue #37：导入预览——解析 SillyTavern/纯文本卡，不写库。 */
+  personaImportPreview: (text: string, cardId?: string) =>
+    request<PersonaImportPreview>("/studio/personas/import-preview", {
+      method: "POST",
+      body: JSON.stringify({
+        text,
+        ...(cardId ? { card_id: cardId } : {}),
+      }),
+    }),
+  /** issue #37：即时试玩——persona_id 或 card（草稿字段）二选一。 */
+  personaPlaytest: (input: {
+    persona_id?: string;
+    card?: PersonaCardInput;
+    input?: string;
+  }) =>
+    request<PersonaPlaytestResult>("/studio/personas/playtest", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
   memorySpaces: async () =>
     (await request<{ memory_spaces: StudioMemorySpace[] }>(
       "/studio/memory-spaces",
@@ -888,6 +1249,84 @@ export const studioApi = {
       body: JSON.stringify({ ...input, confirmed: input.confirmed ?? true }),
     }),
 
+  // ---- 记忆管理面（主体优先）：subjects 总览 + browse 浏览 + 治理操作 ----
+
+  memorySubjects: () =>
+    request<MemorySubjects>("/studio/memory/subjects"),
+
+  memoryBrowse: (params: MemoryBrowseParams) => {
+    const qs = new URLSearchParams();
+    if (params.space_id) qs.set("space_id", params.space_id);
+    else if (params.principal_id) qs.set("principal_id", params.principal_id);
+    else if (params.conversation_key)
+      qs.set("conversation_key", params.conversation_key);
+    if (params.kind) qs.set("kind", params.kind);
+    if (params.source) qs.set("source", params.source);
+    if (params.q) qs.set("q", params.q);
+    if (params.since) qs.set("since", params.since);
+    if (params.until) qs.set("until", params.until);
+    if (params.limit !== undefined) qs.set("limit", String(params.limit));
+    if (params.offset !== undefined) qs.set("offset", String(params.offset));
+    if (params.include_superseded) qs.set("include_superseded", "1");
+    const suffix = qs.toString();
+    return request<MemoryBrowseResult>(
+      `/studio/memory/browse${suffix ? `?${suffix}` : ""}`,
+    );
+  },
+
+  memoryCorrect: (key: string, newSummary: string) =>
+    request<{ corrected: boolean; old_key: string; new_key: string }>(
+      "/studio/memory/correct",
+      {
+        method: "POST",
+        body: JSON.stringify({ key, new_summary: newSummary }),
+      },
+    ),
+
+  memoryExpire: (key: string) =>
+    request<{ expired: boolean; key: string }>("/studio/memory/expire", {
+      method: "POST",
+      body: JSON.stringify({ key }),
+    }),
+
+  memoryDelete: (key: string) =>
+    request<{ deleted: boolean; key: string }>("/studio/memory/delete", {
+      method: "POST",
+      body: JSON.stringify({ key }),
+    }),
+
+  memoryPause: (spaceId: string, paused: boolean) =>
+    request<{ space_id: string; paused: boolean }>("/studio/memory/pause", {
+      method: "POST",
+      body: JSON.stringify({ space_id: spaceId, paused }),
+    }),
+
+  // ---- 主动行为控制面板（issue #42） ----
+
+  initiative: () => request<InitiativeView>("/studio/initiative"),
+
+  putInitiativeGlobal: async (patch: InitiativeGlobalPatch) =>
+    (
+      await request<{ global: InitiativeGlobalView }>(
+        "/studio/initiative/global",
+        { method: "PUT", body: JSON.stringify(patch) },
+      )
+    ).global,
+
+  putInitiativeChannel: async (
+    channel: string,
+    input: { activity: string; max_segments: number; dnd: boolean },
+  ) =>
+    (
+      await request<{ rhythm: InitiativeRhythmView }>(
+        "/studio/initiative/channel",
+        {
+          method: "PUT",
+          body: JSON.stringify({ channel, ...input }),
+        },
+      )
+    ).rhythm,
+
   createCode: (input: StudioCodeCreateInput) =>
     request<TemporaryCodeCreated>("/auth/temporary/codes", {
       method: "POST",
@@ -967,4 +1406,114 @@ export function streamEvents(handlers: EventStreamHandlers): EventStream {
       controller.abort();
     },
   };
+}
+
+// ---- Chat 流式（issue #45）：POST /chat/stream，SSE 行解析（Connection: close） ----
+
+export interface ChatStreamMetrics {
+  ttft_ms?: number;
+  total_ms?: number;
+  chunks?: number;
+  stopped?: boolean;
+}
+
+export interface ChatStreamDone {
+  reply: string;
+  status: string;
+  task_id?: string;
+  metrics?: ChatStreamMetrics;
+  stopped?: boolean;
+}
+
+export interface ChatStreamCallbacks {
+  /** received / context / model / compose */
+  onPhase?: (phase: string) => void;
+  onDelta?: (text: string) => void;
+  onDone?: (done: ChatStreamDone) => void;
+  /** config / rate_limited / server / network / unavailable */
+  onError?: (error: string) => void;
+}
+
+/**
+ * 流式对话：解析 `data: {json}` 行；返回 done 帧（无 done 则为 null）。
+ * HTTP 非 2xx / 网络错误按 ApiError 抛出；signal.abort() 中断读取。
+ */
+export async function chatStream(
+  text: string,
+  conversationId: string,
+  callbacks: ChatStreamCallbacks,
+  signal?: AbortSignal,
+): Promise<ChatStreamDone | null> {
+  const headers = new Headers({
+    "Content-Type": "application/json",
+    Accept: "text/event-stream",
+  });
+  const token = getToken();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const res = await fetch(apiUrl("/chat/stream"), {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ conversation_id: conversationId, text }),
+    signal,
+    redirect: "error",
+  });
+  if (!res.ok) {
+    let code = `http_${res.status}`;
+    let message = res.statusText || `HTTP ${res.status}`;
+    try {
+      const body: unknown = await res.json();
+      if (body && typeof body === "object" && "error" in body) {
+        const err = (body as { error: { code?: unknown; message?: unknown } })
+          .error;
+        if (typeof err.code === "string") code = err.code;
+        if (typeof err.message === "string") message = err.message;
+      }
+    } catch {
+      /* 保留默认错误信息 */
+    }
+    throw new ApiError(code, message, res.status);
+  }
+  if (!res.body)
+    throw new ApiError("no_stream", "chat stream has no body", res.status);
+  const reader = res.body.getReader();
+  // 双保险：真实 fetch 的 signal 会中止读取；手工 mock 的流则靠这里取消。
+  const onAbort = () => {
+    reader.cancel().catch(() => undefined);
+  };
+  signal?.addEventListener("abort", onAbort);
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let done: ChatStreamDone | null = null;
+  try {
+    for (;;) {
+      const { done: finished, value } = await reader.read();
+      if (finished) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, idx).replace(/\r$/, "");
+        buffer = buffer.slice(idx + 1);
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice("data:".length).trim();
+        if (!payload) continue;
+        try {
+          const ev = JSON.parse(payload) as Record<string, unknown>;
+          if (ev.type === "phase") callbacks.onPhase?.(String(ev.phase ?? ""));
+          else if (ev.type === "delta")
+            callbacks.onDelta?.(String(ev.text ?? ""));
+          else if (ev.type === "done") {
+            done = ev as unknown as ChatStreamDone;
+            callbacks.onDone?.(done);
+          } else if (ev.type === "error") {
+            callbacks.onError?.(String(ev.error ?? "server"));
+          }
+        } catch {
+          /* 跳过无法解析的帧 */
+        }
+      }
+    }
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
+  }
+  return done;
 }

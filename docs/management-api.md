@@ -17,6 +17,11 @@
 | DELETE | `/memory/{key}` | 删除真实MemoryRecord，不能访问或删除任意内部KV |
 | POST | `/memory/export` | JSONL下载，不等于完整数据库备份 |
 | GET | `/tasks`, `/tasks/{id}` | 可公开任务状态与工具回执，不返回私有执行journal |
+| GET | `/tasks/{id}/timeline` | 任务执行时间线：阶段解释/下一步/重试建议/送达状态/关联 trace |
+| POST | `/chat/stream` | SSE 流式回复：phase 事件（received/context/model/compose）+ delta + done(metrics)；客户端断开即中止；不支持流式的模型如实只给阶段 |
+| GET | `/traces`, `/traces/{id}` | 持久化行为 Trace 诊断视图（筛选/分页；不含消息正文，detail 已脱敏） |
+| GET | `/activity` | 用户可读活动记录（自然语言解释为什么回复/没回复） |
+| POST | `/traces/prune` | 手动触发保留期清理 |
 | POST | `/tasks/{id}/cancel` | 协作取消；in-flight结果可能为unknown |
 | POST | `/tasks/{id}/decision` | `{decision:approve|reject}`；不执行动作 |
 | POST | `/tasks/{id}/resume` | 审批后继续，已完成步骤不重放 |

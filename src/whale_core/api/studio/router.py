@@ -31,10 +31,26 @@ from whale_core.api.studio.memory import (
     _put_memories,
     _vault_records,
 )
+from whale_core.api.studio.initiative import (
+    _get_initiative,
+    _put_channel,
+    _put_global,
+)
+from whale_core.api.studio.memory_browse import (
+    _browse as _memory_browse,
+    _correct as _memory_correct,
+    _delete as _memory_delete,
+    _expire as _memory_expire,
+    _pause as _memory_pause,
+    _subjects as _memory_subjects,
+)
 from whale_core.api.studio.personas import (
     _create_persona,
     _get_persona_detail,
+    _get_persona_effective,
+    _import_preview,
     _list_personas,
+    _playtest,
     _put_persona,
     _update_persona,
 )
@@ -61,6 +77,10 @@ def _dispatch_studio(handler, method: str, parts: list[str]) -> None:
         _list_personas(handler, ctx, svc)
     elif rest == ["personas"] and method == "POST":
         _create_persona(handler, ctx, svc)
+    elif rest == ["personas", "import-preview"] and method == "POST":
+        _import_preview(handler, ctx, svc)
+    elif rest == ["personas", "playtest"] and method == "POST":
+        _playtest(handler, ctx, svc)
     elif len(rest) == 2 and rest[0] == "personas":
         if method == "GET":
             _get_persona_detail(handler, ctx, svc, rest[1])
@@ -68,8 +88,30 @@ def _dispatch_studio(handler, method: str, parts: list[str]) -> None:
             _update_persona(handler, ctx, svc, rest[1])
         else:
             raise StudioError(405, "method_not_allowed", "use GET or PUT")
+    elif len(rest) == 3 and rest[0] == "personas" and rest[2] == "effective":
+        if method != "GET":
+            raise StudioError(405, "method_not_allowed", "use GET")
+        _get_persona_effective(handler, ctx, svc, rest[1])
     elif rest == ["memory-spaces"] and method == "GET":
         _list_memory_spaces(handler, ctx, svc)
+    elif rest == ["initiative"] and method == "GET":
+        _get_initiative(handler, ctx, svc)
+    elif rest == ["initiative", "global"] and method == "PUT":
+        _put_global(handler, ctx, svc)
+    elif rest == ["initiative", "channel"] and method == "PUT":
+        _put_channel(handler, ctx, svc)
+    elif rest == ["memory", "subjects"] and method == "GET":
+        _memory_subjects(handler, ctx, svc)
+    elif rest == ["memory", "browse"] and method == "GET":
+        _memory_browse(handler, ctx, svc)
+    elif rest == ["memory", "correct"] and method == "POST":
+        _memory_correct(handler, ctx, svc)
+    elif rest == ["memory", "expire"] and method == "POST":
+        _memory_expire(handler, ctx, svc)
+    elif rest == ["memory", "delete"] and method == "POST":
+        _memory_delete(handler, ctx, svc)
+    elif rest == ["memory", "pause"] and method == "POST":
+        _memory_pause(handler, ctx, svc)
     elif rest == ["graph"] and method == "GET":
         _graph(handler, ctx, svc)
     elif rest == ["forks", "preview"] and method == "POST":
@@ -130,12 +172,20 @@ def _dispatch_studio(handler, method: str, parts: list[str]) -> None:
 def _path_known(rest: list[str]) -> bool:
     """路径模板已知但方法不符 → 405（否则 404）。"""
     if rest in (["conversations"], ["personas"], ["memory-spaces"], ["graph"],
+                ["personas", "import-preview"], ["personas", "playtest"],
                 ["forks"], ["forks", "preview"], ["vault", "records"],
                 ["members", "consent"], ["members", "consent", "revoke"],
                 ["members", "memory"], ["members", "memory", "correct"],
-                ["members", "memory", "delete"]):
+                ["members", "memory", "delete"],
+                ["memory", "subjects"], ["memory", "browse"],
+                ["initiative"], ["initiative", "global"],
+                ["initiative", "channel"],
+                ["memory", "correct"], ["memory", "expire"],
+                ["memory", "delete"], ["memory", "pause"]):
         return True
     if len(rest) == 2 and rest[0] == "personas":
+        return True
+    if len(rest) == 3 and rest[0] == "personas" and rest[2] == "effective":
         return True
     return len(rest) == 3 and rest[0] == "conversations" \
         and rest[2] in ("persona", "memories", "capabilities", "rhythm")

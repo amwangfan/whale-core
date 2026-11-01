@@ -2456,3 +2456,470 @@ code,
 .persona-form textarea { resize: vertical; }
 .persona-form-wide { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
 .persona-form-actions { display: flex; gap: 10px; }
+
+/* issue #36：字段去向徽标与生效预览 */
+.dest-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 500;
+  vertical-align: 1px;
+}
+.dest-badge.dest-model {
+  background: #e3f2fd;
+  color: #1565c0;
+}
+.dest-badge.dest-tts {
+  background: #f3e5f5;
+  color: #7b1fa2;
+}
+.dest-badge.dest-meta {
+  background: #eceff1;
+  color: #546e7a;
+}
+.persona-effective {
+  border: 1px solid #d7dce2;
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin: 10px 0;
+}
+.persona-effective h4 {
+  margin: 0 0 6px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.persona-effective-meta {
+  color: #667;
+  font-size: 12px;
+  margin: 4px 0;
+}
+.persona-effective-context {
+  background: #f7f9fb;
+  border: 1px solid #e3e8ee;
+  border-radius: 8px;
+  padding: 8px 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 260px;
+  overflow: auto;
+  font-size: 12.5px;
+}
+
+/* ---------- 记忆管理（主体优先视图） ---------- */
+.memory-subjects {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+  margin: 12px 0 16px;
+}
+.subject-group {
+  border: 1px solid #e3e8ee;
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #fff;
+}
+.subject-group h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+.subject-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.subject-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.subject-pick {
+  flex: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  text-align: left;
+  border: 1px solid #e3e8ee;
+  background: #f7f9fb;
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+.subject-pick:hover {
+  border-color: #7aa2ff;
+}
+.subject-pick.active {
+  border-color: #3b6ee0;
+  background: #eef3ff;
+}
+.subject-name {
+  font-weight: 600;
+}
+.memory-browse {
+  margin-top: 4px;
+}
+.memory-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0;
+}
+.memory-toolbar input,
+.memory-toolbar select {
+  padding: 6px 10px;
+  border: 1px solid #d7dce2;
+  border-radius: 8px;
+  font-size: 13px;
+  background: #fff;
+}
+.memory-toolbar input {
+  flex: 1;
+  min-width: 160px;
+}
+.record-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.record-summary {
+  margin: 2px 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.list-item.superseded {
+  opacity: 0.6;
+}
+.memory-pager {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+.memory-advanced {
+  margin-top: 22px;
+  border-top: 1px dashed #dfe5ec;
+  padding-top: 10px;
+}
+.memory-advanced summary {
+  cursor: pointer;
+  color: #556;
+}
+.memory-advanced .searchbar {
+  margin-top: 10px;
+}
+
+/* ---------- 事件页：活动记录 / 事件流 / Trace 查询 ---------- */
+.view-tabs {
+  display: flex;
+  gap: 6px;
+}
+.view-tabs button {
+  border: 1px solid #d7dce2;
+  background: #fff;
+  border-radius: 8px;
+  padding: 6px 14px;
+  cursor: pointer;
+}
+.view-tabs button.active {
+  border-color: #3b6ee0;
+  background: #eef3ff;
+  font-weight: 600;
+}
+.activity-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.activity-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  border: 1px solid #e3e8ee;
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #fff;
+}
+.activity-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-top: 5px;
+  background: #9aa5b1;
+}
+.activity-dot.replied {
+  background: #2e7d32;
+}
+.activity-dot.silent {
+  background: #9aa5b1;
+}
+.activity-dot.failed {
+  background: #c62828;
+}
+.activity-dot.partial {
+  background: #f9a825;
+}
+.activity-time {
+  flex: none;
+  margin-top: 1px;
+}
+.activity-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.trace-panel {
+  margin-top: 18px;
+  border-top: 1px dashed #dfe5ec;
+  padding-top: 10px;
+}
+.span-table {
+  margin-top: 6px;
+}
+
+/* ---------- 人物卡：模板 / 导入 / 试玩 / 分区（issue #37） ---------- */
+.persona-template {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  font-size: 13px;
+}
+.persona-template select {
+  padding: 6px 10px;
+  border: 1px solid #d7dce2;
+  border-radius: 8px;
+  background: #fff;
+}
+.persona-form-basic {
+  margin-top: 8px;
+}
+.persona-form-advanced {
+  margin: 10px 0;
+  border-top: 1px dashed #dfe5ec;
+  padding-top: 8px;
+}
+.persona-form-advanced summary,
+.persona-import summary {
+  cursor: pointer;
+  color: #556;
+}
+.persona-import {
+  margin: 10px 0;
+  border: 1px dashed #dfe5ec;
+  border-radius: 10px;
+  padding: 8px 10px;
+}
+.persona-import textarea {
+  width: 100%;
+  margin-top: 8px;
+  box-sizing: border-box;
+}
+.import-preview {
+  margin-top: 8px;
+}
+.persona-playtest {
+  margin: 10px 0;
+  border-top: 1px dashed #dfe5ec;
+  padding-top: 8px;
+}
+.playtest-compare {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 10px;
+  margin-top: 8px;
+}
+.playtest-side {
+  border: 1px solid #e3e8ee;
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #fff;
+}
+.playtest-side h5 {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+.playtest-reply {
+  background: #f7f9fb;
+  border: 1px solid #e3e8ee;
+  border-radius: 8px;
+  padding: 8px 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12.5px;
+  margin: 6px 0;
+}
+
+/* ---------- 主动行为控制面板（issue #42） ---------- */
+.initiative-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 10px 0;
+}
+.initiative-field {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #e3e8ee;
+  border-radius: 10px;
+  padding: 8px 12px;
+  background: #fff;
+}
+.initiative-field label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.initiative-field input {
+  width: 110px;
+  padding: 6px 10px;
+  border: 1px solid #d7dce2;
+  border-radius: 8px;
+  font-size: 13px;
+}
+.initiative-field .muted.small {
+  flex-basis: 100%;
+}
+.initiative-channel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #e3e8ee;
+  border-radius: 10px;
+  padding: 8px 12px;
+  background: #fff;
+  margin-bottom: 8px;
+}
+.initiative-channel select {
+  padding: 6px 10px;
+  border: 1px solid #d7dce2;
+  border-radius: 8px;
+  background: #fff;
+  font-size: 13px;
+}
+
+/* ---------- 任务时间线（issue #43） ---------- */
+.task-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.timeline-current {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #e3e8ee;
+  border-radius: 10px;
+  padding: 8px 12px;
+  background: #fff;
+}
+.timeline-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 10px;
+  border-left: 2px solid #dfe5ec;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.timeline-event {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+.timeline-delivery,
+.timeline-retry,
+.timeline-traces {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ---------- Chat 流式（issue #45） ---------- */
+.phase-hint {
+  color: #667;
+  font-size: 12.5px;
+  margin-bottom: 4px;
+}
+.msg-body.msg-error {
+  border-color: #e0a3a3;
+  background: #fdf4f4;
+}
+
+/* ---------- Studio 首页与导航分层（issue #44） ---------- */
+.studio-nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.studio-nav-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.studio-nav-group button {
+  border: 1px solid #d7dce2;
+  background: #fff;
+  border-radius: 8px;
+  padding: 6px 14px;
+  cursor: pointer;
+}
+.studio-nav-group button.active {
+  border-color: #3b6ee0;
+  background: #eef3ff;
+  font-weight: 600;
+}
+.studio-nav-advanced summary {
+  cursor: pointer;
+  color: #556;
+  padding: 6px 0;
+}
+.studio-nav-advanced .studio-nav-group {
+  margin-top: 6px;
+}
+.studio-home {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 12px;
+}
+.home-block {
+  border: 1px solid #e3e8ee;
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: #fff;
+}
+.home-block h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+.home-conn {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.home-shortcuts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}

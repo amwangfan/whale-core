@@ -15,6 +15,8 @@ const paths: Record<string, string> = {
   plugins: "M9 3h6v5h5v6h-5v7H9v-7H4V8h5z",
   memory: "M5 4h11l3 3v13H5z M8 9h8 M8 13h8 M8 17h5",
   tasks: "M9 5h11 M9 12h11 M9 19h11 M3 4l1 1 2-2 M3 11l1 1 2-2 M3 18l1 1 2-2",
+  initiative:
+    "M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9 M10 21a2 2 0 0 0 4 0",
   approvals: "M12 3 3 7v5c0 5 9 9 9 9s9-4 9-9V7z M8 12l3 3 5-6",
   events: "M4 5h16v14H4z M7 9l3 3-3 3 M13 15h4",
   settings:

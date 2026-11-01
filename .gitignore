@@ -64,3 +64,6 @@ web/dist
 
 # Local self-contained release build tools
 .freeze-venv/
+
+# 评测运行产物（保留报告，run/pairs 原始产物不入库）
+evals/live/out/

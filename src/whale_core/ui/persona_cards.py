@@ -75,6 +75,9 @@ class PersonaCard:
     relationship_style: str = ""  # 与用户的关系倾向
     voice_hint: str = ""  # 音色偏好提示（空则回退 timbre_hint）
     artwork_ref: str = ""  # 可选形象引用
+    # UX-02（issue #37）：示例对话——进入模型上下文，作为语气参考
+    # （渲染时标注「不要复述内容」）。
+    example_dialogue: str = ""
 
     def __post_init__(self) -> None:
         if not self.card_id.strip() or not self.title.strip():
@@ -143,6 +146,7 @@ class PersonaCard:
             "relationship_style": self.relationship_style,
             "voice_hint": self.voice_hint,
             "artwork_ref": self.artwork_ref,
+            "example_dialogue": self.example_dialogue,
         }
 
     @classmethod
@@ -170,6 +174,7 @@ class PersonaCard:
             relationship_style=str(d.get("relationship_style") or ""),
             voice_hint=str(d.get("voice_hint") or ""),
             artwork_ref=str(d.get("artwork_ref") or ""),
+            example_dialogue=str(d.get("example_dialogue") or ""),
         )
 
 
@@ -457,7 +462,13 @@ def switch_card(
     )
     persona = card.render_persona()
     # 禁忌 = 卡片自带 + 用户自定义（设置页可改；核心不再预置强制项）
-    merged_taboos = tuple(dict.fromkeys((*persona.taboos, *get_custom_taboos(store))))
+    custom_taboos = get_custom_taboos(store)
+    merged_taboos = tuple(dict.fromkeys((*persona.taboos, *custom_taboos)))
+    # issue #36：快照 preamble 与有效人格快照共用同一渲染器，
+    # 全局路径与会话绑定路径的模型上下文文本保证一致。
+    from whale_core.ui.effective_persona import render_model_context
+
+    preamble, _ = render_model_context(card, host_taboos=custom_taboos)
     store.put_persona_continuity(
         PersonaContinuity(
             persona_name=persona.name,
@@ -471,7 +482,7 @@ def switch_card(
                 "style_rules": list(card.style_rules),
                 "timbre_hint": card.timbre_hint,
                 "speaking_rate": card.speaking_rate,
-                "system_preamble": persona.system_preamble,
+                "system_preamble": preamble or persona.system_preamble,
             },
             last_session_id=session_id,
         )

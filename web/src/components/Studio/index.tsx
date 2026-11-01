@@ -27,6 +27,7 @@ import ForkWizard from "./ForkWizard";
 import GrantsPanel from "./GrantsPanel";
 import StudioListMode from "./ListMode";
 import PersonaPanel from "./PersonaPanel";
+import StudioHome from "./Home";
 import { CapabilityCard, RhythmEditor } from "./cards";
 import { executeIntent, type DropIntent } from "./connect";
 
@@ -47,7 +48,12 @@ function useMediaQuery(query: string): boolean {
   return matches;
 }
 
-export default function Studio() {
+export default function Studio({
+  onNavigate,
+}: {
+  /** issue #44：跨页快捷跳转（记忆/主动性/任务/事件/插件/设置都在控制台页）。 */
+  onNavigate?: (tab: string) => void;
+}) {
   const [graph, setGraph] = useState<StudioGraph | null>(null);
   const [conversations, setConversations] = useState<StudioConversation[]>([]);
   const [personas, setPersonas] = useState<StudioPersona[]>([]);
@@ -62,6 +68,11 @@ export default function Studio() {
   const [selectedEdge, setSelectedEdge] = useState<string | null>(null);
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now() / 1000);
+  // issue #44：视图分层——默认落「概览」（今天发生了什么）；图谱等为高级工程项。
+  const [view, setView] = useState<"home" | "personas" | "conversations" | "canvas">(
+    "home",
+  );
+  const [personaCreateTick, setPersonaCreateTick] = useState(0);
 
   const narrow = useMediaQuery("(max-width: 767px)");
   const reducedMotion = useMediaQuery("(prefers-reduced-motion: reduce)");
@@ -319,6 +330,52 @@ export default function Studio() {
 
   return (
     <div className="studio" data-reduced-motion={reducedMotion || undefined}>
+      <nav className="studio-nav" aria-label="工作台导航">
+        <div className="studio-nav-group">
+          <button
+            className={view === "home" ? "active" : ""}
+            aria-current={view === "home" ? "page" : undefined}
+            onClick={() => setView("home")}
+          >
+            概览
+          </button>
+          <button
+            className={view === "personas" ? "active" : ""}
+            aria-current={view === "personas" ? "page" : undefined}
+            onClick={() => setView("personas")}
+          >
+            人物
+          </button>
+          <button
+            className={view === "conversations" ? "active" : ""}
+            aria-current={view === "conversations" ? "page" : undefined}
+            onClick={() => setView("conversations")}
+          >
+            会话
+          </button>
+          <button onClick={() => onNavigate?.("memory")}>记忆</button>
+          <button onClick={() => onNavigate?.("initiative")}>主动性</button>
+          <button onClick={() => onNavigate?.("tasks")}>任务</button>
+          <button onClick={() => onNavigate?.("events")}>事件</button>
+        </div>
+        <details className="studio-nav-advanced">
+          <summary>高级</summary>
+          <div className="studio-nav-group">
+            <button
+              className={view === "canvas" ? "active" : ""}
+              aria-current={view === "canvas" ? "page" : undefined}
+              onClick={() => setView("canvas")}
+            >
+              图谱
+            </button>
+            <button onClick={() => onNavigate?.("memory")}>记忆空间</button>
+            <button onClick={() => setView("canvas")}>设备</button>
+            <button onClick={() => onNavigate?.("plugins")}>插件</button>
+            <button onClick={() => onNavigate?.("settings")}>系统设置</button>
+          </div>
+        </details>
+      </nav>
+
       {error && (
         <div className="banner error" role="alert">
           {error}
@@ -331,7 +388,31 @@ export default function Studio() {
       )}
       {loading && <p className="muted">正在加载工作台…</p>}
 
-      {!loading && graph && narrow && (
+      {view === "home" && (
+        <StudioHome
+          onNavigate={onNavigate}
+          onNewPersona={() => {
+            setView("personas");
+            setPersonaCreateTick((n) => n + 1);
+          }}
+        />
+      )}
+
+      {view === "personas" && !loading && (
+        <PersonaPanel
+          personas={personas}
+          busy={busy}
+          createSignal={personaCreateTick}
+          onCreateSignalConsumed={() => setPersonaCreateTick(0)}
+          onChanged={(message) => {
+            setNotice(message);
+            void refresh();
+          }}
+          onError={setNotice}
+        />
+      )}
+
+      {view === "conversations" && !loading && graph && (
         <StudioListMode
           conversations={conversations.filter((c) => !c.malformed)}
           personas={personas}
@@ -345,7 +426,21 @@ export default function Studio() {
         />
       )}
 
-      {!loading && graph && !narrow && (
+      {view === "canvas" && !loading && graph && narrow && (
+        <StudioListMode
+          conversations={conversations.filter((c) => !c.malformed)}
+          personas={personas}
+          spaces={spaces}
+          busy={busy}
+          onBindPersona={bindPersona}
+          onBindMemory={bindMemory}
+          onSetCapabilities={setCapabilities}
+          onSetRhythm={setRhythm}
+          onFork={setForkSpace}
+        />
+      )}
+
+      {view === "canvas" && !loading && graph && !narrow && (
         <>
           <StudioCanvas
             graph={graph}
@@ -446,19 +541,7 @@ export default function Studio() {
         </>
       )}
 
-      {!loading && (
-        <PersonaPanel
-          personas={personas}
-          busy={busy}
-          onChanged={(message) => {
-            setNotice(message);
-            void refresh();
-          }}
-          onError={setNotice}
-        />
-      )}
-
-      {!loading && (
+      {view === "canvas" && !loading && (
         <GrantsPanel
           codes={codes}
           grants={grants}

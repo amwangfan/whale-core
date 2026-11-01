@@ -5,9 +5,9 @@
 - ``PersonaResolver.card_for``：按 ResolvedContext.persona_id 解析会话绑定卡；
   未绑定或绑定 id 失效时 fail soft 回退 kv ``persona:active_card`` → 内置
   default，任何解析失败都不阻塞对话（只记录，不抛给聊天链路）。
-- ``PersonaResolver.render``：**极简渲染**——仅 name / summary / temperament /
-  relationship_style / voice_hint 的自然语言拼接；**不注入**权限、工具许可、
-  安全规则或任何格式硬命令（INV-07）。卡为空 → 返回空串，调用方用低负担默认。
+- ``PersonaResolver.render``：委托 ``ui.effective_persona.render_model_context``
+  （issue #36 唯一渲染器）；**不注入**权限、工具许可、安全规则或任何格式硬
+  命令（INV-07）。卡为空 → 返回空串，调用方用低负担默认。
 - ``to_simple_card``：第三方长卡的「提炼预览」——只生成建议，永远
   ``requires_confirmation=True``，绝不自动改写原卡（PRD §4.3）。
 
@@ -87,36 +87,23 @@ class PersonaResolver:
             logger.exception("persona global fallback failed; using builtin default")
             return PersonaCardLibrary().require(DEFAULT_CARD_ID)
 
-    # -- 极简渲染 ---------------------------------------------------------
+    # -- 渲染（issue #36 起委托给唯一有效人格渲染器） ----------------------
 
     @staticmethod
     def render(card: PersonaCard | None) -> str:
-        """把角色卡渲染为极简人格描述（纯自然语言，可为空串）。
+        """把角色卡渲染为模型上下文人格文本（可为空串）。
 
-        只取人格表达字段：name / summary / temperament / relationship_style /
-        voice_hint；兼容旧卡时分别以 description / tone / timbre_hint 回补。
-        **绝不**拼接权限、工具许可、安全规则、style_rules / external_prompt /
-        taboos 等长文——那些属于旧全局快照路径或宿主策略层。
+        issue #36：委托 ``ui.effective_persona.render_model_context``——
+        style_rules / extra_taboos / external_prompt 等字段统一生效，
+        不再被静默忽略；voice_hint / timbre_hint 归入 TTS 专用，不进文本。
+        **绝不**拼接权限、工具许可或安全规则（INV-07）。
         """
         if card is None:
             return ""
-        name = _clip(card.name)
-        summary = _clip(card.summary or card.description)
-        temperament = _clip(card.temperament or card.tone)
-        relationship = _clip(card.relationship_style)
-        voice = _clip(card.voice_hint or card.timbre_hint)
-        parts: list[str] = []
-        if name:
-            parts.append(f"你是「{name}」。")
-        if summary:
-            parts.append(f"设定：{summary}")
-        if temperament:
-            parts.append(f"气质：{temperament}")
-        if relationship:
-            parts.append(f"相处方式：{relationship}")
-        if voice:
-            parts.append(f"声音气质：{voice}")
-        return "\n".join(parts)
+        from whale_core.ui.effective_persona import render_model_context
+
+        text, _ = render_model_context(card)
+        return text
 
     # -- 第三方长卡提炼预览（只建议，不改写） ------------------------------
 
