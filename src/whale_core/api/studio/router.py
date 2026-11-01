@@ -34,6 +34,7 @@ from whale_core.api.studio.memory import (
 from whale_core.api.studio.personas import (
     _create_persona,
     _get_persona_detail,
+    _get_persona_effective,
     _list_personas,
     _put_persona,
     _update_persona,
@@ -68,6 +69,10 @@ def _dispatch_studio(handler, method: str, parts: list[str]) -> None:
             _update_persona(handler, ctx, svc, rest[1])
         else:
             raise StudioError(405, "method_not_allowed", "use GET or PUT")
+    elif len(rest) == 3 and rest[0] == "personas" and rest[2] == "effective":
+        if method != "GET":
+            raise StudioError(405, "method_not_allowed", "use GET")
+        _get_persona_effective(handler, ctx, svc, rest[1])
     elif rest == ["memory-spaces"] and method == "GET":
         _list_memory_spaces(handler, ctx, svc)
     elif rest == ["graph"] and method == "GET":
@@ -136,6 +141,8 @@ def _path_known(rest: list[str]) -> bool:
                 ["members", "memory", "delete"]):
         return True
     if len(rest) == 2 and rest[0] == "personas":
+        return True
+    if len(rest) == 3 and rest[0] == "personas" and rest[2] == "effective":
         return True
     return len(rest) == 3 and rest[0] == "conversations" \
         and rest[2] in ("persona", "memories", "capabilities", "rhythm")

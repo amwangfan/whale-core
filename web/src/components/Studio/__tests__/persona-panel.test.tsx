@@ -182,4 +182,55 @@ describe("PersonaPanel 人物卡管理", () => {
       { timeout: 5000 },
     );
   });
+
+  it("生效预览：拉取 effective 快照并展示模型上下文与字段徽标", async () => {
+    mockStudioFetch({
+      "/studio/personas/custom-abc/effective": () =>
+        jsonResult({
+          effective: {
+            persona_id: "custom-abc",
+            card_title: "我的卡",
+            source: "conversation_bound",
+            model_context: "你是「小鲸」。\n设定：旧设定\n表达规则：\n- 先给结论",
+            voice: { timbre_hint: "bright", speaking_rate: 1.1 },
+            content_sha: "abc123def456",
+            fallback_reason: "",
+            dispositions: [
+              { field: "name", destination: "model_context", applied: "", used_value: true },
+              { field: "voice_hint", destination: "tts_only", applied: "", used_value: true },
+            ],
+          },
+        }),
+    });
+    renderPanel();
+    const buttons = screen.getAllByText("生效预览");
+    fireEvent.click(buttons[1]); // custom-abc 行
+    await waitFor(() =>
+      expect(screen.getByText(/你是「小鲸」/)).toBeTruthy(),
+    );
+    expect(screen.getByText("abc123def456")).toBeTruthy();
+    expect(screen.getByText(/会话绑定卡/)).toBeTruthy();
+  });
+
+  it("编辑表单：每个字段标注去向徽标（模型上下文/仅语音/元数据）", async () => {
+    mockStudioFetch({
+      "/studio/personas/custom-abc": () =>
+        jsonResult({
+          persona: {
+            id: "custom-abc",
+            title: "我的卡",
+            name: "小鲸",
+            builtin: false,
+            summary: "旧设定",
+          },
+        }),
+    });
+    renderPanel();
+    fireEvent.click(screen.getByText("编辑"));
+    await waitFor(() => screen.getByText("保存"));
+    expect(screen.getAllByText("模型上下文").length).toBeGreaterThanOrEqual(8);
+    expect(screen.getAllByText("仅语音").length).toBe(2); // 语速 + 音色提示
+    expect(screen.getAllByText("元数据").length).toBeGreaterThanOrEqual(6);
+  });
+
 });

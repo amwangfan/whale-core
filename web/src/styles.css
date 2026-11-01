@@ -2456,3 +2456,54 @@ code,
 .persona-form textarea { resize: vertical; }
 .persona-form-wide { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
 .persona-form-actions { display: flex; gap: 10px; }
+
+/* issue #36：字段去向徽标与生效预览 */
+.dest-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 500;
+  vertical-align: 1px;
+}
+.dest-badge.dest-model {
+  background: #e3f2fd;
+  color: #1565c0;
+}
+.dest-badge.dest-tts {
+  background: #f3e5f5;
+  color: #7b1fa2;
+}
+.dest-badge.dest-meta {
+  background: #eceff1;
+  color: #546e7a;
+}
+.persona-effective {
+  border: 1px solid #d7dce2;
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin: 10px 0;
+}
+.persona-effective h4 {
+  margin: 0 0 6px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.persona-effective-meta {
+  color: #667;
+  font-size: 12px;
+  margin: 4px 0;
+}
+.persona-effective-context {
+  background: #f7f9fb;
+  border: 1px solid #e3e8ee;
+  border-radius: 8px;
+  padding: 8px 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 260px;
+  overflow: auto;
+  font-size: 12.5px;
+}

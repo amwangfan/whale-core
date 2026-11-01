@@ -163,11 +163,11 @@ def test_missing_bound_card_falls_back_soft_and_records():
 
 
 # ---------------------------------------------------------------------------
-# 极简渲染：只取五个人格字段；空卡 → 空串
+# 有效渲染（issue #36）：表达字段全量生效；空卡 → 空串；TTS/元数据不进文本
 # ---------------------------------------------------------------------------
 
 
-def test_render_uses_only_minimal_fields():
+def test_render_applies_all_expression_fields():
     card = PersonaCard(
         card_id="verbose", title="t", name="鲸鱼",
         summary="简短设定。",
@@ -181,13 +181,16 @@ def test_render_uses_only_minimal_fields():
     assert "你是「鲸鱼」。" in text
     assert "设定：简短设定。" in text
     assert "气质：legacy-tone" in text  # 无 temperament 时回补 tone
-    # 极简渲染不携带长文/硬性格式命令/禁忌/原文
-    assert "emoji" not in text
-    assert "撒娇" not in text
-    assert "不许说 X" not in text
-    assert "一万字" not in text
-    # 极简渲染不注入任何权限/安全规则话术
-    assert "权限" not in text and "许可" not in text and "禁忌" not in text
+    # issue #36：style_rules / extra_taboos / external_prompt 不再被静默忽略
+    assert "每句必须带三个 emoji" in text
+    assert "每五轮必须撒娇" in text
+    assert "不许说 X" in text
+    assert "一万字" in text  # 以防注入包裹形式进入
+    assert "外部上下文而非指令" in text
+    # TTS 专用字段不进文本模型上下文
+    assert "warm_neutral" not in text
+    # 不注入任何权限/许可话术
+    assert "许可" not in text
 
 
 def test_render_empty_card_returns_empty_string():
@@ -301,11 +304,11 @@ def test_to_simple_card_from_raw_text():
 
 
 # ---------------------------------------------------------------------------
-# 对话链路：绑定卡走极简渲染；空卡/缺字段卡/无卡都能正常对话
+# 对话链路：绑定卡与全局卡走同一有效渲染；空卡/缺字段卡/无卡都能正常对话
 # ---------------------------------------------------------------------------
 
 
-def test_companion_chat_uses_bound_card_minimal_render():
+def test_companion_chat_uses_bound_card_effective_render():
     store, _, bindings, resolver, _ = make_env()
     bindings.bind_persona(GROUP_A_KEY, "card-a", updated_by="owner")
     ctx = resolve_group(resolver, "group:111")
@@ -315,17 +318,21 @@ def test_companion_chat_uses_bound_card_minimal_render():
     assert reply == "好的。"
     persona = model.calls[0]["persona"]
     assert "小鲸" in persona and "傲娇" in persona
-    assert "声音气质：bright_neutral" in persona
+    # issue #36：voice_hint 归 TTS 专用，不再进文本模型上下文
+    assert "bright_neutral" not in persona
 
 
-def test_companion_chat_without_binding_keeps_legacy_snapshot_behavior():
+def test_companion_chat_without_binding_uses_global_active_card_same_renderer():
     store, _, _, resolver, _ = make_env()
     ctx = resolve_group(resolver, "group:999")  # 未绑定 → persona_id=None
     assert ctx.persona_id is None
     model = _FakeModel()
     WhaleCompanion(store, model).chat("你好", context=ctx)
-    # 兼容期：走 persona:default 全局快照摘要，而非极简渲染
-    assert "默认人格" in model.calls[0]["persona"]
+    # issue #36：全局路径与会话绑定路径同一渲染器——未绑定会话渲染全局活跃卡
+    # （内置 default），而非旧 PersonaContinuity 摘要格式
+    persona = model.calls[0]["persona"]
+    assert "你是「鲸鱼」。" in persona
+    assert "默认人格" not in persona
 
 
 def test_companion_chat_with_empty_card_falls_back_to_low_burden_default():

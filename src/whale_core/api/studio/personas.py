@@ -127,6 +127,28 @@ def _get_persona_detail(handler, ctx, svc: StudioServices, card_id: str) -> None
     }))
 
 
+def _get_persona_effective(handler, ctx, svc: StudioServices, card_id: str) -> None:
+    """issue #36：有效人格快照预览——保存的设定实际进入模型请求的确切文本。
+
+    ``card_id == "active"`` 表示全局当前生效卡（等价于未绑定会话的解析结果）。
+    返回 model_context 全文 + 每字段去向（model_context / tts_only /
+    metadata_only）+ content_sha（供日志/Trace 引用）。管理面仅 owner Bearer
+    可达；external_prompt 等内部文本本就在详情端点回显，此处不再加码。
+    """
+    from whale_core.ui.effective_persona import build_effective_persona
+
+    if card_id == "active":
+        snap = build_effective_persona(ctx.store, None)
+    else:
+        if not _ID_RE.match(card_id):
+            raise StudioError(404, "not_found", "unknown persona")
+        card = _find_persona(ctx, svc, card_id)
+        if card is None:
+            raise StudioError(404, "not_found", f"人物卡不存在: {card_id!r}")
+        snap = build_effective_persona(ctx.store, card_id, card=card)
+    handler._send(200, _ok({"effective": snap.as_dict()}))
+
+
 def _parse_persona_fields(body: dict) -> dict:
     """严格字段表 + 类型/长度校验；返回 PersonaCard 可接受的字段子集。"""
     _reject_unknown_fields(body, _PERSONA_EDITABLE | {"card_id"})

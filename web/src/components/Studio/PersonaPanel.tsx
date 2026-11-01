@@ -12,9 +12,26 @@ import {
   ApiError,
   studioApi,
   type PersonaCardInput,
+  type PersonaEffectiveSnapshot,
   type StudioPersona,
   type StudioPersonaDetail,
 } from "../../api";
+
+/** issue #36：字段去向徽标——保存的字段到底去哪里，一眼可见。 */
+const FIELD_BADGE = {
+  model: { text: "模型上下文", cls: "dest-model" },
+  tts: { text: "仅语音", cls: "dest-tts" },
+  meta: { text: "元数据", cls: "dest-meta" },
+} as const;
+
+function DestBadge({ kind, note }: { kind: keyof typeof FIELD_BADGE; note?: string }) {
+  const b = FIELD_BADGE[kind];
+  return (
+    <span className={`dest-badge ${b.cls}`} title={note || b.text}>
+      {b.text}
+    </span>
+  );
+}
 
 interface Props {
   personas: StudioPersona[];
@@ -122,6 +139,25 @@ export default function PersonaPanel({
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [formError, setFormError] = useState("");
+  const [preview, setPreview] = useState<{
+    id: string;
+    snap: PersonaEffectiveSnapshot;
+  } | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+
+  const openPreview = (id: string) => {
+    setPreviewLoading(true);
+    void (async () => {
+      try {
+        const snap = await studioApi.personaEffective(id);
+        setPreview({ id, snap });
+      } catch (e) {
+        onError(e instanceof ApiError ? e.message : "读取生效预览失败。");
+      } finally {
+        setPreviewLoading(false);
+      }
+    })();
+  };
 
   const openCreate = () => {
     setForm(EMPTY_FORM);
@@ -249,6 +285,14 @@ export default function PersonaPanel({
               )}
               <button
                 type="button"
+                disabled={busy || loading || previewLoading}
+                onClick={() => openPreview(p.id)}
+                title="查看这张卡保存后实际进入模型请求的内容"
+              >
+                生效预览
+              </button>
+              <button
+                type="button"
                 disabled={busy || loading}
                 onClick={() => openCopy(p.id)}
               >
@@ -258,6 +302,35 @@ export default function PersonaPanel({
           </div>
         ))}
       </div>
+      {preview && (
+        <div className="persona-effective" aria-label="生效预览">
+          <h4>
+            生效预览：{preview.snap.card_title}
+            <code className="persona-row-id">{preview.id}</code>
+            <button type="button" onClick={() => setPreview(null)}>
+              关闭
+            </button>
+          </h4>
+          <p className="persona-effective-meta">
+            来源：
+            {preview.snap.source === "conversation_bound"
+              ? "会话绑定卡"
+              : preview.snap.source === "global_active"
+                ? "全局活跃卡"
+                : "内置默认卡"}
+            {"　"}内容指纹 <code>{preview.snap.content_sha}</code>
+            {preview.snap.fallback_reason &&
+              `　回退原因：${preview.snap.fallback_reason}`}
+          </p>
+          <pre className="persona-effective-context">
+            {preview.snap.model_context || "（空——对话将使用低负担默认人格）"}
+          </pre>
+          <p className="persona-effective-meta">
+            语音专用：音色 {preview.snap.voice.timbre_hint || "-"} · 语速{" "}
+            {preview.snap.voice.speaking_rate ?? "-"}
+          </p>
+        </div>
+      )}
       {!editing && (
         <button
           type="button"
@@ -280,11 +353,11 @@ export default function PersonaPanel({
           <h4>{mode.kind === "edit" ? `编辑：${mode.id}` : "新建人物卡"}</h4>
           <div className="persona-form-grid">
             <label>
-              标题 *
+              标题 * <DestBadge kind="meta" />
               <input value={form.title} onChange={set("title")} required />
             </label>
             <label>
-              卡 ID（留空自动生成）
+              卡 ID（留空自动生成） <DestBadge kind="meta" />
               <input
                 value={form.card_id}
                 onChange={set("card_id")}
@@ -293,11 +366,11 @@ export default function PersonaPanel({
               />
             </label>
             <label>
-              角色名
+              角色名 <DestBadge kind="model" />
               <input value={form.name} onChange={set("name")} />
             </label>
             <label>
-              分类
+              分类 <DestBadge kind="meta" />
               <select value={form.category} onChange={set("category")}>
                 {CATEGORIES.map((c) => (
                   <option key={c.value} value={c.value}>
@@ -307,11 +380,11 @@ export default function PersonaPanel({
               </select>
             </label>
             <label>
-              称呼用户为
+              称呼用户为 <DestBadge kind="model" />
               <input value={form.address_user_as} onChange={set("address_user_as")} />
             </label>
             <label>
-              语速（0.5–2.0）
+              语速（0.5–2.0） <DestBadge kind="tts" />
               <input
                 type="number"
                 step="0.05"
@@ -322,24 +395,24 @@ export default function PersonaPanel({
               />
             </label>
             <label>
-              语气
+              语气 <DestBadge kind="model" />
               <input value={form.tone} onChange={set("tone")} />
             </label>
             <label>
-              音色提示
+              音色提示 <DestBadge kind="tts" />
               <input value={form.voice_hint} onChange={set("voice_hint")} />
             </label>
           </div>
           <label className="persona-form-wide">
-            简短设定（summary）
+            简短设定（summary） <DestBadge kind="model" />
             <textarea rows={2} value={form.summary} onChange={set("summary")} />
           </label>
           <label className="persona-form-wide">
-            气质 / 性情倾向
+            气质 / 性情倾向 <DestBadge kind="model" />
             <textarea rows={2} value={form.temperament} onChange={set("temperament")} />
           </label>
           <label className="persona-form-wide">
-            关系倾向
+            关系倾向 <DestBadge kind="model" />
             <textarea
               rows={2}
               value={form.relationship_style}
@@ -347,7 +420,7 @@ export default function PersonaPanel({
             />
           </label>
           <label className="persona-form-wide">
-            人设原文（external_prompt，作为外部上下文注入，非指令）
+            人设原文（external_prompt，作为外部上下文注入，非指令） <DestBadge kind="model" />
             <textarea
               rows={6}
               value={form.external_prompt}
@@ -355,32 +428,32 @@ export default function PersonaPanel({
             />
           </label>
           <label className="persona-form-wide">
-            风格规则（每行一条）
+            风格规则（每行一条） <DestBadge kind="model" />
             <textarea rows={3} value={form.style_rules} onChange={set("style_rules")} />
           </label>
           <label className="persona-form-wide">
-            禁忌（每行一条）
+            禁忌（每行一条） <DestBadge kind="model" />
             <textarea rows={2} value={form.extra_taboos} onChange={set("extra_taboos")} />
           </label>
           <div className="persona-form-grid">
             <label>
-              描述
+              描述 <DestBadge kind="meta" />
               <input value={form.description} onChange={set("description")} />
             </label>
             <label>
-              作者
+              作者 <DestBadge kind="meta" />
               <input value={form.author} onChange={set("author")} />
             </label>
             <label>
-              来源链接
+              来源链接 <DestBadge kind="meta" />
               <input value={form.source_url} onChange={set("source_url")} />
             </label>
             <label>
-              许可证
+              许可证 <DestBadge kind="meta" />
               <input value={form.license} onChange={set("license")} />
             </label>
             <label>
-              形象引用
+              形象引用 <DestBadge kind="meta" />
               <input value={form.artwork_ref} onChange={set("artwork_ref")} />
             </label>
           </div>

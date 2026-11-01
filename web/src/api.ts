@@ -611,6 +611,26 @@ export interface StudioPersonaDetail extends StudioPersona {
   channels?: string[];
 }
 
+
+/** issue #36：有效人格快照——保存的设定实际进入模型请求的确切内容。 */
+export interface PersonaFieldDisposition {
+  field: string;
+  destination: "model_context" | "tts_only" | "metadata_only";
+  applied: string;
+  used_value: boolean;
+}
+
+export interface PersonaEffectiveSnapshot {
+  persona_id: string;
+  card_title: string;
+  source: "conversation_bound" | "global_active" | "global_legacy" | "builtin_default";
+  model_context: string;
+  voice: { timbre_hint?: string; speaking_rate?: number };
+  content_sha: string;
+  fallback_reason: string;
+  dispositions: PersonaFieldDisposition[];
+}
+
 /** 新建/修改人物卡的可编辑字段（严格字段表；全可选，新建时 title 必填）。 */
 export interface PersonaCardInput {
   card_id?: string;
@@ -794,6 +814,12 @@ export const studioApi = {
         `/studio/personas/${encodeURIComponent(id)}`,
       )
     ).persona,
+  personaEffective: async (id: string) =>
+    (
+      await request<{ effective: PersonaEffectiveSnapshot }>(
+        `/studio/personas/${encodeURIComponent(id)}/effective`,
+      )
+    ).effective,
   createPersona: async (input: PersonaCardInput) =>
     (
       await request<{ persona: StudioPersonaDetail }>("/studio/personas", {
