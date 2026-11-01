@@ -837,6 +837,16 @@ def build_parser() -> argparse.ArgumentParser:
         return eval_main(args.eval_args)
     p_eval.set_defaults(func=eval_cmd)
 
+    # 角色卡与 GitHub 双向同步（owner 决策 2026-11-01）
+    p_persona = sub.add_parser(
+        "persona", help="角色卡导出/导入（whale persona export|import）")
+    p_persona.add_argument("persona_args", nargs=argparse.REMAINDER)
+
+    def persona_cmd(args: argparse.Namespace) -> int:
+        from whale_core.cli.persona_sync import main as persona_main
+        return persona_main(args.persona_args)
+    p_persona.set_defaults(func=persona_cmd)
+
     p_memory = sub.add_parser("memory", help="记忆导出 / 导入（JSONL）")
     msub = p_memory.add_subparsers(dest="memory_command", required=True)
     me = msub.add_parser("export", help="导出记忆为 JSONL")
