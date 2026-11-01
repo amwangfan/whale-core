@@ -43,7 +43,9 @@ from whale_core.api.studio.personas import (
     _create_persona,
     _get_persona_detail,
     _get_persona_effective,
+    _import_preview,
     _list_personas,
+    _playtest,
     _put_persona,
     _update_persona,
 )
@@ -70,6 +72,10 @@ def _dispatch_studio(handler, method: str, parts: list[str]) -> None:
         _list_personas(handler, ctx, svc)
     elif rest == ["personas"] and method == "POST":
         _create_persona(handler, ctx, svc)
+    elif rest == ["personas", "import-preview"] and method == "POST":
+        _import_preview(handler, ctx, svc)
+    elif rest == ["personas", "playtest"] and method == "POST":
+        _playtest(handler, ctx, svc)
     elif len(rest) == 2 and rest[0] == "personas":
         if method == "GET":
             _get_persona_detail(handler, ctx, svc, rest[1])
@@ -155,6 +161,7 @@ def _dispatch_studio(handler, method: str, parts: list[str]) -> None:
 def _path_known(rest: list[str]) -> bool:
     """路径模板已知但方法不符 → 405（否则 404）。"""
     if rest in (["conversations"], ["personas"], ["memory-spaces"], ["graph"],
+                ["personas", "import-preview"], ["personas", "playtest"],
                 ["forks"], ["forks", "preview"], ["vault", "records"],
                 ["members", "consent"], ["members", "consent", "revoke"],
                 ["members", "memory"], ["members", "memory", "correct"],

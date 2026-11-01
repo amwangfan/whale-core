@@ -1,7 +1,8 @@
-"""S5 人物卡域：list/detail/create/update + 会话 persona 绑定。"""
+"""S5 人物卡域：list/detail/create/update + 会话 persona 绑定 + 导入/试玩。"""
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Optional
 from uuid import uuid4
@@ -85,6 +86,7 @@ _PERSONA_STR_FIELDS = frozenset({
     "relationship_style", "voice_hint", "category", "tone",
     "address_user_as", "timbre_hint", "artwork_ref",
     "author", "source_url", "license", "external_prompt",
+    "example_dialogue",
 })
 _PERSONA_LIST_FIELDS = frozenset({"style_rules", "extra_taboos"})
 _PERSONA_EDITABLE = _PERSONA_STR_FIELDS | _PERSONA_LIST_FIELDS | {"speaking_rate"}
@@ -110,6 +112,7 @@ def _persona_detail_view(card: PersonaCard, *, builtin: bool) -> dict:
         "speaking_rate": card.speaking_rate,
         "artwork_ref": card.artwork_ref,
         "external_prompt": card.external_prompt,
+        "example_dialogue": card.example_dialogue,
         "channels": list(card.channels),
     })
     return view
@@ -147,6 +150,188 @@ def _get_persona_effective(handler, ctx, svc: StudioServices, card_id: str) -> N
             raise StudioError(404, "not_found", f"人物卡不存在: {card_id!r}")
         snap = build_effective_persona(ctx.store, card_id, card=card)
     handler._send(200, _ok({"effective": snap.as_dict()}))
+
+
+# ---------------------------------------------------------------------------
+# UX-02（issue #37）：导入预览（确认前不写入）与即时试玩
+# ---------------------------------------------------------------------------
+
+#: 试玩固定场景输入（相同输入对比默认人格与当前角色）。
+_PLAYTEST_DEFAULT_INPUT = "我今天有点累，项目快到截止时间了。"
+
+_MAX_IMPORT_CHARS = 40000
+
+
+def _slugify(name: str) -> str:
+    slug = re.sub(r"[^a-z0-9\-]+", "-", (name or "").lower()).strip("-")
+    return slug[:40] or ""
+
+
+def _import_mapping(card_data: dict) -> tuple[dict, dict, list]:
+    """SillyTavern v1/v2 字段 → PersonaCard 字段。返回 (parsed, mapping,
+    unmapped)。未识别字段进 unmapped（不静默丢字段）。"""
+    parsed: dict = {}
+    mapping: dict[str, str] = {}
+    unmapped: list[dict] = []
+    data = card_data
+    if isinstance(card_data.get("data"), dict) and \
+            str(card_data.get("spec") or "").startswith("chara_card"):
+        data = card_data["data"]  # v2 包装
+    known = {
+        "name": "name",
+        "personality": "temperament",
+        "mes_example": "example_dialogue",
+    }
+    for src, dst in known.items():
+        value = str(data.get(src) or "").strip()
+        if value:
+            parsed[dst] = value[:2000]
+            mapping[src] = dst
+    description = str(data.get("description") or "").strip()
+    scenario = str(data.get("scenario") or "").strip()
+    if description:
+        parsed["summary"] = description[:300]
+        mapping["description"] = "summary(≤300) + external_prompt(原文)"
+    if scenario:
+        mapping["scenario"] = "external_prompt(并入原文)"
+    prompt_parts = [p for p in (description, f"场景：{scenario}" if scenario else "")
+                    if p]
+    if prompt_parts:
+        parsed["external_prompt"] = "\n".join(prompt_parts)[:MAX_EXTERNAL_PROMPT_CHARS]
+    for src in ("first_mes", "greetings"):
+        value = data.get(src)
+        text = value[0] if isinstance(value, list) and value else value
+        if isinstance(text, str) and text.strip():
+            unmapped.append({
+                "field": src,
+                "note": "首条问候暂不参与运行（仅展示），未写入卡",
+                "preview": text.strip()[:120],
+            })
+    handled = set(known) | {"description", "scenario", "spec", "data",
+                            "first_mes", "greetings"}
+    for key in sorted(data):
+        if key not in handled:
+            value = data.get(key)
+            preview = str(value)[:80] if not isinstance(value, (dict, list)) \
+                else f"({type(value).__name__})"
+            unmapped.append({"field": key, "note": "未识别字段，未写入",
+                             "preview": preview})
+    return parsed, mapping, unmapped
+
+
+def _import_preview(handler, ctx, svc: StudioServices) -> None:
+    """POST /studio/personas/import-preview：解析预览；不写任何数据。"""
+    body = _require_json_body(handler)
+    _reject_unknown_fields(body, {"text", "card_id"})
+    raw = str(body.get("text") or "")
+    if not raw.strip():
+        raise StudioError(422, "invalid_request", "text 必填（JSON 或纯文本卡）")
+    if len(raw) > _MAX_IMPORT_CHARS:
+        raise StudioError(422, "invalid_request",
+                          f"卡文本超过 {_MAX_IMPORT_CHARS} 字符上限")
+    warnings: list[str] = []
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        data = None
+    if isinstance(data, dict):
+        parsed, mapping, unmapped = _import_mapping(data)
+    else:
+        # 纯文本：启发式提炼（与 to_simple_card 同族），原文进 external_prompt
+        from whale_core.ui.persona_resolver import PersonaResolver
+        preview = PersonaResolver.to_simple_card(raw)["suggested"]
+        parsed = {k: v for k, v in preview.items() if v}
+        parsed["external_prompt"] = raw[:MAX_EXTERNAL_PROMPT_CHARS]
+        mapping = {"首行": "summary", "性格/气质行": "temperament",
+                   "相处/关系行": "relationship_style", "全文": "external_prompt"}
+        unmapped = []
+        warnings.append("纯文本导入为启发式提炼，请逐项确认后再写入")
+    if not parsed.get("name"):
+        parsed.pop("name", None)
+    suggested_id = _slugify(str(body.get("card_id") or parsed.get("name") or ""))
+    conflicts: list[str] = []
+    if suggested_id and (svc.personas.get(suggested_id) is not None
+                         or ctx.store.get(f"{CARD_KEY_PREFIX}{suggested_id}")):
+        conflicts.append(f"card_id 已存在：{suggested_id}（保存时将生成新 id）")
+    missing = [f for f in ("summary", "temperament")
+               if not (parsed.get(f) or "").strip()]
+    handler._send(200, _ok({
+        "parsed": parsed,
+        "suggested_card_id": suggested_id,
+        "mapping": mapping,
+        "unmapped": unmapped,
+        "missing": missing,
+        "conflicts": conflicts,
+        "warnings": warnings,
+        "requires_confirmation": True,  # 预览永不直接写入
+    }))
+
+
+def _playtest(handler, ctx, svc: StudioServices) -> None:
+    """POST /studio/personas/playtest：真实有效快照 + 真实模型的对比试玩。
+
+    相同固定输入，两侧都不注入记忆/历史（隔离人格变量）；模型失败、
+    降级与未生效字段如实显示。试玩不写记忆、不进会话历史。
+    """
+    from whale_core.ui.effective_persona import build_effective_persona
+
+    body = _require_json_body(handler)
+    _reject_unknown_fields(body, {"persona_id", "card", "input"})
+    orchestrator = getattr(ctx, "orchestrator", None)
+    model = getattr(getattr(orchestrator, "companion", None), "model", None) \
+        if orchestrator is not None else None
+    if model is None:
+        raise StudioError(503, "unavailable",
+                          "模型未装配（检查设置页模型配置后再试玩）")
+    text = str(body.get("input") or "").strip()[:500] or _PLAYTEST_DEFAULT_INPUT
+
+    def _side(persona_id: str, inline: dict | None) -> dict:
+        try:
+            if inline is not None:
+                fields = dict(inline)
+                fields.setdefault("card_id", "playtest")
+                fields.setdefault("title", "试玩预览")
+                card = PersonaCard.from_dict(fields)
+                snap = build_effective_persona(ctx.store, None, card=card)
+                source = "unsaved_draft"
+            else:
+                snap = build_effective_persona(ctx.store, persona_id or None)
+                source = snap.source
+            reply = model.reply(text, persona=snap.model_context,
+                                memories=(), history=())
+            return {
+                "persona_id": snap.persona_id,
+                "source": source,
+                "content_sha": snap.content_sha,
+                "reply": reply,
+                "fields_used": sorted({
+                    d.field for d in snap.dispositions
+                    if d.destination == "model_context" and d.used_value}),
+            }
+        except Exception as exc:
+            from whale_core.core.deepseek import ModelError
+            kind = exc.kind if isinstance(exc, ModelError) \
+                else type(exc).__name__
+            return {"persona_id": persona_id or "playtest",
+                    "source": inline is not None and "unsaved_draft" or "",
+                    "error": f"model_{kind}"}
+
+    persona_id = str(body.get("persona_id") or "").strip()
+    inline = body.get("card") if isinstance(body.get("card"), dict) else None
+    if not persona_id and inline is None:
+        raise StudioError(422, "invalid_request",
+                          "persona_id 或 card（草稿字段）二选一")
+    result = {
+        "input": text,
+        "baseline": _side("", None),  # 全局当前生效人格
+        "trial": _side(persona_id, inline),
+        "note": "两侧均无记忆/历史注入；试玩不写记忆、不进会话历史",
+    }
+    _audit(ctx, "persona.playtest",
+           persona_id=persona_id or "(draft)",
+           baseline_ok="reply" in result["baseline"],
+           trial_ok="reply" in result["trial"])
+    handler._send(200, _ok(result))
 
 
 def _parse_persona_fields(body: dict) -> dict:

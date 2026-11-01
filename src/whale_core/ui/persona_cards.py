@@ -75,6 +75,9 @@ class PersonaCard:
     relationship_style: str = ""  # 与用户的关系倾向
     voice_hint: str = ""  # 音色偏好提示（空则回退 timbre_hint）
     artwork_ref: str = ""  # 可选形象引用
+    # UX-02（issue #37）：示例对话——进入模型上下文，作为语气参考
+    # （渲染时标注「不要复述内容」）。
+    example_dialogue: str = ""
 
     def __post_init__(self) -> None:
         if not self.card_id.strip() or not self.title.strip():
@@ -143,6 +146,7 @@ class PersonaCard:
             "relationship_style": self.relationship_style,
             "voice_hint": self.voice_hint,
             "artwork_ref": self.artwork_ref,
+            "example_dialogue": self.example_dialogue,
         }
 
     @classmethod
@@ -170,6 +174,7 @@ class PersonaCard:
             relationship_style=str(d.get("relationship_style") or ""),
             voice_hint=str(d.get("voice_hint") or ""),
             artwork_ref=str(d.get("artwork_ref") or ""),
+            example_dialogue=str(d.get("example_dialogue") or ""),
         )
 
 

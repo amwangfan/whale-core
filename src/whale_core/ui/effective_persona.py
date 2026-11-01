@@ -50,6 +50,7 @@ FIELD_DESTINATIONS: dict[str, str] = {
     "style_rules": MODEL_CONTEXT,
     "extra_taboos": MODEL_CONTEXT,     # 表达层禁忌（与宿主自定义禁忌合并）
     "external_prompt": MODEL_CONTEXT,  # 不可信原文，防注入包裹 + 截断
+    "example_dialogue": MODEL_CONTEXT,  # 语气示例（标注不复述内容）
     "voice_hint": TTS_ONLY,
     "timbre_hint": TTS_ONLY,           # voice_hint 为空时回退
     "speaking_rate": TTS_ONLY,
@@ -186,6 +187,13 @@ def render_model_context(
     _mark("extra_taboos", bool(merged_taboos),
           f"{len(card.extra_taboos)} 条卡片禁忌"
           + (f"，合并宿主自定义 {len(host_taboos)} 条" if host_taboos else ""))
+
+    example = (getattr(card, "example_dialogue", "") or "").strip()
+    if example:
+        lines.append("表达示例（参考语气与表达方式，不要复述其内容）：")
+        lines.append(example[:1000])
+    _mark("example_dialogue", bool(example),
+          "作为语气参考进入模型上下文（截断上限 1000 字符）" if example else "")
 
     external = (card.external_prompt or "").strip()
     if external:
