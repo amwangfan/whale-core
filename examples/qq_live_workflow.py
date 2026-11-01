@@ -777,14 +777,27 @@ def cmd_run(args) -> int:
         if not is_private and not str(incoming.conversation).startswith("group:"):
             return  # 频道等其他形态：不处理
         if not is_private:
-            # G1：群消息先裁决「该不该回」——未 @/未引用机器人 = 旁观，
-            # 只留时间线，不产生回复（防刷屏）。
+            # G1：群消息先裁决「该不该回」——未 @/未引用机器人时再过
+            # issue #18 的主动参与策略（quiet/balanced/lively）；
+            # 仍不命中 = 旁观，只留时间线，不产生回复（防刷屏）。
             decision = target_resolver.decide(
                 conversation=incoming.conversation, sender_id=incoming.account,
                 message_id=incoming.message_id, mentions=incoming.mentions,
                 reply_to=incoming.reply_to, sender_uid=incoming.sender_uid)
             if decision.action != "reply":
-                return
+                from whale_core.life.rhythm import (
+                    RhythmStore as _RS2, rhythm_key_for as _rkf2)
+                _rhythm2 = _RS2(store).get(
+                    _rkf2("qq", incoming.conversation) or "")
+                join = group_turn_policy.maybe_join(
+                    conversation=incoming.conversation, text=incoming.text,
+                    activity=_rhythm2.activity, dnd=_rhythm2.dnd,
+                    timeline_entries=timeline.recent(incoming.conversation,
+                                                     limit=5))
+                if join.action != "join":
+                    return
+                print(f"  [参与] {_rhythm2.activity} 档主动接话 ← "
+                      f"{incoming.account}（{join.reason_code}）")
         from whale_core.life.temporary_auth import maybe_intercept_sudo
         if maybe_intercept_sudo(incoming.text) is None and not stranger_chat:
             print(f"[未配对] account={incoming.account} conv={incoming.conversation} "
