@@ -36,7 +36,20 @@ PLANNING_HINT = (
 
 SILENCE_MARK = "[[沉默]]"
 _FOLLOW_RE = re.compile(r"\[\[稍后补充[:：]([^\]\n]{1,60})\]\]")
-_BUBBLE_SEP_RE = re.compile(r"\n\s*◆\s*\n")
+# 气泡分隔：◆ 出现在行首即视为新气泡起点——独占一行（\n◆\n）或行首后接文本
+# （\n◆ 接着说）都算数，文首的 ◆ 同样生效。2026-11-01 修复：旧正则只认
+# 独占一行形态，模型实际常写「◆ 接着说」，导致标记与多余空行泄漏进气泡。
+_BUBBLE_SEP_RE = re.compile(r"(?:\A|\n)[ \t]*◆[ \t]*(?:\n|$)?")
+_BLANK_LINES_RE = re.compile(r"\n{2,}")
+
+
+def _tidy_bubble(text: str) -> str:
+    """气泡定稿：折叠连续空行（聊天气泡里的空行读着 AI 味，owner 2026-11-01）；
+    含代码围栏的气泡保留原始空行（``` 块内空行是代码格式的一部分）。"""
+    b = str(text or "").strip()
+    if "```" in b:
+        return b
+    return _BLANK_LINES_RE.sub("\n", b)
 
 
 @dataclass(frozen=True)
@@ -80,7 +93,8 @@ def plan_reply(text: str, *, is_group: bool, max_segments: int,
     def _mk(bubbles, *, silent=False, follow_up="", planner, delay_ms=0):
         action = "observe" if silent else ("follow_up" if follow_up else "reply")
         return ReplyPlan(
-            tuple(bubbles), silent=silent, follow_up=follow_up, planner=planner,
+            tuple(b for b in (_tidy_bubble(t) for t in bubbles) if b),
+            silent=silent, follow_up=follow_up, planner=planner,
             action=action, tone_target=tone_target,
             length_target=length_target, delay_ms=delay_ms)
 
