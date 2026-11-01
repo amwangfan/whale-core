@@ -978,7 +978,9 @@ def cmd_run(args) -> int:
         # 陌生人回复：owner 定向的网关/Outbox 发送口不适用（draft 未入
         # Outbox 账本 + port 锁定 owner 目标）。陌生人/群回复走端口的
         # 回复语义直发方法（目标 = 来件对端/白名单群，已在上方过安全审核）。
-        port_inner = getattr(send_port, "_inner", send_port)
+        # 2026-11-01 修复：直发也走外层 WindowedSendPort（穿窗），不再解包
+        # _inner 绕过完整模式窗口——否则关窗态下陌生人/群回复必发送失败。
+        port_inner = send_port
         # G3：分段 + epoch 校验（新消息到达则剩余段作废）
         from whale_core.life.segments import split_reply
         from whale_core.life.batching import current_epoch, epoch_fresh

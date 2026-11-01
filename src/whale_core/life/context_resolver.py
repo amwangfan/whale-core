@@ -42,6 +42,21 @@ GROUP_CEILING: Tuple[str, ...] = (SCOPE_CHAT_BASIC, SCOPE_TOOL_WEB_SEARCH)
 #: 未配对私聊：仅对话。
 PRIVATE_ANON: Tuple[str, ...] = (SCOPE_CHAT_BASIC,)
 
+#: 媒体生成能力组（图片/视频/语音）。
+MEDIA_GENERATION_SCOPES: Tuple[str, ...] = (
+    "tool.media.image.generate",
+    "tool.media.video.generate",
+    "tool.tts.synthesize",
+)
+
+
+def _media_open_test() -> bool:
+    """测试期开放（owner 2026-11-01）：WHALE_MEDIA_OPEN_TEST=1 时，
+    群会话与陌生人/成员私聊也获得媒体生成 scope（其余纪律不变：
+    高风险动作仍走审批链，频控/配额/静默照常）。"""
+    import os
+    return os.environ.get("WHALE_MEDIA_OPEN_TEST", "").strip() == "1"
+
 #: 已配对主人私聊：对话 + 常规工具 + 提交出站 + 查看本人任务 + 设备通知。
 #: F-01 红队修复：capability scope 在执行端真校验后，主人私聊必须显式
 #: 保留其既有工具能力，否则生图/语音等回归。高风险动作（shell、支付、
@@ -298,14 +313,20 @@ class ConversationContextResolver:
         self, kind: ConversationKind, principal: Principal
     ) -> Tuple[str, ...]:
         if _is_group(kind):
-            return GROUP_CEILING  # INV-03：主人在群里同样受限
+            # INV-03：主人在群里同样受限；测试期媒体生成对全群开放（含主人）。
+            base = GROUP_CEILING
+            return base + (MEDIA_GENERATION_SCOPES if _media_open_test() else ())
         if kind is ConversationKind.API:
-            return API_OWNER if principal.is_owner else PRIVATE_ANON
-        if kind in (ConversationKind.QQ_PRIVATE, ConversationKind.WEB):
-            return PRIVATE_OWNER if principal.is_owner else PRIVATE_ANON
-        if kind is ConversationKind.VOICE:
-            return PRIVATE_OWNER if principal.is_owner else PRIVATE_ANON
-        return (SCOPE_CHAT_BASIC,)
+            base = API_OWNER if principal.is_owner else PRIVATE_ANON
+        elif kind in (ConversationKind.QQ_PRIVATE, ConversationKind.WEB):
+            base = PRIVATE_OWNER if principal.is_owner else PRIVATE_ANON
+        elif kind is ConversationKind.VOICE:
+            base = PRIVATE_OWNER if principal.is_owner else PRIVATE_ANON
+        else:
+            return (SCOPE_CHAT_BASIC,)
+        if not principal.is_owner and _media_open_test():
+            base = base + MEDIA_GENERATION_SCOPES
+        return base
 
 
 def _is_group(kind: ConversationKind) -> bool:

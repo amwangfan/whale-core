@@ -250,6 +250,95 @@ class WeQWebSendPort:
         outcome = (((body.get("result") or {}).get("data") or {}).get("json"))
         return isinstance(outcome, dict) and bool(outcome.get("ok"))
 
+    # ── 定向媒体发送（2026-11-01 媒体功能开放测试）─────────────────────
+    # 与 send_c2c 同一纪律：c2c 目标强校验 uid 形状（回复语义由宿主保证），
+    # 群目标必须在构造期白名单内；消息内容/模型输出永远不能指定发送目标。
+
+    def _media_target_ok(self, peer_type: str, target: str) -> bool:
+        if peer_type == "c2c":
+            return bool(UID_RE.match(str(target or "").strip()))
+        if peer_type == "group":
+            return str(target or "").strip() in self.allowed_groups
+        return False
+
+    def _post_media(self, path: str, payload: dict) -> bool:
+        if self.expected_account_uin:
+            payload["json"]["expectedAccountUin"] = self.expected_account_uin
+        if self.expected_account_config_id:
+            payload["json"]["expectedAccountConfigId"] = self.expected_account_config_id
+        try:
+            if self._cookie is None:
+                self.login()
+            status, body, _ = self._post(path, payload, auth=True)
+            if status == 401:
+                self.login()
+                status, body, _ = self._post(path, payload, auth=True)
+        except WeQSendError:
+            return False
+        if status != 200 or not isinstance(body, dict):
+            return False
+        outcome = (((body.get("result") or {}).get("data") or {}).get("json"))
+        if not isinstance(outcome, dict):
+            return False
+        self.last_receipt = outcome
+        return bool(outcome.get("ok"))
+
+    def send_image_to(self, peer_type: str, target: str, image_bytes: bytes, *,
+                      filename: str = "image.png", width: int = 0, height: int = 0) -> bool:
+        """向指定 c2c 对端/白名单群发图片（send_image 的定向版）。"""
+        peer_type = str(peer_type or "").strip()
+        target = str(target or "").strip()
+        if not self._media_target_ok(peer_type, target):
+            self.last_receipt = {"ok": False, "error": "target-not-allowed"}
+            return False
+        if not image_bytes or len(image_bytes) > 20 * 1024 * 1024:
+            return False
+        payload = {"json": {"peerType": peer_type, "targetId": target,
+                            "image": {"type": "Buffer", "data": list(image_bytes)},
+                            "fileName": filename[:100] or "image.png"}}
+        if width > 0 and height > 0:
+            payload["json"]["width"] = width
+            payload["json"]["height"] = height
+        return self._post_media("/trpc/account.sendImage", payload)
+
+    def send_voice_to(self, peer_type: str, target: str, wav_bytes: bytes, *,
+                      filename: str = "voice.wav") -> bool:
+        """向指定 c2c 对端/白名单群发语音（send_voice 的定向版）。"""
+        peer_type = str(peer_type or "").strip()
+        target = str(target or "").strip()
+        if not self._media_target_ok(peer_type, target):
+            self.last_receipt = {"ok": False, "error": "target-not-allowed"}
+            return False
+        if not wav_bytes or len(wav_bytes) > 20 * 1024 * 1024:
+            return False
+        payload = {"json": {"peerType": peer_type, "targetId": target,
+                            "wav": {"type": "Buffer", "data": list(wav_bytes)},
+                            "fileName": filename[:100] or "voice.wav"}}
+        return self._post_media("/trpc/account.sendVoice", payload)
+
+    def send_video_to(self, peer_type: str, target: str, video_bytes: bytes, *,
+                      filename: str = "video.mp4", width: int = 0, height: int = 0,
+                      duration_sec: int = 0, thumb: bytes = b"") -> bool:
+        """向指定 c2c 对端/白名单群发视频（/trpc/account.sendVideo 补丁端点）。"""
+        peer_type = str(peer_type or "").strip()
+        target = str(target or "").strip()
+        if not self._media_target_ok(peer_type, target):
+            self.last_receipt = {"ok": False, "error": "target-not-allowed"}
+            return False
+        if not video_bytes or len(video_bytes) > 100 * 1024 * 1024:
+            return False
+        payload = {"json": {"peerType": peer_type, "targetId": target,
+                            "video": {"type": "Buffer", "data": list(video_bytes)},
+                            "fileName": filename[:100] or "video.mp4"}}
+        if width > 0 and height > 0:
+            payload["json"]["width"] = width
+            payload["json"]["height"] = height
+        if duration_sec > 0:
+            payload["json"]["durationSec"] = duration_sec
+        if thumb:
+            payload["json"]["thumb"] = {"type": "Buffer", "data": list(thumb)}
+        return self._post_media("/trpc/account.sendVideo", payload)
+
     # ── OutboundPort ─────────────────────────────────────────
 
     def send_c2c(self, uid: str, text: str) -> bool:
