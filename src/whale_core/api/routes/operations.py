@@ -33,6 +33,18 @@ def tasks(handler, method: str, parts: list[str]) -> None:
             return
         handler._send(200, _json_bytes({"result": record}))
         return
+    if len(parts) == 3 and method == "GET" and parts[2] == "timeline":
+        # issue #43：任务执行时间线（可读阶段/重试建议/回执/Trace 关联）
+        from whale_core.core.runtime.task_timeline import build_task_timeline
+        timeline = build_task_timeline(
+            store, parts[1],
+            trace_ledger=getattr(ctx, "trace_ledger", None))
+        if timeline is None:
+            handler._send(404, _error("not_found", "no such task"))
+            return
+        ctx.log_event("task:timeline", parts[1])
+        handler._send(200, _json_bytes({"result": timeline}))
+        return
     if len(parts) == 3 and method == 'POST' and parts[2] in ('cancel', 'decision', 'resume'):
         runtime = ctx.orchestrator
         if runtime is None:
