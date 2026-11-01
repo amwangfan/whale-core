@@ -182,10 +182,18 @@ def configure_optional_capabilities(registry, tools, store, *, env: Mapping[str,
                                    "note":"图片会由系统自动发送给对方；回复正文里"
                                           "不要包含任何图片链接或文件路径。"},
                                   ensure_ascii=False)
+            # 2026-11-02 owner 决策：允许意图模型按需求选供应商——选型指南
+            # 进工具描述（意图规划器可见的唯一渠道）。
+            _IMAGE_GUIDE = {
+                "minimax-image-01": "二次元/人像审美强、自带提示词优化、出图快（默认首选）",
+                "qwen-image-3.0": "写实风/复杂构图/图内带文字的渲染更强",
+            }
+            _img_guide = "；".join(
+                f"{m}（{_IMAGE_GUIDE[m]}）" if m in _IMAGE_GUIDE else m
+                for m in sorted(image_providers))
             tools.register(ToolSpec(name="generate_image", capability="media.image.generate", plugin_id="media_image",
                                     description="按提示生成图片（默认二次元动漫画风，对方要求别的风格时以其为准）；"
-                                    "可用 model 参数指定模型（"
-                                    + "、".join(sorted(image_providers)) + "）", handler=generate))
+                                    "可用 model 参数指定模型：" + _img_guide, handler=generate))
             out.notes.append("图像生成已配置（可选模型：" + "、".join(sorted(image_providers)) + "）")
 
     speech_base, speech_key, speech_kind = _resolve_capability_env(env, "SPEECH")
@@ -318,10 +326,19 @@ def configure_optional_capabilities(registry, tools, store, *, env: Mapping[str,
                 duration_s=int(args.get("duration_s") or 5), size=str(args.get("size") or "1280x720"),
                 model=model)
             return json.dumps(task.as_dict(), ensure_ascii=False)
+        # 2026-11-02 owner 决策：视频模型选型指南进工具描述（意图规划器据此选路）
+        _VIDEO_GUIDE = {
+            "happyhorse-1.1-t2v": "通用首选：时长3–15s灵活、画幅比例多、出片快",
+            "happyhorse-1.0-t2v": "happyhorse 上一代，备选",
+            "MiniMax-Hailuo-2.3": "复杂动作/人物表演/物理感更强、1080P；只支持6/10s、16:9",
+        }
+        _vid_guide = "；".join(
+            f"{m}（{_VIDEO_GUIDE[m]}）" if m in _VIDEO_GUIDE else m
+            for m in sorted(video_providers))
         tools.register(ToolSpec(name="generate_video", capability="media.video.generate", plugin_id="media_video",
                                 description="按提示生成视频（异步任务；默认二次元动漫画风，"
-                                "对方要求别的风格时以其为准）；可用 model 参数指定模型（"
-                                + "、".join(sorted(video_providers)) + "）", handler=video))
+                                "对方要求别的风格时以其为准）；可用 model 参数指定模型："
+                                + _vid_guide, handler=video))
         out.notes.append("异步视频生成已配置（可选模型：" + "、".join(sorted(video_providers)) + "）")
 
     realtime_url = env.get("WHALE_REALTIME_URL", "").strip()
