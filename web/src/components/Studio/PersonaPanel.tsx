@@ -82,7 +82,7 @@ interface FormState {
 const EMPTY_FORM: FormState = {
   card_id: "",
   title: "",
-  name: "鲸鱼",
+  name: "",
   category: "custom",
   summary: "",
   temperament: "",
@@ -102,42 +102,6 @@ const EMPTY_FORM: FormState = {
   artwork_ref: "",
 };
 
-/** issue #37：前端内置起步模板（新建时可选，作为底稿再编辑）。 */
-const STARTER_TEMPLATES: { key: string; label: string; form: Partial<FormState> }[] = [
-  {
-    key: "gentle",
-    label: "温柔陪伴",
-    form: {
-      title: "温柔陪伴",
-      name: "小鲸",
-      category: "companion",
-      summary: "温柔耐心的陪伴者，先倾听再回应，不评判。",
-      temperament: "温和、稳定、共情",
-      relationship_style: "像老朋友一样陪伴，尊重边界与节奏",
-      example_dialogue:
-        "用户：今天好累。\n小鲸：辛苦啦。想说说发生了什么吗？我听着。",
-      tone: "温柔",
-      address_user_as: "你",
-    },
-  },
-  {
-    key: "efficient",
-    label: "效率助手",
-    form: {
-      title: "效率助手",
-      name: "小鲸",
-      category: "mini",
-      summary: "简洁高效的办事助手，结论先行，少废话。",
-      temperament: "干练、直接、有条理",
-      relationship_style: "专业协作，不闲聊",
-      example_dialogue:
-        "用户：帮我列下今天的重点。\n小鲸：好的，按优先级三条：1) … 2) … 3) …",
-      tone: "简洁",
-      address_user_as: "你",
-    },
-  },
-];
-
 const CATEGORIES: { value: string; label: string }[] = [
   { value: "companion", label: "陪伴" },
   { value: "group_chat", label: "群聊" },
@@ -150,7 +114,7 @@ function formFromDetail(d: StudioPersonaDetail): FormState {
   return {
     card_id: d.id,
     title: d.title ?? "",
-    name: d.name ?? "鲸鱼",
+    name: d.name ?? "",
     category: d.category ?? "custom",
     summary: d.summary ?? "",
     temperament: d.temperament ?? "",
@@ -183,7 +147,7 @@ function sameForm(a: FormState, b: FormState): boolean {
 }
 
 const SOURCE_TEXT: Record<string, string> = {
-  builtin_default: "内置默认卡",
+  none: "未选择角色",
   global_active: "全局活跃卡",
   global_legacy: "全局旧卡",
   conversation_bound: "会话绑定卡",
@@ -411,34 +375,6 @@ export default function PersonaPanel({
     })();
   };
 
-  // ---- issue #37：从模板开始（仅新建） ----
-
-  const applyTemplate = (value: string) => {
-    if (!value) return;
-    if (value.startsWith("tpl:")) {
-      const tpl = STARTER_TEMPLATES.find((t) => t.key === value.slice(4));
-      if (tpl) setForm((f) => ({ ...f, ...tpl.form, card_id: "" }));
-      return;
-    }
-    // builtin:<id>：拉内置卡详情作为底稿（与「复制为新卡」同族）
-    const id = value.slice("builtin:".length);
-    setLoading(true);
-    void (async () => {
-      try {
-        const detail = await studioApi.personaDetail(id);
-        setForm({
-          ...formFromDetail(detail),
-          card_id: "",
-          title: `${detail.title}（副本）`,
-        });
-      } catch (e) {
-        onError(e instanceof ApiError ? e.message : "读取内置卡详情失败。");
-      } finally {
-        setLoading(false);
-      }
-    })();
-  };
-
   // ---- issue #37：导入预览（仅新建；预览不写库） ----
 
   const runImportPreview = () => {
@@ -605,7 +541,7 @@ export default function PersonaPanel({
               `　回退原因：${preview.snap.fallback_reason}`}
           </p>
           <pre className="persona-effective-context">
-            {preview.snap.model_context || "（空——对话将使用低负担默认人格）"}
+            {preview.snap.model_context || "（无角色设置——使用中性表达）"}
           </pre>
           <p className="persona-effective-meta">
             语音专用：音色 {preview.snap.voice.timbre_hint || "-"} · 语速{" "}
@@ -644,36 +580,6 @@ export default function PersonaPanel({
                 放弃草稿
               </button>
             </div>
-          )}
-
-          {mode.kind === "create" && (
-            <label className="persona-template">
-              从模板开始
-              <select
-                aria-label="从模板开始"
-                value=""
-                disabled={loading}
-                onChange={(e) => applyTemplate(e.target.value)}
-              >
-                <option value="">（空白卡 / 选择底稿…）</option>
-                <optgroup label="起步模板">
-                  {STARTER_TEMPLATES.map((t) => (
-                    <option key={t.key} value={`tpl:${t.key}`}>
-                      {t.label}
-                    </option>
-                  ))}
-                </optgroup>
-                <optgroup label="内置卡（预填为副本）">
-                  {personas
-                    .filter((p) => p.builtin)
-                    .map((p) => (
-                      <option key={p.id} value={`builtin:${p.id}`}>
-                        {p.title}
-                      </option>
-                    ))}
-                </optgroup>
-              </select>
-            </label>
           )}
 
           {mode.kind === "create" && (
@@ -939,7 +845,7 @@ export default function PersonaPanel({
                   输入：{playResult.input}　{playResult.note}
                 </p>
                 <div className="playtest-compare">
-                  <PlaytestSideView title="默认人格（当前生效）" side={playResult.baseline} />
+                  <PlaytestSideView title="当前生效配置（可能无角色）" side={playResult.baseline} />
                   <PlaytestSideView title="当前卡（草稿）" side={playResult.trial} />
                 </div>
               </div>

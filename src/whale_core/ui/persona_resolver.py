@@ -130,7 +130,7 @@ class PersonaResolver:
         ]
         lines = [ln for ln in lines if ln]
         suggested = {
-            "name": name or "鲸鱼",
+            "name": name,
             "summary": _clip(_first_line(lines)),
             "temperament": _clip(_pick_line(lines, ("性格", "气质", "temperament"))),
             "relationship_style": _clip(
