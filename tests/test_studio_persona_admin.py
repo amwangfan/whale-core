@@ -107,11 +107,11 @@ def test_create_persona_appears_in_listing():
         assert listed["builtin"] is False
 
 
-def test_create_persona_rejects_builtin_id():
+def test_default_id_is_not_reserved_by_builtin_cards():
     with _server() as (server, _):
         status, data = _create(server, card_id="default")
-        assert status == 409
-        assert data["error"]["code"] == "builtin_immutable"
+        assert status == 201
+        assert data["persona"]["builtin"] is False
 
 
 def test_create_persona_rejects_duplicate_id():
@@ -202,12 +202,12 @@ def test_update_persona_partial_fields():
         assert stored["summary"] == "新设定" and stored["name"] == "旧名"
 
 
-def test_update_persona_rejects_builtin():
+def test_update_nonexistent_card_returns_404():
     with _server() as (server, _):
         status, data = _req(server, "PUT", "/api/v1/studio/personas/default",
                             body={"summary": "x"})
-        assert status == 403
-        assert data["error"]["code"] == "builtin_immutable"
+        assert status == 404
+        assert data["error"]["code"] == "not_found"
 
 
 def test_update_persona_404_for_unknown():

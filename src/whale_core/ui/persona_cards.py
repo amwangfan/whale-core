@@ -285,7 +285,8 @@ def set_custom_taboos(store: MemoryStore, taboos) -> tuple[str, ...]:
 def active_card(store: MemoryStore, *, library: PersonaCardLibrary | None = None) -> PersonaCard | None:
     """当前生效的角色卡：持久化选择 > env；未选卡则为 None。"""
     lib = library or PersonaCardLibrary()
-    data = store.get(ACTIVE_CARD_KEY) or {}
+    data = store.get(ACTIVE_CARD_KEY)
+    data = data if isinstance(data, dict) else {}
     card_id = str(data.get("card_id") or "").strip()
     card = (lib.get(card_id) or _load_stored_card(store, card_id)) if card_id else None
     if card is None:

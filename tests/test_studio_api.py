@@ -58,6 +58,9 @@ def api():
         kind=MemoryKind.EPISODE, key="g-rec-1",
         content={"summary": "群A的记录", "importance": 0.5, "confidence": 1.0},
         tags=("curated",), space_id="g-1"))
+    # Explicitly install fixture cards; production no longer bundles any.
+    import_external_card(store, card_id="test-alpha", title="测试 A", prompt_text="A 风格")
+    import_external_card(store, card_id="test-beta", title="测试 B", prompt_text="B 风格")
     ctx = ApiContext(store=store)
     server = WhaleApiServer(ctx, port=0, token=TOKEN)
     server.start()
@@ -118,7 +121,7 @@ def test_write_requires_json_content_type(api):
     # 表单式 CSRF：有 body 但 Content-Type 不是 JSON → 415
     status, raw = _req(
         server, "PUT", f"/api/v1/studio/conversations/{GROUP_KEY}/persona",
-        body={"persona_id": "default"}, content_type="text/plain")
+        body={"persona_id": "test-alpha"}, content_type="text/plain")
     assert status == 415
     assert _json(raw)["error"]["code"] == "invalid_request"
 
@@ -128,7 +131,7 @@ def test_invalid_conversation_key_422(api):
     for bad in ("nocolon", "qq:qq_group:", "qq:nope_kind:g:1", "!!:qq_group:g:1"):
         status, raw = _req(
             server, "PUT", f"/api/v1/studio/conversations/{bad}/persona",
-            body={"persona_id": "default"})
+            body={"persona_id": "test-alpha"})
         assert status == 422, bad
         assert _json(raw)["error"]["code"] == "invalid_request", bad
 
@@ -146,7 +149,8 @@ def test_personas_list_minimal_fields(api):
     assert status == 200
     cards = _json(raw)["result"]["personas"]
     ids = {c["id"] for c in cards}
-    assert {"default", "dafeiyu", "ext-1"} <= ids
+    assert {"test-alpha", "test-beta", "ext-1"} <= ids
+    assert all(not c["builtin"] for c in cards)
     for card in cards:
         # 极简字段；内部 prompt / 规则文本不回显
         assert "external_prompt" not in card
@@ -159,23 +163,23 @@ def test_personas_list_minimal_fields(api):
 def test_persona_bind_version_and_idempotent_replay(api):
     server, _ = api
     path = f"/api/v1/studio/conversations/{GROUP_KEY}/persona"
-    status, raw = _req(server, "PUT", path, body={"persona_id": "default"})
+    status, raw = _req(server, "PUT", path, body={"persona_id": "test-alpha"})
     assert status == 200
     result = _json(raw)["result"]
     assert result["version"] == 1 and result["changed"] is True
     # 幂等重放：同值（即使带自己首次的版本号）不产生变化
     status, raw = _req(server, "PUT", path,
-                       body={"persona_id": "default", "expected_version": 1})
+                       body={"persona_id": "test-alpha", "expected_version": 1})
     result = _json(raw)["result"]
     assert status == 200 and result["changed"] is False
     assert result["version"] == 1
     # 乐观锁：带正确版本换卡 → v2
     status, raw = _req(server, "PUT", path,
-                       body={"persona_id": "dafeiyu", "expected_version": 1})
+                       body={"persona_id": "test-beta", "expected_version": 1})
     assert status == 200 and _json(raw)["result"]["version"] == 2
     # 过期版本换卡 → 409 + 回显当前版本
     status, raw = _req(server, "PUT", path,
-                       body={"persona_id": "default", "expected_version": 1})
+                       body={"persona_id": "test-alpha", "expected_version": 1})
     assert status == 409
     err = _json(raw)["error"]
     assert err["code"] == "version_conflict" and err["current_version"] == 2
@@ -193,7 +197,7 @@ def test_persona_bind_unknown_card_422(api):
 def test_persona_unbind(api):
     server, _ = api
     path = f"/api/v1/studio/conversations/{GROUP_KEY}/persona"
-    _req(server, "PUT", path, body={"persona_id": "default"})
+    _req(server, "PUT", path, body={"persona_id": "test-alpha"})
     status, raw = _req(server, "PUT", path, body={"persona_id": None})
     assert status == 200 and _json(raw)["result"]["changed"] is True
     # 重复解绑 = 幂等 no-op
@@ -332,13 +336,13 @@ def test_bound_copy_reachable_by_resolver(api):
         body={"space_id": new_space, "can_read": True})
     assert status == 200
     _req(server, "PUT", f"/api/v1/studio/conversations/{GROUP_KEY}/persona",
-         body={"persona_id": "dafeiyu"})
+         body={"persona_id": "test-beta"})
     # 同一 store 上的 resolver（与 profiles 装配同构）读出绑定
     resolver = ConversationContextResolver(
         bindings=BindingStore(store, SpaceStore(store)))
     ctx = resolver.resolve(channel="qq", sender_id="10001",
                            conversation_id="group:1001")
-    assert ctx.persona_id == "dafeiyu"
+    assert ctx.persona_id == "test-beta"
     space_ids = [s.space_id for s in ctx.allowed_memory_spaces]
     assert new_space in space_ids
     # vault 依然不在（MEM-HARD-01）
@@ -536,7 +540,7 @@ def test_audit_trail_metadata_only(api):
     _req(server, "PUT", f"/api/v1/studio/conversations/{GROUP_KEY}/capabilities",
          body={"capabilities": ["outbox.submit"]})  # scope_ceiling 拒绝
     _req(server, "PUT", f"/api/v1/studio/conversations/{GROUP_KEY}/persona",
-         body={"persona_id": "default"})
+         body={"persona_id": "test-alpha"})
     audit_keys = [k for k in store.keys() if k.startswith("audit:studio:")]
     assert len(audit_keys) >= 4
     events = [store.get(k) for k in audit_keys]
