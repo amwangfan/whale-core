@@ -58,8 +58,12 @@ def login_ok():
     return FakeResponse(200, raw=b"ok", set_cookie="weq_session=wxyz; Path=/; HttpOnly")
 
 
-def allowed(value):
-    return FakeResponse(200, {"result": {"data": {"json": {"allowed": value}}}})
+def state(allowed, ready=None):
+    """getFullModeState 假响应；ready=None 时响应里不含 ready 键（旧 weq-web 兼容形态）。"""
+    payload = {"allowed": allowed}
+    if ready is not None:
+        payload["ready"] = ready
+    return FakeResponse(200, {"result": {"data": {"json": payload}}})
 
 
 def set_ok():
@@ -101,6 +105,9 @@ class StubWindow:
     def is_allowed(self):
         return self._allowed
 
+    def is_ready(self):
+        return self._allowed
+
     def open(self):
         self.open_calls += 1
         if self.open_raises:
@@ -128,7 +135,7 @@ class StubWindow:
 
 def test_open_sequence_login_set_poll_touch(tmp_path):
     sf = tmp_path / "w.ts"
-    opener = FakeOpener([login_ok(), set_ok(), allowed(False), allowed(True)])
+    opener = FakeOpener([login_ok(), set_ok(), state(False), state(True)])
     w = make_window(opener, sf)
     w.open()
     urls = [r["url"] for r in opener.requests]
@@ -147,7 +154,7 @@ def test_open_relogin_once_on_401(tmp_path):
     sf = tmp_path / "w.ts"
     opener = FakeOpener([
         login_ok(), FakeResponse(401, "unauthorized"),  # set → 401
-        login_ok(), set_ok(), allowed(True),            # 重登后成功
+        login_ok(), set_ok(), state(True),              # 重登后成功
     ])
     make_window(opener, sf).open()
     logins = [r for r in opener.requests if r["url"].endswith("/_auth/login")]
@@ -157,11 +164,29 @@ def test_open_relogin_once_on_401(tmp_path):
 
 def test_open_timeout_raises_and_writes_nothing(tmp_path):
     sf = tmp_path / "w.ts"
-    opener = FakeOpener([login_ok(), set_ok()] + [allowed(False)] * 50)
+    opener = FakeOpener([login_ok(), set_ok()] + [state(False)] * 50)
     w = make_window(opener, sf, ready_timeout_s=0.05)
     with pytest.raises(FullModeWindowError):
         w.open()
     assert not sf.exists()
+
+
+def test_open_waits_for_ready_not_just_allowed(tmp_path):
+    """allowed=true 但 ready=false（SSO 未登记）时 open() 不通过——钉死 2026-11-01 丢发事故形态。"""
+    sf = tmp_path / "w.ts"
+    opener = FakeOpener([login_ok(), set_ok()] + [state(True, ready=False)] * 200)
+    w = make_window(opener, sf, ready_timeout_s=0.05)
+    with pytest.raises(FullModeWindowError):
+        w.open()
+    assert not sf.exists()
+
+
+def test_open_compat_when_ready_field_missing(tmp_path):
+    """旧 weq-web 响应没有 ready 键：回落 allowed 语义，照常开窗。"""
+    sf = tmp_path / "w.ts"
+    opener = FakeOpener([login_ok(), set_ok(), state(True)])
+    make_window(opener, sf).open()
+    assert sf.exists()
 
 
 def test_close_disables_and_clears_state_idempotent(tmp_path):

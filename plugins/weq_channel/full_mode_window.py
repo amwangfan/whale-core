@@ -133,15 +133,29 @@ class FullModeWindow:
     # ── 开关与就绪探测 ────────────────────────────────────────────
 
     def is_allowed(self) -> bool:
-        """getFullModeState.allowed（完整模式当前是否就绪/可用）。"""
+        """getFullModeState.allowed（策略门：autoAttachQq=true 写入即真）。"""
         result = self._call(TRPC_FULL_MODE_STATE)
         return bool((result or {}).get("allowed"))
 
+    def is_ready(self) -> bool:
+        """getFullModeState.ready（SSO 会话已登记，此刻真可发）。
+
+        ready 字段是 2026-11-01 才加的：旧 weq-web 返回里没有它，
+        缺失时回落 allowed（行为同旧版，向后兼容）。
+        见 docs/fullmode-ready-field-20261101.md：allowed 只是策略门，
+        冷启动首次开窗全量收割 ~4.7s，跑在就绪前会丢发。
+        """
+        result = self._call(TRPC_FULL_MODE_STATE)
+        if not isinstance(result, dict) or not result.get("allowed"):
+            return False
+        ready = result.get("ready")
+        return bool(ready) if ready is not None else True
+
     def open(self) -> None:
-        """开窗：置 autoAttachQq=true → 轮询就绪 → grace 等收割 → 落 state_file。"""
+        """开窗：置 autoAttachQq=true → 轮询就绪（ready 位）→ grace → 落 state_file。"""
         self._call(TRPC_SET_AUTO_ATTACH, {"json": {"enabled": True}})
         deadline = time.time() + self.ready_timeout_s
-        while not self.is_allowed():
+        while not self.is_ready():
             if time.time() >= deadline:
                 raise FullModeWindowError("full mode not ready in time")
             time.sleep(self.poll_interval_s)
@@ -220,9 +234,9 @@ class WindowedSendPort:
     # ── 窗口管理 ────────────────────────────────────────────────
 
     def _window_open(self) -> bool:
-        """以服务端真实状态为准（跨进程安全）：探测 getFullModeState。"""
+        """以服务端真实状态为准（跨进程安全）：探测 getFullModeState.ready。"""
         try:
-            self._open = self.window.is_allowed()
+            self._open = self.window.is_ready()
         except FullModeWindowError:
             self._open = False
         return self._open
