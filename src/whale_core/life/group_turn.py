@@ -79,7 +79,8 @@ class GroupTurnPolicy:
     def __init__(self, store: MemoryStore, *,
                  bot_names: Tuple[str, ...] = (),
                  now_fn: Optional[Callable[[], datetime]] = None,
-                 quiet_now: Optional[Callable[[], bool]] = None):
+                 quiet_now: Optional[Callable[[], bool]] = None,
+                 directed_classifier=None):
         self.store = store
         # Host supplies explicit bot aliases; core ships no character names.
         self._names = tuple(n for n in bot_names if n)
@@ -89,6 +90,11 @@ class GroupTurnPolicy:
         # 时间静默判定由宿主注入（ProactiveOutbox._is_quiet + prefs）；
         # 缺省 = 永不静默。
         self._quiet_now = quiet_now or (lambda: False)
+        # 2026-11-02 owner 决策：规则信号无法判定时，用意图模型兜底判「这条
+        # 是不是在找鲸鱼」（生产实证：「说出来各位的名字哦」无「你」无问号，
+        # 规则全不命中被静默压制）。可调用 (text, timeline_entries) -> bool；
+        # 仅在机器人近窗发过言（对话进行中）且规则不命中时调用，调用有界。
+        self._directed_classifier = directed_classifier
 
     # -- 主入口 -------------------------------------------------------------
 
@@ -118,11 +124,23 @@ class GroupTurnPolicy:
                     for e in list(timeline_entries)[-5:])
         )
 
+        # 意图模型兜底定向判定（2026-11-02 owner 决策）：规则全不命中、且
+        # 机器人近窗发过言（对话进行中）时，问一句模型「这条是不是在找鲸鱼」。
+        llm_directed = False
+        if not (named or follow_up) and self._directed_classifier is not None \
+                and any(isinstance(e, dict) and e.get("is_self")
+                        for e in list(timeline_entries)[-5:]):
+            try:
+                llm_directed = bool(self._directed_classifier(
+                    text, timeline_entries))
+            except Exception:
+                llm_directed = False  # 判定器故障 = 无信号，不放大
+
         # 时间静默（2026-11-01 owner 决策修正）：只压制「没人找我」的自主插话；
-        # 直呼其名 / 承接请求 = 群里明确在找我，照常回应（且不耗主动配额/冷却——
-        # 本质是回复而非插话；配额留给真正的主动插话）。
+        # 直呼其名 / 承接请求 / 模型判定定向 = 群里明确在找我，照常回应
+        # （且不耗主动配额/冷却——本质是回复而非插话；配额留给真正的主动插话）。
         if self._quiet_now():
-            if not (named or follow_up):
+            if not (named or follow_up or llm_directed):
                 return self._record(group, JoinDecision("observe", REASON_QUIET_HOURS))
             return self._record(group, JoinDecision("join", REASON_QUIET_DIRECTED))
 
@@ -130,7 +148,8 @@ class GroupTurnPolicy:
             # quiet：只回应直接提及（@/引用已被 resolver 拦截；这里是直呼其名）
             if not named:
                 return self._record(group, JoinDecision("observe", REASON_QUIET_MODE))
-        elif not (named or follow_up or (activity == "lively" and question)):
+        elif not (named or follow_up or llm_directed
+                  or (activity == "lively" and question)):
             # balanced：需直呼其名或承接；lively：直呼其名 或 明确提问/求助/承接
             return self._record(group, JoinDecision("observe", REASON_NOT_DIRECTED))
 

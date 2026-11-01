@@ -51,6 +51,12 @@ _RESIDUAL_MARK_RE = re.compile(r"\[\[[^\[\]\n]{1,60}\]\]")
 # 恶意链接警告且外部根本打不开。图片由系统作为真实图片消息发出，正文里的
 # 媒体引用一律转成 QQ 风格的 [图片] 占位（历史/时间线里也能据此知道发过图）。
 _MD_IMG_RE = re.compile(r"!\[[^\]\n]{0,60}\]\([^)\n]{1,500}\)")
+# 2026-11-01 生产实证「[语音]([图片])」：模型把产物引用写成普通 markdown
+# 链接 [语音](/api/v1/artifacts/x)（无 ! 前缀），漏网后 URL 被替换成 [图片]
+# 留下怪胎。普通链接的 URL 是媒体引用时：整链去掉、保留可见文字 [语音]。
+_MEDIA_URL_SRC = (r"(?:/api/v1/artifacts/[A-Za-z0-9_-]+|https?://[^)\n]*"
+                  r"(?:oss[-\w]*\.aliyuncs\.com|dashscope)[^)\n]*)")
+_MD_MEDIA_LINK_RE = re.compile(r"\[([^\]\n]{0,30})\]\(" + _MEDIA_URL_SRC + r"\)")
 _OSS_URL_RE = re.compile(
     r"https?://[^\s)\]）>\"']*(?:oss[-\w]*\.aliyuncs\.com|dashscope)[^\s)\]）>\"']*")
 _ARTIFACT_REF_RE = re.compile(r"/api/v1/artifacts/[A-Za-z0-9_-]+")
@@ -62,6 +68,7 @@ _FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
 
 def _strip_media_refs(text: str) -> str:
     b = _MD_IMG_RE.sub("[图片]", text)
+    b = _MD_MEDIA_LINK_RE.sub(r"[\1]", b)   # [语音](/api/…) → [语音]
     b = _OSS_URL_RE.sub("[图片]", b)
     b = _ARTIFACT_REF_RE.sub("[图片]", b)
     return _IMAGE_RUN_RE.sub("[图片]", b)

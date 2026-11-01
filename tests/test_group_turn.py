@@ -139,6 +139,44 @@ def test_quiet_hours_directed_still_answers():
     assert (d3.action, d3.reason_code) == ("observe", "quiet_hours")
 
 
+def test_llm_classifier_rescues_quiet_hours_directed():
+    """2026-11-02 owner 决策实证：「说出来各位的名字哦」无「你」无问号，
+    规则全不命中——意图模型兜底判定向，静默时段照样回应。"""
+    store = InMemoryStore()
+    p = GroupTurnPolicy(store, bot_names=("鲸鱼",), now_fn=lambda: T0,
+                        quiet_now=lambda: True,
+                        directed_classifier=lambda text, entries: True)
+    tl = ({"is_self": True, "text": "我刚录了句语音"},)
+    d = p.maybe_join(conversation=GROUP, text="说出来各位的名字哦",
+                     activity="lively", timeline_entries=tl)
+    assert (d.action, d.reason_code) == ("join", "quiet_directed")
+
+
+def test_llm_classifier_not_called_without_self_context():
+    """机器人近窗没发言（非对话进行中）→ 不调用判定器，保持旁观。"""
+    calls = []
+    store = InMemoryStore()
+    p = GroupTurnPolicy(store, bot_names=("鲸鱼",), now_fn=lambda: T0,
+                        quiet_now=lambda: True,
+                        directed_classifier=lambda t, e: calls.append(1) or True)
+    d = p.maybe_join(conversation=GROUP, text="今晚吃啥", activity="lively",
+                     timeline_entries=({"is_self": False, "text": "别人说的"},))
+    assert (d.action, d.reason_code) == ("observe", "quiet_hours")
+    assert calls == []
+
+
+def test_llm_classifier_failure_fails_soft():
+    """判定器抛异常 = 无信号，不放大为参与。"""
+    def boom(t, e):
+        raise RuntimeError("model down")
+    store = InMemoryStore()
+    p = GroupTurnPolicy(store, bot_names=("鲸鱼",), now_fn=lambda: T0,
+                        quiet_now=lambda: True, directed_classifier=boom)
+    d = p.maybe_join(conversation=GROUP, text="说个名字", activity="lively",
+                     timeline_entries=({"is_self": True, "text": "x"},))
+    assert (d.action, d.reason_code) == ("observe", "quiet_hours")
+
+
 def test_reason_code_recorded_without_private_content():
     """诊断落 kv：reason_code + 时间，不含消息正文。"""
     store = InMemoryStore()

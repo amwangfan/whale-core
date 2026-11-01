@@ -680,6 +680,7 @@ def cmd_run(args) -> int:
             model=intent_model_id,
             base_url=os.environ.get("QQ_INTENT_BASE_URL") or None,
             api_key=os.environ.get("QQ_INTENT_API_KEY") or None)
+        globals()["_intent_brain_ref"] = intent_brain  # 群定向兜底判定器用
         if (os.environ.get("TAVILY_API_KEY") or os.environ.get("BRAVE_API_KEY")
                 or os.environ.get("WHALE_SEARCH_PROVIDER")):
             from search_web.web_fetch import register_web_fetch
@@ -1274,8 +1275,38 @@ def cmd_run(args) -> int:
             *os.environ.get("WHALE_BOT_NAMES", "").split(","),
         ) if n.strip()
     ))
+
+    # 2026-11-02 owner 决策：规则判不出的「是不是在找鲸鱼」由意图模型兜底
+    # （实证：「说出来各位的名字哦」无「你」无问号被静默压制，其实是对着
+    # 鲸鱼刚发的语音说的）。仅在机器人近窗发过言时调用，调用有界。
+    def _llm_directed(text, entries) -> bool:
+        brain = globals().get("_intent_brain_ref")
+        if brain is None:
+            return False
+        lines = []
+        for e in list(entries or ())[-6:]:
+            if not isinstance(e, dict):
+                continue
+            who = "Enxi" if e.get("is_self") else "群友"
+            body = " ".join(str(e.get("text") or "").split())[:80]
+            if body:
+                lines.append(f"{who}：{body}")
+        name = bot_aliases[0] if bot_aliases else "Enxi"
+        prompt = (
+            f"判断一条群聊消息是不是在对群里名叫「{name}」的机器人说话"
+            "（叫她回应、让她做事、接着她的话头说事都算；群友之间互相聊、"
+            "单纯陈述不算）。\n"
+            + ("群聊最近消息：\n" + "\n".join(lines) + "\n" if lines else "")
+            + f"最新一条：{str(text)[:200]}\n只回答一个字：是 或 否。")
+        try:
+            ans = brain.reply(prompt)
+        except Exception:
+            return False
+        return str(ans or "").strip().startswith("是")
+
     group_turn_policy = GroupTurnPolicy(
         store, bot_names=bot_aliases, quiet_now=_quiet_now,
+        directed_classifier=_llm_directed,
     )
 
     _member_extractor = MemberMemoryExtractor(

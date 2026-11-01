@@ -113,6 +113,17 @@ def test_media_refs_become_image_placeholder():
     assert plan3.bubbles == ("[图片]",)
 
 
+def test_plain_markdown_link_with_media_url_keeps_label():
+    """2026-11-01 生产实证「[语音]([图片])」：普通 markdown 链接的 URL 是
+    媒体引用时，整链去掉、保留可见文字。"""
+    plan = plan_reply("录了 [语音](/api/v1/artifacts/abc123) 听听",
+                      is_group=True, max_segments=2)
+    assert plan.bubbles == ("录了 [语音] 听听",)
+    plan2 = plan_reply("看 [视频](https://dashscope-x.oss.aliyuncs.com/v.mp4?Expires=1) 吧",
+                       is_group=True, max_segments=2)
+    assert "[视频]" in plan2.bubbles[0] and "http" not in plan2.bubbles[0]
+
+
 def test_code_fence_keeps_markers_and_links():
     """代码围栏内的 [[…]]/链接是代码内容，不剥。"""
     text = "看这段：\n```\nx = '[[稍后补充:演示]]'\n```"

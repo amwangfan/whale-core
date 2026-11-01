@@ -256,7 +256,12 @@ def configure_optional_capabilities(registry, tools, store, *, env: Mapping[str,
                 audio = provider.synthesize(str(args.get("text") or ""), voice=str(args.get("voice") or ""), rate=float(args.get("rate") or 1))
                 if out.artifacts is None:
                     raise ValueError("artifact storage required for speech output")
-                return json.dumps(out.artifacts.save_bytes(audio, "audio/mpeg").as_dict())
+                # 2026-11-01：同生图——只回工件引用 + 勿贴链接提示（模型曾把
+                # /api/v1/artifacts/ 写成 [语音](url) 发进群，URL 外部打不开）。
+                _r = out.artifacts.save_bytes(audio, "audio/mpeg").as_dict()
+                _r["note"] = ("语音会由系统自动作为语音消息发送给对方；"
+                              "回复正文里不要包含任何链接或文件路径。")
+                return json.dumps(_r, ensure_ascii=False)
             tools.register(ToolSpec(name="synthesize_speech", capability="tts.synthesize", plugin_id="speech_tts",
                                     description="文本转语音；可用 model 参数指定模型（"
                                     + "、".join(sorted(tts_providers)) + "）", handler=speak))
