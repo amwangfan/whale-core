@@ -2615,3 +2615,75 @@ code,
 .memory-advanced .searchbar {
   margin-top: 10px;
 }
+
+/* ---------- 事件页：活动记录 / 事件流 / Trace 查询 ---------- */
+.view-tabs {
+  display: flex;
+  gap: 6px;
+}
+.view-tabs button {
+  border: 1px solid #d7dce2;
+  background: #fff;
+  border-radius: 8px;
+  padding: 6px 14px;
+  cursor: pointer;
+}
+.view-tabs button.active {
+  border-color: #3b6ee0;
+  background: #eef3ff;
+  font-weight: 600;
+}
+.activity-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.activity-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  border: 1px solid #e3e8ee;
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #fff;
+}
+.activity-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-top: 5px;
+  background: #9aa5b1;
+}
+.activity-dot.replied {
+  background: #2e7d32;
+}
+.activity-dot.silent {
+  background: #9aa5b1;
+}
+.activity-dot.failed {
+  background: #c62828;
+}
+.activity-dot.partial {
+  background: #f9a825;
+}
+.activity-time {
+  flex: none;
+  margin-top: 1px;
+}
+.activity-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.trace-panel {
+  margin-top: 18px;
+  border-top: 1px dashed #dfe5ec;
+  padding-top: 10px;
+}
+.span-table {
+  margin-top: 6px;
+}
