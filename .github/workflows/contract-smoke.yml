@@ -4,12 +4,8 @@ name: contract smoke（协议与边界契约）
 # 工具执行器、记忆治理与身份。这些套件守护「与 whale-io 的线协议」与
 # 「安全边界」，破坏即失败，不允许静默漂移。
 
+# No automatic PR, push, or nightly runs; select Run workflow manually.
 on:
-  pull_request:
-  push:
-    branches: [main]
-  schedule:
-    - cron: '17 19 * * *'  # 每日 03:17 Asia/Shanghai（UTC+8）全量回归
   workflow_dispatch:
 
 concurrency:
@@ -31,13 +27,3 @@ jobs:
           tests/test_task_engine.py tests/test_tool_executor.py
           tests/integration/test_memory_identity_governance.py tests/test_g3_scenarios.py -q
 
-  nightly-full:
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - run: python -m pip install -e ".[dev]"
-      - run: python -m pytest tests -q
