@@ -184,7 +184,7 @@ class QqInboundWorkflow:
                 return
         if self._completion_sender is not None:
             try:
-                self._completion_sender(event, reply, audio_ids)
+                self._completion_sender(event, reply, audio_ids, image_ids)
             except Exception:
                 if self.orchestrator is not None and task_id:
                     self.orchestrator.mark_delivery_failed(

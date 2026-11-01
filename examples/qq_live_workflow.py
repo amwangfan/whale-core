@@ -499,12 +499,35 @@ def cmd_run(args) -> int:
             for k in list(turn_epoch_by_msg)[:250]:
                 turn_epoch_by_msg.pop(k, None)
 
-    def _send_completion(event, reply: str, audio_ids=()) -> None:
+    def _send_completion(event, reply: str, audio_ids=(), image_ids=()) -> None:
         """两段式补发：草稿+审批+网关发送（与主回复同一条发送链）。"""
         if not live_auto:
             return
         # 语音产物先发（单独一条语音消息），文字补发随后
         _send_audio_artifacts(audio_ids)
+        # 图片产物：真实图片消息发到补发会话（2026-11-01 修复：此前补发只带
+        # 文本里的 /api/v1/artifacts/ 本地路径，群/私聊外部根本打不开）。
+        if image_ids and cap.artifacts is not None:
+            conv = str(getattr(event, "conversation", "") or "")
+            peer_type = "group" if conv.startswith("group:") else "c2c"
+            target = conv.split(":", 1)[1] if ":" in conv else ""
+            for aid in image_ids[:2]:
+                try:
+                    blob = cap.artifacts.read(aid)
+                    data = blob[1] if isinstance(blob, tuple) else blob
+                    ok = send_port.send_image_to(
+                        peer_type, target, data, filename=f"{aid[:8]}.png") \
+                        if hasattr(send_port, "send_image_to") else False
+                    print(f"  [补发图片] {aid[:8]} → {peer_type}:{target[:12]}… "
+                          f"{'已发' if ok else '发送失败'}")
+                except Exception as exc:
+                    print(f"  [补发图片] {aid[:8]} 读取失败：{type(exc).__name__}")
+            # 文本里的本地产物引用外部打不开，剥离后只发可读文字
+            import re as _re
+            reply = _re.sub(r"!\[[^\]]*\]\(/api/v1/artifacts/[A-Za-z0-9_-]+\)",
+                            "", str(reply)).strip()
+            if not reply:
+                return
         draft_id = f"qq-followup:{event.message_id}"
         from whale_core.life.initiative import ProactiveDraft
         workflow.outbox.propose(ProactiveDraft(
