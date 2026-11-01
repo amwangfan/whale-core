@@ -31,7 +31,7 @@ class FakeEmbedder:
         self.mapping = mapping
         self.dim = dim
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
+    def embed(self, texts: list[str], *, namespace: str = "") -> list[list[float]]:
         return [list(self.mapping.get(t, [0.0] * self.dim)) for t in texts]
 
 
@@ -207,3 +207,23 @@ def test_sqlite_backend_no_embedder_matches_curator(tmp_path):
     curator_keys = {h.record.key for h in MemoryCurator(store).recall(QUERY, limit=10)}
     hybrid_keys = {h.record.key for h in HybridCurator(store).recall(QUERY, limit=10)}
     assert hybrid_keys == curator_keys
+
+
+def test_legacy_embedder_without_namespace_degrades_without_second_call():
+    store = InMemoryStore()
+    keys = _seed(store)
+
+    class LegacyEmbedder:
+        def __init__(self):
+            self.calls = 0
+
+        def embed(self, texts):
+            self.calls += 1
+            raise AssertionError("unnamespaced embedding must not be called")
+
+    legacy = LegacyEmbedder()
+    hits = HybridCurator(store, embedder=legacy).recall(QUERY, limit=10)
+    assert legacy.calls == 0
+    assert keys["lexical"] in {h.record.key for h in hits}
+    assert keys["semantic"] not in {h.record.key for h in hits}
+    assert any("退化" in r for h in hits for r in h.reasons)
