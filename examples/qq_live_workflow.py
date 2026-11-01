@@ -830,9 +830,12 @@ def cmd_run(args) -> int:
                 receipt = plugin_gateway.dispatch(send_message_intent(
                     event.conversation, seg, draft_id=seg_id))
                 print(f"  [插件网关] 段{i+1}/{len(segments)} {receipt}")
-                _tspan(_tid, "send", "executed",
+                # issue #39：回执即真相——gateway 回执含 fail 时如实记 failed
+                _ok_send = ":fail" not in str(receipt)
+                _tspan(_tid, "send", "executed" if _ok_send else "failed",
+                       reason_code="" if _ok_send else "send_failed",
                        detail=f"段{i+1}/{len(segments)}")
-                _sent_segs += 1
+                _sent_segs += 1 if _ok_send else 0
                 if i + 1 < len(segments):
                     time.sleep(0.35)
             # issue #39：收尾——全段送达 replied；部分送达 partial
