@@ -311,6 +311,7 @@ class QqInboundWorkflow:
             reason="QQ 入站消息的回复草稿（owner 已配对）",
             evidence=(f"qq:{event.conversation}:{event.message_id}",),
             channel=REPLY_CHANNEL,
+            target_conversation=event.conversation,
         )
         proposed = self.outbox.propose(draft)
         # QQ 入站回复是**被动回复**（owner 先说话）：走被动策略——静默时段是否

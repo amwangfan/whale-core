@@ -362,3 +362,51 @@ def test_mixed_send_artifact_bytes_no_network():
     assert ok
     assert any(len(item) == 3 and item[0] == "image" and item[1] == b"PNG-BYTES" for item in port.sent)
     # 无网络：FakePort 没有任何下载入口可用
+
+
+# ── ConversationRoutingPort（2026-11-01：群回复不再落 owner 私聊）──────
+
+class _RouteProbePort:
+    def __init__(self):
+        self.calls = []
+    def send(self, draft):
+        self.calls.append(("owner", draft.text))
+        return True
+    def send_group_text(self, group_code, text):
+        self.calls.append(("group", group_code, text))
+        return True
+    def send_c2c(self, uid, text):
+        self.calls.append(("c2c", uid, text))
+        return True
+
+
+def _draft(text, conv=""):
+    return ProactiveDraft(f"d-{conv}-{text[:4]}", text, "r", ("e",),
+                          channel="direct_message", target_conversation=conv)
+
+
+def test_routing_port_routes_by_target_conversation():
+    from weq_channel.weq_send import ConversationRoutingPort
+    inner = _RouteProbePort()
+    port = ConversationRoutingPort(inner, owner_uid="u_owner")
+    assert port.send(_draft("群回复", "group:1124744261"))
+    assert port.send(_draft("成员私聊", "private:u_member1"))
+    assert port.send(_draft("主人私聊", "private:u_owner"))
+    assert port.send(_draft("无会话信息"))
+    assert inner.calls == [
+        ("group", "1124744261", "群回复"),
+        ("c2c", "u_member1", "成员私聊"),
+        ("owner", "主人私聊"),   # owner 私聊仍走内层定向口
+        ("owner", "无会话信息"),  # 空会话回落原行为
+    ]
+
+
+def test_draft_target_conversation_serde_roundtrip():
+    from whale_core.life.initiative import ProactiveDraft
+    d = ProactiveDraft("d1", "t", "r", ("e",), channel="direct_message",
+                       target_conversation="group:1124744261")
+    assert ProactiveDraft.from_dict(d.as_dict()).target_conversation == "group:1124744261"
+    # 旧记录无该字段：向后兼容回落空串
+    old = d.as_dict()
+    old.pop("target_conversation")
+    assert ProactiveDraft.from_dict(old).target_conversation == ""

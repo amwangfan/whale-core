@@ -511,7 +511,8 @@ def cmd_run(args) -> int:
             draft_id=draft_id, text=reply,
             reason="两段式慢任务完成后的补发（ack 已发）",
             evidence=(f"qq:{event.conversation}:{event.message_id}",),
-            channel="direct_message"))
+            channel="direct_message",
+            target_conversation=event.conversation))
         # G3/issue #17：补发也分段 + epoch 校验；基线 = 原请求回合的 epoch
         # （查不到才回落当前值），不把任务执行期间到达的新消息吞进基线。
         from whale_core.life.segments import split_reply
@@ -543,7 +544,8 @@ def cmd_run(args) -> int:
                     draft_id=seg_id, text=seg,
                     reason=f"补发多气泡分段 {i+1}/{len(segments)}（主草稿 {draft_id}）",
                     evidence=(f"qq:{event.conversation}:{event.message_id}",),
-                    channel="direct_message"))
+                    channel="direct_message",
+                    target_conversation=event.conversation))
             owner_draft_ids.add(seg_id)
             approved_draft_ids.add(seg_id)
             receipt = plugin_gateway.dispatch(send_message_intent(
@@ -559,8 +561,13 @@ def cmd_run(args) -> int:
         QQ_WEQ_PLUGIN_ID, build_qq_weq_gateway, register_qq_weq_plugin, send_message_intent)
     from whale_core.plugins import PluginRegistry
     plugin_registry = PluginRegistry()
+    # 2026-11-01 修复：网关口按草稿 target_conversation 路由——群回复发回群里，
+    # 不再落进 owner 私聊（修复前 port.send 只认 owner 定向目标）。
+    from weq_channel.weq_send import ConversationRoutingPort
+    routed_send_port = ConversationRoutingPort(
+        send_port, owner_uid=os.environ.get("OWNER_UID", ""))
     adapter, _executor = register_qq_weq_plugin(
-        plugin_registry, port=send_port, outbox=workflow.outbox, prefs=prefs)
+        plugin_registry, port=routed_send_port, outbox=workflow.outbox, prefs=prefs)
 
     # 媒体/语音能力：统一走 configure_optional_capabilities——
     # 支持 WHALE_MEDIA_BASE_URL/WHALE_MEDIA_API_KEY 一个平台全覆盖，也可各能力
@@ -881,7 +888,8 @@ def cmd_run(args) -> int:
                         reason=f"多气泡分段 {i+1}/{len(segments)}"
                                f"（主草稿 {result['draft_id']}）",
                         evidence=(f"qq:{event.conversation}:{event.message_id}",),
-                        channel="direct_message"))
+                        channel="direct_message",
+                        target_conversation=event.conversation))
                 owner_draft_ids.add(seg_id)
                 approved_draft_ids.add(seg_id)
                 receipt = plugin_gateway.dispatch(send_message_intent(

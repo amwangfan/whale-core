@@ -623,3 +623,36 @@ def _send_mixed_impl(self, parts: list[tuple[str, str]]) -> bool:
         if not self._send_text_payload(content if kind == "image" else f"[图片 {label}]"):
             ok_all = False
     return ok_all
+
+
+class ConversationRoutingPort:
+    """按草稿目标会话路由发送（OutboundPort 装饰器）。
+
+    2026-11-01 修复：网关/Outbox 链路里 ``port.send(draft)`` 只走内层端口的
+    固定目标（owner 私聊），群里的回复被送进 owner 私聊。本端口按
+    ``draft.target_conversation`` 路由：
+
+    - ``group:<code>`` → ``send_group_text``（白名单群）；
+    - ``private:<uid>`` 且非 owner → ``send_c2c``（回复语义对端）；
+    - 其余（空 / owner 私聊 / 无会话信息）→ 内层 ``send``（原行为不变）。
+
+    只换路由，不改配额/审批/账本语义（那些在 Outbox 层已完成）。
+    """
+
+    def __init__(self, inner, *, owner_uid: str = "") -> None:
+        self._inner = inner
+        self._owner_uid = str(owner_uid or "")
+
+    def send(self, draft) -> bool:
+        conv = str(getattr(draft, "target_conversation", "") or "")
+        if conv.startswith("group:") and hasattr(self._inner, "send_group_text"):
+            return bool(self._inner.send_group_text(conv.split(":", 1)[1], draft.text))
+        if conv.startswith("private:"):
+            uid = conv.split(":", 1)[1]
+            if uid and uid != self._owner_uid and hasattr(self._inner, "send_c2c"):
+                return bool(self._inner.send_c2c(uid, draft.text))
+        return bool(self._inner.send(draft))
+
+    def __getattr__(self, name):
+        # 其余端口能力（send_voice / artifact_reader / window 等）透传给内层
+        return getattr(self._inner, name)
