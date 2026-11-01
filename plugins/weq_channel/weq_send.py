@@ -250,6 +250,67 @@ class WeQWebSendPort:
         outcome = (((body.get("result") or {}).get("data") or {}).get("json"))
         return isinstance(outcome, dict) and bool(outcome.get("ok"))
 
+    # ── 只读查询（昵称解析，2026-11-01）────────────────────────────────
+
+    def _get(self, path: str, *, auth: bool) -> tuple[int, "dict | str"]:
+        """tRPC query 只能 GET（本版本 tRPC 把 POST 一律当 mutation）。"""
+        headers: dict = {}
+        if auth:
+            if not self._cookie:
+                raise WeQSendError("no session (login first)")
+            headers["Cookie"] = self._cookie
+        request = urllib.request.Request(self.base_url + path, headers=headers,
+                                         method="GET")
+        try:
+            with self._opener(request, self.timeout) as response:  # type: ignore[operator]
+                raw = response.read()
+                status = getattr(response, "status", 200)
+        except urllib.error.HTTPError as exc:
+            try:
+                raw = exc.read()
+            except Exception:
+                raw = b""
+            status = exc.code
+        except (urllib.error.URLError, OSError, ValueError):
+            raise WeQSendError("weq web unreachable") from None
+        try:
+            parsed = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            parsed = raw.decode("utf-8", "replace")[:200]
+        return status, parsed
+
+    def member_briefs(self, group_code: str = "", uins=(), uids=()) -> list[dict]:
+        """群成员名片/昵称批量解析（/trpc/account.memberBriefs，whale 补丁端点）。
+
+        只读查询（本地成员库，不碰发送链）。返回 [{uid, uin, card, nick}]。
+        失败返回 []——昵称是增强，缺失时调用方回退代号标签，不影响主链路。
+        """
+        uins = [str(u).strip() for u in (uins or ())
+                if str(u or "").strip().isdigit()][:50]
+        uids = [str(u).strip() for u in (uids or ()) if str(u or "").strip()][:50]
+        if not uins and not uids:
+            return []
+        inp = {"groupCode": str(group_code or "").strip(), "uins": uins,
+               "uids": uids}
+        path = "/trpc/account.memberBriefs?input=" + urllib.parse.quote(
+            json.dumps({"json": inp}, ensure_ascii=False))
+        try:
+            if self._cookie is None:
+                self.login()
+            status, body = self._get(path, auth=True)
+            if status == 401:
+                self.login()
+                status, body = self._get(path, auth=True)
+        except WeQSendError:
+            return []
+        if status != 200 or not isinstance(body, dict):
+            return []
+        data = ((body.get("result") or {}).get("data") or {}).get("json")
+        members = data.get("members") if isinstance(data, dict) else None
+        if not isinstance(members, list):
+            return []
+        return [m for m in members if isinstance(m, dict)]
+
     # ── 定向媒体发送（2026-11-01 媒体功能开放测试）─────────────────────
     # 与 send_c2c 同一纪律：c2c 目标强校验 uid 形状（回复语义由宿主保证），
     # 群目标必须在构造期白名单内；消息内容/模型输出永远不能指定发送目标。

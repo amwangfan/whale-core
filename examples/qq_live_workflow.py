@@ -451,18 +451,30 @@ def cmd_run(args) -> int:
                                  context_resolver=context_resolver,
                                  stranger_daily_limit=_stranger_limit)
 
-    def _send_audio_artifacts(audio_ids) -> None:
-        """把任务产生的音频产物发成 QQ 语音消息。"""
+    def _send_audio_artifacts(audio_ids, *, peer_type: str = "",
+                              target: str = "") -> int:
+        """把任务产生的音频产物发成 QQ 语音消息；返回实际送达条数。
+
+        2026-11-01 修复：补发场景的语音此前无条件 send_voice（owner 定向），
+        群/陌生人请求的语音会落进 owner 私聊——与图片一样按会话定向发送。
+        """
+        sent = 0
         if not audio_ids or cap.artifacts is None:
-            return
+            return sent
         for aid in audio_ids[:2]:
             try:
                 blob = cap.artifacts.read(aid)
                 data = blob[1] if isinstance(blob, tuple) else blob
-                ok = send_port.send_voice(data, filename=f"{aid[:8]}.wav")
+                if peer_type and target and hasattr(send_port, "send_voice_to"):
+                    ok = send_port.send_voice_to(peer_type, target, data,
+                                                 filename=f"{aid[:8]}.wav")
+                else:
+                    ok = send_port.send_voice(data, filename=f"{aid[:8]}.wav")
                 print(f"  [语音] {aid[:8]} → {'已发' if ok else '发送失败'}")
+                sent += 1 if ok else 0
             except Exception as exc:
                 print(f"  [语音] {aid[:8]} 读取失败：{type(exc).__name__}")
+        return sent
 
     def _plan_segments(text, *, is_group, rhythm, anxious=False,
                        familiarity="stranger"):
@@ -503,14 +515,31 @@ def cmd_run(args) -> int:
         """两段式补发：草稿+审批+网关发送（与主回复同一条发送链）。"""
         if not live_auto:
             return
-        # 语音产物先发（单独一条语音消息），文字补发随后
-        _send_audio_artifacts(audio_ids)
+        conv = str(getattr(event, "conversation", "") or "")
+        peer_type = "group" if conv.startswith("group:") else "c2c"
+        target = conv.split(":", 1)[1] if ":" in conv else ""
+        _is_group = conv.startswith("group:")
+
+        def _note_self_media(kind: str, n: int = 1) -> None:
+            """媒体补发也回写群时间线（is_self）——模型随后能在时间线里看到
+            自己发过图/语音，群友评论「这图…」时接得上话（2026-11-01 实证：
+            图片没进时间线，bot 对评论图片的消息答非所问）。"""
+            if not (_is_group and n > 0):
+                return
+            try:
+                timeline.append(conv, message_id=(
+                    f"selfmedia:{getattr(event, 'message_id', '')}:{kind}"),
+                    sender_id=self_uin, text=f"[{kind}]", is_self=True)
+            except Exception:
+                pass
+        # 语音产物先发（单独一条语音消息），按来件会话定向（修复：此前无条件
+        # 发 owner 私聊，群/陌生人请求的语音串到了 owner 那边）。
+        _note_self_media("语音", _send_audio_artifacts(
+            audio_ids, peer_type=peer_type, target=target))
         # 图片产物：真实图片消息发到补发会话（2026-11-01 修复：此前补发只带
         # 文本里的 /api/v1/artifacts/ 本地路径，群/私聊外部根本打不开）。
         if image_ids and cap.artifacts is not None:
-            conv = str(getattr(event, "conversation", "") or "")
-            peer_type = "group" if conv.startswith("group:") else "c2c"
-            target = conv.split(":", 1)[1] if ":" in conv else ""
+            _img_sent = 0
             for aid in image_ids[:2]:
                 try:
                     blob = cap.artifacts.read(aid)
@@ -520,12 +549,18 @@ def cmd_run(args) -> int:
                         if hasattr(send_port, "send_image_to") else False
                     print(f"  [补发图片] {aid[:8]} → {peer_type}:{target[:12]}… "
                           f"{'已发' if ok else '发送失败'}")
+                    _img_sent += 1 if ok else 0
                 except Exception as exc:
                     print(f"  [补发图片] {aid[:8]} 读取失败：{type(exc).__name__}")
-            # 文本里的本地产物引用外部打不开，剥离后只发可读文字
+            _note_self_media("图片", _img_sent)
+            # 文本里的媒体引用一律净化成 [图片]（plan 层已做；这里保底）
             import re as _re
-            reply = _re.sub(r"!\[[^\]]*\]\(/api/v1/artifacts/[A-Za-z0-9_-]+\)",
-                            "", str(reply)).strip()
+            reply = _re.sub(r"!\[[^\]]*\]\([^)\n]+\)", "[图片]", str(reply))
+            reply = _re.sub(
+                r"https?://[^\s)\]）>\"']*(?:oss[-\w]*\.aliyuncs\.com|dashscope)"
+                r"[^\s)\]）>\"']*", "[图片]", reply)
+            reply = _re.sub(r"/api/v1/artifacts/[A-Za-z0-9_-]+", "[图片]",
+                            reply).strip()
             if not reply:
                 return
         draft_id = f"qq-followup:{event.message_id}"
@@ -556,6 +591,7 @@ def cmd_run(args) -> int:
         if _plan.silent:
             print("  [规划] 补发内容被规划为沉默，不发送")
             return
+        _sent_segs = 0
         for i, seg in enumerate(segments):
             # 2026-11-01 owner 决策：群会话不因后续闲聊截断已开始发送的回复
             if not event.conversation.startswith("group:")                     and not epoch_fresh(store, event.conversation, ep):
@@ -575,8 +611,20 @@ def cmd_run(args) -> int:
             receipt = plugin_gateway.dispatch(send_message_intent(
                 event.conversation, seg, draft_id=seg_id))
             print(f"  [补发] {seg_id} → {receipt}")
+            _sent_segs += 1 if _send_ok(receipt) else 0
             if i + 1 < len(segments):
                 time.sleep(0.35)
+        # 补发文本也回写群时间线（is_self）——与主回复路径同纪律（2026-11-01
+        # 实证：群友评论补发的图/内容时，模型在时间线里看不到自己发过什么）。
+        if event.conversation.startswith("group:") and _sent_segs:
+            try:
+                timeline.append(event.conversation,
+                                message_id=f"selffc:{event.message_id}",
+                                sender_id=self_uin,
+                                text="\n".join(segments[:_sent_segs]),
+                                is_self=True)
+            except Exception:
+                pass
     registry = OwnerChannelRegistry(owner_id="owner", bindings=bindings)
 
     # QQ/WeQ is registered as a channel plugin. The input adapter is consumed here
@@ -872,9 +920,14 @@ def cmd_run(args) -> int:
             _tfin(_tid, "silent")
             return
         if live_auto:
-            # 语音产物先发（同步路径的 TTS 任务产物——「语音跟我说」这类）
+            # 语音产物先发（同步路径的 TTS 任务产物——「语音跟我说」这类），
+            # 按来件会话定向（群请求的语音发回群里，不落 owner 私聊）。
             from whale_core.life.qq_workflow import _extract_audio_artifacts
-            _send_audio_artifacts(_extract_audio_artifacts(result.get("receipts")))
+            _conv = str(getattr(event, "conversation", "") or "")
+            _send_audio_artifacts(
+                _extract_audio_artifacts(result.get("receipts")),
+                peer_type="group" if _conv.startswith("group:") else "c2c",
+                target=_conv.split(":", 1)[1] if ":" in _conv else "")
             # G3：语义分段多气泡；每段发送前校验 epoch——新消息已到达则
             # 剩余片段作废（MSG-02：旧回复不越过新消息）。
             from whale_core.life.segments import split_reply
@@ -1113,6 +1166,15 @@ def cmd_run(args) -> int:
     from whale_core.memory.timeline import GroupTimelineStore
     from whale_core.life.reply_target import ReplyTargetResolver
     timeline = GroupTimelineStore(store)
+    # 2026-11-01 owner 决策：时间线标签用群名片/昵称，不再是「群友<hash>」
+    # 代号（生产实证：机器人称呼群友只会念出一串 ID，"像乱码"）。
+    # 昵称仅作展示标签；解析失败自动回退代号，不影响主链路。
+    try:
+        from weq_channel.name_directory import WeqNameDirectory
+        timeline.name_resolver = WeqNameDirectory(store, send_port).resolver()
+        print("[昵称] 群成员昵称目录已装配（uin→群名片/昵称，24h 缓存）")
+    except Exception as exc:
+        print(f"[昵称] 昵称目录装配失败，回退代号标签：{type(exc).__name__}")
     workflow.companion.timeline = timeline
     self_uid = os.environ.get("QQ_SELF_UID", "").strip()
     # issue #15：时间线渲染标注「@我」需要自身 uid
@@ -1141,6 +1203,13 @@ def cmd_run(args) -> int:
     workflow.companion.planning_hint += (
         "\n对方当条消息里附带的图片你能直接看到内容并讨论；"
         "别再说自己读不了图——之前看图猜内容都是真看到了，不是瞎猜。")
+    # 2026-11-01 owner 决策：群友实测反馈「太严肃、太有原则」。放开手脚聊——
+    # 原则与安全由系统后台把关，人格层不端着、不布道。称呼用群名片/昵称。
+    workflow.companion.planning_hint += (
+        "\n群里都是熟人朋友，大家说话很随意：放开了聊——接梗、吐槽、开玩笑、"
+        "被逗了可以俏皮地怼回去，不用端着、不用说教、不用一本正经。"
+        "提到或称呼群友时直接用他们的群名片/昵称（时间线里 […|名字] 就是），"
+        "不要念 ID 或代号。")
     if not self_uid:
         try:
             import glob as _glob, json as _json

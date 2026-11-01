@@ -72,6 +72,56 @@ def test_blank_lines_collapsed_but_code_fence_kept():
     assert plan.bubbles and "\n\n" in plan2.bubbles[-1]  # 代码块空行保留
 
 
+def test_multiple_follow_up_markers_all_stripped():
+    """2026-11-01 生产实证：模型写两个 [[稍后补充]]，search 只剥第一个，
+    第二个原样发进群。finditer+sub 全剥。"""
+    plan = plan_reply(
+        "我去画。[[稍后补充:生图结果出来后发出来]]◆ 等下哦[[稍后补充:再说]]",
+        is_group=True, max_segments=3)
+    assert plan.follow_up == "生图结果出来后发出来"
+    assert all("[[" not in b and "]]" not in b for b in plan.bubbles)
+    assert plan.bubbles == ("我去画。", "等下哦")
+
+
+def test_unknown_double_bracket_marker_stripped():
+    """任何残留 [[…]] 内部标记都不进气泡（纵深防御，不认标记名）。"""
+    plan = plan_reply("甲。[[新标记:xyz]] 乙。", is_group=True, max_segments=2)
+    assert plan.bubbles and all("[[" not in b for b in plan.bubbles)
+    assert "甲。" in plan.bubbles[0] and "乙。" in plan.bubbles[0]
+
+
+def test_marker_only_bubble_drops_to_silent_or_clean():
+    plan = plan_reply("◆[[稍后补充:等任务]]", is_group=True, max_segments=2)
+    assert all(b.strip() for b in plan.bubbles)
+    assert all("[[" not in b for b in plan.bubbles)
+
+
+def test_media_refs_become_image_placeholder():
+    """2026-11-01「恶意链接」事件：模型把签名 OSS 链接/本地产物引用贴进正文，
+    QQ 弹恶意链接警告。正文里的媒体引用一律转 [图片]（真图由系统另发）。"""
+    oss = ("https://dashscope-463f.oss-accelerate.aliyuncs.com/1d/44/x.png"
+           "?Expires=1&OSSAccessKeyId=LTAI&Signature=ab%2Fc")
+    plan = plan_reply(f"画好啦 ◆ 给你看\n![小鲸鱼]({oss})",
+                      is_group=True, max_segments=3)
+    assert len(plan.bubbles) == 2
+    assert "http" not in plan.bubbles[1] and "[图片]" in plan.bubbles[1]
+    # 裸 OSS 链接与本地 artifact 引用同样净化
+    plan2 = plan_reply(f"图在这 {oss} 看", is_group=True, max_segments=2)
+    assert "http" not in plan2.bubbles[0] and "[图片]" in plan2.bubbles[0]
+    plan3 = plan_reply("![图](/api/v1/artifacts/abc123)", is_group=True,
+                       max_segments=2)
+    assert plan3.bubbles == ("[图片]",)
+
+
+def test_code_fence_keeps_markers_and_links():
+    """代码围栏内的 [[…]]/链接是代码内容，不剥。"""
+    text = "看这段：\n```\nx = '[[稍后补充:演示]]'\n```"
+    plan = plan_reply(text, is_group=False, max_segments=3)
+    assert any("[[稍后补充:等任务]]" not in b and "[[稍后补充:下载" not in b
+               for b in plan.bubbles)
+    assert any("x = '[[稍后补充:演示]]'" in b for b in plan.bubbles)
+
+
 def test_mid_line_marker_also_separates():
     """句中夹带的 ◆ 同样是分隔（模型只从规划提示学到这个符号，出现即标记；
     「我在呢。◆ 八点起」生产实证形态）。"""

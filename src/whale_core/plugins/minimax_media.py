@@ -1,4 +1,4 @@
-"""MiniMax 媒体 provider：视频生成（Hailuo/T2V）+ 语音合成（t2a_v2）。
+"""MiniMax 媒体 provider：视频生成（Hailuo/T2V）+ 语音合成（t2a_v2）+ 图像生成（image-01）。
 
 分层：内置 provider 实现，非插件框架契约（builtin-provider，issue #31）。
 
@@ -11,6 +11,9 @@
 - TTS ``POST {base}/v1/t2a_v2``（stream=false, output_format=hex）→
   data.audio 十六进制字节。模型：speech-02-hd / speech-02-turbo /
   speech-2.6-* / speech-2.8-*；voice_setting.voice_id 为平台音色 id。
+- 图像 ``POST {base}/v1/image_generation``（同步）→ data.image_urls[]。
+  模型：image-01；aspect_ratio 1:1/16:9/9:16/4:3/3:4/3:2/2:3/21:9；
+  prompt_optimizer 开启（官方提示词优化，二次元/人像出图显著更稳）。
 
 安全：key 只从构造参数读，永不进日志/异常；仅 https（或回环调试）。
 MiniMax 视频无取消接口：cancel 如实返回 False。
@@ -22,6 +25,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from whale_core.plugins.media_image import ImageTaskResult
 from whale_core.plugins.media_video import (
     STATUS_FAILED,
     STATUS_RUNNING,
@@ -155,6 +159,66 @@ class MiniMaxVideoProvider(_MiniMaxBase):
 
     def cancel(self, task_id: str) -> bool:
         return False  # MiniMax 视频无取消接口（官方文档未提供）
+
+
+IMAGE_MODELS = frozenset({"image-01"})
+
+#: image-01 官方支持的宽高比
+_ASPECTS = ("1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "21:9")
+
+
+def _aspect_for(size: str) -> str:
+    """size（"1328*1328"/"1280x720"）→ 最接近的官方 aspect_ratio。"""
+    import re as _re
+    m = _re.match(r"^\s*(\d+)\s*[*x×]\s*(\d+)\s*$", str(size or ""))
+    if not m:
+        return "1:1"
+    w, h = int(m.group(1)), int(m.group(2))
+    if w <= 0 or h <= 0:
+        return "1:1"
+    ratio = w / h
+    return min(_ASPECTS, key=lambda a: abs(
+        int(a.split(":")[0]) / int(a.split(":")[1]) - ratio))
+
+
+class MiniMaxImageProvider(_MiniMaxBase):
+    """MiniMax 文生图（ImageProvider 契约：generate → ImageTaskResult）。
+
+    images 为远端 URL 引用（调用方 ArtifactStore 负责落存/复制）。
+    """
+
+    def __init__(self, *, api_key: str, base_url: str = MINIMAX_BASE,
+                 model: str = "image-01", timeout: float = 120.0) -> None:
+        super().__init__(api_key=api_key, base_url=base_url, timeout=timeout)
+        if model not in IMAGE_MODELS:
+            raise ValueError(f"unknown minimax image model {model!r}")
+        self.model = model
+
+    def generate(self, prompt: str, *, size: str = "1328*1328",
+                 n: int = 1) -> ImageTaskResult:
+        prompt = (prompt or "").strip()[:1500]
+        if not prompt:
+            raise ValueError("prompt must be non-empty")
+        data = self._request("/v1/image_generation", {
+            "model": self.model,
+            "prompt": prompt,
+            "aspect_ratio": _aspect_for(size),
+            "response_format": "url",
+            "n": max(1, min(int(n or 1), 4)),
+            "prompt_optimizer": True,
+        })
+        images: list[str] = []
+        d = data.get("data")
+        if isinstance(d, dict) and isinstance(d.get("image_urls"), list):
+            for u in d["image_urls"]:
+                u = str(u or "").strip()
+                if u.startswith("https://"):
+                    images.append(u)
+        if not images:
+            raise MiniMaxError("bad_response", "image response has no image_urls")
+        import uuid
+        return ImageTaskResult(task_id="mmimg-" + uuid.uuid4().hex[:12],
+                           status="succeeded", images=tuple(images))
 
 
 class MiniMaxTTSProvider(_MiniMaxBase):

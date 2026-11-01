@@ -286,6 +286,15 @@ class WindowedSendPort:
         return self._through_window(
             lambda: self._inner.send_file_to(peer_type, target, path, **kw))
 
+    def member_briefs(self, group_code: str = "", uins=(), uids=()) -> list:
+        """昵称解析是本地库只读查询，不穿窗、不触发开窗（窗口纪律只管发送）。"""
+        if not hasattr(self._inner, "member_briefs"):
+            return []
+        try:
+            return self._inner.member_briefs(group_code, uins=uins, uids=uids)
+        except Exception:
+            return []  # 昵称是增强，查询失败回退代号标签
+
     # ── 窗口管理 ────────────────────────────────────────────────
 
     def _window_open(self) -> bool:

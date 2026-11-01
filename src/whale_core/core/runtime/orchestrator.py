@@ -75,5 +75,7 @@ class ConversationOrchestrator(
                               error="runtime-restarted-during-execution")
                 store.put(f"task:{task_id}", record)
 
-    # 慢能力前缀：这些任务执行耗时（生图/视频/搜索/抓取），适合两段式回复
-    SLOW_CAPABILITY_PREFIXES = ("media.", "web.")
+    # 慢能力前缀：这些任务执行耗时（生图/视频/搜索/抓取/语音合成），适合两段式回复。
+    # 2026-11-01 生产实证：TTS 经平台代理耗时 10–60s，同步路径 60s 上限会超时，
+    # 且同步分支根本不投递音频产物——并入慢前缀走两段式（ack → 完成补发语音）。
+    SLOW_CAPABILITY_PREFIXES = ("media.", "web.", "tts.")

@@ -42,15 +42,60 @@ _FOLLOW_RE = re.compile(r"\[\[稍后补充[:：]([^\]\n]{1,60})\]\]")
 # 「我在呢。◆ 八点起」这类句中夹带也曾泄漏）。
 _BUBBLE_SEP_RE = re.compile(r"\s*◆\s*")
 _BLANK_LINES_RE = re.compile(r"\n{2,}")
+# 2026-11-01 生产实证：模型写了两个 [[稍后补充:…]] 时只剥第一个，第二个
+# 原样发进群里（owner 抓到现行）。纵深防御：气泡定稿前剥掉一切残留
+# [[…]] 规划标记——[[…]] 不是正常聊天用字，出现即内部标记。
+_RESIDUAL_MARK_RE = re.compile(r"\[\[[^\[\]\n]{1,60}\]\]")
+# 媒体引用净化（2026-11-01 生产实证「恶意链接」事件）：模型把工具结果里的
+# 签名 OSS 链接 /api/v1/artifacts/ 本地产物引用贴进回复正文，QQ 直接弹
+# 恶意链接警告且外部根本打不开。图片由系统作为真实图片消息发出，正文里的
+# 媒体引用一律转成 QQ 风格的 [图片] 占位（历史/时间线里也能据此知道发过图）。
+_MD_IMG_RE = re.compile(r"!\[[^\]\n]{0,60}\]\([^)\n]{1,500}\)")
+_OSS_URL_RE = re.compile(
+    r"https?://[^\s)\]）>\"']*(?:oss[-\w]*\.aliyuncs\.com|dashscope)[^\s)\]）>\"']*")
+_ARTIFACT_REF_RE = re.compile(r"/api/v1/artifacts/[A-Za-z0-9_-]+")
+_IMAGE_RUN_RE = re.compile(r"(?:\s*\[图片\]){2,}")
+
+
+_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
+
+
+def _strip_media_refs(text: str) -> str:
+    b = _MD_IMG_RE.sub("[图片]", text)
+    b = _OSS_URL_RE.sub("[图片]", b)
+    b = _ARTIFACT_REF_RE.sub("[图片]", b)
+    return _IMAGE_RUN_RE.sub("[图片]", b)
+
+
+def _map_outside_fences(text: str, fn) -> str:
+    """对 ``` 围栏**之外**的片段应用 fn；围栏块内容原样保留。"""
+    parts = _FENCE_RE.split(text)
+    fences = _FENCE_RE.findall(text)
+    out: list[str] = []
+    for i, part in enumerate(parts):
+        out.append(fn(part))
+        if i < len(fences):
+            out.append(fences[i])
+    return "".join(out)
+
+
+def _scrub(text: str) -> str:
+    """剥内部标记 + 媒体引用（非围栏片段）。"""
+    return _strip_media_refs(_RESIDUAL_MARK_RE.sub("", text))
 
 
 def _tidy_bubble(text: str) -> str:
     """气泡定稿：折叠连续空行（聊天气泡里的空行读着 AI 味，owner 2026-11-01）；
-    含代码围栏的气泡保留原始空行（``` 块内空行是代码格式的一部分）。"""
+    剥残留 [[…]] 规划标记与媒体引用（转 [图片]）。
+    含代码围栏的气泡：围栏块内原样保留（空行/[[…]]/链接都是代码内容），
+    块外照常净化；空行折叠整体跳过（无法区分空行是否在围栏内）。"""
     b = str(text or "").strip()
     if "```" in b:
-        return b
-    return _BLANK_LINES_RE.sub("\n", b)
+        return _map_outside_fences(b, _scrub).strip()
+    b = _scrub(b)
+    # 剥标记可能留下的行尾空白/空行一并收拾
+    b = "\n".join(line.rstrip() for line in b.split("\n"))
+    return _BLANK_LINES_RE.sub("\n", b).strip()
 
 
 @dataclass(frozen=True)
@@ -105,12 +150,15 @@ def plan_reply(text: str, *, is_group: bool, max_segments: int,
     # 沉默标记只认开头（防正文注入伪造沉默/归属）
     if raw.startswith(SILENCE_MARK):
         return _mk((), silent=True, planner="silent")
-    # 稍后补充：剥离标记文本，原因带回给调用方（调用方决定是否真有后续事件）
+    # 稍后补充：剥离**所有**标记文本（模型可能写多个，search 只剥一个会漏），
+    # 第一个原因带回给调用方（调用方决定是否真有后续事件）。
+    # 围栏代码块内的 [[…]] 是代码内容，不当标记处理。
     follow_up = ""
-    m = _FOLLOW_RE.search(raw)
-    if m is not None:
-        follow_up = m.group(1).strip()
-        raw = (raw[:m.start()] + raw[m.end():]).strip()
+    outside = _FENCE_RE.split(raw)
+    first = next((m for p in outside if (m := _FOLLOW_RE.search(p))), None)
+    if first is not None:
+        follow_up = first.group(1).strip()
+        raw = _map_outside_fences(raw, lambda p: _FOLLOW_RE.sub("", p)).strip()
     if not raw:
         return _mk((), silent=True, follow_up=follow_up, planner="silent")
 

@@ -89,54 +89,104 @@ def configure_optional_capabilities(registry, tools, store, *, env: Mapping[str,
     def save(reference: str) -> str:
         return out.artifacts.save_reference(reference).url if out.artifacts else reference
 
+    # MiniMax（图像 + 视频 + 语音）：WHALE_MINIMAX_API_KEY 配了才注册
+    # （key 由 owner 自填）。位置必须在 image/speech/video 装配之前：
+    # 三者的可选模型清单与默认模型都要并入 MiniMax 模型。
+    minimax_key = (env.get("WHALE_MINIMAX_API_KEY") or "").strip()
+    minimax_base = (env.get("WHALE_MINIMAX_BASE_URL") or "").strip() or "https://api.minimaxi.com"
+    minimax = None
+    if minimax_key:
+        from whale_core.plugins.minimax_media import (
+            MiniMaxImageProvider, MiniMaxTTSProvider, MiniMaxVideoProvider)
+        minimax = (MiniMaxVideoProvider, MiniMaxTTSProvider, MiniMaxImageProvider)
+        out.notes.append("MiniMax 已配置（图像 + 视频 + 语音模型可选）")
+
+    # 2026-11-01 owner 决策：生图/视频默认二次元动漫画风（群友实测反馈
+    # 写实向出图违和）。对方提示词里已带风格词（写实/真人/油画…）时以其为准。
+    media_style = (env.get("WHALE_MEDIA_STYLE") or "二次元动漫风格").strip()
+    import re as _re
+    _STYLE_CUES_RE = _re.compile(
+        r"写实|真人|照片|photoreal|realistic|cosplay|油画|水彩|素描|像素|"
+        r"二次元|动漫|漫画|插画|古风|国风|赛博|3[dD]|风格", _re.I)
+
+    def _with_media_style(prompt: str) -> str:
+        p = (prompt or "").strip()
+        if not p or not media_style or _STYLE_CUES_RE.search(p):
+            return p
+        return p + "，" + media_style
+
     image_base, image_key, image_kind = _resolve_capability_env(env, "IMAGE")
-    if image_base:
-        image_default = env.get("WHALE_IMAGE_MODEL") or ("qwen-image-3.0" if image_kind == "dashscope" else "dall-e-3")
-        image_models = [image_default] + [
-            m.strip() for m in (env.get("WHALE_IMAGE_MODELS") or "").split(",")
-            if m.strip() and m.strip() != image_default]
+    if image_base or minimax is not None:
+        mm_image_name = "minimax-" + (env.get("WHALE_MINIMAX_IMAGE_MODEL") or "image-01").strip()
+        # 默认模型：显式 WHALE_IMAGE_MODEL 优先；其次 MiniMax（owner 决策：
+        # 画图模型切成 minimax）；再回退供应商默认。
+        vendor_default = "qwen-image-3.0" if image_kind == "dashscope" else "dall-e-3"
+        image_default = (env.get("WHALE_IMAGE_MODEL") or "").strip() \
+            or (mm_image_name if minimax is not None else vendor_default)
+        # 候选清单：默认 + 显式列表 + 供应商默认（默认被切去 MiniMax 时
+        # qwen 等仍保留为可选项，不悄悄消失）
+        seen_models: set[str] = set()
+        image_models = []
+        for m in [image_default] + [
+                x.strip() for x in (env.get("WHALE_IMAGE_MODELS") or "").split(",")
+            ] + ([vendor_default] if image_base else []):
+            if m and m not in seen_models:
+                seen_models.add(m)
+                image_models.append(m)
         image_providers = {}
         for m in image_models:
+            if m == mm_image_name or m.startswith("minimax-"):
+                continue  # MiniMax 模型在下方单独装配
+            if not image_base:
+                continue
             if image_kind == "dashscope":
                 from whale_core.plugins.dashscope_media import DashScopeImageProvider
                 image_providers[m] = DashScopeImageProvider(base_url=image_base, api_key=image_key, model=m)
             else:
                 image_providers[m] = OpenAIImagesProvider(base_url=image_base, api_key=image_key, model=m)
-        image_provider = image_providers[image_default]
-        register_image_gen(registry, provider=image_provider)
-        default_size = "1328*1328" if image_kind == "dashscope" else "1024x1024"
-        def generate(args):
-            require("media_image")  # 注册被撤销即拒绝（保 disable 语义）
-            # 2026-11-01：允许指定生图模型（owner 决策）；未知模型诚实报错并列可用
-            model = str(args.get("model") or "").strip()
-            provider = image_provider
-            if model:
-                provider = image_providers.get(model)
-                if provider is None:
-                    raise ValueError(
-                        f"未知生图模型 {model!r}（可用：{', '.join(sorted(image_providers))}）")
-            result = provider.generate(str(args.get("prompt") or args.get("query") or args.get("goal") or ""),
-                size=str(args.get("size") or default_size), n=int(args.get("n") or 1))
-            # 同时回原始 URL（签名临时链接，QQ 等外部渠道可直接打开）
-            # 与本地工件引用（控制台内可管理）；工件复制实现持久保存。
-            return json.dumps({"task_id":result.task_id, "status":result.status,
-                               "model": model or image_default,
-                               "images":[save(r) for r in result.images],
-                               "urls":[r for r in result.images]}, ensure_ascii=False)
-        tools.register(ToolSpec(name="generate_image", capability="media.image.generate", plugin_id="media_image",
-                                description="按提示生成图片，返回已保存的图片链接；可用 model 参数指定模型（"
-                                + "、".join(sorted(image_providers)) + "）", handler=generate))
-        out.notes.append("图像生成已配置（可选模型：" + "、".join(sorted(image_providers)) + "）")
-
-    # MiniMax（视频 + 语音）：WHALE_MINIMAX_API_KEY 配了才注册（key 由 owner 自填）。
-    # 位置必须在 speech/video 装配之前：两者的可选模型清单要并入 MiniMax 模型。
-    minimax_key = (env.get("WHALE_MINIMAX_API_KEY") or "").strip()
-    minimax_base = (env.get("WHALE_MINIMAX_BASE_URL") or "").strip() or "https://api.minimaxi.com"
-    minimax = None
-    if minimax_key:
-        from whale_core.plugins.minimax_media import MiniMaxTTSProvider, MiniMaxVideoProvider
-        minimax = (MiniMaxVideoProvider, MiniMaxTTSProvider)
-        out.notes.append("MiniMax 已配置（视频 + 语音模型可选）")
+        if minimax is not None:
+            image_providers[mm_image_name] = minimax[2](
+                api_key=minimax_key, base_url=minimax_base,
+                model=mm_image_name.removeprefix("minimax-"))
+        if image_default not in image_providers:
+            # 显式指定的默认模型不可用（如 key 未配）→ 回退到任一可用模型
+            if not image_providers:
+                image_default = ""
+            else:
+                out.notes.append(f"图像默认模型 {image_default} 不可用，回退 "
+                                 + sorted(image_providers)[0])
+                image_default = sorted(image_providers)[0]
+        if image_default:
+            image_provider = image_providers[image_default]
+            register_image_gen(registry, provider=image_provider)
+            default_size = "1328*1328" if image_kind == "dashscope" else "1024x1024"
+            def generate(args):
+                require("media_image")  # 注册被撤销即拒绝（保 disable 语义）
+                # 2026-11-01：允许指定生图模型（owner 决策）；未知模型诚实报错并列可用
+                model = str(args.get("model") or "").strip()
+                provider = image_provider
+                if model:
+                    provider = image_providers.get(model)
+                    if provider is None:
+                        raise ValueError(
+                            f"未知生图模型 {model!r}（可用：{', '.join(sorted(image_providers))}）")
+                result = provider.generate(
+                    _with_media_style(str(args.get("prompt") or args.get("query") or args.get("goal") or "")),
+                    size=str(args.get("size") or default_size), n=int(args.get("n") or 1))
+                # 只回本地工件引用（2026-11-01「恶意链接」事件：裸签名 URL 被
+                # 模型贴进 QQ 正文触发安全警告且外部打不开）。图片由系统作为
+                # 真实图片消息发出，模型不应在正文里贴任何链接/路径。
+                return json.dumps({"task_id":result.task_id, "status":result.status,
+                                   "model": model or image_default,
+                                   "images":[save(r) for r in result.images],
+                                   "note":"图片会由系统自动发送给对方；回复正文里"
+                                          "不要包含任何图片链接或文件路径。"},
+                                  ensure_ascii=False)
+            tools.register(ToolSpec(name="generate_image", capability="media.image.generate", plugin_id="media_image",
+                                    description="按提示生成图片（默认二次元动漫画风，对方要求别的风格时以其为准）；"
+                                    "可用 model 参数指定模型（"
+                                    + "、".join(sorted(image_providers)) + "）", handler=generate))
+            out.notes.append("图像生成已配置（可选模型：" + "、".join(sorted(image_providers)) + "）")
 
     speech_base, speech_key, speech_kind = _resolve_capability_env(env, "SPEECH")
     tts_providers: dict = {}
@@ -218,12 +268,14 @@ def configure_optional_capabilities(registry, tools, store, *, env: Mapping[str,
             require("media_video")
             # 2026-11-01：允许指定视频模型（owner 决策）；未知模型诚实报错并列可用
             model = str(args.get("model") or "").strip()
-            task = out.video_manager.submit(str(args.get("prompt") or args.get("query") or ""),
+            task = out.video_manager.submit(
+                _with_media_style(str(args.get("prompt") or args.get("query") or "")),
                 duration_s=int(args.get("duration_s") or 5), size=str(args.get("size") or "1280x720"),
                 model=model)
             return json.dumps(task.as_dict(), ensure_ascii=False)
         tools.register(ToolSpec(name="generate_video", capability="media.video.generate", plugin_id="media_video",
-                                description="按提示生成视频（异步任务）；可用 model 参数指定模型（"
+                                description="按提示生成视频（异步任务；默认二次元动漫画风，"
+                                "对方要求别的风格时以其为准）；可用 model 参数指定模型（"
                                 + "、".join(sorted(video_providers)) + "）", handler=video))
         out.notes.append("异步视频生成已配置（可选模型：" + "、".join(sorted(video_providers)) + "）")
 

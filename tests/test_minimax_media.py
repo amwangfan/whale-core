@@ -14,8 +14,10 @@ from whale_core.plugins import provider_http
 from whale_core.plugins.media_video import VideoError, VideoTaskManager
 from whale_core.plugins.minimax_media import (
     MiniMaxError,
+    MiniMaxImageProvider,
     MiniMaxTTSProvider,
     MiniMaxVideoProvider,
+    _aspect_for,
 )
 
 
@@ -84,6 +86,43 @@ def test_minimax_tts_hex_decode_and_params(monkeypatch):
     assert body["voice_setting"]["speed"] == 1.2
     assert body["audio_setting"]["format"] == "wav"
     assert body["stream"] is False and body["output_format"] == "hex"
+
+
+def test_minimax_image_happy_path(monkeypatch):
+    calls = []
+    monkeypatch.setattr(provider_http, "open_request", _fake_transport(
+        [{"data": {"image_urls": ["https://cdn.example/a.png"]},
+          "base_resp": {"status_code": 0}}], calls))
+    p = MiniMaxImageProvider(api_key="k")
+    r = p.generate("一只二次元小鲸鱼", size="1280x720")
+    assert r.status == "succeeded" and r.images == ("https://cdn.example/a.png",)
+    body = json.loads(calls[0].data)
+    assert body["model"] == "image-01"
+    assert body["aspect_ratio"] == "16:9"
+    assert body["prompt_optimizer"] is True
+    assert "/v1/image_generation" in calls[0].full_url
+
+
+def test_minimax_image_no_urls_is_bad_response(monkeypatch):
+    calls = []
+    monkeypatch.setattr(provider_http, "open_request", _fake_transport(
+        [{"data": {}, "base_resp": {"status_code": 0}}], calls))
+    p = MiniMaxImageProvider(api_key="k")
+    with pytest.raises(MiniMaxError) as ei:
+        p.generate("x")
+    assert ei.value.kind == "bad_response"
+
+
+def test_minimax_image_model_validation():
+    with pytest.raises(ValueError):
+        MiniMaxImageProvider(api_key="k", model="no-such-model")
+
+
+def test_aspect_for_mapping():
+    assert _aspect_for("1328*1328") == "1:1"
+    assert _aspect_for("1280x720") == "16:9"
+    assert _aspect_for("720x1280") == "9:16"
+    assert _aspect_for("") == "1:1"
 
 
 def test_minimax_model_validation():
