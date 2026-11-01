@@ -822,6 +822,21 @@ def build_parser() -> argparse.ArgumentParser:
         return qq_main(args.qq_args)
     p_qq.set_defaults(func=qq)
 
+    # issue #40：真实模型评测入口（多裁判交叉打分；手动运行）
+    p_eval = sub.add_parser(
+        "eval",
+        help="真实模型评测（whale eval run|pair|judge|judges|report）",
+    )
+    p_eval.add_argument(
+        "eval_args", nargs=argparse.REMAINDER,
+        help="原样转发给 evals.live 子命令（如 judges --env ... --pairs ...）",
+    )
+
+    def eval_cmd(args: argparse.Namespace) -> int:
+        from whale_core.cli.eval_cmds import main as eval_main
+        return eval_main(args.eval_args)
+    p_eval.set_defaults(func=eval_cmd)
+
     p_memory = sub.add_parser("memory", help="记忆导出 / 导入（JSONL）")
     msub = p_memory.add_subparsers(dest="memory_command", required=True)
     me = msub.add_parser("export", help="导出记忆为 JSONL")

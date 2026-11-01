@@ -5,12 +5,10 @@
 
 ## 评审方式与局限（前置声明）
 
-- 本轮评审为 **AI 代理盲评**（评审时不知 A/B 归属，mapping 回收后生成报告）；
-  **待 owner 人工复核**——复核只需照 `evals/live/out/pairs-01/scores_template.csv`
-  重填后重跑 report 命令即可覆盖本结论。
-- candidate = owner 实装卡 persona-e2a1165930（含外部原文），baseline = 内置 default。
-  话题承接/情绪适配的回落**可能**来自：卡原文较长稀释了对话上下文、
-  样本量仅 4 对；不作为卡的最终判决，只作为「下一轮迭代要盯的维度」。
+- 本轮人工分为 **AI 代理盲评**（评审时不知 A/B 归属）；**待 owner 人工复核**——
+  照 `evals/live/out/pairs-01/scores_template.csv` 重填后重跑 report 即可覆盖。
+- 多裁判：当前仅 deepseek 在线（kimi/qwen/glm 缺 API key 已如实跳过）；
+  deepseek 裁判与被测模型同源，其分数仅供参考，偏好一致性见附录。
 
 ## 版本信息
 

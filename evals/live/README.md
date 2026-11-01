@@ -106,3 +106,34 @@ PYTHONPATH=src python3 -m evals.live.report \
 | `scores.csv` | 人工打分 | ✅ |
 | `judge_scores.json` | 模型裁判分（仅供参考） | ✅ |
 | `report.md` | 对比报告 | ✅ |
+
+## 多模型裁判（owner 决策 2026-11-01）
+
+`judges.py` 支持多平台交叉打分（OpenAI 兼容协议）：
+
+| 平台 | env key | 默认模型 | 覆盖 env |
+| --- | --- | --- | --- |
+| deepseek | `DEEPSEEK_API_KEY` | 生产 `DEEPSEEK_MODEL` | `WHALE_JUDGE_DEEPSEEK_MODEL`（端点沿用 `DEEPSEEK_BASE_URL`） |
+| kimi | `MOONSHOT_API_KEY` | `kimi-k3` | `WHALE_JUDGE_KIMI_MODEL` |
+| qwen | `DASHSCOPE_API_KEY` | `qwen3-max` | `WHALE_JUDGE_QWEN_MODEL` |
+| glm | `ZHIPU_API_KEY` | `glm-5.2` | `WHALE_JUDGE_GLM_MODEL` |
+
+缺 key 的平台如实 `skipped_no_key`，不伪造分数；任一平台失败不影响其他。
+汇总产物 `judges_scores.json` 含各平台分数与偏好一致性统计。
+
+## 生产使用（接入生产环境）
+
+仓内 `whale eval` CLI（dev/生产 checkout 均可）：
+
+```bash
+cd /opt/whale/whale-core   # 生产 canonical checkout
+PYTHONPATH=src:plugins python3 -m whale_core.cli.main eval run \
+    --env /opt/whale/secrets/qq_workflow.env --persona-id <卡id> \
+    --store /opt/whale/state/qq_workflow.sqlite3 --out /tmp/eval/run-x
+PYTHONPATH=src:plugins python3 -m whale_core.cli.main eval judges \
+    --env /opt/whale/secrets/qq_workflow.env --pairs <pairs.jsonl> --out <dir>
+```
+
+子命令：`run / pair / judge / judges / report`（参数透传各模块 `--help`）。
+**注意**：评测只读生产库（跑 run 时如需库存卡，先复制 store 再
+`--store` 指向副本，绝不直写生产库）。
