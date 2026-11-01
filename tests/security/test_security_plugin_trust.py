@@ -310,5 +310,6 @@ def test_manifest_directory_claimed_bundled_is_capped(tmp_path):
 def test_explicit_host_manifest_still_supports_bundled():
     manager = PluginManager(PluginRegistry(), InMemoryStore())
     manager.load_manifest(PluginManifest(
-        plugin_id="host", name="host", version="1", trust="bundled"))
+        plugin_id="host", name="host", version="1", trust="bundled",
+        actions=("ping",)))
     assert manager.status()[0]["trust"] == "bundled"
