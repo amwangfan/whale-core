@@ -48,3 +48,18 @@ References:
 - https://docs.sillytavern.app/usage/prompts/prompt-manager/
 - https://docs.sillytavern.app/usage/core-concepts/worldinfo/
 - https://github.com/malfoyslastname/character-card-spec-v2/blob/main/spec_v2.md
+
+## QQ identity routing
+
+Group-turn participation has no hardcoded nicknames. The example QQ host
+supplies the selected persona's name at startup plus optional comma-separated
+`WHALE_BOT_NAMES` aliases. A change of selected persona requires reinitializing
+the example host's group-turn policy to update its name matching. Explicit
+@-mentions and replies continue to use trusted channel metadata.
+
+## Validation notes
+
+The repository's test workflow is manual (`workflow_dispatch`). New unit and
+integration regression tests accompany this change, but they are not considered
+passing until run by an actual checkout/CI environment. No production store
+cleanup or automatic card import is performed.

@@ -45,7 +45,7 @@ beforeEach(() => {
 });
 
 describe("PersonaPanel 快速创建 / 导入 / 试玩 / 草稿（issue #37）", () => {
-  it("新建表单：默认区只有 5+1 个字段，进阶设置默认折叠，模板选项齐全", async () => {
+  it("新建表单：默认区只有 5+1 个字段，无预制角色模板", async () => {
     mockStudioFetch();
     const { container } = renderPanel();
     fireEvent.click(screen.getByText("新建人物卡"));

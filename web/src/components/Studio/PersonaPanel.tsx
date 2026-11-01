@@ -6,7 +6,7 @@
  * - 内置卡不可改：只能「复制为新卡」（预填底稿，新 id）；
  * - 编辑先拉详情（含 external_prompt 等完整字段），保存后由父组件整体刷新；
  * - issue #37：表单分区（默认 5+1 字段 / 进阶设置折叠）、从模板开始、
- *   导入预览（不写库，确认后才填进表单）、即时试玩（草稿对比默认人格）、
+ *   导入预览（不写库，确认后才填进表单）、即时试玩（草稿对比当前配置）、
  *   localStorage 草稿（恢复/放弃/撤销）。
  * - 表单只出现人格内容字段：不出现权限/工具 scope/Vault/安全策略控件。
  */
@@ -314,7 +314,7 @@ export default function PersonaPanel({
     const rate = Number.parseFloat(form.speaking_rate);
     return {
       title: form.title.trim(),
-      name: form.name.trim() || "鲸鱼",
+      name: form.name.trim(),
       category: form.category,
       summary: form.summary,
       temperament: form.temperament,
