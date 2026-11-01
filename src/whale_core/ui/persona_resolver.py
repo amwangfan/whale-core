@@ -23,7 +23,6 @@ from typing import Any
 
 from whale_core.memory.store import MemoryStore
 from whale_core.ui.persona_cards import (
-    DEFAULT_CARD_ID,
     PersonaCard,
     PersonaCardLibrary,
     _load_stored_card,
@@ -63,7 +62,7 @@ class PersonaResolver:
         """解析会话应使用的角色卡。
 
         优先级：会话绑定卡（内置库 → kv ``persona:card:{id}`` 导入卡）
-        > kv ``persona:active_card`` 全局回退（含 env）> 内置 default。
+        > kv ``persona:active_card`` 全局回退（含 env）> 不使用默认人物卡。
         绑定 id 不存在 / 卡数据损坏时回退并记录（fail soft）。
         ``fallback=False`` 时不回退，未命中返回 None。
         """
@@ -83,9 +82,9 @@ class PersonaResolver:
         try:
             return active_card(self.store, library=self.library)
         except Exception:  # 全局设置损坏也不阻塞对话
-            self.fallbacks.append((pid, "global fallback failed; builtin default"))
-            logger.exception("persona global fallback failed; using builtin default")
-            return PersonaCardLibrary().require(DEFAULT_CARD_ID)
+            self.fallbacks.append((pid, "global fallback failed; no active persona"))
+            logger.exception("persona global fallback failed; continuing without persona")
+            return None
 
     # -- 渲染（issue #36 起委托给唯一有效人格渲染器） ----------------------
 
