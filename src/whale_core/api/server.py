@@ -58,6 +58,7 @@ class ApiContext:
     started_at: float = field(default_factory=time.time)
     events: list[dict] = field(default_factory=list)  # bounded, non-durable log
     event_seq: int = 0
+    trace_ledger: Any = None  # issue #39：惰性构建（api/routes/traces.py）
 
     def log_event(self, kind: str, detail: str = "") -> None:
         with self.lock:
@@ -224,6 +225,10 @@ class _Handler(BaseHTTPRequestHandler):
             _studio.dispatch_auth(self, method, parts)
         elif head == "memory":
             routes.chat.memory(self, method, parts, query)
+        elif head == "traces":
+            routes.traces.traces(self, method, parts, query)
+        elif head == "activity":
+            routes.traces.activity(self, method, parts, query)
         elif parts == ["chat"] and method == "POST":
             routes.chat.chat(self)
         elif head == "tasks":

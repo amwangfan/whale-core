@@ -16,6 +16,7 @@ from whale_core.api.routes import (
     operations,
     plugins,
     system,
+    traces,
     workflows,
 )
 
@@ -26,5 +27,6 @@ __all__ = [
     "operations",
     "plugins",
     "system",
+    "traces",
     "workflows",
 ]
