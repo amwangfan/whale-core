@@ -132,7 +132,16 @@ def build_inbox(path_str: str):
     return SqliteInbox(spec)
 
 
-def risk_prefs() -> ProactivePrefs:
+def risk_prefs(store=None) -> ProactivePrefs:
+    """生效主动策略：kv（Studio #42 写入）覆盖 env 默认。store=None 时仅 env。"""
+    base = _env_risk_prefs()
+    if store is None:
+        return base
+    from whale_core.life.initiative import load_prefs
+    return load_prefs(store, base)
+
+
+def _env_risk_prefs() -> ProactivePrefs:
     """风控策略（issue #13 统一口径）：被动回复与主动行为是两套预算。
 
     - 主动：DAILY_LIMIT 默认 10/天 + QUIET 22–7（与 docs/research §6.5 一致）；
@@ -253,7 +262,7 @@ def dispatch_dry_run(store, draft_id: str) -> str:
     shadow = InMemoryStore()
     shadow_outbox = ProactiveOutbox(shadow)
     shadow_outbox.propose(draft)
-    verdict = shadow_outbox.dispatch(draft_id, risk_prefs(), now=datetime.now(timezone.utc),
+    verdict = shadow_outbox.dispatch(draft_id, risk_prefs(store), now=datetime.now(timezone.utc),
                                      port=DryRunSendPort(), explicitly_approved=True,
                                      passive_reply=True)
     print(f"[dry-run 账本] {draft_id}: {verdict.status} ({verdict.reason})"
@@ -264,7 +273,7 @@ def dispatch_dry_run(store, draft_id: str) -> str:
 def dispatch_approved(store, draft_id: str, port=None) -> str:
     """人工批准派发：完整真实账本（attempt 先记账，unknown 不自动重试）。"""
     outbox = ProactiveOutbox(store)
-    verdict = outbox.dispatch(draft_id, risk_prefs(), now=datetime.now(timezone.utc),
+    verdict = outbox.dispatch(draft_id, risk_prefs(store), now=datetime.now(timezone.utc),
                               port=port or build_send_port(live_ok=True),
                               explicitly_approved=True, passive_reply=True)
     print(f"[账本] {draft_id}: {verdict.status} ({verdict.reason})")
@@ -357,7 +366,7 @@ def cmd_run(args) -> int:
         return any(auth_service.consume_grant_use(
             g, action_fingerprint=fingerprint, required_scope=required_scope)
             for g in grant_ids)
-    prefs = risk_prefs()
+    prefs = risk_prefs(store)
     print(policy_summary(prefs))
 
     # issue #12：审批/发送模式判定（fail closed）
@@ -622,8 +631,9 @@ def cmd_run(args) -> int:
         前已由 send_message_intent 网关裁决；explicitly_approved 不预设）。"""
         try:
             from datetime import datetime as _dt2, timezone as _tz2
+            # issue #42：kv 覆盖即时生效（Studio 改主动策略无需重启）
             sent = supervised_runner.dispatch_ready_followups(
-                prefs, port=_FollowupPort(), now=_dt2.now(_tz2.utc))
+                risk_prefs(store), port=_FollowupPort(), now=_dt2.now(_tz2.utc))
             if sent:
                 print(f"  [任务续答] 本轮派发 {len(sent)} 条")
         except Exception as exc:
@@ -736,8 +746,8 @@ def cmd_run(args) -> int:
                     RhythmStore as _RhythmStore, rhythm_key_for)
                 from whale_core.life.reply_target import TurnDecision
                 RhythmStore = _RhythmStore
-                rhythm0 = RhythmStore(store).get(
-                    rhythm_key_for("qq", event.conversation) or "")
+                rhythm0 = RhythmStore(store).get_with_channel_default(
+                    rhythm_key_for("qq", event.conversation) or "", "qq")
                 join = group_turn_policy.maybe_join(
                     conversation=event.conversation, text=event.text,
                     activity=rhythm0.activity, dnd=rhythm0.dnd,
@@ -794,8 +804,8 @@ def cmd_run(args) -> int:
             from whale_core.life.batching import current_epoch
             from whale_core.life.rhythm import RhythmStore, rhythm_key_for
             # G4：分段上限取会话节奏卡配置（quiet = 单气泡）。
-            rhythm = RhythmStore(store).get(
-                rhythm_key_for("qq", event.conversation) or "")
+            rhythm = RhythmStore(store).get_with_channel_default(
+                rhythm_key_for("qq", event.conversation) or "", "qq")
             ep = current_epoch(store, event.conversation)
             segments, _plan = _plan_segments(
                 result["reply"],
@@ -864,8 +874,8 @@ def cmd_run(args) -> int:
             if decision.action != "reply":
                 from whale_core.life.rhythm import (
                     RhythmStore as _RS2, rhythm_key_for as _rkf2)
-                _rhythm2 = _RS2(store).get(
-                    _rkf2("qq", incoming.conversation) or "")
+                _rhythm2 = _RS2(store).get_with_channel_default(
+                    _rkf2("qq", incoming.conversation) or "", "qq")
                 join = group_turn_policy.maybe_join(
                     conversation=incoming.conversation, text=incoming.text,
                     activity=_rhythm2.activity, dnd=_rhythm2.dnd,
@@ -928,8 +938,8 @@ def cmd_run(args) -> int:
         ep = epoch or current_epoch(store, incoming.conversation)
         is_group = incoming.conversation.startswith("group:")
         # G4：分段上限取会话节奏卡配置（quiet = 单气泡）。
-        rhythm = RhythmStore(store).get(
-            rhythm_key_for("qq", incoming.conversation) or "")
+        rhythm = RhythmStore(store).get_with_channel_default(
+            rhythm_key_for("qq", incoming.conversation) or "", "qq")
         segments, _plan = _plan_segments(reply, is_group=is_group,
                                          rhythm=rhythm)
         if _plan.silent:

@@ -31,6 +31,11 @@ from whale_core.api.studio.memory import (
     _put_memories,
     _vault_records,
 )
+from whale_core.api.studio.initiative import (
+    _get_initiative,
+    _put_channel,
+    _put_global,
+)
 from whale_core.api.studio.memory_browse import (
     _browse as _memory_browse,
     _correct as _memory_correct,
@@ -89,6 +94,12 @@ def _dispatch_studio(handler, method: str, parts: list[str]) -> None:
         _get_persona_effective(handler, ctx, svc, rest[1])
     elif rest == ["memory-spaces"] and method == "GET":
         _list_memory_spaces(handler, ctx, svc)
+    elif rest == ["initiative"] and method == "GET":
+        _get_initiative(handler, ctx, svc)
+    elif rest == ["initiative", "global"] and method == "PUT":
+        _put_global(handler, ctx, svc)
+    elif rest == ["initiative", "channel"] and method == "PUT":
+        _put_channel(handler, ctx, svc)
     elif rest == ["memory", "subjects"] and method == "GET":
         _memory_subjects(handler, ctx, svc)
     elif rest == ["memory", "browse"] and method == "GET":
@@ -167,6 +178,8 @@ def _path_known(rest: list[str]) -> bool:
                 ["members", "memory"], ["members", "memory", "correct"],
                 ["members", "memory", "delete"],
                 ["memory", "subjects"], ["memory", "browse"],
+                ["initiative"], ["initiative", "global"],
+                ["initiative", "channel"],
                 ["memory", "correct"], ["memory", "expire"],
                 ["memory", "delete"], ["memory", "pause"]):
         return True

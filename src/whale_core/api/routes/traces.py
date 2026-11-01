@@ -16,16 +16,21 @@ from whale_core.life.trace import TraceLedger, _trace_dict, explain
 
 
 def _ledger(handler) -> TraceLedger:
-    """按 store 路径惰性构建账本（与记忆库同目录的 trace.sqlite3）。"""
+    """惰性构建账本：WHALE_TRACE_DB env 显式指定 > 与记忆库同目录的
+    trace.sqlite3 > 进程内（:memory:）。多进程部署（API 与 QQ runner 分离）
+    时用 env 指向 runner 的账本文件以共享视图。"""
+    import os
     ctx = handler.ctx
     led = getattr(ctx, "trace_ledger", None)
     if led is None:
-        store_path = getattr(getattr(ctx, "store", None), "path", "") or ""
-        if store_path and store_path != ":memory:":
-            path = store_path.rsplit("/", 1)[0] + "/trace.sqlite3" \
-                if "/" in store_path else "trace.sqlite3"
-        else:
-            path = ":memory:"
+        path = (os.environ.get("WHALE_TRACE_DB") or "").strip()
+        if not path:
+            store_path = getattr(getattr(ctx, "store", None), "path", "") or ""
+            if store_path and store_path != ":memory:":
+                path = store_path.rsplit("/", 1)[0] + "/trace.sqlite3" \
+                    if "/" in store_path else "trace.sqlite3"
+            else:
+                path = ":memory:"
         led = TraceLedger(path)
         ctx.trace_ledger = led
     return led

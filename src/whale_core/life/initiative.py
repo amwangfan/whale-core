@@ -5,7 +5,7 @@ an atomic claim/lease and provider-side idempotency before production deployment
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone, time
 from typing import Protocol
 from zoneinfo import ZoneInfo
@@ -109,6 +109,66 @@ class ProactivePrefs:
             raise ValueError("negative daily limit")
         if self.passive_daily_limit is not None and self.passive_daily_limit < 0:
             raise ValueError("negative passive daily limit")
+
+
+# ---------------------------------------------------------------------------
+# issue #42：主动行为配置的统一事实源（kv 优先，env 兜底）
+# ---------------------------------------------------------------------------
+
+PREFS_KEY = "life:proactive:prefs"
+
+#: kv 可写字段白名单（enabled/allowed_channels/auto_send/allow_calls 是
+#: 安全相关开关，仍由部署侧 env/代码决定，不开给管理面热改）。
+PREFS_KV_FIELDS = frozenset({
+    "daily_limit", "passive_daily_limit", "quiet_start", "quiet_end",
+})
+
+
+def prefs_to_dict(prefs: ProactivePrefs) -> dict:
+    return {
+        "daily_limit": prefs.daily_limit,
+        "passive_daily_limit": prefs.passive_daily_limit,
+        "quiet_start": prefs.quiet_start.strftime("%H:%M"),
+        "quiet_end": prefs.quiet_end.strftime("%H:%M"),
+    }
+
+
+def load_prefs(store: MemoryStore, env_fallback: ProactivePrefs) -> ProactivePrefs:
+    """kv 覆盖 env 兜底（单配置来源：UI 与真实策略都读这里）。"""
+    data = store.get(PREFS_KEY)
+    if not isinstance(data, dict):
+        return env_fallback
+    out = env_fallback
+    if isinstance(data.get("daily_limit"), int) and data["daily_limit"] >= 0:
+        out = replace(out, daily_limit=data["daily_limit"])
+    pdl = data.get("passive_daily_limit")
+    if pdl is None or (isinstance(pdl, int) and pdl >= 0):
+        out = replace(out, passive_daily_limit=pdl)
+    for name in ("quiet_start", "quiet_end"):
+        raw = data.get(name)
+        if isinstance(raw, str):
+            try:
+                hh, mm = raw.split(":")
+                out = replace(out, **{name: time(int(hh), int(mm))})
+            except (ValueError, AttributeError):
+                continue
+    return out
+
+
+def save_prefs(store: MemoryStore, fields: dict) -> ProactivePrefs:
+    """写入 kv（严格白名单）；返回当前生效视图需调用方再 load。"""
+    unknown = set(fields) - PREFS_KV_FIELDS
+    if unknown:
+        raise ValueError(f"不允许热改字段: {sorted(unknown)}")
+    data = store.get(PREFS_KEY)
+    data = dict(data) if isinstance(data, dict) else {}
+    for key, value in fields.items():
+        if value is None:
+            data.pop(key, None)  # None = 恢复默认（删覆盖）
+        else:
+            data[key] = value
+    store.put(PREFS_KEY, data)
+    return load_prefs(store, ProactivePrefs())  # 视图以调用方 env 为准
 
 
 @dataclass(frozen=True)

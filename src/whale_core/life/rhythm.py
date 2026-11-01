@@ -26,6 +26,10 @@ DEFAULT_ACTIVITY = "balanced"
 MAX_SEGMENTS_LIMIT = 5
 
 _KEY_PREFIX = "bind:rhythm:"
+#: issue #42：渠道级默认档位（会话未单独设置时生效）：
+#: ``bind:rhythm-channel:{channel}`` → {"activity": ..., "max_segments": int,
+#: "dnd": bool}（只含节奏字段，版本语义不需要——这是默认值而非会话状态）。
+_CHANNEL_KEY_PREFIX = "bind:rhythm-channel:"
 
 
 @dataclass(frozen=True)
@@ -107,6 +111,43 @@ class RhythmStore:
 
     def configured(self, conversation_key: str) -> bool:
         return isinstance(self.store.get(self._key(conversation_key)), Mapping)
+
+    # -- issue #42：渠道级默认档位 -------------------------------------------
+
+    def get_with_channel_default(
+            self, conversation_key: str, channel: str) -> ConversationRhythm:
+        """会话设置优先；未设置时回落渠道默认档位；都无 → 内置默认。"""
+        if self.configured(conversation_key):
+            return self.get(conversation_key)
+        data = self.store.get(f"{_CHANNEL_KEY_PREFIX}{channel}")
+        if isinstance(data, Mapping):
+            merged = {"version": 0, **{k: v for k, v in data.items()
+                                       if k in ("activity", "max_segments",
+                                                "dnd")}}
+            return ConversationRhythm.from_dict(dict(merged))
+        return self.get(conversation_key)
+
+    def set_channel_default(self, channel: str, *, activity: str = "",
+                            max_segments: int = 0, dnd: bool = False) -> None:
+        """写入渠道默认档位；activity 为空串 = 清除渠道覆盖。"""
+        key = f"{_CHANNEL_KEY_PREFIX}{channel}"
+        if not activity:
+            self.store.delete(key)
+            return
+        if activity not in ACTIVITY_MODES:
+            raise ValueError(f"unknown activity: {activity!r}")
+        self.store.put(key, {"activity": activity,
+                             "max_segments": max(0, min(int(max_segments),
+                                                        MAX_SEGMENTS_LIMIT)),
+                             "dnd": bool(dnd)})
+
+    def channel_default(self, channel: str) -> Optional[ConversationRhythm]:
+        data = self.store.get(f"{_CHANNEL_KEY_PREFIX}{channel}")
+        if not isinstance(data, Mapping):
+            return None
+        return ConversationRhythm.from_dict(
+            {"version": 0, **{k: v for k, v in data.items()
+                              if k in ("activity", "max_segments", "dnd")}})
 
 
 def rhythm_key_for(channel: str, conversation_id: str) -> Optional[str]:
