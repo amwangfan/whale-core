@@ -332,6 +332,45 @@ def cmd_run(args) -> int:
             except Exception:
                 pass
 
+    # ---- 会话自愈（owner 决策 2026-11-01：运行核心不依赖人工/对话介入） ----
+    # QQ 账号会话周期性掉线（发送 fail:unknown）时，runner 自行 reopen 账号
+    # 并重试一次；仍失败则如实记 failed，等下一波入站再试。冷却 300s 防抖。
+    _send_fail_streak = {"n": 0, "last": 0.0}
+
+    def _maybe_recover_channel(tid) -> bool:
+        """连续发送失败 ≥2 且过冷却 → 跑 weq reopen 脚本。返回是否尝试恢复。"""
+        import subprocess as _sp
+        _send_fail_streak["n"] += 1
+        now = time.time()
+        if _send_fail_streak["n"] < 2 or \
+                now - _send_fail_streak["last"] < 300:
+            return False
+        script = os.environ.get(
+            "WHALE_WEQ_REOPEN_SCRIPT", "/opt/whale/scripts/weq-reopen-account.py")
+        if not Path(script).is_file():
+            return False
+        _send_fail_streak["last"] = now
+        print(f"  [自愈] 连续发送失败 {_send_fail_streak['n']} 次，"
+              f"尝试重连 QQ 账号会话…")
+        _tspan(tid, "recovery", "executed", detail="weq reopen")
+        try:
+            proc = _sp.run(["python3", script], capture_output=True,
+                           text=True, timeout=45)
+            ok = proc.returncode == 0 and "ok" in (proc.stdout or "")
+            print(f"  [自愈] {'成功' if ok else '未生效'}")
+            if ok:
+                _send_fail_streak["n"] = 0
+            return ok
+        except Exception as exc:
+            print(f"  [自愈] 脚本异常：{type(exc).__name__}")
+            return False
+
+    def _send_ok(receipt) -> bool:
+        """发送回执统一判定（网关 receipt 字符串或端口 bool）。"""
+        if isinstance(receipt, bool):
+            return receipt
+        return ":fail" not in str(receipt)
+
     # S1：服务端会话上下文解析器——群里主人不提权、未配对即普通主体；
     # S2：绑定存储接入（会话 → 记忆空间/角色卡，vault 硬拒）。
     from whale_core.life.context_resolver import (
@@ -829,9 +868,15 @@ def cmd_run(args) -> int:
                 approved_draft_ids.add(seg_id)
                 receipt = plugin_gateway.dispatch(send_message_intent(
                     event.conversation, seg, draft_id=seg_id))
+                # 会话自愈：失败后自动 reopen 账号并重试本段一次
+                if not _send_ok(receipt) and _maybe_recover_channel(_tid):
+                    receipt = plugin_gateway.dispatch(send_message_intent(
+                        event.conversation, seg, draft_id=seg_id))
                 print(f"  [插件网关] 段{i+1}/{len(segments)} {receipt}")
                 # issue #39：回执即真相——gateway 回执含 fail 时如实记 failed
-                _ok_send = ":fail" not in str(receipt)
+                _ok_send = _send_ok(receipt)
+                if _ok_send:
+                    _send_fail_streak["n"] = 0
                 _tspan(_tid, "send", "executed" if _ok_send else "failed",
                        reason_code="" if _ok_send else "send_failed",
                        detail=f"段{i+1}/{len(segments)}")
@@ -962,12 +1007,20 @@ def cmd_run(args) -> int:
                 group_code = incoming.conversation.split(":", 1)[1]
                 ok = port_inner.send_group_text(group_code, seg) \
                     if hasattr(port_inner, "send_group_text") else False
+                if not ok and _maybe_recover_channel(_tid):
+                    ok = port_inner.send_group_text(group_code, seg) \
+                        if hasattr(port_inner, "send_group_text") else False
                 print(f"  [群回复] 段{i+1}/{len(segments)} {'已发送' if ok else '发送失败'} ← {group_code}")
             else:
                 peer_uid = incoming.conversation.split(":", 1)[1]
                 ok = port_inner.send_c2c(peer_uid, seg) \
                     if hasattr(port_inner, "send_c2c") else False
+                if not ok and _maybe_recover_channel(_tid):
+                    ok = port_inner.send_c2c(peer_uid, seg) \
+                        if hasattr(port_inner, "send_c2c") else False
                 print(f"  [陌生人回复] 段{i+1}/{len(segments)} {'已发送' if ok else '发送失败'} ← {peer_uid[:12]}…")
+            if ok:
+                _send_fail_streak["n"] = 0
             _tspan(_tid, "send", "executed" if ok else "failed",
                    reason_code="" if ok else "send_failed",
                    detail=f"段{i+1}/{len(segments)}")
