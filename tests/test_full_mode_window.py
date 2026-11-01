@@ -259,6 +259,47 @@ def test_send_passthrough_false_still_touches(tmp_path):
     assert win.touch_calls >= 2            # 失败的发送也算窗口活跃
 
 
+class _MediaInner(StubInner):
+    """带直发方法的内层端口（c2c/群文本/定向视频）。"""
+
+    def send_c2c(self, uid, text):
+        self.calls.append(("c2c", uid, text))
+        return True
+
+    def send_group_text(self, group_code, text):
+        self.calls.append(("group", group_code, text))
+        return True
+
+    def send_video_to(self, peer_type, target, video_bytes, **kw):
+        self.calls.append(("video", peer_type, target))
+        return True
+
+
+def test_direct_sends_go_through_window(tmp_path):
+    """2026-11-01 事故形态：陌生人/群直发若绕过窗口（解包 _inner），
+    关窗态发送必被 weq-web 拒绝。穿窗代理必须先开窗再委托。"""
+    win = StubWindow(tmp_path / "w.ts")   # 初始关窗
+    port = WindowedSendPort(_MediaInner(True), win)
+
+    assert port.send_c2c("u_x", "在吗") is True
+    assert win.open_calls == 1             # 第一次直发触发开窗
+    assert port.send_group_text("1124744261", "群里好") is True
+    assert port.send_video_to("group", "1124744261", b"\x00\x00") is True
+    assert win.open_calls == 1             # 已开窗不重复开
+    assert [c[0] for c in port._inner.calls] == ["c2c", "group", "video"]
+    assert win.touch_calls >= 4            # open 落档 + 每次发送续期
+
+
+def test_direct_sends_missing_inner_method_false(tmp_path):
+    """内层没有该直发方法时：如实 False，不开窗、不炸。"""
+    win = StubWindow(tmp_path / "w.ts")
+    port = WindowedSendPort(StubInner(True), win)
+    assert port.send_c2c("u_x", "hi") is False
+    assert port.send_group_text("g1", "hi") is False
+    assert port.send_video_to("c2c", "u_x", b"x") is False
+    assert win.open_calls == 0
+
+
 def test_open_failure_does_not_block_send(tmp_path):
     win = StubWindow(tmp_path / "w.ts",
                      open_raises=FullModeWindowError("weq web unreachable"))
