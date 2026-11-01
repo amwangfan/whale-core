@@ -13,12 +13,14 @@ import FirstRunSetup from "./components/FirstRunSetup";
 import Media from "./components/Media";
 import Workflows from "./components/Workflows";
 import Studio from "./components/Studio";
+import Initiative from "./components/Initiative";
 
 type TabKey =
   | "overview"
   | "studio"
   | "plugins"
   | "memory"
+  | "initiative"
   | "approvals"
   | "chat"
   | "tasks"
@@ -56,6 +58,11 @@ const TABS: { key: TabKey; label: string; description: string }[] = [
     key: "tasks",
     label: "任务中心",
     description: "追踪每个目标，以及真正发生的动作。",
+  },
+  {
+    key: "initiative",
+    label: "主动行为",
+    description: "调整鲸鱼主动说话的频率、时段与渠道节奏。",
   },
   {
     key: "approvals",
@@ -354,7 +361,10 @@ export default function App() {
               signal={chatSession.current.signal}
             />
           )}
-          {tab === "tasks" && <Tasks />}
+          {tab === "tasks" && <Tasks onNavigate={(t) => setTab(t as TabKey)} />}
+          {tab === "initiative" && (
+            <Initiative onNavigate={(t) => setTab(t as TabKey)} />
+          )}
           {tab === "events" && <Events />}
           {tab === "settings" && <Settings onDisconnect={disconnect} onRunSetup={() => void reopenSetup()} />}
           {tab === "media" && <Media />}

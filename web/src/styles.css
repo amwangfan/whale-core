@@ -2760,3 +2760,95 @@ code,
   font-size: 12.5px;
   margin: 6px 0;
 }
+
+/* ---------- 主动行为控制面板（issue #42） ---------- */
+.initiative-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 10px 0;
+}
+.initiative-field {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #e3e8ee;
+  border-radius: 10px;
+  padding: 8px 12px;
+  background: #fff;
+}
+.initiative-field label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.initiative-field input {
+  width: 110px;
+  padding: 6px 10px;
+  border: 1px solid #d7dce2;
+  border-radius: 8px;
+  font-size: 13px;
+}
+.initiative-field .muted.small {
+  flex-basis: 100%;
+}
+.initiative-channel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #e3e8ee;
+  border-radius: 10px;
+  padding: 8px 12px;
+  background: #fff;
+  margin-bottom: 8px;
+}
+.initiative-channel select {
+  padding: 6px 10px;
+  border: 1px solid #d7dce2;
+  border-radius: 8px;
+  background: #fff;
+  font-size: 13px;
+}
+
+/* ---------- 任务时间线（issue #43） ---------- */
+.task-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.timeline-current {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #e3e8ee;
+  border-radius: 10px;
+  padding: 8px 12px;
+  background: #fff;
+}
+.timeline-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 10px;
+  border-left: 2px solid #dfe5ec;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.timeline-event {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+.timeline-delivery,
+.timeline-retry,
+.timeline-traces {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}

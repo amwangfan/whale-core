@@ -171,6 +171,40 @@ export interface TracesQuery {
   offset?: number;
 }
 
+// ---- 任务时间线（issue #43）：GET /tasks/{id}/timeline ----
+
+export interface TaskTimelineEvent {
+  /** epoch 秒 */
+  at: number;
+  at_text: string;
+  kind: string;
+  text: string;
+  detail: Record<string, unknown>;
+}
+
+export interface TaskTimeline {
+  task_id: string;
+  goal: string;
+  phase: string;
+  status: string;
+  current: { label: string; explanation: string; next_step: string };
+  timeline: TaskTimelineEvent[];
+  receipts: string[];
+  delivery: {
+    state: string;
+    attempts: number;
+    last_error: string;
+    channel: string;
+  };
+  retry: {
+    allowed: boolean;
+    kind: "resume" | "redeliver" | "inspect" | "none" | string;
+    reason: string;
+  };
+  trace_ids: string[];
+  capabilities: string[];
+}
+
 export interface BudgetLimits {
   model_calls: number;
   media_jobs: number;
@@ -611,6 +645,10 @@ export const api = {
     request<{ total: number; items: ActivityItem[] }>(
       `/activity?limit=${limit}&offset=${offset}`,
     ),
+
+  /** issue #43：任务执行时间线（可读阶段/回执/送达/重试建议/Trace 关联）。 */
+  taskTimeline: (id: string) =>
+    request<TaskTimeline>(`/tasks/${encodeURIComponent(id)}/timeline`),
 };
 
 // ---------- Whale Studio（S6：关系画布；所有授权判断都在服务端） ----------
@@ -1007,6 +1045,68 @@ export interface MemoryBrowseParams {
   include_superseded?: boolean;
 }
 
+// ---- 主动行为控制面板（issue #42）：GET/PUT /studio/initiative ----
+
+/** 单个全局字段视图：当前生效值 + 来源 + 影响说明。 */
+export interface InitiativeFieldView {
+  /** daily_limit/passive_daily_limit 为整数；quiet_start/quiet_end 为 "HH:MM"。 */
+  value: number | string;
+  source: "console" | "default" | string;
+  note: string;
+}
+
+export interface InitiativeGlobalView {
+  fields: Record<string, InitiativeFieldView>;
+  quiet_hours_rule: string;
+  editable: string[];
+  locked_by_deploy: string[];
+}
+
+export interface RhythmChannelDefault {
+  activity: string;
+  max_segments: number;
+  dnd: boolean;
+}
+
+export interface RhythmConversationView {
+  conversation_key: string;
+  activity: string;
+  max_segments: number;
+  dnd: boolean;
+  version: number;
+}
+
+export interface InitiativeRhythmView {
+  channels: Record<string, RhythmChannelDefault>;
+  conversations: RhythmConversationView[];
+  activity_modes: string[];
+}
+
+export interface InitiativeDecision {
+  trace_id: string;
+  /** epoch 秒 */
+  at: number;
+  conversation_id: string;
+  status: string;
+  reason_code: string;
+  reason_text: string;
+}
+
+export interface InitiativeView {
+  global: InitiativeGlobalView;
+  rhythm: InitiativeRhythmView;
+  recent_decisions: InitiativeDecision[];
+}
+
+/** PUT /studio/initiative/global 的字段补丁；null = 删除该字段覆盖。 */
+export interface InitiativeGlobalPatch {
+  daily_limit?: number | null;
+  passive_daily_limit?: number | null;
+  quiet_start?: string | null;
+  quiet_end?: string | null;
+  reset?: boolean;
+}
+
 const studioConv = (key: string) =>
   `/studio/conversations/${encodeURIComponent(key)}`;
 
@@ -1200,6 +1300,32 @@ export const studioApi = {
       method: "POST",
       body: JSON.stringify({ space_id: spaceId, paused }),
     }),
+
+  // ---- 主动行为控制面板（issue #42） ----
+
+  initiative: () => request<InitiativeView>("/studio/initiative"),
+
+  putInitiativeGlobal: async (patch: InitiativeGlobalPatch) =>
+    (
+      await request<{ global: InitiativeGlobalView }>(
+        "/studio/initiative/global",
+        { method: "PUT", body: JSON.stringify(patch) },
+      )
+    ).global,
+
+  putInitiativeChannel: async (
+    channel: string,
+    input: { activity: string; max_segments: number; dnd: boolean },
+  ) =>
+    (
+      await request<{ rhythm: InitiativeRhythmView }>(
+        "/studio/initiative/channel",
+        {
+          method: "PUT",
+          body: JSON.stringify({ channel, ...input }),
+        },
+      )
+    ).rhythm,
 
   createCode: (input: StudioCodeCreateInput) =>
     request<TemporaryCodeCreated>("/auth/temporary/codes", {
