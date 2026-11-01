@@ -174,30 +174,32 @@ class TestBrowse:
             keys = {i["key"] for i in body["result"]["items"]}
             assert "own:2" not in keys and "own:1" in keys
 
-    def test_by_principal_metadata_only(self):
-        """群友私有空间：管理通道只见元数据，不见正文（MEM-02/03）。"""
+    def test_by_principal_full_view_for_owner_console(self):
+        """owner 决策 2026-11-01：管理面（owner Bearer）可见群友私有记忆全文
+        （管理/调试需要）；对话召回侧的本人限制不变。"""
         with _server() as (server, _):
             status, body = _req(
                 server, "GET",
                 f"/api/v1/studio/memory/browse?principal_id={PRINCIPAL}")
             assert status == 200
             r = body["result"]
-            assert r["metadata_only"] is True
+            assert r["metadata_only"] is False
             assert r["total"] == 2
-            for item in r["items"]:
-                assert "summary" not in item
-                assert item["restricted"] is True
-                assert item["kind"] and item["created_at"]
+            summaries = {i["summary"] for i in r["items"]}
+            assert "小明不吃辣" in summaries
+            # 授权范围说明仍在（边界透明）
+            assert all("管理面" in i["scope_note"] for i in r["items"])
 
-    def test_direct_member_space_id_still_restricted(self):
-        """负例：改参数直接指定他人空间 id 也拿不到全文。"""
-        with _server() as (server, _):
+    def test_member_space_conversation_recall_unchanged(self):
+        """对话侧边界不变：member_private 不进群聊召回（MEM-03 结构性保证，
+        由 context_resolver 双门把守——此处验证空间类型语义未被管理面改动）。"""
+        with _server() as (server, store):
+            meta = store.get(f"space:{MEMBER_SPACE}")
+            assert meta["type"] == "member_private"  # 类型未变
             status, body = _req(
                 server, "GET",
                 f"/api/v1/studio/memory/browse?space_id={MEMBER_SPACE}")
-            assert status == 200
-            assert body["result"]["metadata_only"] is True
-            assert all("summary" not in i for i in body["result"]["items"])
+            assert status == 200 and body["result"]["metadata_only"] is False
 
     def test_vault_403(self):
         with _server() as (server, _):
@@ -268,18 +270,20 @@ class TestGovernance:
             assert status == 200
             assert is_recording_paused(store, GROUP_SPACE) is False
 
-    def test_member_and_vault_writes_forbidden(self):
-        with _server() as (server, _):
-            for op in ("correct", "expire", "delete"):
-                body = {"key": "mem:1"}
-                if op == "correct":
-                    body["new_summary"] = "改写"
-                status, _ = _req(server, "POST",
-                                 f"/api/v1/studio/memory/{op}", body=body)
-                assert status == 403, op
+    def test_member_writes_allowed_vault_forbidden(self):
+        """owner 决策 2026-11-01：管理面可治理 member_private（审计照旧）；
+        vault 仍 403。"""
+        with _server() as (server, store):
+            status, body = _req(server, "POST", "/api/v1/studio/memory/correct",
+                                body={"key": "mem:1",
+                                      "new_summary": "小明不吃辣（微辣可以）"})
+            assert status == 200 and body["result"]["corrected"] is True
+            status, _ = _req(server, "POST", "/api/v1/studio/memory/expire",
+                             body={"key": "mem:2"})
+            assert status == 200
             status, _ = _req(server, "POST", "/api/v1/studio/memory/delete",
                              body={"key": "vault:1"})
-            assert status == 403
+            assert status == 403  # vault 边界不动
 
     def test_audit_written(self):
         with _server() as (server, store):

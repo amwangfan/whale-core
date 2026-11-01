@@ -103,7 +103,7 @@ const OWNER_BROWSE = {
 
 const MEMBER_BROWSE = {
   space_ids: ["mem-1001"],
-  metadata_only: true,
+  metadata_only: false,
   total: 1,
   offset: 0,
   limit: 50,
@@ -121,7 +121,7 @@ const MEMBER_BROWSE = {
       source_group: "",
       expires_at: null,
       last_confirmed: null,
-      // metadata_only：无 summary
+      summary: "不吃辣",  // owner 决策：管理面全量可见
     },
   ],
 };
@@ -157,7 +157,7 @@ describe("MemoryView 主体优先记忆管理", () => {
     expect(screen.getByText(/选中上方任一主体/)).toBeTruthy();
   });
 
-  it("选中群友：按 principal_id 浏览，metadata_only 时提示仅元数据且无操作按钮", async () => {
+  it("选中群友：按 principal_id 浏览，管理面全量可见且可治理（owner 决策 2026-11-01）", async () => {
     const mock = mockStudioFetch({
       "/studio/memory/subjects": () => jsonResult(SUBJECTS),
       "/studio/memory/browse": () => jsonResult(MEMBER_BROWSE),
@@ -174,15 +174,11 @@ describe("MemoryView 主体优先记忆管理", () => {
       expect(calls[0].url).toContain("principal_id=qq%3Auser%3A1001");
       expect(calls[0].url).not.toContain("space_id=");
     });
-    // 横幅 + 行内各一处「仅元数据」说明
-    const notes = await screen.findAllByText(
-      /仅元数据——群友私有记忆仅本人可见/,
-    );
-    expect(notes.length).toBeGreaterThanOrEqual(2);
+    // 管理面全量可见：摘要渲染 + 治理操作可用
+    expect(await screen.findByText("不吃辣")).toBeTruthy();
     expect(screen.getByText("mem:k1")).toBeTruthy();
-    // metadata_only 行不显示治理操作
-    expect(screen.queryByText("纠错")).toBeNull();
-    expect(screen.queryByText("标记过期")).toBeNull();
+    expect(screen.getByText("纠错")).toBeTruthy();
+    expect(screen.getByText("标记过期")).toBeTruthy();
   });
 
   it("选中主人空间：渲染记录摘要，纠错按钮提交正确 body 并提示新旧 key", async () => {

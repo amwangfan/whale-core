@@ -2,7 +2,7 @@
  * 记忆管理面（主体优先视图）：
  * - 顶部按「主体」分组：主人空间 / 群友 / 群聊 / 其他空间（fork + 未分区遗留计数）；
  * - 选中一个主体后才加载其记录（GET /studio/memory/browse），不混排；
- * - 群友私有空间返回 metadata_only：只展示元数据，不给摘要与治理操作（服务端强制）；
+ * - 群友私有空间对管理面（owner）全量可见（owner 决策 2026-11-01）；对话召回侧仍仅本人可见；
  * - 行级治理：纠错 / 标记过期 / 删除；空间级「暂停记录 / 恢复记录」开关；
  * - 底部「高级」保留原全局关键词搜索与 NDJSON 导出。
  */
@@ -372,7 +372,7 @@ export default function MemoryView() {
             {it.superseded && <span className="badge bad">已被纠正</span>}
           </div>
           {metaOnly || !it.summary ? (
-            <div className="muted">仅元数据——群友私有记忆仅本人可见</div>
+            <div className="muted">群友私有记忆——对话召回仅本人可见，管理面可治理</div>
           ) : (
             <div className="record-summary">{it.summary}</div>
           )}
@@ -485,7 +485,7 @@ export default function MemoryView() {
 
           {browse?.metadata_only && (
             <div className="banner warn">
-              仅元数据——群友私有记忆仅本人可见，此处不显示摘要全文，也不能执行纠错/过期/删除。
+              群友私有记忆：对话召回仅本人可见；管理面（你）可见并可治理。
             </div>
           )}
 
