@@ -229,6 +229,8 @@ class _Handler(BaseHTTPRequestHandler):
             routes.traces.traces(self, method, parts, query)
         elif head == "activity":
             routes.traces.activity(self, method, parts, query)
+        elif parts == ["chat", "stream"] and method == "POST":
+            routes.chat.chat_stream(self)
         elif parts == ["chat"] and method == "POST":
             routes.chat.chat(self)
         elif head == "tasks":

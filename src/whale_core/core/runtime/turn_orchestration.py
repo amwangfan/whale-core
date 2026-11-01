@@ -22,10 +22,13 @@ class TurnOrchestrationMixin:
     # ---- G1-A：统一入口（InputEnvelope）与唯一规划点 ----
 
     def handle_message(self, conversation_id: str, text: str, *, source: str = "runtime",
-                       images: Sequence = (), sender_id: str = "") -> TurnResult:
+                       images: Sequence = (), sender_id: str = "",
+                       on_delta=None, should_stop=None, metrics=None,
+                       on_phase=None) -> TurnResult:
         return self.handle_envelope(InputEnvelope(
             conversation_id=conversation_id, text=text, source=source,
-            images=tuple(images), sender_id=sender_id))
+            images=tuple(images), sender_id=sender_id, on_delta=on_delta,
+            should_stop=should_stop, metrics=metrics, on_phase=on_phase))
 
     def handle_envelope(self, env: InputEnvelope) -> TurnResult:
         """同步入口：一次请求至多一次规划，Decision 直接消费。"""
@@ -201,7 +204,11 @@ class TurnOrchestrationMixin:
             plan = decision.plan
             return TurnResult(
                 reply=self.companion.chat(text, conversation_id=env.conversation_id,
-                                          images=env.images, context=env.context),
+                                          images=env.images, context=env.context,
+                                          on_delta=env.on_delta,
+                                          should_stop=env.should_stop,
+                                          metrics=env.metrics,
+                                          on_phase=env.on_phase),
                 status="answered", plan=plan, receipts=receipts,
                 task_id=(plan.task_id or plan.intent_id) if plan else "")
         if decision.route == "clarify":

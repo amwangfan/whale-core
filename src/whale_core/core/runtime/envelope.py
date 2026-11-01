@@ -54,6 +54,12 @@ class InputEnvelope:
     # 编排器注入 resolver 后会自行重解析并覆盖任何调用方提供的值。
     sender_id: str = ""
     context: object | None = None
+    # issue #45：流式/阶段反馈回调（可选；仅 chat 快路径透传到模型层，
+    # 慢任务与澄清路径不流式——如实降级，不伪造进度）。
+    on_delta: object = None      # callable(piece: str)
+    should_stop: object = None   # callable() -> bool
+    metrics: object = None       # dict（ttft_ms/total_ms/chunks/stopped）
+    on_phase: object = None      # callable(phase: str)
 
 
 # 任务生命周期（G1-B）：pending → acknowledged → running(leased) →

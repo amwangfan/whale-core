@@ -71,18 +71,26 @@ class WhaleCompanion:
     def chat(self, text: str, *, conversation_id: str = "", user_text: str | None = None,
              images: Sequence[bytes] = (), turn_key: str = "",
              episodic: bool = True, context=None, allowed_spaces=None,
-             write_space: str | None = None) -> str:
+             write_space: str | None = None,
+             on_delta=None, should_stop=None, metrics=None, on_phase=None) -> str:
         with conversation_lock(self.store, conversation_id):
             return self._chat(text, conversation_id=conversation_id, user_text=user_text,
                               images=images, turn_key=turn_key, episodic=episodic,
                               context=context, allowed_spaces=allowed_spaces,
-                              write_space=write_space)
+                              write_space=write_space, on_delta=on_delta,
+                              should_stop=should_stop, metrics=metrics,
+                              on_phase=on_phase)
 
     def _chat(self, text: str, *, conversation_id: str = "", user_text: str | None = None,
               images: Sequence[bytes] = (), turn_key: str = "",
               episodic: bool = True, context=None, allowed_spaces=None,
-              write_space: str | None = None) -> str:
+              write_space: str | None = None,
+              on_delta=None, should_stop=None, metrics=None, on_phase=None) -> str:
         original = text if user_text is None else user_text
+        # issue #45：真实阶段反馈（接收→上下文/记忆构建→模型请求→整理）；
+        # 无回调时零开销。阶段与耗时全部实测，不伪造进度百分比。
+        if on_phase is not None:
+            on_phase("context")
         # S2：服务端 ResolvedContext 决定记忆可见域。context=None 是兼容期
         # 旧行为（存储层仍硬排除 protected_original）；携带 context 时
         # 检索与写回都限定在授权空间内（INV-06：执行时检查）。
@@ -183,7 +191,23 @@ class WhaleCompanion:
         kwargs = {"persona": persona_text, "memories": memories, "history": history}
         if images:
             kwargs["images"] = images
+        if on_phase is not None:
+            on_phase("model")
+        # issue #45：模型支持流式回调时透传（DeepSeekCompanion）；不支持的
+        # 模型（如 FakeBrain）自动回落非流式——阶段反馈仍然真实。
+        if on_delta is not None or should_stop is not None or metrics is not None:
+            import inspect as _inspect
+            try:
+                params = _inspect.signature(self.model.reply).parameters
+                if "on_delta" in params:
+                    kwargs.update({"on_delta": on_delta,
+                                   "should_stop": should_stop,
+                                   "metrics": metrics})
+            except (TypeError, ValueError):
+                pass
         response = self.model.reply(text, **kwargs)
+        if on_phase is not None:
+            on_phase("compose")
         if episodic:
             # G2 情节质量：同一对话轮（turn_key，如 task_id）内的 ack/补发等
             # 多次系统中间对话**合并回写**同一条情节（后者覆盖前者，包含最终
