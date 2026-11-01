@@ -39,6 +39,7 @@ describe("会话节奏设置（G4，只影响回复节奏）", () => {
         jsonResult({ conversations: [structuredClone(CONV_WITH_RHYTHM)] }),
     });
     render(<Studio />);
+    fireEvent.click(screen.getByRole("button", { name: "会话" }));
     await screen.findByTestId("rhythm-editor");
     const activity = screen.getByLabelText(/活跃模式/) as HTMLSelectElement;
     expect(activity.value).toBe("balanced");
@@ -59,6 +60,7 @@ describe("会话节奏设置（G4，只影响回复节奏）", () => {
         }),
     });
     render(<Studio />);
+    fireEvent.click(screen.getByRole("button", { name: "会话" }));
     await screen.findByTestId("rhythm-editor");
 
     fireEvent.change(screen.getByLabelText(/活跃模式/), {
@@ -97,6 +99,7 @@ describe("会话节奏设置（G4，只影响回复节奏）", () => {
         ),
     });
     render(<Studio />);
+    fireEvent.click(screen.getByRole("button", { name: "会话" }));
     await screen.findByTestId("rhythm-editor");
     fireEvent.click(screen.getByLabelText(/免打扰/));
     fireEvent.click(screen.getByText("保存节奏设置"));

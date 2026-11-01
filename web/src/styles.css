@@ -2852,3 +2852,74 @@ code,
   align-items: center;
   gap: 8px;
 }
+
+/* ---------- Chat 流式（issue #45） ---------- */
+.phase-hint {
+  color: #667;
+  font-size: 12.5px;
+  margin-bottom: 4px;
+}
+.msg-body.msg-error {
+  border-color: #e0a3a3;
+  background: #fdf4f4;
+}
+
+/* ---------- Studio 首页与导航分层（issue #44） ---------- */
+.studio-nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.studio-nav-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.studio-nav-group button {
+  border: 1px solid #d7dce2;
+  background: #fff;
+  border-radius: 8px;
+  padding: 6px 14px;
+  cursor: pointer;
+}
+.studio-nav-group button.active {
+  border-color: #3b6ee0;
+  background: #eef3ff;
+  font-weight: 600;
+}
+.studio-nav-advanced summary {
+  cursor: pointer;
+  color: #556;
+  padding: 6px 0;
+}
+.studio-nav-advanced .studio-nav-group {
+  margin-top: 6px;
+}
+.studio-home {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 12px;
+}
+.home-block {
+  border: 1px solid #e3e8ee;
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: #fff;
+}
+.home-block h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+.home-conn {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.home-shortcuts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}

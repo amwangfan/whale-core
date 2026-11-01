@@ -1407,3 +1407,113 @@ export function streamEvents(handlers: EventStreamHandlers): EventStream {
     },
   };
 }
+
+// ---- Chat 流式（issue #45）：POST /chat/stream，SSE 行解析（Connection: close） ----
+
+export interface ChatStreamMetrics {
+  ttft_ms?: number;
+  total_ms?: number;
+  chunks?: number;
+  stopped?: boolean;
+}
+
+export interface ChatStreamDone {
+  reply: string;
+  status: string;
+  task_id?: string;
+  metrics?: ChatStreamMetrics;
+  stopped?: boolean;
+}
+
+export interface ChatStreamCallbacks {
+  /** received / context / model / compose */
+  onPhase?: (phase: string) => void;
+  onDelta?: (text: string) => void;
+  onDone?: (done: ChatStreamDone) => void;
+  /** config / rate_limited / server / network / unavailable */
+  onError?: (error: string) => void;
+}
+
+/**
+ * 流式对话：解析 `data: {json}` 行；返回 done 帧（无 done 则为 null）。
+ * HTTP 非 2xx / 网络错误按 ApiError 抛出；signal.abort() 中断读取。
+ */
+export async function chatStream(
+  text: string,
+  conversationId: string,
+  callbacks: ChatStreamCallbacks,
+  signal?: AbortSignal,
+): Promise<ChatStreamDone | null> {
+  const headers = new Headers({
+    "Content-Type": "application/json",
+    Accept: "text/event-stream",
+  });
+  const token = getToken();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const res = await fetch(apiUrl("/chat/stream"), {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ conversation_id: conversationId, text }),
+    signal,
+    redirect: "error",
+  });
+  if (!res.ok) {
+    let code = `http_${res.status}`;
+    let message = res.statusText || `HTTP ${res.status}`;
+    try {
+      const body: unknown = await res.json();
+      if (body && typeof body === "object" && "error" in body) {
+        const err = (body as { error: { code?: unknown; message?: unknown } })
+          .error;
+        if (typeof err.code === "string") code = err.code;
+        if (typeof err.message === "string") message = err.message;
+      }
+    } catch {
+      /* 保留默认错误信息 */
+    }
+    throw new ApiError(code, message, res.status);
+  }
+  if (!res.body)
+    throw new ApiError("no_stream", "chat stream has no body", res.status);
+  const reader = res.body.getReader();
+  // 双保险：真实 fetch 的 signal 会中止读取；手工 mock 的流则靠这里取消。
+  const onAbort = () => {
+    reader.cancel().catch(() => undefined);
+  };
+  signal?.addEventListener("abort", onAbort);
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let done: ChatStreamDone | null = null;
+  try {
+    for (;;) {
+      const { done: finished, value } = await reader.read();
+      if (finished) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, idx).replace(/\r$/, "");
+        buffer = buffer.slice(idx + 1);
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice("data:".length).trim();
+        if (!payload) continue;
+        try {
+          const ev = JSON.parse(payload) as Record<string, unknown>;
+          if (ev.type === "phase") callbacks.onPhase?.(String(ev.phase ?? ""));
+          else if (ev.type === "delta")
+            callbacks.onDelta?.(String(ev.text ?? ""));
+          else if (ev.type === "done") {
+            done = ev as unknown as ChatStreamDone;
+            callbacks.onDone?.(done);
+          } else if (ev.type === "error") {
+            callbacks.onError?.(String(ev.error ?? "server"));
+          }
+        } catch {
+          /* 跳过无法解析的帧 */
+        }
+      }
+    }
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
+  }
+  return done;
+}

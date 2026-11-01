@@ -348,7 +348,7 @@ export default function App() {
             <span className="workspace-tag">CORE CONSOLE</span>
           </div>
           {tab === "overview" && <Overview onNavigate={setTab} />}
-          {tab === "studio" && <Studio />}
+          {tab === "studio" && <Studio onNavigate={(t) => setTab(t as TabKey)} />}
           {tab === "plugins" && <Plugins />}
           {tab === "memory" && <MemoryView />}
           {tab === "approvals" && <Approvals />}

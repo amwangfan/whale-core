@@ -119,6 +119,7 @@ describe("Fork 向导", () => {
     mockMatchMedia((q) => q.includes("max-width")); // 触发列表模式
     const fetchMock = mockStudioFetch();
     render(<Studio />);
+    fireEvent.click(screen.getByRole("button", { name: "会话" }));
 
     const conv = await screen.findByTestId("list-qq:group:g1");
     expect(conv).toBeTruthy();

@@ -29,6 +29,7 @@ describe("窄屏列表模式（<768px 退化）", () => {
     mockMatchMedia((q) => q.includes("max-width"));
     mockStudioFetch();
     const { unmount } = render(<Studio />);
+    fireEvent.click(screen.getByRole("button", { name: "会话" }));
     await screen.findByTestId("studio-list");
     expect(screen.queryByTestId("studio-canvas")).toBeNull();
     unmount();
@@ -37,6 +38,7 @@ describe("窄屏列表模式（<768px 退化）", () => {
     mockMatchMedia(() => false);
     mockStudioFetch();
     render(<Studio />);
+    fireEvent.click(screen.getByRole("button", { name: "图谱" }));
     await screen.findByTestId("studio-canvas");
     expect(screen.queryByTestId("studio-list")).toBeNull();
   });
@@ -53,6 +55,7 @@ describe("窄屏列表模式（<768px 退化）", () => {
         }),
     });
     render(<Studio />);
+    fireEvent.click(screen.getByRole("button", { name: "会话" }));
     await screen.findByTestId("list-qq:group:g1");
 
     const select = screen.getByLabelText("角色卡") as HTMLSelectElement;
@@ -81,6 +84,7 @@ describe("窄屏列表模式（<768px 退化）", () => {
         }),
     });
     render(<Studio />);
+    fireEvent.click(screen.getByRole("button", { name: "会话" }));
     const conv = await screen.findByTestId("list-qq:group:g1");
 
     // vault 不提供直接绑定入口

@@ -45,6 +45,10 @@ interface Props {
   busy: boolean;
   onChanged: (message: string) => void;
   onError: (message: string) => void;
+  /** issue #44：首页「新建人物卡」快捷入口——值变化时自动打开新建表单。 */
+  createSignal?: number;
+  /** 消费回调：打开表单后通知外部复位信号（避免视图切换重挂时重复打开）。 */
+  onCreateSignalConsumed?: () => void;
 }
 
 type EditorMode =
@@ -195,6 +199,8 @@ export default function PersonaPanel({
   busy,
   onChanged,
   onError,
+  createSignal,
+  onCreateSignalConsumed,
 }: Props) {
   const [mode, setMode] = useState<EditorMode>({ kind: "closed" });
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
@@ -278,6 +284,17 @@ export default function PersonaPanel({
     setPendingDraft(readDraft("whale.persona-draft.new", EMPTY_FORM));
     setMode({ kind: "create" });
   };
+
+  // issue #44：外部快捷入口触发新建（信号消费后由外部复位，重挂不重复打开）。
+  const consumedSignalRef = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (createSignal && createSignal !== consumedSignalRef.current) {
+      consumedSignalRef.current = createSignal;
+      openCreate();
+      onCreateSignalConsumed?.();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [createSignal]);
 
   const openCopy = (id: string) => {
     setLoading(true);
