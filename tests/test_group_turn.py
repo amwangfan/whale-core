@@ -98,18 +98,45 @@ def test_consecutive_limit_no_double_join():
 
 
 def test_dnd_and_quiet_hours_suppress_proactive_join():
-    """免打扰与时间静默都压制非定向主动参与。"""
+    """免打扰压制一切；时间静默只压制「没人找我」的非定向插话。"""
     store = InMemoryStore()
     p = _policy(store)
     d = p.maybe_join(conversation=GROUP, text="鲸鱼这个怎么弄",
                      activity="lively", dnd=True)
     assert (d.action, d.reason_code) == ("observe", "dnd")
 
+    # 时间静默 + 无指向闲聊 → 压制
     store2 = InMemoryStore()
     p2 = GroupTurnPolicy(store2, now_fn=lambda: T0, quiet_now=lambda: True)
-    d2 = p2.maybe_join(conversation=GROUP, text="鲸鱼这个怎么弄",
+    d2 = p2.maybe_join(conversation=GROUP, text="今晚吃啥",
                        activity="lively")
     assert (d2.action, d2.reason_code) == ("observe", "quiet_hours")
+
+
+def test_quiet_hours_directed_still_answers():
+    """2026-11-01 owner 决策：静默时段里明确找鲸鱼的（直呼其名/承接请求）
+    仍要回应——静默只压制主动插话；且不耗主动配额/冷却。"""
+    # 直呼其名
+    store = InMemoryStore()
+    p = _policy(store, quiet=True)
+    d = p.maybe_join(conversation=GROUP, text="鲸鱼这个怎么弄",
+                     activity="lively")
+    assert (d.action, d.reason_code) == ("join", "quiet_directed")
+    # 不耗主动配额
+    assert store.get(f"life:turnbudget:2026-11-01:{GROUP}") is None
+    # 承接请求（机器人刚发言 + 「你+请求动词」）
+    store2 = InMemoryStore()
+    p2 = _policy(store2, quiet=True)
+    d2 = p2.maybe_join(conversation=GROUP, text="那你再画一张吧",
+                       activity="lively",
+                       timeline_entries=({"is_self": True, "text": "刚画完"},))
+    assert (d2.action, d2.reason_code) == ("join", "quiet_directed")
+    # 静默时段的 bare question（没点名）仍压制——不算明确找它
+    store3 = InMemoryStore()
+    p3 = _policy(store3, quiet=True)
+    d3 = p3.maybe_join(conversation=GROUP, text="这个报错什么意思？",
+                       activity="lively")
+    assert (d3.action, d3.reason_code) == ("observe", "quiet_hours")
 
 
 def test_reason_code_recorded_without_private_content():

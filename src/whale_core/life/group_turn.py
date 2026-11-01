@@ -7,8 +7,9 @@
 - 规则先行，不为每条消息调用大模型；不给 LLM 决定身份/权限的能力。
 - ``quiet`` 只回应直接提及；``balanced`` 谨慎少量参与；``lively`` 可更
   积极——但有明确的每日上限、冷却与连续发言限制。
-- **时间静默 ≠ 群活跃度**：静默时段只压制「非定向的自主插话」；群友
-  @/引用/明确向鲸鱼提问的被动回复不受影响（issue #22/#18 补充）。
+- **时间静默 ≠ 群活跃度**：静默时段只压制「没人找我」的自主插话；群友
+  @/引用的被动回复在 resolver 层不受影响，直呼其名/承接请求的也会回应
+  （2026-11-01 owner 决策修正：此前静默时段把非 @ 的定向消息一并压制了）。
 - 群友之间的表白、争执、私事不认领、不介入、不转发（无规则命中即
   observe）。
 - 每次决策记录 ``reason_code`` 到 kv（可观测：Studio/日志可查「为何这次
@@ -56,6 +57,7 @@ REASON_REPLY_TO_BOT = "reply_to_bot"
 REASON_QUIET_MODE = "quiet_mode"            # quiet 档：只回应直接提及
 REASON_NOT_DIRECTED = "not_directed"        # 无指向信号
 REASON_QUIET_HOURS = "quiet_hours"          # 时间静默：压制非定向自主插话
+REASON_QUIET_DIRECTED = "quiet_directed"    # 时间静默但被明确指向（直呼其名/承接），仍回应
 REASON_DND = "dnd"                          # 会话免打扰
 REASON_BUDGET = "budget_exceeded"           # 当日主动参与配额用尽
 REASON_COOLDOWN = "cooldown"                # 距上次主动参与太近
@@ -103,31 +105,34 @@ class GroupTurnPolicy:
             activity = "balanced"
         if dnd:
             return self._record(group, JoinDecision("observe", REASON_DND))
-        # 时间静默：非定向自主插话压制（定向回复在 resolver 层已 reply，
-        # 到不了这里；issue #18/#22 补充）
-        if self._quiet_now():
-            return self._record(group, JoinDecision("observe", REASON_QUIET_HOURS))
 
         text = str(text or "")
         named = bool(self._name_re.search(text)) if self._name_re else False
         question = bool(_QUESTION_RE.search(text))
+        # lively 补充信号：时间线近窗有机器人自己的发言（我刚参与过），
+        # 且本条是「你+请求动词」的承接句式 → 视为叫我做事的跟进请求。
+        follow_up = (
+            activity == "lively"
+            and bool(_FOLLOWUP_RE.search(text))
+            and any(isinstance(e, dict) and e.get("is_self")
+                    for e in list(timeline_entries)[-5:])
+        )
+
+        # 时间静默（2026-11-01 owner 决策修正）：只压制「没人找我」的自主插话；
+        # 直呼其名 / 承接请求 = 群里明确在找我，照常回应（且不耗主动配额/冷却——
+        # 本质是回复而非插话；配额留给真正的主动插话）。
+        if self._quiet_now():
+            if not (named or follow_up):
+                return self._record(group, JoinDecision("observe", REASON_QUIET_HOURS))
+            return self._record(group, JoinDecision("join", REASON_QUIET_DIRECTED))
 
         if activity == "quiet":
             # quiet：只回应直接提及（@/引用已被 resolver 拦截；这里是直呼其名）
             if not named:
                 return self._record(group, JoinDecision("observe", REASON_QUIET_MODE))
-        elif not (named or (activity == "lively" and question)):
-            # lively 补充信号：时间线近窗有机器人自己的发言（我刚参与过），
-            # 且本条是「你+请求动词」的承接句式 → 视为叫我做事的跟进请求。
-            follow_up = (
-                activity == "lively"
-                and bool(_FOLLOWUP_RE.search(text))
-                and any(isinstance(e, dict) and e.get("is_self")
-                        for e in list(timeline_entries)[-5:])
-            )
-            if not follow_up:
-                # balanced：需直呼其名；lively：直呼其名 或 明确提问/求助/承接
-                return self._record(group, JoinDecision("observe", REASON_NOT_DIRECTED))
+        elif not (named or follow_up or (activity == "lively" and question)):
+            # balanced：需直呼其名或承接；lively：直呼其名 或 明确提问/求助/承接
+            return self._record(group, JoinDecision("observe", REASON_NOT_DIRECTED))
 
         # 连续发言限制：时间线最新一条已是鲸鱼自己 → 不再主动接话
         if timeline_entries:
