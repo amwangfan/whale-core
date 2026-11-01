@@ -692,6 +692,40 @@ def _cmd_memory_backup_owned(args: argparse.Namespace) -> int:
         store.close()
 
 
+def _cmd_runtime(args: argparse.Namespace) -> int:
+    """issue #47：本地运行时 start/status/stop，安全拒绝归属不明的进程。"""
+    from whale_core.ops.local_runtime import (
+        LocalRuntimeManager,
+        RuntimeError_,
+        render_json,
+        render_text,
+    )
+    checkout = args.checkout or str(
+        Path(__file__).resolve().parents[3]
+    )
+    manager = LocalRuntimeManager(checkout)
+    try:
+        if args.runtime_command == "status":
+            if args.services:
+                manager.services = [
+                    s for s in manager.services if s.name in set(args.services)
+                ]
+            report = manager.status()
+            print(render_json(report) if args.json else render_text(report))
+            return 0 if report.ok else 1
+        for name in args.services:
+            st = (
+                manager.start(name) if args.runtime_command == "start"
+                else manager.stop(name)
+            )
+            state = "active" if st.active else "inactive"
+            print(f"{st.name}: {state} pid={st.main_pid or '-'}")
+        return 0
+    except RuntimeError_ as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 2
+
+
 # ---------------------------------------------------------------------------
 # parser 与入口
 # ---------------------------------------------------------------------------
@@ -807,6 +841,26 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument('path', help='SQLite备份文件路径')
         _add_config_dir(p)
         p.set_defaults(func=_cmd_memory_backup)
+
+    # issue #47：本地运行时归属管理（canonical checkout 的 start/status/stop）
+    p_rt = sub.add_parser(
+        "runtime",
+        help="本地服务运行时归属：status/start/stop（展示 PID/cwd/端口/HEAD）",
+    )
+    rsub = p_rt.add_subparsers(dest="runtime_command", required=True)
+    for op in ("status", "start", "stop"):
+        p = rsub.add_parser(op, help=f"{op} 受管服务")
+        p.add_argument(
+            "services", nargs="*" if op == "status" else "+",
+            help="服务名（status 缺省为全部）",
+        )
+        p.add_argument(
+            "--checkout", default=None,
+            help="canonical checkout 路径（默认按本模块所在源码树推断）",
+        )
+        if op == "status":
+            p.add_argument("--json", action="store_true", help="JSON 输出")
+        p.set_defaults(func=_cmd_runtime)
     return parser
 
 

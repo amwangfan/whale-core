@@ -1,0 +1,13 @@
+{
+  "v": "1.0",
+  "id": "01J000000000000000000000013",
+  "type": "error",
+  "ts": 1730000000013,
+  "seq": 13,
+  "dir": "downlink",
+  "payload": {
+    "ref_id": "01J0000000000000000000ACTN",
+    "code": "expired",
+    "message": "action.request 已过期，不予执行"
+  }
+}

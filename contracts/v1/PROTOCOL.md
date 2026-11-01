@@ -56,7 +56,9 @@
 | `sensor.result` | up | request_id, status(ok/denied/unavailable/error), data, truncated, source | 仅返回限定字段；不泄露本地路径 |
 | `action.request` | down | action_id, capability, args, authorized_scope, approval_ref?, expires_at, idempotency_key | 端侧校验白名单+有效期+scope |
 | `action.receipt` | up | action_id, state(received/accepted/executed/failed/unknown), executed_at?, error_code? | 「接受」≠「已执行」，禁止谎报 |
-| `call.invite` / `call.answer` / `call.hangup` / `call.state` | both | session_id, media_params, expires_at | 挂断即撤销会话临时 scope |
+| `device.confirm.request` | down | challenge_id, device_id, principal_id, channel, scopes[], expires_at | AUTH-01 可信确认挑战（无私人内容） |
+| `device.confirm.response` | up | challenge_id, approved, signature?, responded_at | approved=true 时 signature=Ed25519(challenge_id UTF-8 字节)；拒绝/超时 approved=false |
+| `call.invite` / `call.answer` / `call.hangup` / `call.state` | both | session_id, media_params, expires_at（invite 另可选 number/name；桥端点永远由端侧配置，不接受远端指定） | 挂断即撤销会话临时 scope |
 | `error` | both | ref_id, code, message（脱敏） | 协议级错误 |
 
 错误码（V1）：`protocol_version` `auth_failed` `device_revoked` `scope_denied` `capability_unknown` `expired` `duplicate` `rate_limited` `unavailable` `permission_missing`（端侧 Android 运行时权限缺失）`invalid_message` `internal`。完整定义见 `messages/error.schema.json`。
@@ -65,6 +67,7 @@
 
 - 隐私级：`public` / `owner_private` / `owner_sensitive` / `device_secret`（永不进感知事件）。
 - 能力命名：`screen.context.read` `screen.history.search` `screen.evidence.read` `screen.live.subscribe` `phone.notification.post` `phone.notification.read` `phone.call.ring` `phone.call.audio` `phone.device.safe_action`。
+- V1.1 候选（GL-01）：`glasses.card.show` / `glasses.card.update` / `glasses.card.dismiss`（眼镜 HUD；无桥/离线时端侧降级手机通知并回执 provider_ref=degraded:*，绝不伪报 shown）。
 - 默认最小权限；群聊/非主人会话对 screen.* 一律硬上限拒绝。
 
 ## 6. 幂等与离线

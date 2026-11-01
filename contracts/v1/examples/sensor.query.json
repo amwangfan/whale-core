@@ -1,0 +1,18 @@
+{
+  "v": "1.0",
+  "id": "01J000000000000000000000005",
+  "type": "sensor.query",
+  "ts": 1730000000005,
+  "seq": 5,
+  "dir": "downlink",
+  "payload": {
+    "request_id": "01J0000000000000000000QURY",
+    "operation": "screen.history.search",
+    "filters": {
+      "keyword": "采购清单",
+      "since": 1729913600000
+    },
+    "max_items": 20,
+    "deadline": 1730000010000
+  }
+}

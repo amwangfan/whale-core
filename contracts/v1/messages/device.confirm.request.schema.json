@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "messages/device.confirm.request.schema.json",
+  "title": "device.confirm.request",
+  "description": "设备可信确认挑战（AUTH-01）：Core 请求手机弹出确认。挑战只含 nonce/主体/会话/scope/动作指纹/过期，不含私人内容。",
+  "type": "object",
+  "required": [
+    "v",
+    "id",
+    "type",
+    "ts",
+    "seq",
+    "dir",
+    "payload"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "v": {
+      "type": "string",
+      "pattern": "^1\\.[0-9]+$"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 64
+    },
+    "type": {
+      "const": "device.confirm.request"
+    },
+    "ts": {
+      "type": "integer"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "dir": {
+      "const": "downlink"
+    },
+    "payload": {
+      "type": "object",
+      "required": [
+        "challenge_id",
+        "device_id",
+        "principal_id",
+        "channel",
+        "scopes",
+        "expires_at"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "challenge_id": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 64
+        },
+        "device_id": {
+          "type": "string",
+          "minLength": 16,
+          "maxLength": 64
+        },
+        "principal_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "channel": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "conversation_id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "scopes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "minItems": 1,
+          "maxItems": 16
+        },
+        "action_fingerprint": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}

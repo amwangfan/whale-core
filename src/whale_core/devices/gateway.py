@@ -119,6 +119,8 @@ class DeviceGateway:
         self.lock = threading.RLock()
         self.online: dict[str, ConnectionState] = {}
         self.pending: dict[str, _Pending] = {}
+        # AUTH-01：challenge_id → 待决确认
+        self.pending_confirm: dict[str, _Pending] = {}
         self.stopping = threading.Event()
         logger = logging.getLogger("whale.devices.transport")
         logger.handlers = [logging.NullHandler()]
@@ -398,6 +400,43 @@ class DeviceGateway:
         # §6 幂等闭环：无论新收还是去重命中都 ack，端侧据此停止重发
         self.send_msg(st, "sensor.ack", {"event_ids": [p["event_id"]]})
 
+    def send_confirm_request(self, device_id: str, payload: dict,
+                             timeout_s: float = 130.0) -> dict:
+        """AUTH-01：下发 device.confirm.request 并等待 confirm.response。
+
+        返回 {"approved": bool, "reason": str|None, "signature": str|None}。
+        超时/断线 → approved=False reason=timeout/unavailable（绝不默认批准）。
+        """
+        st = self._online_or_raise(device_id)
+        challenge_id = str(payload["challenge_id"])
+        pend = _Pending()
+        with self.lock:
+            self.pending_confirm[challenge_id] = pend
+        try:
+            self.send_msg(st, "device.confirm.request", payload)
+            if not pend.event.wait(timeout_s + 5):
+                return {"approved": False, "reason": "timeout", "signature": None}
+            return dict(pend.result or {"approved": False, "reason": "empty"})
+        finally:
+            with self.lock:
+                self.pending_confirm.pop(challenge_id, None)
+
+    def _on_device_confirm_response(self, st: ConnectionState, msg: dict) -> None:
+        p = msg["payload"]
+        challenge_id = str(p["challenge_id"])
+        with self.lock:
+            pend = self.pending_confirm.pop(challenge_id, None)
+        if pend is None:
+            log.warning("收到无对应挑战的 confirm.response challenge=%s，忽略",
+                        challenge_id)
+            return
+        pend.result = {
+            "approved": bool(p.get("approved")),
+            "reason": p.get("reason"),
+            "signature": p.get("signature"),
+        }
+        pend.event.set()
+
     def _on_sensor_result(self, st: ConnectionState, msg: dict) -> None:
         request_id = msg["payload"]["request_id"]
         pend = self.pending.pop(request_id, None)
@@ -525,6 +564,7 @@ class DeviceGateway:
                     args: dict | None = None, idempotency_key: str | None = None,
                     authorized_scope: list[str] | None = None,
                     approval_ref: str | None = None,
+                    correlation_id: str | None = None,
                     timeout_s: float = 15.0) -> dict:
         """下发 action.request；幂等键查重（§6），等待终态回执。"""
         st = self._online_or_raise(device_id)
@@ -553,6 +593,9 @@ class DeviceGateway:
         }
         if approval_ref:
             payload["approval_ref"] = approval_ref
+        if correlation_id:
+            # EV-02：事件→决策→动作关联键（契约 v1 minor：可选字段）
+            payload["correlation_id"] = correlation_id
         pend = _Pending()
         self.pending[action_id] = pend
         try:

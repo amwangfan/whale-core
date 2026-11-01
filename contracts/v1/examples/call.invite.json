@@ -1,0 +1,18 @@
+{
+  "v": "1.0",
+  "id": "01J000000000000000000000009",
+  "type": "call.invite",
+  "ts": 1730000000009,
+  "seq": 9,
+  "dir": "downlink",
+  "payload": {
+    "session_id": "01J0000000000000000000CALL",
+    "media_params": {
+      "codec": "pcm_s16le",
+      "sample_rate": 16000,
+      "channels": 1,
+      "frame_ms": 20
+    },
+    "expires_at": 1730000030000
+  }
+}

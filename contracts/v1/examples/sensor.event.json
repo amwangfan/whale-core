@@ -1,0 +1,17 @@
+{
+  "v": "1.0",
+  "id": "01J000000000000000000000004",
+  "type": "sensor.event",
+  "ts": 1730000000004,
+  "seq": 4,
+  "dir": "uplink",
+  "payload": {
+    "event_id": "01J0000000000000000000EVNT",
+    "kind": "screen.memo.created",
+    "occurred_at": 1729999998500,
+    "privacy_class": "owner_private",
+    "summary": "主人在笔记应用中记录了采购清单（脱敏摘要）",
+    "evidence_ref": "evref:screenmemo:01J0000000000000000000EVRF",
+    "schema_version": "1.0"
+  }
+}

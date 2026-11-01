@@ -13,13 +13,14 @@
 | [AI_DEVELOPMENT_GUIDE.md](AI_DEVELOPMENT_GUIDE.md) | 开发者与 AI 协作主文档：定位边界、运行链路、代码地图、安全不变量、验收命令与协作约定 |
 | [contracts.md](contracts.md) | 智能层与基础设施（whale-io）的边界契约：事件 / 意图 / 动作 |
 | [vision-map.md](vision-map.md) | 原设想 → whale-core 类型与模块落点对照（权威覆盖表在 whale-io） |
-| [devices.md](devices.md) | 设备面（whale-mobile 接入，D1–D4 范围说明）；协议唯一事实源是 `contracts/v1/` |
+| [devices.md](devices.md) | 设备面（whale-mobile 接入，D1–D4 范围说明）；协议 canonical 事实源是 **whale-mobile** 的 `contracts/v1/`（本仓同目录为镜像，漂移校验见 `scripts/contract_sync_check.py`） |
 
 ### 部署、发行与运维
 
 | 文档 | 内容 |
 | --- | --- |
 | [deployment.md](deployment.md) | 安装、运行与恢复（Linux / macOS，单 owner 部署） |
+| [local-runtime.md](local-runtime.md) | 本地运行时归属：canonical checkout 与 `whale runtime` start/status/stop |
 | [packaging-desktop.md](packaging-desktop.md) | 桌面入口与免 Python 冻结包 |
 | [g4-operations.md](g4-operations.md) | 运维可靠性与开发者自检：`whale doctor`、能力健康视图、provider 指标、插件信任级别 |
 

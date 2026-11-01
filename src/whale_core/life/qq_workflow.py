@@ -61,7 +61,8 @@ class QqInboundWorkflow:
                  media_validator=None,
                  auth_service=None,
                  context_resolver=None,
-                 on_member_provisioned=None) -> None:
+                 on_member_provisioned=None,
+                 stranger_daily_limit: int | None = None) -> None:
         self.store = store
         self.companion = WhaleCompanion(store, brain, curator=MemoryCurator(store))
         self.outbox = ProactiveOutbox(store)
@@ -82,6 +83,13 @@ class QqInboundWorkflow:
         # issue #16：成员建档/恢复后的回调（宿主接回填管道）；
         # callable(principal_id, reason)——reason ∈ {"auto", "optin"}。
         self._on_member_provisioned = on_member_provisioned
+        # 陌生人/成员被动回复的日额度（防滥用保险丝）；
+        # None = 类缺省 20。
+        if stranger_daily_limit is not None and int(stranger_daily_limit) < 1:
+            raise ValueError("stranger_daily_limit 须为正整数")
+        self._stranger_daily_limit = (int(stranger_daily_limit)
+                                      if stranger_daily_limit is not None
+                                      else self.STRANGER_DAILY_LIMIT)
         # S4：临时授权服务（一次性口令 sudo）；None = 未启用，口令消息按
         # 普通文本处理。
         self._auth_service = auth_service
@@ -322,7 +330,7 @@ class QqInboundWorkflow:
     # -- S7：陌生账号私聊（受限入口） -----------------------------------------
 
     #: G6 红队高-1：陌生人/群成员回复的独立日额度（每 sender+会话）
-    STRANGER_DAILY_LIMIT = 20
+    STRANGER_DAILY_LIMIT = 20  # 缺省值；宿主可经构造参数覆盖（见 __init__）
 
     def _stranger_gate(self, sender: str, conversation: str) -> str | None:
         """陌生人/群成员被动回复的滥用闸门（直发路径不经 Outbox，必须自带）。
@@ -341,7 +349,7 @@ class QqInboundWorkflow:
         key = f"rl:stranger:{day}:{conversation}:{sender}"
         count = self.store.get(key)
         count = int(count) if isinstance(count, (int, float)) else 0
-        if count >= self.STRANGER_DAILY_LIMIT:
+        if count >= self._stranger_daily_limit:
             return "stranger_budget"
         self.store.put(key, count + 1)
         return None
