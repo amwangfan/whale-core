@@ -452,15 +452,22 @@ class DeviceGateway:
         action_id, state = p["action_id"], p.get("state")
         # 回执状态机：received/accepted 中间态记录落库；
         # executed/failed/unknown 终态才 resolve 等待方（§4「接受」≠「已执行」）。
+        # Ignore receipts for unknown action IDs *before* writing any data.
+        # This also prevents an authenticated device from flooding unbounded
+        # receipt records with arbitrary UUIDs.
+        lookup = self.store.get(f"device:action-id:{st.device_id}:{action_id}")
+        if not isinstance(lookup, str):
+            log.warning("unmapped action receipt for device=%s action=%s",
+                        st.device_id, action_id)
+            return
         with self.lock:
             key = f"device:receipts:{st.device_id}:{action_id}"
             receipts = self.store.get(key) or []
             if isinstance(receipts, list):
-                receipts = receipts + [{"state": str(state), "ts": now_ms()}]
+                receipts = (receipts + [{"state": str(state), "ts": now_ms()}])[-32:]
                 self.store.put(key, receipts)
         # Persist terminal outcome against the original idempotency key, so a
         # late receipt or process restart can be reconciled without replay.
-        lookup = self.store.get(f"device:action-id:{st.device_id}:{action_id}")
         if isinstance(lookup, str):
             action_key = f"device:action:{st.device_id}:{lookup}"
             with self.lock:
@@ -476,10 +483,6 @@ class DeviceGateway:
                                 if k in p
                             }
                         self.store.put(action_key, record)
-        else:
-            log.warning("unmapped action receipt for device=%s action=%s",
-                        st.device_id, action_id)
-            return
         if state in TERMINAL_RECEIPT_STATES:
             pend = self.pending.pop(action_id, None)
             if pend is not None:
