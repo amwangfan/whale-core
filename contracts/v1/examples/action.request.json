@@ -1,0 +1,24 @@
+{
+  "v": "1.0",
+  "id": "01J000000000000000000000007",
+  "type": "action.request",
+  "ts": 1730000000007,
+  "seq": 7,
+  "dir": "downlink",
+  "payload": {
+    "action_id": "01J0000000000000000000ACTN",
+    "capability": "phone.notification.post",
+    "args": {
+      "title": "Whale",
+      "body": "水烧开了",
+      "correlation_note": "演示：由 screen.app_changed 事件触发的提醒"
+    },
+    "authorized_scope": [
+      "phone.notification.post"
+    ],
+    "approval_ref": "01J0000000000000000000APRV",
+    "expires_at": 1730000060000,
+    "idempotency_key": "idem-example-0001-demo",
+    "correlation_id": "sm-0000000000211"
+  }
+}

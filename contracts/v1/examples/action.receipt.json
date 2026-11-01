@@ -1,0 +1,13 @@
+{
+  "v": "1.0",
+  "id": "01J000000000000000000000008",
+  "type": "action.receipt",
+  "ts": 1730000000008,
+  "seq": 8,
+  "dir": "uplink",
+  "payload": {
+    "action_id": "01J0000000000000000000ACTN",
+    "state": "executed",
+    "executed_at": 1730000001200
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "v": "1.0",
+  "id": "01J000000000000000000000003",
+  "type": "device.heartbeat",
+  "ts": 1730000000003,
+  "seq": 3,
+  "dir": "uplink",
+  "payload": {
+    "device_id": "3a7f1c9e5b2048d6a1f3e7c9b5d80246",
+    "observed_at": 1730000030000,
+    "status": "online",
+    "battery": 87,
+    "modules": {
+      "screenmemo": "ok",
+      "call": "idle"
+    }
+  }
+}

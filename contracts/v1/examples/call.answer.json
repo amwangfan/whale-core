@@ -1,0 +1,19 @@
+{
+  "v": "1.0",
+  "id": "01J000000000000000000000010",
+  "type": "call.answer",
+  "ts": 1730000000010,
+  "seq": 10,
+  "dir": "uplink",
+  "payload": {
+    "session_id": "01J0000000000000000000CALL",
+    "accepted": true,
+    "media_params": {
+      "codec": "pcm_s16le",
+      "sample_rate": 16000,
+      "channels": 1,
+      "frame_ms": 20
+    },
+    "expires_at": 1730003600000
+  }
+}

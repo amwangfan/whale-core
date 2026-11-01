@@ -1,0 +1,38 @@
+# 跨仓契约漂移校验（issue #46）——仅手动触发。
+#
+# 设计纪律（防止合并时序造成假失败）：
+#   1. 协议变更先在 canonical（whale-mobile）落定；
+#   2. 再同步 whale-core 镜像；
+#   3. 最后用本 workflow 以**同一批次的两个候选 ref** 做联合验收。
+# 本 workflow 不做任何豁免；两侧任一处漂移即失败并列出文件。
+name: contract-sync
+
+on:
+  workflow_dispatch:
+    inputs:
+      core_ref:
+        description: "whale-core 候选 ref"
+        required: true
+        default: main
+      mobile_ref:
+        description: "whale-mobile 候选 ref"
+        required: true
+        default: main
+
+jobs:
+  drift-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: core
+          ref: ${{ inputs.core_ref }}
+      - uses: actions/checkout@v4
+        with:
+          repository: amwangfan/whale-mobile
+          ref: ${{ inputs.mobile_ref }}
+          path: mobile
+          # whale-mobile 当前是 public 仓，GITHUB_TOKEN 即可读取；
+          # 若将来转私有，在此补 token: ${{ secrets.CROSS_REPO_TOKEN }}
+      - name: Compare contracts/v1 file by file
+        run: python3 core/scripts/contract_sync_check.py --core core --mobile mobile

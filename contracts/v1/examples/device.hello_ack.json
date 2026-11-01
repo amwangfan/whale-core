@@ -1,0 +1,17 @@
+{
+  "v": "1.0",
+  "id": "01J000000000000000000000002",
+  "type": "device.hello_ack",
+  "ts": 1730000000002,
+  "seq": 2,
+  "dir": "downlink",
+  "payload": {
+    "session_id": "01J0000000000000000000SESS",
+    "server_time": 1730000000002,
+    "heartbeat_interval": 30,
+    "accepted_capabilities": [
+      "screen.context.read",
+      "screen.history.search"
+    ]
+  }
+}

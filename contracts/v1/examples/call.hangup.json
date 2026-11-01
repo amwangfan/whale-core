@@ -1,0 +1,12 @@
+{
+  "v": "1.0",
+  "id": "01J000000000000000000000012",
+  "type": "call.hangup",
+  "ts": 1730000000012,
+  "seq": 12,
+  "dir": "uplink",
+  "payload": {
+    "session_id": "01J0000000000000000000CALL",
+    "reason": "normal"
+  }
+}

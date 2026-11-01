@@ -1,8 +1,11 @@
 # 设备面（whale-mobile 接入，D1–D4 范围说明）
 
-> 协议唯一事实源：`contracts/v1/PROTOCOL.md` + `contracts/v1/messages/*.schema.json`
-> （whale-mobile 仓的版本化副本，版本 `1.0-dev` 2026-10-31；见该目录 README，
-> 不允许在本仓单独改 schema）。参考实现：whale-mobile `server/dev_gateway.py`。
+> 协议 canonical 事实源：**whale-mobile** 的 `contracts/v1/`（PROTOCOL.md +
+> messages/*.schema.json + examples/*.json）；本仓 `contracts/v1/` 是整体覆盖
+> 同步的镜像，不允许在本仓单独修改 schema。漂移校验：
+> `python3 scripts/contract_sync_check.py --core . --mobile ../whale-mobile`，
+> 或手动触发 CI workflow `contract-sync` 指定两侧候选 ref 联合验收（issue #46）。
+> 参考实现：whale-mobile `server/dev_gateway.py`。
 
 ## 组件
 

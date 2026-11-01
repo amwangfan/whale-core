@@ -1,0 +1,21 @@
+{
+  "v": "1.0",
+  "id": "01J000000000000000000000006",
+  "type": "sensor.result",
+  "ts": 1730000000006,
+  "seq": 6,
+  "dir": "uplink",
+  "payload": {
+    "request_id": "01J0000000000000000000QURY",
+    "status": "ok",
+    "data": [
+      {
+        "title": "采购清单",
+        "occurred_at": 1729996400000,
+        "summary": "笔记内容摘要（脱敏）"
+      }
+    ],
+    "truncated": false,
+    "source": "screenmemo.local"
+  }
+}

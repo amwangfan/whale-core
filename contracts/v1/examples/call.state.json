@@ -1,0 +1,18 @@
+{
+  "v": "1.0",
+  "id": "01J000000000000000000000011",
+  "type": "call.state",
+  "ts": 1730000000011,
+  "seq": 11,
+  "dir": "downlink",
+  "payload": {
+    "session_id": "01J0000000000000000000CALL",
+    "state": "active",
+    "media_params": {
+      "codec": "pcm_s16le",
+      "sample_rate": 16000,
+      "channels": 1
+    },
+    "expires_at": 1730003600000
+  }
+}

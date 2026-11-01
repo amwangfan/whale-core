@@ -1,0 +1,12 @@
+{
+  "v": "1.0",
+  "id": "01J9EXAMPLECHAL00000000001",
+  "type": "auth.challenge",
+  "ts": 1730000000100,
+  "seq": 1,
+  "dir": "downlink",
+  "payload": {
+    "challenge": "9f2c7a1b3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4f5061728394a5b6c7d8e",
+    "expires_in": 30
+  }
+}

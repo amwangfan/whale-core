@@ -1,0 +1,21 @@
+{
+  "v": "1.0",
+  "id": "01J000000000000000000000001",
+  "type": "device.hello",
+  "ts": 1730000000001,
+  "seq": 1,
+  "dir": "uplink",
+  "payload": {
+    "protocol_version": "1.0",
+    "device_id": "3a7f1c9e5b2048d6a1f3e7c9b5d80246",
+    "capabilities": [
+      "screen.context.read",
+      "screen.history.search",
+      "phone.notification.post",
+      "phone.call.ring"
+    ],
+    "app_version": "0.1.0-dev",
+    "signature": "abababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababababab",
+    "challenge": "c2hhbGxlbmdlLWZyb20tY29yZS0wMDAx"
+  }
+}
