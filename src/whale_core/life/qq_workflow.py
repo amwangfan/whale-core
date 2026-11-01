@@ -555,7 +555,14 @@ class QqInboundWorkflow:
         envelope = InputEnvelope(
             conversation_id=event.conversation, text=text, source="qq:stranger",
             channel=channel, sender_id=sender, images=images)
-        result = self.orchestrator.handle_envelope(envelope)
+        # 2026-11-01 修复：陌生人/群成员路径同样走两段式——慢任务（生图实测
+        # 60-180s）先 ack 后补发；此前同步路径 60s 即 tool-timeout 全灭。
+        if self._completion_sender is not None:
+            result = self.orchestrator.handle_envelope_async(
+                envelope,
+                on_complete=lambda r, ev=event: self._on_async_complete(ev, r))
+        else:
+            result = self.orchestrator.handle_envelope(envelope)
         reply = (result.reply or "").strip()
         if not reply:
             return {"empty_reply": True}
