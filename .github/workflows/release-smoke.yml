@@ -1,26 +1,11 @@
 name: installed release smoke
 
+# Build and smoke-test only on explicitly requested runs or published releases.
+# Publishing a GitHub Release runs the checks on that release tag.
 on:
-  pull_request:
-    paths:
-      - 'src/**'
-      - 'web/**'
-      - 'scripts/**'
-      - 'pyproject.toml'
-      - 'Dockerfile'
-      - 'compose.yaml'
-      - '.github/workflows/release-smoke.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'src/**'
-      - 'web/**'
-      - 'scripts/**'
-      - 'pyproject.toml'
-      - 'Dockerfile'
-      - 'compose.yaml'
-      - '.github/workflows/release-smoke.yml'
   workflow_dispatch:
+  release:
+    types: [published]
 
 concurrency:
   group: whale-release-${{ github.event.pull_request.number || github.ref }}
