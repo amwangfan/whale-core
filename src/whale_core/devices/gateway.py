@@ -466,8 +466,9 @@ class DeviceGateway:
             with self.lock:
                 record = self.store.get(action_key)
                 if isinstance(record, dict) and record.get("action_id") == action_id:
-                    if (record.get("state") not in TERMINAL_RECEIPT_STATES
-                            or state in TERMINAL_RECEIPT_STATES):
+                    # First terminal receipt wins: a conflicting delayed
+                    # terminal must not rewrite an already recorded outcome.
+                    if record.get("state") not in TERMINAL_RECEIPT_STATES:
                         record.update(state=state, updated_at=now_ms())
                         if state in TERMINAL_RECEIPT_STATES:
                             record["receipt"] = {
