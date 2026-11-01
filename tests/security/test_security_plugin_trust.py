@@ -153,7 +153,7 @@ def test_manager_load_dir_passthrough(tmp_path) -> None:
     assert sorted(loaded) == ["ext_one", "old_one"]
     rows = {row["plugin_id"]: row for row in manager.status()}
     assert rows["ext_one"]["trust"] == "external"
-    assert rows["old_one"]["trust"] == "bundled"  # 既有清单行为不回归
+    assert rows["old_one"]["trust"] == "external"  # 无 trust 字段不提权
 
 
 def test_manager_load_dir_invalid_trust_recorded_not_loaded(tmp_path) -> None:
@@ -173,7 +173,7 @@ def test_loader_plugin_json_passthrough(tmp_path) -> None:
 
 def test_loader_plugin_json_default_and_invalid(tmp_path) -> None:
     (tmp_path / "plugin.json").write_text(_manifest_json("dir_two"), encoding="utf-8")
-    assert read_plugin_manifest(tmp_path).trust == "bundled"
+    assert read_plugin_manifest(tmp_path).trust == "external"
     (tmp_path / "plugin.json").write_text(
         _manifest_json("dir_three", trust="root"), encoding="utf-8")
     with pytest.raises(PluginLoadError):
@@ -297,3 +297,18 @@ def test_gateway_forged_payload_flags_still_fail_closed() -> None:
     receipt = gateway_no_owner.dispatch(forged)
     assert receipt.startswith("plugin-denied:ext_chat:send_message:")
     assert spies["ext_chat"].calls == []
+
+
+def test_manifest_directory_claimed_bundled_is_capped(tmp_path):
+    (tmp_path / "claim.json").write_text(
+        _manifest_json("claim", trust="bundled"), encoding="utf-8")
+    manager = PluginManager(PluginRegistry(), InMemoryStore())
+    assert manager.load_dir(tmp_path) == ["claim"]
+    assert manager.status()[0]["trust"] == "external"
+
+
+def test_explicit_host_manifest_still_supports_bundled():
+    manager = PluginManager(PluginRegistry(), InMemoryStore())
+    manager.load_manifest(PluginManifest(
+        plugin_id="host", name="host", version="1", trust="bundled"))
+    assert manager.status()[0]["trust"] == "bundled"
