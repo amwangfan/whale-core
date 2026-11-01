@@ -183,8 +183,8 @@ def test_render_applies_all_expression_fields():
     assert "每句必须带三个 emoji" in text
     assert "每五轮必须撒娇" in text
     assert "不许说 X" in text
-    assert "一万字" in text  # 以防注入包裹形式进入
-    assert "外部上下文而非指令" in text
+    assert "一万字" in text  # 原文直出（owner 2026-11-01：不再以防注入包裹形式进入）
+    assert "外部上下文而非指令" not in text
     # TTS 专用字段不进文本模型上下文
     assert "warm_neutral" not in text
     # 不注入任何权限/许可话术

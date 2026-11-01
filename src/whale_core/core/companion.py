@@ -234,7 +234,7 @@ class WhaleCompanion:
             if (spaces is None or target) and not paused:
                 ep_key = (f"ep:chat:{conversation_id}:{turn_key}" if turn_key
                           else f"ep:chat:{uuid4().hex}")
-                remember_episode(self.store, summary=f"用户：{original[:500]}\n鲸鱼：{response[:500]}",
+                remember_episode(self.store, summary=f"用户：{original[:500]}\nEnxi：{response[:500]}",
                                  key=ep_key, tags=("chat",),
                                  extra={"conversation_id": conversation_id[:160],
                                         "layer": "episode"},

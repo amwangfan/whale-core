@@ -255,6 +255,6 @@ class TurnOrchestrationMixin:
                     parts.append("记忆：" + summary[:200])
         history = load_history(self.store, conversation_id)
         for msg in history[-4:]:
-            role = "用户" if msg["role"] == "user" else "鲸鱼"
+            role = "用户" if msg["role"] == "user" else "Enxi"
             parts.append(f"{role}：{msg['content'][:160]}")
         return "\n".join(parts)[:1500]

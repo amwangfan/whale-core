@@ -11,7 +11,7 @@ from whale_core.perception.events import ScheduleTick
 
 class FakeDeepSeek:
     def reply(self, text, *, persona="", memories=(), history=()):
-        assert "鲸鱼" in persona
+        assert "Enxi" in persona  # 默认人格名（owner 2026-11-01 更名）
         assert "上次" in "".join(memories)
         return "记得，我们继续聊。"
 
