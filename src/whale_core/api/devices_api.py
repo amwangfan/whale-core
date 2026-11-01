@@ -58,10 +58,13 @@ def ensure_device_services(ctx, server) -> tuple[DeviceRegistry, DeviceGateway |
         gateway = getattr(ctx, "device_gateway", None)
         if isinstance(gateway, DeviceGateway):
             return registry, gateway
-        from whale_core.devices.perception import DevicePerceptionAdapter
         adapter = getattr(ctx, "device_adapter", None)
         if adapter is None:
-            adapter = ctx.device_adapter = DevicePerceptionAdapter()
+            # EV-02：感知适配器带主动闭环（默认关；kv config:device_initiative 启用）
+            from whale_core.devices.initiative_loop import DeviceInitiativeAdapter
+            adapter = ctx.device_adapter = DeviceInitiativeAdapter(
+                ctx.store,
+                gateway_resolver=lambda: getattr(ctx, "device_gateway", None))
         host = getattr(server, "device_relay_host", "127.0.0.1")
         port = getattr(server, "device_relay_port", 0)
         gateway = DeviceGateway(
