@@ -280,6 +280,12 @@ class WindowedSendPort:
         return self._through_window(
             lambda: self._inner.send_video_to(peer_type, target, video_bytes, **kw))
 
+    def send_file_to(self, peer_type: str, target: str, path: str, **kw) -> bool:
+        if not hasattr(self._inner, "send_file_to"):
+            return False
+        return self._through_window(
+            lambda: self._inner.send_file_to(peer_type, target, path, **kw))
+
     # ── 窗口管理 ────────────────────────────────────────────────
 
     def _window_open(self) -> bool:

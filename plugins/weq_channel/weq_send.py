@@ -319,7 +319,12 @@ class WeQWebSendPort:
     def send_video_to(self, peer_type: str, target: str, video_bytes: bytes, *,
                       filename: str = "video.mp4", width: int = 0, height: int = 0,
                       duration_sec: int = 0, thumb: bytes = b"") -> bool:
-        """向指定 c2c 对端/白名单群发视频（/trpc/account.sendVideo 补丁端点）。"""
+        """向指定 c2c 对端/白名单群发视频（/trpc/account.sendVideo 补丁端点）。
+
+        尺寸纪律（weq 侧实测口径）：**c2c 固定不上报 width/height**（服务端
+        schema 限制，报了会被 result=79 拒发）；group 建议给（不给安卓端可能
+        显示「文件已过期」）。
+        """
         peer_type = str(peer_type or "").strip()
         target = str(target or "").strip()
         if not self._media_target_ok(peer_type, target):
@@ -330,7 +335,7 @@ class WeQWebSendPort:
         payload = {"json": {"peerType": peer_type, "targetId": target,
                             "video": {"type": "Buffer", "data": list(video_bytes)},
                             "fileName": filename[:100] or "video.mp4"}}
-        if width > 0 and height > 0:
+        if peer_type == "group" and width > 0 and height > 0:
             payload["json"]["width"] = width
             payload["json"]["height"] = height
         if duration_sec > 0:
@@ -338,6 +343,46 @@ class WeQWebSendPort:
         if thumb:
             payload["json"]["thumb"] = {"type": "Buffer", "data": list(thumb)}
         return self._post_media("/trpc/account.sendVideo", payload)
+
+    def send_file_to(self, peer_type: str, target: str, path: str, *,
+                     filename: str = "") -> bool:
+        """向指定 c2c 对端/白名单群发文件（/trpc/account.sendFile）。
+
+        ``path`` 是 weq-web 所在机的本地路径（桌面文件走原路径上传）。
+        2026-11-01 实测：c2c 原生视频气泡被服务端 result=79 拒发（群正常），
+        私聊视频经本方法以文件形态送达。
+        """
+        peer_type = str(peer_type or "").strip()
+        target = str(target or "").strip()
+        if not self._media_target_ok(peer_type, target):
+            self.last_receipt = {"ok": False, "error": "target-not-allowed"}
+            return False
+        path = str(path or "").strip()
+        if not path:
+            return False
+        payload = {"json": {"peerType": peer_type, "targetId": target, "path": path}}
+        if filename:
+            payload["json"]["fileName"] = filename[:100]
+        if self.expected_account_uin:
+            payload["json"]["expectedAccountUin"] = self.expected_account_uin
+        if self.expected_account_config_id:
+            payload["json"]["expectedAccountConfigId"] = self.expected_account_config_id
+        try:
+            if self._cookie is None:
+                self.login()
+            status, body, _ = self._post("/trpc/account.sendFile", payload, auth=True)
+            if status == 401:
+                self.login()
+                status, body, _ = self._post("/trpc/account.sendFile", payload, auth=True)
+        except WeQSendError:
+            return False
+        if status != 200 or not isinstance(body, dict):
+            return False
+        outcome = (((body.get("result") or {}).get("data") or {}).get("json"))
+        if not isinstance(outcome, dict):
+            return False
+        self.last_receipt = outcome
+        return bool(outcome.get("ok") or outcome.get("sent"))
 
     # ── OutboundPort ─────────────────────────────────────────
 
