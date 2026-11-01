@@ -208,6 +208,11 @@ class WhaleCompanion:
         response = self.model.reply(text, **kwargs)
         if on_phase is not None:
             on_phase("compose")
+        # 2026-11-01 记忆污染修复：情节记忆与会话历史只落**净文本**
+        # （剥离 ◆/[[…]] 规划标记；沉默轮不落）。返回值仍给原始文本——
+        # 发送侧的规划解析（沉默/分段）依赖原始标记，不能提前剥离。
+        from whale_core.life.response_planner import clean_reply_text
+        clean_response = clean_reply_text(response)
         if episodic:
             # G2 情节质量：同一对话轮（turn_key，如 task_id）内的 ack/补发等
             # 多次系统中间对话**合并回写**同一条情节（后者覆盖前者，包含最终
@@ -231,16 +236,16 @@ class WhaleCompanion:
                 from whale_core.memory.pause import is_recording_paused
 
                 paused = is_recording_paused(self.store, target)
-            if (spaces is None or target) and not paused:
+            if (spaces is None or target) and not paused and clean_response:
                 ep_key = (f"ep:chat:{conversation_id}:{turn_key}" if turn_key
                           else f"ep:chat:{uuid4().hex}")
-                remember_episode(self.store, summary=f"用户：{original[:500]}\nEnxi：{response[:500]}",
+                remember_episode(self.store, summary=f"用户：{original[:500]}\nEnxi：{clean_response[:500]}",
                                  key=ep_key, tags=("chat",),
                                  extra={"conversation_id": conversation_id[:160],
                                         "layer": "episode"},
                                  space_id=target)
-        if conversation_id:
-            append_turn(self.store, conversation_id, original, response)
+        if conversation_id and clean_response:
+            append_turn(self.store, conversation_id, original, clean_response)
         return response
 
 class RealtimeTranscriptRecorder:

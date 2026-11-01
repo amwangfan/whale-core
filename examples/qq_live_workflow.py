@@ -912,6 +912,15 @@ def cmd_run(args) -> int:
             # issue #39：收尾——全段送达 replied；部分送达 partial
             _tfin(_tid, "replied" if _sent_segs == len(segments) else "partial",
                   summary=f"{_sent_segs}/{len(segments)} 段已发送")
+            # G1 补全（2026-11-01 生产实证：模型看不到自己回过什么，重复接旧话茬）：
+            # 网关路径的群回复也回写时间线（is_self），记录**实际发出的净文本**
+            # （分段内容，非带规划标记的原始回复）。
+            if event.conversation.startswith("group:") and _sent_segs:
+                timeline.append(event.conversation,
+                                message_id=f"self:{event.message_id}",
+                                sender_id=self_uin,
+                                text="\n".join(segments[:_sent_segs]),
+                                is_self=True)
         elif args.auto_approve:
             # --auto-approve remains isolated dry-run: no real Outbox or plugin executor.
             dispatch_dry_run(store, result["draft_id"])
@@ -1060,11 +1069,15 @@ def cmd_run(args) -> int:
               "failed" if _send_failed and _sent_segs == 0
               else ("replied" if _sent_segs == len(segments) else "partial"),
               summary=f"{_sent_segs}/{len(segments)} 段已发送")
-        if is_group and ok:
-            # G1：自己的发言也进时间线（is_self），模型上下文才完整
+        if is_group and _sent_segs:
+            # G1：自己的发言也进时间线（is_self），模型上下文才完整。
+            # 记实际发出的净文本（分段拼接），不记带 ◆ 规划标记的原始回复——
+            # 否则标记泄漏进时间线，反过来教会模型继续内联用 ◆。
             timeline.append(incoming.conversation,
                             message_id=f"self:{incoming.message_id}",
-                            sender_id=self_uin, text=reply, is_self=True)
+                            sender_id=self_uin,
+                            text="\n".join(segments[:_sent_segs]),
+                            is_self=True)
 
     def on_mass(meta):
         print(f"[mass] {meta['chatType']}:{meta['convId']} seq {meta['fromSeq']}→{meta['toSeq']} "

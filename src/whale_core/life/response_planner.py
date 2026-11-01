@@ -124,3 +124,16 @@ def plan_reply(text: str, *, is_group: bool, max_segments: int,
     # 无显式规划标记：回落既有语义分段（fallback，不是模型规划）
     return _mk(split_reply(raw, is_group=is_group, max_segments=max_segments),
                follow_up=follow_up, planner="fallback")
+
+
+def clean_reply_text(text: str) -> str:
+    """模型原始回复 → 可落库/可展示的净文本（2026-11-01 记忆污染修复）。
+
+    剥离 ◆ 气泡标记（转分段拼接）、[[沉默]]/[[稍后补充:…]] 规划标记；
+    沉默轮返回空串（调用方据此跳过记忆/历史写入——原始标记落库会反过来
+    教会模型继续内联输出标记）。
+    """
+    plan = plan_reply(text, is_group=False, max_segments=10)
+    if plan.silent:
+        return ""
+    return "\n".join(plan.bubbles)
