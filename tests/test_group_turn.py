@@ -142,3 +142,39 @@ def test_no_bundled_aliases_and_no_empty_regex_match():
         conversation=GROUP, text="阿澜帮我看下？",
         activity="balanced"
     ).action == "join"
+
+
+def test_followup_request_after_bot_speaks_joins_lively():
+    """2026-11-01 生产实证：「那你画个蜥蜴爬宠的图吧」——无 @ 无名无问号，
+    但机器人刚在群里说过话（时间线近窗有 is_self）且是「你+请求动词」
+    承接句式 → lively 档应主动接话。"""
+    store = InMemoryStore()
+    p = _policy(store)
+    tl = [{"is_self": False, "text": "群里有人喜欢爬宠吗"},
+          {"is_self": True, "text": "好，我这就搜搜，稍等"},
+          {"is_self": False, "text": "搜索是付费功能"}]
+    d = p.maybe_join(conversation=GROUP, text="那你画个蜥蜴爬宠的图吧",
+                     activity="lively", timeline_entries=tl)
+    assert d.action == "join"
+
+
+def test_followup_requires_recent_self_and_lively():
+    store = InMemoryStore()
+    # 机器人近期没说话 → 不接（群友互相喊话不认领）
+    p = _policy(store)
+    tl = [{"is_self": False, "text": "你画个看看"}]
+    d = p.maybe_join(conversation=GROUP, text="你画个蜥蜴看看",
+                     activity="lively", timeline_entries=tl)
+    assert d.reason_code == "not_directed"
+    # balanced 档无此信号
+    p2 = _policy(InMemoryStore())
+    d2 = p2.maybe_join(conversation=GROUP, text="你画个蜥蜴看看",
+                       activity="balanced",
+                       timeline_entries=[{"is_self": True, "text": "我在"}])
+    assert d2.reason_code == "not_directed"
+    # 普通闲聊句式不命中（无承接动词）
+    p3 = _policy(InMemoryStore())
+    d3 = p3.maybe_join(conversation=GROUP, text="明天天气真不错",
+                       activity="lively",
+                       timeline_entries=[{"is_self": True, "text": "我在"}])
+    assert d3.reason_code == "not_directed"

@@ -534,7 +534,8 @@ def cmd_run(args) -> int:
             print("  [规划] 补发内容被规划为沉默，不发送")
             return
         for i, seg in enumerate(segments):
-            if not epoch_fresh(store, event.conversation, ep):
+            # 2026-11-01 owner 决策：群会话不因后续闲聊截断已开始发送的回复
+            if not event.conversation.startswith("group:")                     and not epoch_fresh(store, event.conversation, ep):
                 print(f"  [补发] 会话已有新消息，剩余 {len(segments)-i} 段作废")
                 break
             seg_id = draft_id if len(segments) == 1 else f"{draft_id}#{i}"
@@ -871,7 +872,9 @@ def cmd_run(args) -> int:
                 return
             _sent_segs = 0
             for i, seg in enumerate(segments):
-                if not epoch_fresh(store, event.conversation, ep):
+                # 2026-11-01 owner 决策：群里别人接着说 ≠ 截断机器人已开始
+                # 的回复（群节奏快，截断表现为「部分完成」残句）；私聊保留。
+                if not event.conversation.startswith("group:")                         and not epoch_fresh(store, event.conversation, ep):
                     print(f"  [分段] 会话已有新消息，剩余 {len(segments)-i} 段作废")
                     _tspan(_tid, "send", "skipped", reason_code="epoch_stale",
                            detail=f"剩余 {len(segments)-i} 段作废")
@@ -1035,7 +1038,7 @@ def cmd_run(args) -> int:
         _sent_segs = 0
         _send_failed = False
         for i, seg in enumerate(segments):
-            if not epoch_fresh(store, incoming.conversation, ep):
+            if not is_group and not epoch_fresh(store, incoming.conversation, ep):
                 print(f"  [分段] 会话已有新消息，剩余 {len(segments)-i} 段作废")
                 _tspan(_tid, "send", "skipped", reason_code="epoch_stale",
                        detail=f"剩余 {len(segments)-i} 段作废")
@@ -1094,6 +1097,27 @@ def cmd_run(args) -> int:
     # issue #23：QQ 会话启用回复规划标记（◆ 多气泡 / [[沉默]] / [[稍后补充]]）
     from whale_core.life.response_planner import PLANNING_HINT
     workflow.companion.planning_hint = PLANNING_HINT
+    # 2026-11-01 生产实证：对话模型不知道自身能力会虚假否认（「画图我做不到」）。
+    # 按实际挂载的工具补一句能力自述（宿主事实层，非角色卡内容）。
+    _cap_names = []
+    if tools.for_capability("web.search"):
+        _cap_names.append("搜索")
+    if tools.for_capability("media.image.generate"):
+        _cap_names.append("画图")
+    if tools.for_capability("media.video.generate"):
+        _cap_names.append("生成视频")
+    if tools.for_capability("tts.synthesize"):
+        _cap_names.append("发语音")
+    if _cap_names:
+        workflow.companion.planning_hint += (
+            "\n你当前具备这些能力：" + "、".join(_cap_names) +
+            "——对方提出这类需求时会有任务流程接住处理，答应下来即可，"
+            "不要自称做不到或不会。")
+    # 读图能力自述（2026-11-01 生产实证：模型一边真读图一边说「读不了」）——
+    # 诚实口径：当条消息附带的图能直接看到；没被 @/没触发回复的旧图看不到。
+    workflow.companion.planning_hint += (
+        "\n对方当条消息里附带的图片你能直接看到内容并讨论；"
+        "别再说自己读不了图——之前看图猜内容都是真看到了，不是瞎猜。")
     if not self_uid:
         try:
             import glob as _glob, json as _json

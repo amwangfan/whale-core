@@ -44,6 +44,12 @@ COOLDOWN_MIN = {"quiet": 60, "balanced": 20, "lively": 8}
 _QUESTION_RE = re.compile(
     r"[?？]|怎么|如何|为什么|为啥|请问|求[助教]|有人[会知]|怎么办|是什么")
 
+#: 承接请求信号（lively 档补充，2026-11-01 生产实证）：机器人近期在群里发过言
+#: 时的「那你画个…吧」「你再唱一首」类跟进句式——无 @ 无名但明确是叫我做事。
+_FOLLOWUP_RE = re.compile(
+    r"^(?:那|来|快|再|接着|继续|要不)?\s*你(?:给我|给我来|来|快|再|接着|继续)?\s*"
+    r"(?:画|搜|查|找|写|做|唱|讲|说|算|翻译|推荐|放|拍|帮|发|生成|介绍|念|读|背|猜)")
+
 #: 诊断原因码（稳定枚举；Studio 可展示）。
 REASON_AT_BOT = "at_bot"
 REASON_REPLY_TO_BOT = "reply_to_bot"
@@ -111,8 +117,17 @@ class GroupTurnPolicy:
             if not named:
                 return self._record(group, JoinDecision("observe", REASON_QUIET_MODE))
         elif not (named or (activity == "lively" and question)):
-            # balanced：需直呼其名；lively：直呼其名 或 明确提问/求助
-            return self._record(group, JoinDecision("observe", REASON_NOT_DIRECTED))
+            # lively 补充信号：时间线近窗有机器人自己的发言（我刚参与过），
+            # 且本条是「你+请求动词」的承接句式 → 视为叫我做事的跟进请求。
+            follow_up = (
+                activity == "lively"
+                and bool(_FOLLOWUP_RE.search(text))
+                and any(isinstance(e, dict) and e.get("is_self")
+                        for e in list(timeline_entries)[-5:])
+            )
+            if not follow_up:
+                # balanced：需直呼其名；lively：直呼其名 或 明确提问/求助/承接
+                return self._record(group, JoinDecision("observe", REASON_NOT_DIRECTED))
 
         # 连续发言限制：时间线最新一条已是鲸鱼自己 → 不再主动接话
         if timeline_entries:

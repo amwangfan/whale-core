@@ -238,6 +238,16 @@ class TurnOrchestrationMixin:
         """
         from whale_core.memory.history import load_history
         parts: list[str] = []
+        # 群会话：意图上下文并入群时间线（2026-11-01 生产实证：observe 的群消息
+        # 不进会话历史，规划者只看历史等于半盲——「说你呢」这类承接丢了目标）。
+        if conversation_id.startswith("group:"):
+            tl = getattr(self.companion, "timeline", None)
+            if tl is not None:
+                block = tl.render_for_model(
+                    conversation_id, limit=12,
+                    self_uid=getattr(self.companion, "self_uid", ""))
+                if block:
+                    parts.append("本群最近消息：\n" + block)
         if self.companion.curator is not None:
             # 查询相关记忆 + 稳定事实（空查询只放 stable——owner 所在地等
             # 缺省值来源，与查询词项未必有交集）
