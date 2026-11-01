@@ -334,11 +334,21 @@ def test_settings_persona_taboos_roundtrip(api, tmp_path, monkeypatch):
     monkeypatch.setenv("WHALE_CONFIG_DIR", str(tmp_path))
     from whale_core.configuration import SettingsController
     from whale_core.profiles import assemble_runtime
-    from whale_core.ui.persona_cards import get_custom_taboos
+    from whale_core.ui.persona_cards import (
+        get_custom_taboos,
+        import_external_card,
+        switch_card,
+    )
 
     bundle = assemble_runtime("local", env={}, store=api.ctx.store)
     controller = SettingsController(tmp_path, bundle, env={})
     api.ctx.settings = controller
+
+    # 中立启动无活跃卡（PR#48）：先导入并选中一张卡，才有可重渲的快照
+    card = import_external_card(
+        api.ctx.store, card_id="taboos-card", title="禁忌测试卡",
+        prompt_text="说话温和简洁")
+    switch_card(api.ctx.store, card.card_id)
 
     # 初始为空
     status, raw = _req(api, "GET", "/api/v1/settings")
