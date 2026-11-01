@@ -72,8 +72,10 @@ def test_blank_lines_collapsed_but_code_fence_kept():
     assert plan.bubbles and "\n\n" in plan2.bubbles[-1]  # 代码块空行保留
 
 
-def test_mid_line_marker_is_not_separator():
-    """行中间的 ◆ 不当分隔（非行首），原样保留。"""
-    plan = plan_reply("这个符号 ◆ 在句子中间", is_group=False, max_segments=3)
-    assert plan.planner == "fallback"
-    assert plan.bubbles == ("这个符号 ◆ 在句子中间",)
+def test_mid_line_marker_also_separates():
+    """句中夹带的 ◆ 同样是分隔（模型只从规划提示学到这个符号，出现即标记；
+    「我在呢。◆ 八点起」生产实证形态）。"""
+    plan = plan_reply("链路正常，我在呢。◆ 八点起还回学校", is_group=False,
+                      max_segments=3)
+    assert plan.planner == "model"
+    assert plan.bubbles == ("链路正常，我在呢。", "八点起还回学校")
