@@ -252,3 +252,62 @@ def test_pcm_bridge_fields_in_settings_contract():
                   "WHALE_PCM_BRIDGE_PUBLIC_WS_URL"):
         assert field in SERVICE_FIELDS
     assert "WHALE_PCM_BRIDGE_TOKEN" in SECRET_FIELDS
+
+
+def test_media_model_selection_and_minimax_registration(tmp_path, monkeypatch):
+    """2026-11-01 owner 决策：图/视频/语音工具可按 model 参数选模型；
+    未知模型诚实报错并列可用清单；MiniMax 配 key 才注册。"""
+    env = {
+        'WHALE_MEDIA_BASE_URL': 'http://localhost:1234/v1',
+        'WHALE_MEDIA_API_KEY': 'sk-test',
+        'WHALE_IMAGE_MODELS': 'qwen-image-2.0',
+        'WHALE_TTS_MODELS': 'qwen-audio-3.0-tts-plus',
+        'WHALE_VIDEO_MODELS': 'wan3.0-video',
+        'WHALE_MINIMAX_API_KEY': 'mm-key',
+    }
+    registry, tools = PluginRegistry(), ToolRegistry()
+    bundle = configure_optional_capabilities(registry, tools, InMemoryStore(),
+                                             env=env, artifact_dir=tmp_path)
+
+    # 图像：默认 qwen-image-3.0 + 追加 qwen-image-3.0 外的模型；未知模型诚实报错
+    img_spec = tools.for_capability('media.image.generate')[0]
+    payload = {'output': {'choices': [{'message': {'content': [
+        {'image': 'https://cdn.example/a.png'}]}}]}}
+    monkeypatch.setattr(provider_http, 'open_request',
+                        lambda *a, **k: io.BytesIO(json.dumps(payload).encode()))
+    # 工件落盘会真实抓取 URL——本测试只关心模型路由，stub 掉下载
+    class _StubArtifact:
+        url = '/api/v1/artifacts/stub'
+    monkeypatch.setattr(bundle.artifacts, 'save_reference',
+                        lambda ref, **kw: _StubArtifact())
+    r = json.loads(img_spec.handler({'prompt': '鲸', 'model': 'qwen-image-2.0'}))
+    assert r['model'] == 'qwen-image-2.0'
+    with pytest.raises(ValueError) as ei:
+        img_spec.handler({'prompt': '鲸', 'model': 'dall-e-9'})
+    assert 'qwen-image-2.0' in str(ei.value) and '未知生图模型' in str(ei.value)
+
+    # 语音：dashscope flash/plus + minimax speech-02-hd 注册进可选模型
+    tts_spec = tools.for_capability('tts.synthesize')[0]
+    assert 'speech-02-hd' in tts_spec.description
+    with pytest.raises(ValueError) as ei:
+        tts_spec.handler({'text': '你好', 'model': 'no-such'})
+    assert '未知语音模型' in str(ei.value)
+
+    # 视频：happyhorse + wan3.0-video + MiniMax-Hailuo-2.3 全部可选
+    v_spec = tools.for_capability('media.video.generate')[0]
+    assert 'wan3.0-video' in v_spec.description
+    assert 'MiniMax-Hailuo-2.3' in v_spec.description
+    assert bundle.video_manager is not None
+    assert 'MiniMax-Hailuo-2.3' in bundle.video_manager.available_models
+    with pytest.raises(VideoError):
+        bundle.video_manager.submit('鲸', model='no-such-video')
+
+
+def test_no_minimax_key_no_minimax_models(tmp_path):
+    registry, tools = PluginRegistry(), ToolRegistry()
+    bundle = configure_optional_capabilities(registry, tools, InMemoryStore(),
+        env={'WHALE_MEDIA_BASE_URL': 'http://localhost:1234/v1',
+             'WHALE_MEDIA_API_KEY': 'sk-test'}, artifact_dir=tmp_path)
+    tts_spec = tools.for_capability('tts.synthesize')[0]
+    assert 'speech-02' not in tts_spec.description
+    assert 'MiniMax' not in tools.for_capability('media.video.generate')[0].description

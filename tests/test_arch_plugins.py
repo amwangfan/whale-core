@@ -46,6 +46,7 @@ BUILTIN_PROVIDER_MODULES = {
     "media_image",
     "media_video",
     "dashscope_media",
+    "minimax_media",
     "speech",
     "pcm_voice",
     "realtime_voice",
