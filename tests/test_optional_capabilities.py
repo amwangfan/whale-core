@@ -139,6 +139,33 @@ def test_minimax_image_default_when_key_present(tmp_path, monkeypatch):
     assert 'minimax' not in spec3.description
 
 
+def test_minimax_only_full_media_stack_no_proxy(tmp_path, monkeypatch):
+    """2026-11-01 owner 决策「不走代理」：仅 MiniMax key、无任何 dashscope 基座时，
+    图/视频/语音全部照常挂载（MiniMax 官方直连），ASR 诚实缺席。"""
+    registry, tools = PluginRegistry(), ToolRegistry()
+    bundle = configure_optional_capabilities(registry, tools, InMemoryStore(),
+        env={'WHALE_MINIMAX_API_KEY':'k'}, artifact_dir=tmp_path)
+    # 图像：默认 minimax-image-01
+    img = tools.for_capability('media.image.generate')[0]
+    assert 'minimax-image-01' in img.description and 'qwen' not in img.description
+    # 语音：speech-02-hd 挂载；无 ASR
+    tts = tools.for_capability('tts.synthesize')[0]
+    assert 'speech-02-hd' in tts.description
+    assert tools.for_capability('asr.transcribe') == []
+    # 视频：默认 MiniMax-Hailuo-2.3
+    vid = tools.for_capability('media.video.generate')[0]
+    assert 'MiniMax-Hailuo-2.3' in vid.description
+    assert bundle.video_manager is not None
+    assert set(bundle.video_manager._providers) == {'MiniMax-Hailuo-2.3'}
+    # TTS 真实调用链（mock 传输层，hex 音频解码）
+    wav = b'RIFF' + b'\x00' * 40
+    monkeypatch.setattr(provider_http, 'open_request',
+        lambda req, **kw: io.BytesIO(json.dumps(
+            {'data':{'audio':wav.hex()}, 'base_resp':{'status_code':0}}).encode()))
+    result = json.loads(tts.handler({'text':'你好'}))
+    assert bundle.artifacts.read(result['artifact_id'])[1] == wav
+
+
 def test_wan_http_protocol_and_state_validation(monkeypatch):
     calls = []
     responses = [{'output':{'task_id':'job-1'}}, {'output':{'task_status':'SUCCEEDED','video_url':'https://cdn.example/x.mp4'}}, {}]

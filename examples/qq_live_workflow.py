@@ -661,15 +661,19 @@ def cmd_run(args) -> int:
         if hasattr(_inner_port, "send_image"):
             _inner_port.artifact_reader = lambda aid: cap.artifacts.read(aid)
 
-    # 意图模型（可选，默认关）：QQ_INTENT_MODEL=<模型 id> 开启——同 AgentScope
-    # 平台的 OpenAI 兼容端点复用 DEEPSEEK_* 凭据；规则优先（显式搜索指令本地
-    # 识别零额外调用），LLM 规划用于其余消息。实测选型记录见 gap-analysis。
+    # 意图模型（可选，默认关）：QQ_INTENT_MODEL=<模型 id> 开启；规则优先（显式
+    # 搜索指令本地识别零额外调用），LLM 规划用于其余消息。实测选型见 gap-analysis。
+    # 2026-11-01 owner 决策「不走代理」：QQ_INTENT_BASE_URL/QQ_INTENT_API_KEY
+    # 可独立于主聊天端点（不同供应商/不同 key 时必备）；缺省回落 DEEPSEEK_*。
     intent_model_id = os.environ.get("QQ_INTENT_MODEL", "").strip()
     if intent_model_id:
         from whale_core.core.deepseek import DeepSeekCompanion  # build_brain 同款局部导入
         from whale_core.core.intent_router import SearchIntentRouter
         from whale_core.core.runtime import ConversationOrchestrator, ToolRegistry
-        intent_brain = DeepSeekCompanion(model=intent_model_id)  # 同平台不同模型
+        intent_brain = DeepSeekCompanion(
+            model=intent_model_id,
+            base_url=os.environ.get("QQ_INTENT_BASE_URL") or None,
+            api_key=os.environ.get("QQ_INTENT_API_KEY") or None)
         if (os.environ.get("TAVILY_API_KEY") or os.environ.get("BRAVE_API_KEY")
                 or os.environ.get("WHALE_SEARCH_PROVIDER")):
             from search_web.web_fetch import register_web_fetch
@@ -695,7 +699,10 @@ def cmd_run(args) -> int:
         safety_model_id = ""               # 显式关闭
     if safety_model_id:
         from whale_core.core.deepseek import DeepSeekCompanion as _DS
-        safety_brain = _DS(model=safety_model_id)
+        # 审核模型与意图模型同一端点（QQ_INTENT_* 覆盖生效于两者）
+        safety_brain = _DS(model=safety_model_id,
+                           base_url=os.environ.get("QQ_INTENT_BASE_URL") or None,
+                           api_key=os.environ.get("QQ_INTENT_API_KEY") or None)
 
         def _review(reply: str) -> str | None:
             prompt = (
