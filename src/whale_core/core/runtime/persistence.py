@@ -380,7 +380,10 @@ class PersistenceMixin:
                 plan = IntentPlan(**raw)
             except Exception:
                 continue
-            untouched = journal.get("next_step", 0) == 0 and not journal.get("receipts")
+            untouched = (journal.get("next_step", 0) == 0
+                         and not journal.get("receipts")
+                         and not journal.get("dispatch_started")
+                         and not record.get("in_flight"))
             if untouched:
                 self._append_event(task_id, "recovered", detail="restart-rerun")
                 def _rerun(tid=task_id, jid=journal):

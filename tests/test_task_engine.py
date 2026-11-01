@@ -326,3 +326,71 @@ def test_input_envelope_carries_channel_and_owner():
     assert result.status == "answered"
     journal = orc.store.get(f"runtime:task:{result.task_id}")
     assert journal["channel"] == "qq" and journal["source"] == "qq:owner"
+
+
+def test_recovery_does_not_replay_crash_after_dispatch_before_receipt():
+    """next_step=0 and empty receipts do not prove no side effect happened."""
+    from dataclasses import asdict
+    from whale_core.core.intent_plan import IntentPlan
+
+    store = InMemoryStore()
+    plan = IntentPlan(goal="notify", kind="task",
+                      capabilities=("test.fast",), task_id="crash")
+    store.put("runtime:task:crash", {
+        "plan": asdict(plan), "transient_keys": [], "conversation_id": "c1",
+        "source": "test", "text": "notify", "next_step": 0,
+        "results": [], "receipts": [],
+        "dispatch_started": {"step": 0, "tool": "notify", "fingerprint": "sent"},
+        "tool_name": "",
+    })
+    orc = _orc(CountingIntent(FAST_TASK), tools=_tools_with("test.fast"),
+               store=store)
+    store.put("task:crash", {
+        "task_id": "crash", "phase": "running", "status": "running",
+        "in_flight": False,
+    })
+    assert orc.recover_interrupted_tasks() == ["crash"]
+    assert store.get("task:crash")["phase"] == "unknown"
+    assert store.get("runtime:task:crash")["next_step"] == 0
+
+
+def test_dispatch_marker_written_before_external_handler():
+    store = InMemoryStore()
+    observed = []
+
+    def handler(_):
+        observed.append(store.get("runtime:task:marker")["dispatch_started"])
+        return "ok"
+
+    tools = ToolRegistry()
+    tools.register(ToolSpec("read", "test.fast", handler=handler))
+    orc = _orc(CountingIntent(FAST_TASK), tools=tools, store=store)
+    result = orc.execute_tool("read", {}, conversation_id="c1",
+                              task_id="marker")
+    assert result.status == "answered"
+    assert observed and observed[0]["step"] == 0
+    assert observed[0]["tool"] == "read"
+    journal = store.get("runtime:task:marker")
+    assert journal["dispatch_started"] == observed[0]
+    assert journal["next_step"] == 1
+
+
+def test_legacy_inflight_flag_prevents_crash_replay():
+    from dataclasses import asdict
+    from whale_core.core.intent_plan import IntentPlan
+
+    store = InMemoryStore()
+    plan = IntentPlan(goal="old", kind="task",
+                      capabilities=("test.fast",), task_id="legacy")
+    store.put("runtime:task:legacy", {
+        "plan": asdict(plan), "transient_keys": [], "conversation_id": "c1",
+        "source": "test", "text": "old", "next_step": 0,
+        "results": [], "receipts": [], "tool_name": "",
+    })
+    orc = _orc(CountingIntent(FAST_TASK), store=store)
+    store.put("task:legacy", {
+        "task_id": "legacy", "phase": "running", "status": "running",
+        "in_flight": True,
+    })
+    assert orc.recover_interrupted_tasks() == ["legacy"]
+    assert store.get("task:legacy")["phase"] == "unknown"
