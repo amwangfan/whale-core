@@ -139,11 +139,11 @@ describe("PersonaPanel 人物卡管理", () => {
     await waitFor(
       () =>
         expect(
-          (screen.getByLabelText(/简短设定/) as HTMLTextAreaElement).value,
+          (screen.getByLabelText(/简短介绍/) as HTMLTextAreaElement).value,
         ).toBe("旧设定"),
       { timeout: 5000 },
     );
-    fireEvent.change(screen.getByLabelText(/简短设定/), {
+    fireEvent.change(screen.getByLabelText(/简短介绍/), {
       target: { value: "新设定" },
     });
     fireEvent.click(screen.getByText("保存"));

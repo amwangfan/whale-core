@@ -701,6 +701,8 @@ export interface StudioPersonaDetail extends StudioPersona {
   speaking_rate?: number;
   artwork_ref?: string;
   external_prompt?: string;
+  /** issue #37：示例对话（进模型上下文）。 */
+  example_dialogue?: string;
   channels?: string[];
 }
 
@@ -743,9 +745,56 @@ export interface PersonaCardInput {
   source_url?: string;
   license?: string;
   external_prompt?: string;
+  /** issue #37：示例对话（进模型上下文）。 */
+  example_dialogue?: string;
   style_rules?: string[];
   extra_taboos?: string[];
   speaking_rate?: number;
+}
+
+/** issue #37：导入预览解析出的字段（SillyTavern v1/v2 JSON 或纯文本）。 */
+export interface PersonaImportParsed {
+  name?: string;
+  summary?: string;
+  temperament?: string;
+  example_dialogue?: string;
+  external_prompt?: string;
+  relationship_style?: string;
+}
+
+export interface PersonaImportUnmapped {
+  field: string;
+  note: string;
+  preview: string;
+}
+
+/** POST /studio/personas/import-preview 的结果（预览不写库）。 */
+export interface PersonaImportPreview {
+  parsed: PersonaImportParsed;
+  suggested_card_id: string;
+  mapping: Record<string, string>;
+  unmapped: PersonaImportUnmapped[];
+  missing: string[];
+  conflicts: string[];
+  warnings: string[];
+  requires_confirmation: boolean;
+}
+
+/** issue #37：试玩一侧结果（reply 与 error 二选一）。 */
+export interface PersonaPlaytestSide {
+  persona_id: string;
+  source: string;
+  content_sha?: string;
+  reply?: string;
+  error?: string;
+  fields_used?: string[];
+}
+
+export interface PersonaPlaytestResult {
+  input: string;
+  baseline: PersonaPlaytestSide;
+  trial: PersonaPlaytestSide;
+  note: string;
 }
 
 export interface StudioGraphNode {
@@ -1001,6 +1050,25 @@ export const studioApi = {
         { method: "PUT", body: JSON.stringify(input) },
       )
     ).persona,
+  /** issue #37：导入预览——解析 SillyTavern/纯文本卡，不写库。 */
+  personaImportPreview: (text: string, cardId?: string) =>
+    request<PersonaImportPreview>("/studio/personas/import-preview", {
+      method: "POST",
+      body: JSON.stringify({
+        text,
+        ...(cardId ? { card_id: cardId } : {}),
+      }),
+    }),
+  /** issue #37：即时试玩——persona_id 或 card（草稿字段）二选一。 */
+  personaPlaytest: (input: {
+    persona_id?: string;
+    card?: PersonaCardInput;
+    input?: string;
+  }) =>
+    request<PersonaPlaytestResult>("/studio/personas/playtest", {
+      method: "POST",
+      body: JSON.stringify(input),
+    }),
   memorySpaces: async () =>
     (await request<{ memory_spaces: StudioMemorySpace[] }>(
       "/studio/memory-spaces",

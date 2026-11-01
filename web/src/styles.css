@@ -2687,3 +2687,76 @@ code,
 .span-table {
   margin-top: 6px;
 }
+
+/* ---------- 人物卡：模板 / 导入 / 试玩 / 分区（issue #37） ---------- */
+.persona-template {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  font-size: 13px;
+}
+.persona-template select {
+  padding: 6px 10px;
+  border: 1px solid #d7dce2;
+  border-radius: 8px;
+  background: #fff;
+}
+.persona-form-basic {
+  margin-top: 8px;
+}
+.persona-form-advanced {
+  margin: 10px 0;
+  border-top: 1px dashed #dfe5ec;
+  padding-top: 8px;
+}
+.persona-form-advanced summary,
+.persona-import summary {
+  cursor: pointer;
+  color: #556;
+}
+.persona-import {
+  margin: 10px 0;
+  border: 1px dashed #dfe5ec;
+  border-radius: 10px;
+  padding: 8px 10px;
+}
+.persona-import textarea {
+  width: 100%;
+  margin-top: 8px;
+  box-sizing: border-box;
+}
+.import-preview {
+  margin-top: 8px;
+}
+.persona-playtest {
+  margin: 10px 0;
+  border-top: 1px dashed #dfe5ec;
+  padding-top: 8px;
+}
+.playtest-compare {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 10px;
+  margin-top: 8px;
+}
+.playtest-side {
+  border: 1px solid #e3e8ee;
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #fff;
+}
+.playtest-side h5 {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+.playtest-reply {
+  background: #f7f9fb;
+  border: 1px solid #e3e8ee;
+  border-radius: 8px;
+  padding: 8px 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12.5px;
+  margin: 6px 0;
+}
