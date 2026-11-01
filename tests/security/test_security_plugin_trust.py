@@ -1,4 +1,6 @@
-"""G4 插件信任级别：manifest.trust 字段、加载透传、policy/gateway 最小钩子。
+"""插件信任级别：manifest.trust 字段、加载透传、policy/gateway 最小钩子。
+
+（原 tests/test_g4_trust.py，G4 里程碑命名；issue #29 起按领域与层级组织。）
 
 契约（docs/g4-operations.md）：
 

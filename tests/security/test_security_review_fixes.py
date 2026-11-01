@@ -1,4 +1,7 @@
-"""Regression tests for post-review integration and security fixes (offline)."""
+"""Regression tests for post-review integration and security fixes (offline).
+
+(Moved from tests/test_review_fixes.py; issue #29 domain-based layout.)
+"""
 from __future__ import annotations
 
 import io

@@ -1,13 +1,7 @@
 name: whale-core tests
 
+# Only run when explicitly requested from Actions.
 on:
-  pull_request:
-    paths-ignore:
-      - '**.md'
-  push:
-    branches: [main]
-    paths-ignore:
-      - '**.md'
   workflow_dispatch:
 
 concurrency:

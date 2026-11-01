@@ -1,4 +1,6 @@
-"""G2 测试：记忆分层治理 + 跨设备 OwnerIdentity。
+"""记忆分层治理 + 跨设备 OwnerIdentity。
+
+（原 tests/test_g2_memory_identity.py，G2 里程碑命名；issue #29 起按领域与层级组织。）
 
 DoD 对照：
 - QQ 提出任务 → 另一渠道（语音/网页）按 owner 查到进度（tasks_for_owner）；

@@ -1,15 +1,7 @@
 name: web console build
 
+# Web builds are opt-in: launch from the Actions tab.
 on:
-  pull_request:
-    paths:
-      - 'web/**'
-      - '.github/workflows/web-build.yml'
-  push:
-    branches: [main]
-    paths:
-      - 'web/**'
-      - '.github/workflows/web-build.yml'
   workflow_dispatch:
 
 concurrency:

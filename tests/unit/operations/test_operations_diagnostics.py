@@ -1,4 +1,6 @@
-"""G4 测试：能力健康视图、运营指标、doctor --json/--deep、插件信任分级。
+"""能力健康视图、运营指标、doctor --json/--deep、插件信任分级。
+
+（原 tests/test_g4_operations.py，G4 里程碑命名；issue #29 起按领域与层级组织。）
 
 全部离线：deep 探测走注入的 fake opener/回环服务，不触外网。
 """
