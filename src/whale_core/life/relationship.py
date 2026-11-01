@@ -19,7 +19,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Tuple
+from datetime import datetime, timezone
+from typing import Callable, Optional, Tuple
 
 from whale_core.life.conversation_context import (
     ConversationKind,
@@ -60,6 +61,30 @@ _ADDRESS_RES = (
 #: 互动边界：只从「我不喜欢/我讨厌/我怕…」式自述提取，原样短引用。
 _BOUNDARY_RE = re.compile(r"我(?:不喜欢|讨厌|怕)([^，。,.；;！!？?]{1,12})")
 
+# ---- issue #41：关系证据的可解释化（置信度 + 时间衰减） --------------------
+#: 互动计数的时间衰减权重（只对有 recorded_at 的时间线生效；私聊历史无
+#: 时间戳，按等权 1.0 计数并在 evidence 里如实说明）。
+DECAY_RECENT_DAYS = 7
+DECAY_MID_DAYS = 30
+W_RECENT, W_MID, W_OLD = 1.0, 0.5, 0.2
+
+
+def _weight(entry_recorded_at: str, now: datetime) -> float:
+    if not entry_recorded_at:
+        return W_RECENT
+    try:
+        ts = datetime.fromisoformat(str(entry_recorded_at))
+    except ValueError:
+        return W_RECENT
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    days = (now - ts).days
+    if days <= DECAY_RECENT_DAYS:
+        return W_RECENT
+    if days <= DECAY_MID_DAYS:
+        return W_MID
+    return W_OLD
+
 
 def _uid_of(principal_id: str) -> str:
     """``anon:qq:{uin}`` / ``paired:qq:{uin}`` → 渠道账号（与提炼管道同口径）。"""
@@ -83,6 +108,12 @@ class RelationshipState:
     boundaries: Tuple[str, ...] = ()
     self_facts: Tuple[str, ...] = field(default_factory=tuple)
     evidence: Tuple[str, ...] = ()        # 来源说明（审计用；不含秘密）
+    # ---- issue #41：可解释证据 ----
+    interaction_score: float = 0.0        # 时间衰减加权互动分
+    recent_7d: int = 0                    # 近 7 天互动次数
+    span_days: int = 0                    # 最早互动距今的天数
+    corrections: int = 0                  # 用户纠正过的记忆条数（superseded）
+    confidence: float = 0.0               # 0..1 证据置信度（公式见 resolver）
 
     @property
     def label(self) -> str:
@@ -97,6 +128,8 @@ class RelationshipState:
                 "保持礼貌与分寸，不假装熟悉、不制造亲昵。"
             )
         parts = [f"关系：{self.label}（有 {self.interaction_count} 次互动记录）。"]
+        if self.recent_7d:
+            parts.append(f"近 7 天有 {self.recent_7d} 次互动（时间衰减已计入判断）。")
         if self.shared_topics:
             parts.append("共同话题：" + "、".join(self.shared_topics) + "。")
         if self.address_as:
@@ -111,35 +144,61 @@ class RelationshipState:
 class RelationshipResolver:
     """从 ResolvedContext 计算当前主体的关系视图。无状态、纯读取。"""
 
-    def __init__(self, store: MemoryStore, *, timeline=None) -> None:
+    def __init__(self, store: MemoryStore, *, timeline=None,
+                 now_fn: Optional[Callable[[], datetime]] = None) -> None:
         self.store = store
         # GroupTimelineStore（可选）；无时间线时群互动计数为 0（fail closed）。
         self.timeline = timeline
+        self._now = now_fn or (lambda: datetime.now(timezone.utc))
 
-    # -- 互动计数（只数有归属证据的消息） ------------------------------------
+    # -- 互动统计（原始计数 + 时间衰减加权 + 近期性/跨度，issue #41） --------
 
-    def interaction_count(self, ctx: ResolvedContext,
-                          conversation_id: str = "") -> int:
+    def interaction_stats(self, ctx: ResolvedContext,
+                          conversation_id: str = "") -> tuple[int, float, int, int]:
+        """返回 (原始计数, 加权分, 近7天次数, 跨度天数)。只数有归属证据的消息。"""
         conv = ctx.conversation
         cid = conversation_id or conv.conversation_id
         uid = _uid_of(ctx.principal.principal_id)
+        now = self._now()
         if conv.kind is ConversationKind.QQ_GROUP:
             if self.timeline is None or not uid:
-                return 0
-            return sum(
-                1
-                for e in self.timeline.recent(cid, limit=1000)
-                if str(e.get("sender_id") or "") == uid and not e.get("is_self")
-            )
+                return 0, 0.0, 0, 0
+            raw = 0
+            score = 0.0
+            recent_7d = 0
+            oldest_days = 0
+            for e in self.timeline.recent(cid, limit=1000):
+                if str(e.get("sender_id") or "") == uid and not e.get("is_self"):
+                    raw += 1
+                    w = _weight(str(e.get("recorded_at") or ""), now)
+                    score += w
+                    ts = str(e.get("recorded_at") or "")
+                    try:
+                        dt = datetime.fromisoformat(ts)
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        days = (now - dt).days
+                        if days <= DECAY_RECENT_DAYS:
+                            recent_7d += 1
+                        oldest_days = max(oldest_days, days)
+                    except ValueError:
+                        pass
+            return raw, score, recent_7d, oldest_days
         # 私聊：历史无 sender 标签，只有会话可结构性证明属于该 principal 时，
         # 其中的用户轮才能计为该主体的互动（否则 0，不猜）。
         if principal_matches_private_conversation(
                 conv.channel, conv.kind, cid, ctx.principal.principal_id):
-            return sum(
+            raw = sum(
                 1 for turn in load_history(self.store, cid)
                 if turn.get("role") == "user"
             )
-        return 0
+            # 私聊历史无时间戳：等权计数，近期性未知（evidence 如实说明）
+            return raw, float(raw), 0, 0
+        return 0, 0.0, 0, 0
+
+    def interaction_count(self, ctx: ResolvedContext,
+                          conversation_id: str = "") -> int:
+        return self.interaction_stats(ctx, conversation_id)[0]
 
     # -- 已授权自述事实（member_private 双门已由 resolver 把守） ---------------
 
@@ -172,12 +231,33 @@ class RelationshipResolver:
                         return tuple(facts)
         return tuple(facts)
 
+    # -- 用户纠正证据（issue #41：纠正可生效、可解释） ------------------------
+
+    def corrections_for(self, ctx: ResolvedContext) -> int:
+        """授权 member_private 空间里被纠正（superseded）的记录条数。"""
+        pid = ctx.principal.principal_id
+        n = 0
+        for ref in ctx.allowed_memory_spaces:
+            if ref.type is not MemorySpaceType.MEMBER_PRIVATE:
+                continue
+            meta = self.store.get(f"space:{ref.space_id}")
+            if not isinstance(meta, dict) or str(meta.get("owner") or "") != pid:
+                continue
+            for kind in (MemoryKind.PREFERENCE, MemoryKind.EPISODE):
+                n += sum(
+                    1 for rec in self.store.list_by_kind(
+                        kind, space_ids=(ref.space_id,))
+                    if "member" in rec.tags and "superseded" in rec.tags)
+        return n
+
     # -- 主入口 ---------------------------------------------------------------
 
     def state_for(self, ctx: ResolvedContext,
                   conversation_id: str = "") -> RelationshipState:
-        count = self.interaction_count(ctx, conversation_id)
+        count, score, recent_7d, span_days = self.interaction_stats(
+            ctx, conversation_id)
         facts = self.self_facts_for(ctx)
+        corrections = self.corrections_for(ctx)
         topics: list[str] = []
         address_as = ""
         boundaries: list[str] = []
@@ -199,17 +279,35 @@ class RelationshipResolver:
         topics = topics[:_MAX_TOPICS]
         boundaries = boundaries[:_MAX_BOUNDARIES]
 
+        # issue #41：熟悉度按**时间衰减加权分**判定（不只按消息总数）；
+        # 阈值常数沿用原口径，避免旧部署关系档位跳变。
         if count <= 0 and not facts:
             familiarity = "stranger"
-        elif count >= FAMILIAR_MIN_INTERACTIONS or (
-                facts and count >= FAMILIAR_WITH_FACTS_MIN):
+        elif score >= FAMILIAR_MIN_INTERACTIONS or (
+                facts and score >= FAMILIAR_WITH_FACTS_MIN):
             familiarity = "familiar"
         else:
             familiarity = "acquainted"
 
-        evidence: list[str] = [f"interactions:{count}"]
+        # 置信度：互动饱和度 + 自述事实 + 时间跨度 + 纠正记录（封顶 1.0）。
+        confidence = min(1.0,
+                         0.5 * min(score / FAMILIAR_MIN_INTERACTIONS, 1.0)
+                         + 0.3 * min(len(facts) / 3, 1.0)
+                         + 0.1 * min(span_days / 14, 1.0)
+                         + 0.1 * min(corrections, 1))
+        if familiarity == "stranger":
+            confidence = 0.0
+
+        evidence: list[str] = [f"interactions:{count}",
+                               f"weighted:{score:.1f}"]
+        if recent_7d:
+            evidence.append(f"recent_7d:{recent_7d}")
+        if span_days:
+            evidence.append(f"span_days:{span_days}")
         if facts:
             evidence.append(f"member_private_facts:{len(facts)}")
+        if corrections:
+            evidence.append(f"user_corrections:{corrections}")
         return RelationshipState(
             principal_id=ctx.principal.principal_id,
             familiarity=familiarity,
@@ -219,4 +317,9 @@ class RelationshipResolver:
             boundaries=tuple(boundaries),
             self_facts=facts,
             evidence=tuple(evidence),
+            interaction_score=round(score, 2),
+            recent_7d=recent_7d,
+            span_days=span_days,
+            corrections=corrections,
+            confidence=round(confidence, 2),
         )

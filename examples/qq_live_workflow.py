@@ -416,13 +416,20 @@ def cmd_run(args) -> int:
             except Exception as exc:
                 print(f"  [语音] {aid[:8]} 读取失败：{type(exc).__name__}")
 
-    def _plan_segments(text, *, is_group, rhythm):
+    def _plan_segments(text, *, is_group, rhythm, anxious=False,
+                       familiarity="stranger"):
         """issue #23：模型规划优先（◆ 分隔/[[沉默]]/[[稍后补充]]），
-        无标记回落 split_reply。返回 (bubbles, plan)。"""
-        from whale_core.life.response_planner import plan_reply
+        无标记回落 split_reply。返回 (bubbles, plan)。
+        issue #41：语气/长度目标由确定性信号推导（derive_plan_guidance），
+        随计划结构化返回（供 trace/宿主决策；模型不能自报目标）。"""
+        from whale_core.life.response_planner import (
+            derive_plan_guidance, plan_reply)
+        guidance = derive_plan_guidance(
+            familiarity=familiarity, anxious=anxious, is_group=is_group)
         plan = plan_reply(text, is_group=is_group,
                           max_segments=rhythm.effective_max_segments(
-                              is_group=is_group))
+                              is_group=is_group),
+                          **guidance)
         if plan.follow_up:
             # 「稍后补充」是意图声明：只有存在服务端可信的未完成任务/事件
             # 时才可能真的续聊（#20）；此处只记录，不产生任何后台行为。
