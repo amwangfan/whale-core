@@ -307,33 +307,102 @@ class ToolExecutionMixin:
                       timeout: float, task_id: str) -> tuple[bool, str] | None:
         if not self._workers.acquire(blocking=False):
             return False, f"tool-fail:{spec.name}:worker-capacity-exhausted"
-        done = threading.Event()
-        box: list[tuple[bool, str]] = []
-        def run() -> None:
-            try:
-                box.append(self._run_tool(spec, plan, action=action))
-            except Exception as exc:
-                box.append((False, f"tool-fail:{spec.name}:{type(exc).__name__}"))
-            finally:
+        try:
+            # issue #50：进程隔离路径——超时/取消真实杀掉子进程组，槽位
+            # 由本等待方归还（无泄漏线程）；handler 不可 pickle 是配置错误。
+            if getattr(spec, "isolation", "thread") == "process":
+                if spec.handler is None:
+                    return False, f"tool-unwired:{spec.name}"
+                from whale_core.core.runtime.isolation import (
+                    IsolationError, run_callable_isolated)
+
+                def _cancelled() -> bool:
+                    record = self.store.get(f"task:{task_id}") or {}
+                    return bool(record.get("cancel_requested"))
+
                 try:
-                    with self._task_lock:
-                        record = self.store.get(f"task:{task_id}")
-                        if isinstance(record, dict):
-                            record["in_flight"] = False
-                            self.store.put(f"task:{task_id}", record)
-                except Exception:
-                    # A closed/failing store must not leak worker capacity.
-                    pass
+                    outcome = run_callable_isolated(
+                        spec.handler, dict(plan.slots), timeout_s=timeout,
+                        output_chars=self.tool_output_chars,
+                        proc_registry=self._isolated_procs,
+                        registry_key=f"{task_id}:{spec.name}",
+                        cancel_check=_cancelled)
+                except IsolationError as exc:
+                    return False, f"tool-fail:{spec.name}:{exc}"
+                if outcome is None:
+                    return None
+                ok, text = outcome
+                return ok, f"tool:{spec.name}:ok:{text}" if ok else \
+                    f"tool-fail:{spec.name}:{text[:200]}"
+            # 线程路径：等待方持槽。超时/取消时**等待方归还槽位**，卡死的
+            # 线程转为 orphan（登记+封顶），不再永久占用执行容量（issue #50
+            # 修复：旧实现槽位由线程 finally 释放，插件永久阻塞 4 次即全灭）。
+            with self._orphan_lock:
+                if len(self._orphans) >= self._max_orphans:
+                    return False, f"tool-fail:{spec.name}:orphan-capacity-exhausted"
+            done = threading.Event()
+            box: list[tuple[bool, str]] = []
+            orphan_key = f"{task_id}:{spec.name}:{time.monotonic_ns()}"
+
+            def run() -> None:
+                try:
+                    box.append(self._run_tool(spec, plan, action=action))
+                except Exception as exc:
+                    box.append((False, f"tool-fail:{spec.name}:{type(exc).__name__}"))
                 finally:
-                    self._workers.release()
                     done.set()
-        threading.Thread(target=run, daemon=True, name="whale-tool").start()
-        deadline = time.monotonic() + timeout
-        while not done.wait(min(0.05, max(0, deadline - time.monotonic()))):
-            record = self.store.get(f"task:{task_id}") or {}
-            if record.get("cancel_requested") or time.monotonic() >= deadline:
-                return None
-        return box[0]
+                    try:
+                        with self._task_lock:
+                            record = self.store.get(f"task:{task_id}")
+                            if isinstance(record, dict):
+                                record["in_flight"] = False
+                                self.store.put(f"task:{task_id}", record)
+                    except Exception:
+                        # A closed/failing store must not leak worker capacity.
+                        pass
+                    with self._orphan_lock:
+                        self._orphans.pop(orphan_key, None)
+
+            threading.Thread(target=run, daemon=True, name="whale-tool").start()
+            deadline = time.monotonic() + timeout
+            while not done.wait(min(0.05, max(0, deadline - time.monotonic()))):
+                record = self.store.get(f"task:{task_id}") or {}
+                if record.get("cancel_requested") or time.monotonic() >= deadline:
+                    with self._orphan_lock:
+                        self._orphans[orphan_key] = {
+                            "task_id": task_id, "tool": spec.name,
+                            "since": time.time()}
+                    return None
+            return box[0]
+        finally:
+            self._workers.release()
+
+    def orphan_report(self) -> list[dict]:
+        """issue #50：当前被放弃等待但仍在跑的孤儿工具调用（诊断用）。"""
+        with self._orphan_lock:
+            return [dict(v) for v in self._orphans.values()]
+
+    def shutdown(self, *, grace_s: float = 2.0) -> dict:
+        """服务关闭：回收在途执行（issue #50）。
+
+        - 进程隔离的子进程：真实终止（进程组），不留给系统；
+        - 线程路径无法安全杀死——daemon 线程随进程退出回收；返回 orphan
+          清单供日志/诊断如实记录（不谎报「已取消」）。
+        """
+        with self._orphan_lock:
+            orphans = [dict(v) for v in self._orphans.values()]
+        killed: list[str] = []
+        for key, proc in list(self._isolated_procs.items()):
+            try:
+                if proc.is_alive():
+                    from whale_core.core.runtime.isolation import _kill_tree
+                    _kill_tree(proc)
+                    killed.append(key)
+            except Exception:
+                pass
+            finally:
+                self._isolated_procs.pop(key, None)
+        return {"isolated_killed": killed, "orphan_threads": orphans}
 
     def _run_tool(self, spec: ToolSpec, plan: IntentPlan, *, action: ActionIntent | None = None) -> tuple[bool, str]:
         """执行单个工具，返回 (ok, receipt)。风险门控：非只读必经插件网关。"""

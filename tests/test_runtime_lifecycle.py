@@ -73,21 +73,32 @@ def test_cancel_pending_never_executes():
     assert orch.cancel_task(task.task_id)["status"] == "cancelled"
     with pytest.raises(ValueError): orch.decide_task(task.task_id, "approve")
 
-def test_timeout_is_unknown_no_replay_and_worker_capacity_bounded(monkeypatch):
+def test_timeout_is_unknown_no_replay_and_orphan_capacity_bounded(monkeypatch):
+    """issue #50：超时记 unknown 不重试；卡死线程转 orphan、槽位立即归还
+    （不再永久占满），orphan 数封顶防无限泄漏；orphan 完成后自动销账。"""
     release = threading.Event()
     calls = []
     orch = make()
+    orch._max_orphans = 2
     orch.tools.register(ToolSpec("slow", "read", handler=lambda _: (calls.append(1), release.wait())[0]))
     monkeypatch.setattr("whale_core.core.runtime.plan_from_model_text", lambda _: IntentPlan(
         goal="slow", capabilities=("read",), timeout_s=.03))
     try:
-        results = [orch.handle_message("c", "等待") for _ in range(5)]
-        assert [r.status for r in results[:4]] == ["unknown"] * 4
-        assert results[4].status == "failed"
-        assert len(calls) == 4
-        with pytest.raises(ValueError): orch.resume_task(results[0].task_id)
+        r1 = orch.handle_message("c", "等待")
+        r2 = orch.handle_message("c", "等待")
+        assert (r1.status, r2.status) == ("unknown", "unknown")  # 槽位照常释放
+        assert len(orch.orphan_report()) == 2
+        r3 = orch.handle_message("c", "等待")
+        assert r3.status == "failed"          # orphan 封顶
+        assert len(calls) == 2                # 第 3 次未派发新线程
+        with pytest.raises(ValueError): orch.resume_task(r1.task_id)
     finally:
         release.set()
+    for _ in range(100):                      # orphan 线程结束后自动销账
+        if not orch.orphan_report():
+            break
+        time.sleep(0.02)
+    assert orch.orphan_report() == []
 
 def test_cancel_in_flight_blocks_following_steps(monkeypatch):
     started, release = threading.Event(), threading.Event()
