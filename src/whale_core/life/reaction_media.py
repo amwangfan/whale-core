@@ -82,6 +82,19 @@ class ReactionMediaStore:
         self.store.delete(key)
         return True
 
+    def has_sha256(self, sha: str) -> bool:
+        """按内容哈希查重（自动收编防重复入库；2026-11-03 owner 授权场景）。"""
+        if not sha or self.artifacts is None:
+            return False
+        for m in self.list():
+            try:
+                rec = self.store.get("artifact:" + m.artifact_id) or {}
+            except Exception:
+                continue
+            if isinstance(rec, dict) and rec.get("sha256") == sha:
+                return True
+        return False
+
     def list(self, *, persona_id: str | None = None) -> tuple[ReactionMedia, ...]:
         """persona_id=None 列全部；否则只列全局 + 该角色归属的素材。"""
         out: list[ReactionMedia] = []

@@ -221,6 +221,15 @@ def sse_message_to_incoming(event: Mapping, *, self_uin: str,
                 "url": urls[0] if urls else "",
                 "urls": urls,
                 "name": str(data.get("fileName") or "image")[:100],
+                # 表情包识别的元数据信号（2026-11-03 owner 授权群表情自动收编）：
+                # summary 常见「[动画表情]」等、imgType、尺寸与大小——
+                # 全部是非内容结构字段，不含 URL 以外的隐私信息。
+                "summary": str(data.get("summary") or "")[:100],
+                "img_type": str(data.get("imgType") or "")[:20],
+                "width": int(data.get("imgWidth") or 0),
+                "height": int(data.get("imgHeight") or 0),
+                "size": int(data.get("fileSize") or 0),
+                "md5": str(data.get("md5") or "")[:64],
             })
     # 诊断（结构性，不含正文/URL）：图片链路排障用——记录元素类型序列与
     # pic 元素实际携带的字段名，便于确认上游推送是否含附件。

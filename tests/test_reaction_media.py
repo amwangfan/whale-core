@@ -137,3 +137,16 @@ def test_artifact_retention_override(tmp_path):
     import pytest as _pt
     with _pt.raises(ValueError):
         arts.save_bytes(b"z" * 10, "image/png", retention_s=-1)
+
+
+def test_has_sha256_dedup():
+    """自动收编查重：同内容哈希不再入库（2026-11-03 owner 授权场景）。"""
+    import hashlib
+    ms, arts = _store()
+    ms.add("art-1", ("开心",))
+    # 模拟 ArtifactStore 的 kv 元数据（fake artifacts 不写 kv，这里补登记）
+    ms.store.put("artifact:art-1", {"sha256": hashlib.sha256(b"img1").hexdigest()})
+    sha1 = hashlib.sha256(b"img1").hexdigest()
+    assert ms.has_sha256(sha1) is True
+    assert ms.has_sha256(hashlib.sha256(b"other").hexdigest()) is False
+    assert ms.has_sha256("") is False
