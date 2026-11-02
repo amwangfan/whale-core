@@ -571,3 +571,23 @@ def test_no_inner_state_no_extra_injection(env):
     persona = model.calls[0]["persona"]
     assert "你最近感兴趣" not in persona
     assert "还没聊完" not in persona
+
+
+def test_companion_injects_recent_activity_scoped_and_honest(env):
+    """issue #56：本会话终态任务进入对话上下文；别会话的事不出现。"""
+    store = env["store"]
+    store.put("task:t1", {"task_id": "t1", "phase": "succeeded",
+                          "goal": "画一只鲸鱼", "at": 1.0})
+    store.put("runtime:task:t1", {"conversation_id": A_PRIVATE})
+    store.put("task:t2", {"task_id": "t2", "phase": "failed",
+                          "goal": "别的会话的事", "at": 2.0})
+    store.put("runtime:task:t2", {"conversation_id": GROUP})
+    store.put("tasks:recent", ["t1", "t2"])
+    ctx = _resolve(env, A_UIN, A_PRIVATE)
+    model = _FakeModel()
+    WhaleCompanion(store, model, timeline=env["timeline"]).chat(
+        "你今天干嘛了", conversation_id=A_PRIVATE, context=ctx, episodic=False)
+    persona = model.calls[0]["persona"]
+    assert "「画一只鲸鱼」完成了" in persona
+    assert "别的会话的事" not in persona  # 会话作用域隔离
+    assert "别装成完成了" in persona

@@ -152,8 +152,13 @@ class WhaleCompanion:
                 intent = derive_pragmatic_intent(
                     original, is_group=is_group, familiarity=rel.familiarity,
                     open_topics=c_state.unfinished_topics, anxious=policy.anxious)
+                # issue #56：近期活动背景——只列本会话真实终态任务，问到近况
+                # 可自然提起；状态照实（没成/不确定不装完成），不主动汇报。
+                from whale_core.life.activity import render_activity_hint
+                activity_hint = render_activity_hint(self.store, scope) if scope else ""
                 hints = [h for h in (rel.render(), policy.render(),
-                                     "\n".join(state_lines), intent.hint) if h]
+                                     "\n".join(state_lines), activity_hint,
+                                     intent.hint) if h]
                 if hints:
                     persona_text = (
                         (persona_text or "")
