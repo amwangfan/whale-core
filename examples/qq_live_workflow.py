@@ -1541,10 +1541,14 @@ def cmd_run(args) -> int:
     def _dynamic_planning_hint():
         hint = _base_planning_hint
         try:
-            if reaction_store.list():
+            items = reaction_store.list()
+            if items:
+                # 带上素材库的真实标签——模型写不存在的标签=选不到图
+                tag_pool = sorted({t for m in items for t in m.tags})[:12]
                 hint += ("\n想在文字之外配一张应景的表情图时，可以在回复结尾写 "
-                         "[[表情:标签]]（标签比如 开心/疑惑/庆祝/无语——按素材"
-                         "实际标签来）；有匹配素材才会真的发出去，别每轮都用。")
+                         "[[表情:标签]]（只能从现有素材标签里挑："
+                         + "/".join(tag_pool) +
+                         "）；有匹配素材才会真的发出去，别每轮都用。")
         except Exception:
             pass
         return hint
