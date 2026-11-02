@@ -59,11 +59,15 @@ class ArtifactStore:
             raise ValueError("artifact limits must be positive")
         self._fetcher = fetcher or WebFetcher(timeout=30, max_bytes=self.max_bytes+1)
 
-    def save_bytes(self, data: bytes, content_type: str) -> Artifact:
+    def save_bytes(self, data: bytes, content_type: str, *,
+                   retention_s: float | None = None) -> Artifact:
+        """``retention_s``：覆盖默认 7 天保留期（如表情素材库等长期素材，
+        issue #57）；None = 用 store 默认值。"""
         with self._lock:
-            return self._save_bytes(data, content_type)
+            return self._save_bytes(data, content_type, retention_s=retention_s)
 
-    def _save_bytes(self, data: bytes, content_type: str) -> Artifact:
+    def _save_bytes(self, data: bytes, content_type: str, *,
+                    retention_s: float | None = None) -> Artifact:
         content_type = content_type.split(";", 1)[0].strip().lower()
         if content_type not in _TYPES:
             raise ValueError("unsupported artifact content type")
@@ -75,8 +79,11 @@ class ArtifactStore:
         if total + len(data) > self.max_total_bytes:
             raise ValueError("artifact storage quota exceeded")
         now = time.time()
+        retention = self.retention_seconds if retention_s is None else float(retention_s)
+        if not math.isfinite(retention) or retention <= 0:
+            raise ValueError("retention_s must be positive")
         artifact = Artifact(uuid4().hex, content_type, len(data), hashlib.sha256(data).hexdigest(),
-                            now, now+self.retention_seconds)
+                            now, now+retention)
         path = self.directory / (artifact.artifact_id + _TYPES[content_type])
         # Exclusive creation prevents following attacker-controlled symlinks.
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

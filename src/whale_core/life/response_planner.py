@@ -36,6 +36,9 @@ PLANNING_HINT = (
 
 SILENCE_MARK = "[[沉默]]"
 _FOLLOW_RE = re.compile(r"\[\[稍后补充[:：]([^\]\n]{1,60})\]\]")
+# issue #57：反应图意图标记——模型只提语义标签（如 [[表情:开心]]），
+# 实际选图由素材检索层完成（模型不拼任何文件路径/URL）。
+_REACTION_RE = re.compile(r"\[\[表情[:：]([^\]\n]{1,20})\]\]")
 # 气泡分隔：任何 ◆ 一律视为分隔（独占一行/行首内联/句中夹带都认）。
 # ◆ 不是正常中文用字，模型只会从规划提示里学到它——出现即标记。
 # 2026-11-01 两次修复：先放行首内联形态，再放开句中形态（生产实证
@@ -123,6 +126,7 @@ class ReplyPlan:
     tone_target: str = ""          # warm | neutral | calm | ""（无目标）
     length_target: str = ""        # short | normal | ""
     delay_ms: int = 0              # 可选延迟（0 = 立即；由宿主节奏决定，不由模型）
+    reaction_tag: str = ""         # issue #57：反应图语义意图（标签；选图由素材层完成）
 
 
 def derive_plan_guidance(*, familiarity: str = "stranger", anxious: bool = False,
@@ -143,13 +147,15 @@ def derive_plan_guidance(*, familiarity: str = "stranger", anxious: bool = False
 def plan_reply(text: str, *, is_group: bool, max_segments: int,
                tone_target: str = "", length_target: str = "") -> ReplyPlan:
     """把模型原始输出解析为发言计划（确定性；无标记走既有规则拆分）。"""
-    def _mk(bubbles, *, silent=False, follow_up="", planner, delay_ms=0):
+    def _mk(bubbles, *, silent=False, follow_up="", planner, delay_ms=0,
+            reaction_tag=""):
         action = "observe" if silent else ("follow_up" if follow_up else "reply")
         return ReplyPlan(
             tuple(b for b in (_tidy_bubble(t) for t in bubbles) if b),
             silent=silent, follow_up=follow_up, planner=planner,
             action=action, tone_target=tone_target,
-            length_target=length_target, delay_ms=delay_ms)
+            length_target=length_target, delay_ms=delay_ms,
+            reaction_tag=reaction_tag)
 
     raw = str(text or "").strip()
     if not raw:
@@ -157,6 +163,15 @@ def plan_reply(text: str, *, is_group: bool, max_segments: int,
     # 沉默标记只认开头（防正文注入伪造沉默/归属）
     if raw.startswith(SILENCE_MARK):
         return _mk((), silent=True, planner="silent")
+    # issue #57：反应图意图（语义标签，选图由宿主素材层完成）；与「稍后补充」
+    # 同纪律——围栏代码块内不当标记，剥全部出现、带回第一个标签。
+    reaction_tag = ""
+    parts = _FENCE_RE.split(raw)
+    first_reaction = next(
+        (m for p in parts if (m := _REACTION_RE.search(p))), None)
+    if first_reaction is not None:
+        reaction_tag = first_reaction.group(1).strip()
+        raw = _map_outside_fences(raw, lambda p: _REACTION_RE.sub("", p)).strip()
     # 稍后补充：剥离**所有**标记文本（模型可能写多个，search 只剥一个会漏），
     # 第一个原因带回给调用方（调用方决定是否真有后续事件）。
     # 围栏代码块内的 [[…]] 是代码内容，不当标记处理。
@@ -166,7 +181,7 @@ def plan_reply(text: str, *, is_group: bool, max_segments: int,
     if first is not None:
         follow_up = first.group(1).strip()
         raw = _map_outside_fences(raw, lambda p: _FOLLOW_RE.sub("", p)).strip()
-    if not raw:
+    if not raw and not reaction_tag:
         return _mk((), silent=True, follow_up=follow_up, planner="silent")
 
     if _BUBBLE_SEP_RE.search(raw):
@@ -175,11 +190,12 @@ def plan_reply(text: str, *, is_group: bool, max_segments: int,
         if len(parts) > cap:
             # 超出上限的尾部合并进最后一个气泡（内容不丢，不静默截断）
             parts = [*parts[:cap - 1], "\n".join(parts[cap - 1:])]
-        return _mk(parts, follow_up=follow_up, planner="model")
+        return _mk(parts, follow_up=follow_up, planner="model",
+                   reaction_tag=reaction_tag)
 
     # 无显式规划标记：回落既有语义分段（fallback，不是模型规划）
     return _mk(split_reply(raw, is_group=is_group, max_segments=max_segments),
-               follow_up=follow_up, planner="fallback")
+               follow_up=follow_up, planner="fallback", reaction_tag=reaction_tag)
 
 
 def clean_reply_text(text: str) -> str:
@@ -193,3 +209,82 @@ def clean_reply_text(text: str) -> str:
     if plan.silent:
         return ""
     return "\n".join(plan.bubbles)
+
+
+# ---------------------------------------------------------------------------
+# issue #55：语用意图与表达倾向（软性参考，非模板）
+# ---------------------------------------------------------------------------
+
+#: 收尾信号：对话在自然收束（道晚安/短确认/先撤了）。
+_WRAP_WORDS = ("晚安", "去睡了", "先睡了", "先这样", "先这样啦", "回头说",
+               "回聊", "拜拜", "拜~", "溜了", "先撤", "去忙了", "去吃饭")
+_WRAP_ACKS = frozenset({"嗯", "嗯嗯", "好", "好的", "好哒", "行", "行吧", "ok",
+                        "OK", "收到", "好嘞", "哦哦", "噢", "哦"})
+#: 玩梗/轻松信号（避免「草」这类高误命中单字——「草莓」「草原」不是梗）。
+_PLAY_WORDS = ("哈哈", "哈哈哈", "笑死", "笑不活", "233", "xswl", "绷不住",
+               "绝了", "离大谱", "好家伙", "hhh", "HHH", "😂", "🤣")
+#: 认真求解信号（问题词 + 有足够内容）。
+_ASK_WORDS = ("为什么", "怎么办", "怎么", "如何", "什么", "哪", "能不能", "可以吗",
+              "是不是", "有没有", "帮我", "求", "请教")
+#: 对方在分享自己的事。
+_SHARE_WORDS = ("我今天", "我刚", "我最近", "我昨天", "上次我", "我家", "我们")
+
+
+@dataclass(frozen=True)
+class PragmaticIntent:
+    """本轮的表达倾向（表达层软性参考，无权限语义；``intent=""`` 表示无倾向）。
+
+    意图由确定性信号推导（不输出生成模板、不指定话术），模型收到的是
+    一句软性提示，仍由人格决定具体怎么表达（issue #55）。
+    """
+
+    intent: str = ""   # play | answer | share | continue | wrap | ""
+    hint: str = ""     # 注入人格层的一行软提示；intent=="" 时为空串
+
+
+def derive_pragmatic_intent(
+    text: str,
+    *,
+    is_group: bool = False,
+    familiarity: str = "stranger",
+    open_topics: Tuple[str, ...] = (),
+    anxious: bool = False,
+) -> PragmaticIntent:
+    """从当前消息 + 关系 + 未完话题推导本轮表达倾向（纯函数，无模型调用）。
+
+    规则与顺序（每轮至多一个倾向，命中即止）：
+    - 焦虑语境不强行给倾向（ExpressionPolicy 已在引导安抚节奏）；
+    - 收尾信号 → wrap：自然结束，不硬找话题；
+    - 未完话题被重新提起 → continue：自然承接，不自然就不硬提；
+    - 玩梗信号 → play：顺着玩，别一本正经（陌生人场合不给，省得冒犯）；
+    - 实质提问 → answer：认真把事说清楚；
+    - 对方在分享自己的事 → share：回应之外可以自然说说自己的看法/近况。
+    """
+    t = (text or "").strip()
+    if not t or anxious:
+        return PragmaticIntent()
+    stripped = t.rstrip("！!？?~～。.,， ")
+    if any(w in t for w in _WRAP_WORDS) or stripped in _WRAP_ACKS:
+        return PragmaticIntent(
+            "wrap", "这轮话题在自然收尾：简短自然结束就好，别硬找话题、别追问。")
+    for topic in open_topics:
+        topic = str(topic).strip()
+        if topic and len(topic) >= 2 and (topic in t or t in topic):
+            return PragmaticIntent(
+                "continue",
+                f"这里有之前没聊完的「{topic[:24]}」：聊得自然就顺手接上，"
+                "不自然就别硬提。")
+    if any(w in t for w in _PLAY_WORDS):
+        if familiarity != "stranger":
+            return PragmaticIntent(
+                "play", "这轮气氛轻松：接得住梗就顺着玩，别一本正经、别说教。")
+        return PragmaticIntent()
+    has_question = ("?" in t or "？" in t) and len(t) >= 6
+    if has_question or any(w in t for w in _ASK_WORDS) and len(t) >= 8:
+        return PragmaticIntent(
+            "answer", "这轮适合认真回应：把事说清楚，别光顾着抖机灵。")
+    if any(w in t for w in _SHARE_WORDS):
+        return PragmaticIntent(
+            "share", "对方在分享自己的事：好好回应之外，也可以自然说说你的看法"
+            "或你的近况。")
+    return PragmaticIntent()

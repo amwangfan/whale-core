@@ -32,6 +32,11 @@ def _store_runtime_state(store: MemoryStore) -> tuple[dict, bool]:
             state = {"task_lock": threading.RLock(),
                      "workers": threading.BoundedSemaphore(4), "active_tasks": set(), "transient_args": {}}
             _STORE_STATES[store] = state
+        # issue #50：孤儿工具调用（超时/取消后仍在跑的线程）与进程隔离子进程
+        # 的登记簿；容量上限防止无限泄漏。旧 state 补键，同 store 共享同一本簿。
+        state.setdefault("orphans", {})
+        state.setdefault("orphan_lock", threading.Lock())
+        state.setdefault("isolated_procs", {})
         return state, first
 
 

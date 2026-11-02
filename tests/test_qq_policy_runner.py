@@ -235,6 +235,34 @@ def test_dry_run_makes_no_http(runner, monkeypatch):
     assert runner.dispatch_dry_run(store, "qq-reply:m2") == "accepted"
 
 
+# ── issue #59：双开关 ↔ 主动私信授权链一致 ────────────────────────────
+
+
+def test_live_auto_enables_auto_send_in_prefs(runner, monkeypatch):
+    """双开关置位后，risk_prefs 携带 auto_send=True，主动私信按授权自动派发
+    （渠道范围/额度/静默仍约束）；未置位时保持逐条人审。"""
+    monkeypatch.setattr(runner, "_PROCESS_LIVE_AUTO", False)
+    assert runner.risk_prefs().auto_send is False
+    store = InMemoryStore()
+    outbox = propose_draft(store, "qq-proactive:1")
+    day = datetime(2026, 11, 2, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    verdict = outbox.inspect("qq-proactive:1", runner.risk_prefs(), now=day)
+    assert verdict.status == "needs_approval"
+
+    monkeypatch.setattr(runner, "_PROCESS_LIVE_AUTO", True)
+    assert runner.risk_prefs().auto_send is True
+    verdict = outbox.inspect("qq-proactive:1", runner.risk_prefs(), now=day)
+    assert verdict.status == "ready"
+
+
+def test_policy_summary_reflects_auto_send_mode(runner, monkeypatch):
+    monkeypatch.setattr(runner, "_PROCESS_LIVE_AUTO", True)
+    line = runner.policy_summary(runner.risk_prefs())
+    assert "自动派发" in line
+    monkeypatch.setattr(runner, "_PROCESS_LIVE_AUTO", False)
+    assert "人工逐条" in runner.policy_summary(runner.risk_prefs())
+
+
 def test_dry_run_port_is_print_only(runner):
     port = runner.DryRunSendPort()
     draft = ProactiveDraft("d", "文本", "r", ("e",), channel="direct_message")

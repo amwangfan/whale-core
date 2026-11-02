@@ -14,13 +14,19 @@ transaction  denied      needs_approval         ready（且过限额/日限）
 ===========  ==========  =====================  =========================
 
 - transaction 的批准**不可由 auto_send 类配置代劳**——每笔单独人审，
-  与 ProactiveOutbox「call/direct_message 强制 needs_approval」同款语义；
+  与 ProactiveOutbox「call 强制 needs_approval」同款语义；
 - 未注册插件 / 未声明动作 / 未声明风险级 → 一律 denied；
 - 台账（audit）只记动作与裁决，不记 args 全文（可能含隐私 / 凭据形状）。
 
 信任级别钩子（G4，manifest.trust）：``trust="external"`` 的插件执行
-**非 read_only** 动作时强制 needs_approval——宿主的 auto_approve_risks
-放宽对 external 插件不生效；显式批准后仍走原有 ready 路径（不新造状态机）。
+**非 read_only** 动作时强制 needs_approval——宿主的 auto_approve_risks /
+auto_approve_actions 放宽对 external 插件不生效；显式批准后仍走原有
+ready 路径（不新造状态机）。
+
+按动作免审（issue #59）：``auto_approve_actions`` 接受 ``"plugin_id.action"``
+精确对，宿主可针对单个已授权能力免逐次审批（典型：personal 档的沙箱终端），
+而不是把整个 communicate 风险级放开。transaction 动作永远不可列入——构造时
+若已能解析出该动作是 transaction 直接 ValueError，执行时再次兜底。
 """
 
 from __future__ import annotations
@@ -62,6 +68,7 @@ class PluginActionPolicy:
         max_daily_transactions: int | None = None,
         transaction_count_today: Callable[[], int] | None = None,
         auto_approve_risks: frozenset[str] | None = None,
+        auto_approve_actions: frozenset[str] | None = None,
     ) -> None:
         if max_transaction_amount is not None and (
             not math.isfinite(max_transaction_amount) or max_transaction_amount < 0
@@ -78,6 +85,18 @@ class PluginActionPolicy:
         self.auto_approve_risks = frozenset(
             RiskClass(r).value for r in auto  # 非法值在此抛 ValueError
         )
+        # 按动作免审（issue #59）：精确到 "plugin_id.action"。transaction 动作
+        # 列入即拒（能解析时）；解析不了（插件未注册）留到 evaluate 兜底。
+        actions = frozenset(auto_approve_actions or ())
+        for pair in actions:
+            if pair.count(".") != 1:
+                raise ValueError(f"auto_approve_actions 项需为 'plugin_id.action'：{pair!r}")
+            pid, act = pair.split(".", 1)
+            manifest = registry.manifest(pid)
+            if manifest is not None and act in manifest.actions:
+                if manifest.risk_of(act) is RiskClass.TRANSACTION:
+                    raise ValueError("transaction action can never be auto-approved")
+        self.auto_approve_actions = actions
         self.registry = registry
         self.max_transaction_amount = max_transaction_amount
         self.max_daily_transactions = max_daily_transactions
@@ -133,6 +152,11 @@ class PluginActionPolicy:
         if risk is RiskClass.COMMUNICATE:
             if explicitly_approved:
                 return PluginVerdict("ready", "approved outbound", risk.value, plugin_id, action)
+            if f"{plugin_id}.{action}" in self.auto_approve_actions:
+                return PluginVerdict(
+                    "ready", "action auto-approved by host policy (issue #59)",
+                    risk.value, plugin_id, action,
+                )
             if risk.value in self.auto_approve_risks:
                 return PluginVerdict(
                     "ready", "communicate auto-approved by host policy (R1)",

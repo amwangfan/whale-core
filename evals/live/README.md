@@ -7,7 +7,8 @@
 
 ## 数据纪律（硬性）
 
-1. **场景全部合成**：`scenarios.py` 的 10 类场景不来自、不复述任何真实
+1. **场景全部合成**：`scenarios.py` 的 14 类场景（issue #40 十类 + issue
+   #53 增补接梗/技术求助/主动分享/自然收尾）不来自、不复述任何真实
    私聊原文；因此 run JSON 可以保存模型输出原文并入库。
 2. **不提交真实私聊**：任何来自生产对话的文本都不得进入本目录。
 3. **密钥不落盘**：`DEEPSEEK_API_KEY` 只从环境变量或 `--env` 指定的 env
@@ -25,16 +26,17 @@
 # 基线版本（先 checkout 基线代码，或用基线人格卡）
 PYTHONPATH=src python3 -m evals.live.live_runner \
     --env /opt/whale/secrets/qq_workflow.env \
-    --persona-id default \
     --out evals/live/out/baseline
 
 # 候选版本（同一人格卡、同一场景集、登记同一组采样参数）
 PYTHONPATH=src python3 -m evals.live.live_runner \
     --env /opt/whale/secrets/qq_workflow.env \
-    --persona-id default \
     --out evals/live/out/candidate
 ```
 
+- 默认 `--persona-id eval-default`：issue #53 的合成评测基线卡
+  （`eval_persona.py`），缺失时自动装入评测存储，新鲜检出也能一条命令跑通；
+  测库存卡用 `--persona-id <id> --store <sqlite>`；
 - 缺 `DEEPSEEK_API_KEY` 时退出码 2 并打印说明；
 - `--store <sqlite 路径>` 用于评测库存（非 builtin）人格卡；
 - run JSON 元数据含：模型名、采样参数（登记值）、persona_id、人格

@@ -47,8 +47,10 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -141,10 +143,18 @@ def risk_prefs(store=None) -> ProactivePrefs:
     return load_prefs(store, base)
 
 
+# 进程级双开关状态（issue #59）：cmd_run 启动时判定一次并置位。置位后
+# 主动私信（direct_message）经 ProactiveOutbox 按授权自动派发——渠道范围、
+# 每日额度、静默时段照常约束；电话仍单独授权 + 逐条人审。
+_PROCESS_LIVE_AUTO = False
+
+
 def _env_risk_prefs() -> ProactivePrefs:
     """风控策略（issue #13 统一口径）：被动回复与主动行为是两套预算。
 
     - 主动：DAILY_LIMIT 默认 10/天 + QUIET 22–7（与 docs/research §6.5 一致）；
+      双开关（--live-auto-send + QQ_LIVE_AUTOSEND=1）已启用时 auto_send=True，
+      主动私信按该授权自动派发（issue #59），不再逐条人审；
     - 被动回复（仅回应已配对 owner 入站）：PASSIVE_DAILY_LIMIT 默认 200/天为
       防跑飞保险丝（自激循环/风暴），PASSIVE_REPLY_IN_QUIET 默认开——深夜
       owner 来件照常回复（对话延续不是打扰）；豁免**只**作用于被动回复。
@@ -155,6 +165,7 @@ def _env_risk_prefs() -> ProactivePrefs:
     return ProactivePrefs(
         enabled=True,
         allowed_channels=frozenset({"direct_message"}),
+        auto_send=_PROCESS_LIVE_AUTO,
         daily_limit=int(os.environ.get("DAILY_LIMIT", "10")),
         quiet_start=dtime(int(os.environ.get("QUIET_START", "22"))),
         quiet_end=dtime(int(os.environ.get("QUIET_END", "7"))),
@@ -166,13 +177,16 @@ def _env_risk_prefs() -> ProactivePrefs:
 
 def policy_summary(prefs: ProactivePrefs) -> str:
     """启动公示的生效策略（只含策略参数，不含任何密钥）。"""
+    approval = ("主动私信按授权自动派发（双开关已启用；渠道/额度/静默仍约束）"
+                if prefs.auto_send else
+                "人工逐条（--auto-approve 仅 dry-run 演示；无人值守真实发送需 "
+                "--live-auto-send + QQ_LIVE_AUTOSEND=1 双开关）")
     return (
         f"[策略] 主动: 上限={prefs.daily_limit}/日 静默={prefs.quiet_start.hour:02d}:00–"
         f"{prefs.quiet_end.hour:02d}:00 | "
         f"被动回复: 上限={prefs.passive_daily_limit}/日 "
         f"静默豁免={'是' if prefs.passive_reply_in_quiet else '否'} | "
-        f"审批: 人工逐条（--auto-approve 仅 dry-run 演示；无人值守真实发送需 "
-        f"--live-auto-send + QQ_LIVE_AUTOSEND=1 双开关）"
+        f"审批: {approval}"
     )
 
 
@@ -405,14 +419,16 @@ def cmd_run(args) -> int:
         return any(auth_service.consume_grant_use(
             g, action_fingerprint=fingerprint, required_scope=required_scope)
             for g in grant_ids)
-    prefs = risk_prefs(store)
-    print(policy_summary(prefs))
-
-    # issue #12：审批/发送模式判定（fail closed）
+    # issue #12：审批/发送模式判定（fail closed）——先判定双开关再算策略，
+    # 让 risk_prefs 拿到进程级 live_auto 状态（issue #59 一致生效链路）。
+    global _PROCESS_LIVE_AUTO
     live_auto = live_auto_send_enabled(args)
+    _PROCESS_LIVE_AUTO = live_auto
     if args.live_auto_send and not live_auto:
         print("错误：--live-auto-send 还需环境 QQ_LIVE_AUTOSEND=1（双开关防误开，见 --help）。")
         return 2
+    prefs = risk_prefs(store)
+    print(policy_summary(prefs))
     if live_auto:
         if not weq_live_configured():
             print("错误：无人值守真实发送需配齐 WEQ_WEB_TOKEN/WEQ_WEB_URL/OWNER_UID。")
@@ -700,6 +716,26 @@ def cmd_run(args) -> int:
         if hasattr(_inner_port, "send_image"):
             _inner_port.artifact_reader = lambda aid: cap.artifacts.read(aid)
 
+    # issue #57：反应图片/表情素材库（主人显式导入；模型只提语义标签，
+    # 选图/去重/频控由素材层完成；无素材或发送失败退回纯文字）。
+    from whale_core.life.reaction_media import ReactionMediaStore
+    reaction_store = ReactionMediaStore(store, cap.artifacts)
+
+    def _reaction_persona_id(conversation: str) -> str:
+        """素材的角色归属口径：会话绑定卡 > 全局活跃卡；取不到 = 全局。"""
+        try:
+            from whale_core.life.context_resolver import derive_kind
+            from whale_core.memory.bindings import BindingStore
+            from whale_core.memory.spaces import SpaceStore
+            kind = derive_kind("qq", conversation)
+            key = f"qq:{kind.value}:{conversation}"
+            pid = BindingStore(store, SpaceStore(store)).persona_for(key)
+            if pid:
+                return pid
+        except Exception:
+            pass
+        return str(store.get("persona:active_card") or "")
+
     # 意图模型（可选，默认关）：QQ_INTENT_MODEL=<模型 id> 开启；规则优先（显式
     # 搜索指令本地识别零额外调用），LLM 规划用于其余消息。实测选型见 gap-analysis。
     # 2026-11-01 owner 决策「不走代理」：QQ_INTENT_BASE_URL/QQ_INTENT_API_KEY
@@ -900,6 +936,237 @@ def cmd_run(args) -> int:
         receipt = plugin_gateway.dispatch(send_message_intent(conversation_id, reply, draft_id=draft_id))
         print(f"  [恢复补发] {draft_id} → {receipt}")
 
+    def _owner_reply_direct(conversation_id: str, text: str) -> None:
+        """主人私聊确定性指令的应答：与恢复补发同款 草稿+审批+网关 链。"""
+        draft_id = f"qq-reaction-cmd:{uuid.uuid4().hex[:12]}"
+        workflow.outbox.propose(ProactiveDraft(
+            draft_id=draft_id, text=text,
+            reason="表情素材管理指令的确认回执",
+            evidence=(f"qq:{conversation_id}:cmd",), channel="direct_message",
+            target_conversation=conversation_id))
+        owner_draft_ids.add(draft_id)
+        approved_draft_ids.add(draft_id)
+        receipt = plugin_gateway.dispatch(send_message_intent(
+            conversation_id, text, draft_id=draft_id))
+        print(f"  [表情指令] {draft_id} → {receipt}")
+
+    def _handle_reaction_command(event) -> bool:
+        """主人私聊的表情素材管理指令（issue #57）。命中并已处理 → True。
+
+        - 存表情：标签1,标签2（须附图；图存私有产物库，字节不进 kv）；
+        - 删表情：<media_id>；
+        - 表情列表。
+        私人聊天图片只在主人显式发指令时入库，绝不自动变成共享素材。
+        """
+        if not live_auto:
+            return False
+        text = (event.text or "").strip()
+        conv = str(event.conversation)
+        if conv.startswith("group:"):
+            return False  # 素材管理只在主人私聊（群友无权动素材库）
+        if text.startswith(("存表情：", "存为表情：", "存表情:", "存为表情:")):
+            raw_tags = text.split("：", 1)[-1] if "：" in text else text.split(":", 1)[-1]
+            tags = [t for t in re.split(r"[,，、\s]+", raw_tags) if t]
+            images = workflow._attachment_images(event) \
+                if getattr(event, "attachments", None) else ()
+            if not tags or not images:
+                _owner_reply_direct(conv, "存表情要同时附一张图和至少一个标签，"
+                                    "比如：存表情：开心（配图）")
+                return True
+            if cap.artifacts is None:
+                _owner_reply_direct(conv, "产物存储没启用，存不了图。")
+                return True
+            data, mime = images[0]
+            # 表情素材长期保留（覆盖产物默认 7 天期，issue #57）
+            artifact = cap.artifacts.save_bytes(data, mime,
+                                                retention_s=365 * 86400)
+            media = reaction_store.add(
+                artifact.id, tags,
+                persona_id=_reaction_persona_id(conv))
+            _owner_reply_direct(
+                conv, f"存好了「{', '.join(media.tags)}」（id {media.media_id}）。"
+                      "聊天里我应景时会用。")
+            return True
+        if text.startswith(("删表情：", "删表情:")):
+            media_id = text.split("：", 1)[-1] if "：" in text else text.split(":", 1)[-1]
+            ok = reaction_store.remove(media_id.strip())
+            _owner_reply_direct(conv, "删掉了。" if ok else "没找到这个表情 id。")
+            return True
+        if text.strip() in ("表情列表", "表情包列表"):
+            items = reaction_store.list(
+                persona_id=_reaction_persona_id(conv))
+            if not items:
+                _owner_reply_direct(conv, "还没有表情素材。私聊发图+「存表情：标签」就能存。")
+            else:
+                lines = [f"- {m.media_id}：{', '.join(m.tags)}"
+                         f"{'（全局）' if not m.persona_id else ''}" for m in items]
+                _owner_reply_direct(conv, "表情素材：\n" + "\n".join(lines[:20]))
+            return True
+        return False
+
+    def _maybe_send_reaction(conversation: str, plan) -> None:
+        """模型提了反应图意图（[[表情:标签]]）时素材层选图直发（issue #57）。
+
+        无素材/频控中/近期重复/读取或发送失败 → 安静退回纯文字
+        （文字气泡已发，不补发不报错）。
+        """
+        tag = getattr(plan, "reaction_tag", "") or ""
+        if not tag or not live_auto:
+            return
+        try:
+            media = reaction_store.pick(
+                (tag,), persona_id=_reaction_persona_id(conversation),
+                conversation_id=conversation)
+            if media is None:
+                return
+            blob = cap.artifacts.read(media.artifact_id) \
+                if cap.artifacts is not None else None
+            if not blob:
+                return
+            artifact, data = blob
+            ext = {"image/png": ".png", "image/jpeg": ".jpg",
+                   "image/webp": ".webp", "image/gif": ".gif"}.get(
+                getattr(artifact, "content_type", ""), ".png")
+            peer_type = "group" if conversation.startswith("group:") else "c2c"
+            target = conversation.split(":", 1)[1] if ":" in conversation else ""
+            ok = send_port.send_image_to(
+                peer_type, target, data,
+                filename=f"reaction-{media.media_id}{ext}") \
+                if hasattr(send_port, "send_image_to") else False
+            print(f"  [表情] 「{tag}」→ 素材 {media.media_id} "
+                  f"{'已发' if ok else '发送失败'}")
+            if ok and peer_type == "group":
+                timeline.append(conversation,
+                                message_id=f"selfreaction:{uuid.uuid4().hex[:8]}",
+                                sender_id=self_uin, text="[图片]", is_self=True)
+        except Exception as exc:
+            print(f"  [表情] fail-soft：{type(exc).__name__}")
+
+    # 2026-11-03 owner 授权：群里看到的表情包自动收编为自己的
+    # （入反应素材库 + QQ 收藏）。私聊图片绝不自动入库（#57 纪律保留）。
+    _AUTOSAVE_DAY_CAP = 10            # 全局每日自动收编上限
+    _AUTOSAVE_GROUP_MIN_S = 1800      # 每群最小间隔 30min
+    _AUTOSAVE_MAX_BYTES = 3 * 1024 * 1024
+
+    def _stickerish(att: dict) -> bool:
+        """表情包启发式：summary 带「表情」字样，或小尺寸图/动图。
+        手机照片（大图大文件）不命中。"""
+        summary = str(att.get("summary") or "")
+        if "表情" in summary or "sticker" in summary.lower():
+            return True
+        w = int(att.get("width") or 0)
+        h = int(att.get("height") or 0)
+        size = int(att.get("size") or 0)
+        small = (0 < max(w, h) <= 600) or (w == 0 and h == 0)
+        small_file = 0 < size <= _AUTOSAVE_MAX_BYTES or size == 0
+        anim = str(att.get("img_type") or "").lower() in ("gif", "webp")
+        return small and small_file and (anim or max(w, h) <= 600)
+
+    def _autosave_gate(conv: str) -> bool:
+        """频率闸门：每群间隔 + 全局日上限（kv 记账）。"""
+        now = time.time()
+        last = store.get(f"reaction:auto:last:{conv}")
+        if isinstance(last, (int, float)) and now - float(last) < _AUTOSAVE_GROUP_MIN_S:
+            return False
+        day = time.strftime("%Y-%m-%d")
+        count = int(store.get(f"reaction:auto:day:{day}") or 0)
+        return count < _AUTOSAVE_DAY_CAP
+
+    def _autosave_mark(conv: str) -> None:
+        store.put(f"reaction:auto:last:{conv}", time.time())
+        day = time.strftime("%Y-%m-%d")
+        store.put(f"reaction:auto:day:{day}",
+                  int(store.get(f"reaction:auto:day:{day}") or 0) + 1)
+
+    def _tag_sticker(data: bytes, mime: str) -> tuple:
+        """主模型读图出 1–3 个中文情绪/场景标签；不合适的内容返回 ()。"""
+        brain = build_brain()
+        out = brain.reply(
+            "这是一张群聊表情包。请给 1–3 个简短中文标签（情绪或使用场景，"
+            "如 开心/无语/打招呼/庆祝/吐槽），只输出标签、用英文逗号分隔，"
+            "不要解释。如果内容不适合公开传播，只输出 NSFW。",
+            images=[(data, mime)])
+        text = str(out or "").strip()
+        if not text or "NSFW" in text.upper():
+            return ()
+        tags = tuple(t.strip()[:12] for t in re.split(r"[,，、]", text)
+                     if t.strip() and "NSFW" not in t.upper())[:3]
+        return tags
+
+    def _qq_favorite_add(artifact) -> bool:
+        """把素材文件加进小号的 QQ 收藏（best-effort；需完整模式窗口）。"""
+        try:
+            import glob as _g
+            paths = _g.glob(str(cap.artifacts.directory / (artifact.artifact_id + ".*")))
+            if not paths:
+                return False
+            from weq_channel.full_mode_window import FullModeWindow
+            url = os.environ.get("WEQ_WEB_URL", "").strip()
+            token = os.environ.get("WEQ_WEB_TOKEN", "").strip()
+            if not url or not token:
+                return False
+            window = getattr(send_port, "window", None) or FullModeWindow(
+                url, token, state_file="/tmp/whale-fullmode-send.ts")
+            window.open()
+            import json as _json
+            import urllib.request as _u
+            payload = {"json": {
+                "expectedAccountUin": os.environ.get("QQ_SELF_UIN", ""),
+                "action": "add", "path": paths[0]}}
+            req = _u.Request(url.rstrip("/") + "/trpc/account.qqActions.favorite",
+                             data=_json.dumps(payload).encode(),
+                             headers={"Content-Type": "application/json"},
+                             method="POST")
+            # 发送口已登录持有 cookie；这里独立登录一次拿 cookie
+            login = _u.Request(url.rstrip("/") + "/_auth/login",
+                               data=_json.dumps({"token": token}).encode(),
+                               headers={"Content-Type": "application/json"},
+                               method="POST")
+            cookie = _u.urlopen(login, timeout=10).headers.get("Set-Cookie", "").split(";")[0]
+            req.add_header("Cookie", cookie)
+            with _u.urlopen(req, timeout=30) as resp:
+                body = _json.load(resp)
+            state = ((body.get("result") or {}).get("data") or {}).get("json") or {}
+            return str(state.get("state") or "") == "accepted"
+        except Exception as exc:
+            print(f"  [表情收编] QQ 收藏添加失败 fail-soft：{type(exc).__name__}")
+            return False
+
+    def _maybe_autosave_sticker(event, *, self_sent: bool = False) -> None:
+        """群里看到的表情包 → 收编为自己的（素材库 + QQ 收藏）。全 fail-soft。"""
+        try:
+            if self_sent or not live_auto:
+                return
+            conv = str(getattr(event, "conversation", "") or "")
+            if not conv.startswith("group:"):
+                return  # 私聊图片绝不自动入库
+            atts = [a for a in (getattr(event, "attachments", None) or ())
+                    if isinstance(a, dict) and a.get("kind") == "pic" and _stickerish(a)]
+            if not atts or not _autosave_gate(conv) or cap.artifacts is None:
+                return
+            images = workflow._attachment_images(event)
+            if not images:
+                return
+            import hashlib as _hl
+            data, mime = images[0]
+            sha = _hl.sha256(data).hexdigest()
+            if reaction_store.has_sha256(sha):
+                return
+            tags = _tag_sticker(data, mime)
+            if not tags:
+                print("  [表情收编] 标签生成失败/不宜传播，跳过")
+                return
+            artifact = cap.artifacts.save_bytes(data, mime,
+                                                retention_s=365 * 86400)
+            media = reaction_store.add(artifact.artifact_id, tags,
+                                       added_by=f"auto:{conv}")
+            _autosave_mark(conv)
+            fav = _qq_favorite_add(artifact)
+            print(f"  [表情收编] {conv} 新素材 {media.media_id} 标签{list(tags)}"
+                  f"{' + QQ收藏' if fav else ''}")
+        except Exception as exc:
+            print(f"  [表情收编] fail-soft：{type(exc).__name__}")
+
     if workflow.orchestrator is not None:
         recovered = workflow.orchestrator.recover_interrupted_tasks(
             on_complete=lambda cid, reply, status: _send_recovery(cid, reply))
@@ -981,6 +1248,14 @@ def cmd_run(args) -> int:
                      principal_id=event.sender_id or "owner",
                      message_id=event.message_id)
         _tspan(_tid, "received", "ok")
+        _maybe_autosave_sticker(event)
+        # issue #57：主人私聊的表情素材管理指令（存表情/删表情/表情列表）
+        # 确定性处理，不进模型（与 记住/忘掉 指令同纪律）。
+        if not event.conversation.startswith("group:") \
+                and _handle_reaction_command(event):
+            _tspan(_tid, "command", "ok", reason_code="reaction_media")
+            _tfin(_tid, "replied", summary="表情素材指令已处理")
+            return
         # G1/G3.4：群里即使是主人也先裁决「该不该回」——未 @/引用机器人
         # 的群消息只入时间线，不触发回复（主人在群里同样不提权不打扰）。
         if event.conversation.startswith("group:"):
@@ -1118,6 +1393,8 @@ def cmd_run(args) -> int:
             # issue #39：收尾——全段送达 replied；部分送达 partial
             _tfin(_tid, "replied" if _sent_segs == len(segments) else "partial",
                   summary=f"{_sent_segs}/{len(segments)} 段已发送")
+            if _sent_segs:
+                _maybe_send_reaction(event.conversation, _plan)
             # 2026-11-01 审批积压治理：多气泡主草稿已被 #i 分段取代（分段台账
             # 各自 accepted），主草稿标 superseded 终态，不占审批列表。
             if len(segments) > 1:
@@ -1159,6 +1436,7 @@ def cmd_run(args) -> int:
                      principal_id=str(incoming.account),
                      message_id=str(incoming.message_id))
         _tspan(_tid, "received", "ok")
+        _maybe_autosave_sticker(incoming)
         if not is_private:
             # G1：群消息先裁决「该不该回」——未 @/未引用机器人时再过
             # issue #18 的主动参与策略（quiet/balanced/lively）；
@@ -1313,6 +1591,8 @@ def cmd_run(args) -> int:
               "failed" if _send_failed and _sent_segs == 0
               else ("replied" if _sent_segs == len(segments) else "partial"),
               summary=f"{_sent_segs}/{len(segments)} 段已发送")
+        if _sent_segs:
+            _maybe_send_reaction(incoming.conversation, _plan)
         # 2026-11-01 审批积压治理：直发路径不过网关/台账，回复草稿的
         # 「draft」状态会永远悬在审批列表——发送成功后补终态。
         if _sent_segs and result.get("draft_id"):
@@ -1381,6 +1661,26 @@ def cmd_run(args) -> int:
         "被逗了可以俏皮地怼回去，不用端着、不用说教、不用一本正经。"
         "提到或称呼群友时直接用他们的群名片/昵称（时间线里 […|名字] 就是），"
         "不要念 ID 或代号。")
+    # issue #57：反应图能力说明只在素材库非空时出现（每轮动态求值；
+    # 模型只提语义标签，选图/频控由素材层兜底，发不出就纯文字）。
+    _base_planning_hint = workflow.companion.planning_hint
+
+    def _dynamic_planning_hint():
+        hint = _base_planning_hint
+        try:
+            items = reaction_store.list()
+            if items:
+                # 带上素材库的真实标签——模型写不存在的标签=选不到图
+                tag_pool = sorted({t for m in items for t in m.tags})[:12]
+                hint += ("\n想在文字之外配一张应景的表情图时，可以在回复结尾写 "
+                         "[[表情:标签]]（只能从现有素材标签里挑："
+                         + "/".join(tag_pool) +
+                         "）；有匹配素材才会真的发出去，别每轮都用。")
+        except Exception:
+            pass
+        return hint
+
+    workflow.companion.planning_hint = _dynamic_planning_hint
     if not self_uid:
         try:
             import glob as _glob, json as _json

@@ -61,13 +61,13 @@ Gateway 协议：`ActionGateway.dispatch(ActionIntent) → str`。
 | `parse_onebot_message` / `OneBotInboundBridge` | 协议端消息事件 → `Incoming(channel="qq")` → registry 配对产出 `OwnerEvent` | 群聊默认拒收；未鉴权/未配对事件不进入业务 |
 | `OneBotHttpListener` | 接收协议端「HTTP POST 事件推送」；无 token 拒绝启动，默认只绑 `127.0.0.1:18798` | 不记录消息正文，不回显 token |
 | `WeQSsePushListener` | 接收 WeQ「SSE 消息推送」（`{events:[...]}`，至少一次投递）：Bearer 鉴权、msgId 有界去重、自发消息过滤、立即 ACK + 单工作线程串行消费 | 未配对来件只暴露元数据；过载丢弃计数可见不静默 |
-| `QqInboundWorkflow` | `OwnerEvent` → 记忆指令捷径（记住/忘掉，不调模型）→ WhaleCompanion（人格 + 多轮历史 `chat:history:{会话}` + 记忆召回 + DeepSeek + 情节回写）→ 回复草稿进 `ProactiveOutbox` 裁决 | **不发送任何消息**；策略闸门未过不调用 AI；direct_message 逐条人工批准 |
+| `QqInboundWorkflow` | `OwnerEvent` → 记忆指令捷径（记住/忘掉，不调模型）→ WhaleCompanion（人格 + 多轮历史 `chat:history:{会话}` + 记忆召回 + DeepSeek + 情节回写）→ 回复草稿进 `ProactiveOutbox` 裁决 | **不发送任何消息**；策略闸门未过不调用 AI；direct_message 跟随 auto_send 授权，未启用时逐条人工批准 |
 | `OneBotOutboundPort` | `direct_message` 草稿 → 绑定对端的 `send_private_msg`（默认 `enabled=False`） | 不群发、不换目标；受理 ≠ 送达，失败记 unknown 不重试 |
 | `WeQWebSendPort`（`plugins/weq_channel/weq_send.py`） | `direct_message` 草稿 → WeQ 内置 Web 服务 tRPC（`account.sendElements`）真实发送；登录 token 由用户从 WeQ 设置复制注入 | 不破解、不复用助手令牌；需 WeQ 完整模式；ok=true 仅代表服务端受理 |
 | `qq_weq_plugin`（`life/qq_weq_plugin.py`） | QQ/WeQ channel 插件：`qq.message` 输入适配、`send_message` communicate 动作、宿主台账 verifier 与共享 Outbox | 真实无人值守发送经 `PluginGateway`；`--auto-approve` 仍是隔离 dry-run；固定目标与被动回复预算沿用既有端口/账本 |
 | `NullOneBotTransport` / `HttpOneBotTransport` | 默认 stub 只记拟调用不触网 / 真实 HTTP API 客户端（注入本机配置） | 不读环境变量自动连接；token 不进日志与异常文本 |
 
-发送审批仍由 `ProactiveOutbox` 策略层强制：`direct_message` 渠道逐条人工批准后才触达传输端口。
+发送审批仍由 `ProactiveOutbox` 策略层强制：`direct_message` 渠道在 auto_send 授权（如 QQ 双开关无人值守模式）下按渠道范围/额度/静默自动派发，未启用时逐条人工批准后才触达传输端口（issue #59）。
 运行器 `--auto-approve` 是 **dry-run 演示档**：影子账本走审批流，不触网、不动真实账本、不占额度；
 无人值守真实发送需 `--live-auto-send` + `QQ_LIVE_AUTOSEND=1` 双开关，issue #12。
 该无人值守 QQ/WeQ 路径经 `PluginGateway` 的宿主台账 verifier，再复用同一 `ProactiveOutbox`；

@@ -181,6 +181,11 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             self._dispatch(method, parts, query)
         except Exception:
+            # 500 必须可诊断（此前完全吞掉异常，定位靠猜）
+            import logging, traceback
+            logging.getLogger("whale.api").error(
+                "dispatch 500: %s /%s\n%s", method, "/".join(parts),
+                traceback.format_exc())
             self._send(500, _error("internal", "internal error"))
 
     def _dispatch(self, method: str, parts: list[str], query: dict) -> None:
@@ -318,8 +323,16 @@ class WhaleApiServer:
         self._httpd.voice_relay_port = port + 1 if port else 0  # type: ignore[attr-defined]
         # 设备面 WSS 长连（D2）懒监听在 API 端口 + 2（voice +1 的顺延约定）；
         # port=0（临时端口）时同样用临时端口。
-        self._httpd.device_relay_host = host                    # type: ignore[attr-defined]
-        self._httpd.device_relay_port = port + 2 if port else 0  # type: ignore[attr-defined]
+        # 设备面 WSS 可被 tailscale serve 等前置终结：允许经环境变量显式
+        # 指定监听地址/端口（例：tailscale serve tcp:8192 → 127.0.0.1:8182 时
+        # 本端应监听 127.0.0.1:8182，而不是与 tailscaled 抢 0.0.0.0:8192）。
+        import os as _os
+        self._httpd.device_relay_host = (  # type: ignore[attr-defined]
+            _os.environ.get("WHALE_DEVICE_RELAY_HOST") or host)
+        self._httpd.device_relay_port = (  # type: ignore[attr-defined]
+            int(_os.environ["WHALE_DEVICE_RELAY_PORT"])
+            if _os.environ.get("WHALE_DEVICE_RELAY_PORT") else
+            (port + 2 if port else 0))
         # 静态目录词法归一 + resolve，供穿越校验
         from pathlib import Path
         self._httpd.static_dir = (  # type: ignore[attr-defined]

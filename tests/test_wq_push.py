@@ -309,3 +309,51 @@ def test_pic_relative_url_completed_with_rkey(tmp_path, monkeypatch):
     assert abs_urls[0] == "https://cdn.example.com/x.png".replace("/x.png", "") or abs_urls[0] == "https://cdn.example.com/x.png"
     # 无 rkey → 相对路径不可用（空候选，诚实不伪造）
     assert _pic_download_urls(data, chat_type="c2c", rkeys=[]) == ()
+
+
+def test_pending_task_opens_and_completion_closes_scoped_topic():
+    """issue #54 写路径：慢任务 ack 挂起会话未完话题；补发完成后关闭。"""
+    from types import SimpleNamespace
+    from whale_core.life.state import InnerStateStore
+    store = InMemoryStore()
+    brain = StubBrain()
+
+    class _FakeOrch:
+        context_resolver = None
+
+        def __init__(self):
+            self._cb = None
+
+        def handle_envelope_async(self, envelope, *, on_complete):
+            self._cb = on_complete
+            return SimpleNamespace(reply="在画了", status="ack", receipts=(),
+                                   task_id="t1")
+
+        def mark_delivered(self, task_id, *, channel):
+            pass
+
+        def mark_delivery_failed(self, task_id, *, error):
+            pass
+
+        def finish(self):
+            self._cb(SimpleNamespace(reply="画好了", status="done",
+                                     receipts=(), task_id="t1"))
+
+    orch = _FakeOrch()
+    prefs = ProactivePrefs(enabled=True,
+                           allowed_channels=frozenset({"direct_message"}),
+                           daily_limit=20)
+    wf = QqInboundWorkflow(store, brain, prefs=prefs,
+                           completion_sender=lambda *a, **k: None,
+                           now_fn=lambda: datetime(2026, 10, 29, 15, 0,
+                                                   tzinfo=ZoneInfo("Asia/Shanghai")))
+    wf.orchestrator = orch
+    result = wf.handle_owner_event(owner_event(text="画一只鲸鱼"))
+    assert result["reply"] == "在画了"
+    scoped = InnerStateStore(store, scope="private:10001")
+    assert scoped.load().unfinished_topics == ("等「画一只鲸鱼」的结果",)
+    # 补发完成 → 话题关闭
+    orch.finish()
+    assert scoped.load().unfinished_topics == ()
+    # 全局态不被写入话题
+    assert InnerStateStore(store).load().unfinished_topics == ()

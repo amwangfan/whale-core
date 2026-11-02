@@ -245,18 +245,26 @@ def test_outbox_integration_review_gate_before_transport():
     transport = FakeTransport()
     port = OneBotOutboundPort(transport, user_id="10001", enabled=True)
     now = datetime(2026, 10, 29, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
-    # direct_message 强制人工批准：未批准时传输层零调用
+    # issue #59：auto_send 授权下 direct_message 按策略自动派发
     verdict = outbox.dispatch("qq-1", prefs, now=now, port=port)
-    assert verdict.status == "needs_approval"
-    assert transport.calls == []
-    # 批准后受理；accepted 仅是渠道受理
-    verdict = outbox.dispatch("qq-1", prefs, now=now, port=port, explicitly_approved=True)
     assert verdict.status == "accepted"
     assert len(transport.calls) == 1
     assert outbox.ledger("qq-1")["status"] == "accepted"
     # 不自动重发
     assert outbox.dispatch("qq-1", prefs, now=now, port=port,
                            explicitly_approved=True).status == "already_attempted"
+    # 未开 auto_send 的部署：仍需人工批准，未批准时传输层零调用
+    outbox2 = ProactiveOutbox(InMemoryStore())
+    outbox2.propose(make_draft())
+    manual = ProactivePrefs(enabled=True,
+                            allowed_channels=frozenset({"direct_message"}))
+    transport2 = FakeTransport()
+    port2 = OneBotOutboundPort(transport2, user_id="10001", enabled=True)
+    assert outbox2.dispatch("qq-1", manual, now=now, port=port2).status == "needs_approval"
+    assert transport2.calls == []
+    assert outbox2.dispatch("qq-1", manual, now=now, port=port2,
+                            explicitly_approved=True).status == "accepted"
+    assert len(transport2.calls) == 1
 
 
 # ── HTTP 传输构造（注入 opener，不触网）────────────────────────

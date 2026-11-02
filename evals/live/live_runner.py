@@ -317,8 +317,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--env", default=None,
                         help="含 DEEPSEEK_API_KEY 的 env 文件路径"
                              "（缺省只读当前进程环境变量）")
-    parser.add_argument("--persona-id", default="default",
-                        help="被测人格卡 id（默认 builtin default）")
+    parser.add_argument("--persona-id", default="eval-default",
+                        help="被测人格卡 id（默认 eval-default：合成评测基线卡，"
+                             "缺失时自动装入评测存储，issue #53）")
     parser.add_argument("--store", default=None,
                         help="生产 sqlite 库路径（被测卡为库存卡时必填；"
                              "builtin 卡可省略）")
@@ -365,6 +366,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         sampling["top_p"] = args.top_p
 
     persona_store = _build_persona_store(args.store)
+    # issue #53：默认评测基线卡缺失时自动装入（幂等），保证新鲜检出
+    # 一条命令即可跑回归集；显式指定的其它卡不自动安装（缺失→全局回落，
+    # 由 run JSON 元数据如实记录 persona_source）。
+    if args.persona_id == "eval-default":
+        from evals.live.eval_persona import ensure_eval_persona
+        if ensure_eval_persona(persona_store):
+            print("[评测] 已装入合成基线人格卡 eval-default（仅评测用途）")
     model_name = args.model or env.get("DEEPSEEK_MODEL") or "deepseek-chat"
     try:
         run = run_live(model_reply, scenarios,

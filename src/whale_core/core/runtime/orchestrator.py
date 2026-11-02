@@ -65,6 +65,11 @@ class ConversationOrchestrator(
         self._workers = state["workers"]
         self._active_tasks: set[str] = state["active_tasks"]
         self._transient_args: dict[str, dict] = state["transient_args"]
+        # issue #50：孤儿/隔离进程登记簿（键由 _store_runtime_state 保证存在）。
+        self._orphans: dict = state["orphans"]
+        self._orphan_lock = state["orphan_lock"]
+        self._isolated_procs: dict = state["isolated_procs"]
+        self._max_orphans = 8
         # A process restart cannot prove whether an in-flight action happened.
         # Preserve it as unknown and never automatically replay it.
         self._delivery_handlers: dict[str, Callable] = {}

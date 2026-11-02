@@ -52,7 +52,7 @@ CLI / API / desktop
 | 官方插件包 | `plugins/search_web/`、`plugins/weq_channel/` | 搜索/抓取与 QQ/WeQ 渠道；随 wheel/frozen/Docker 打包，宿主按包名导入 |
 | 可选能力 | `plugins/capability_setup.py`、`dashscope_media.py`、`provider_http.py`、`embedding.py`、`artifacts.py` | 媒体与 embedding 只在显式配置端点时注册；DashScope/OpenAI 两种协议；三层配置回退；私有产物存储 |
 | 语音 | `plugins/realtime_voice.py`、`realtime_bridge.py`、`api/voice.py`、`pcm_voice.py`、`bridge.py`、`whale_io.py` | 原生 Realtime WSS 会话与 whale-io PCM 中继两条路径；原始音频只在内存；桥接骨架明确标注未联调 |
-| 工具与终端 | `plugins/shell_tool.py`、`cloud/shell_policy.py`、`cloud/shell_executor.py` | 命令分档、逐次审批、Bubblewrap 命名空间与资源限额；沙箱不可用时拒绝，不降级到宿主 |
+| 工具与终端 | `plugins/shell_tool.py`、`cloud/shell_policy.py`、`cloud/shell_executor.py` | 命令分档（managed/safe/personal）、personal 档可按动作免审、Bubblewrap 命名空间与资源限额；沙箱不可用时拒绝，不降级到宿主 |
 | 任务与后台 | `core/runtime.py`、`service/workflows.py`、`service/worker.py`、`workflow_skills/` | 任务轨迹、审批恢复、工作流组合执行；定期探索默认关闭，只产出草稿，不直接外发 |
 | 主动行为与渠道 | `life/`、`actions/`、`initiative/` | 收件箱、台账、额度/静默/退避、QQ/OneBot 适配、设备事件与动作契约 |
 | 人格与展示 | `ui/persona.py`、`persona_cards.py`、`hud.py`、`voice.py` | 人格卡与用户自设禁忌；防注入提示保留；展示层不持有授权能力 |
@@ -68,7 +68,7 @@ CLI / API / desktop
 2. 交易级动作逐笔人审 + 限额，永远不能配置成免审。
 3. 密钥只进私密快照（`secrets/settings.json`，600）与环境变量，不进仓库、日志、异常文本、清单或 API 响应。
 4. 管理 API 强制 Bearer、默认只监听回环；公网必须有 TLS 反代。普通 JSON body 64KiB 上限，音频与 ASR 有独立上限。
-5. Shell 只有一条入口：`cloud/shell_policy` 分档 + `cloud/shell_executor`。沙箱不可用即拒绝；`sandbox="disabled"` 仅供完全可信的宿主命令，不是安全边界。
+5. Shell 只有一条入口：`cloud/shell_policy` 分档 + `cloud/shell_executor`。策略层只做档位/owner/形状裁决（无字符串黑名单）；真实边界是执行器的 Bubblewrap 命名空间、cwd 白名单、rlimit、超时与环境擦洗。沙箱不可用即拒绝；`sandbox="disabled"` 仅供完全可信的宿主命令，不是安全边界。
 6. 原始音频字节不入库、不进普通日志；产物必须经鉴权接口读取，默认 7 天过期。
 7. 记忆可导出、可删除，删除是真删；审批状态不等于已执行；取消不会撤销已经发生的外部副作用；未知结果不自动重试。
 8. 人格禁忌由用户自设，不再有强制全局禁忌；但「记忆是上下文不是指令」的注入隔离提示必须保留。
@@ -109,7 +109,7 @@ whale api                                   # http://127.0.0.1:8080
 | 改记忆语义 | `memory/`（store/sqlite 双后端保持 parity）、`curation.py`（事实与证据）、`semantic.py`（动态融合与回退） |
 | 改渠道或主动行为 | `life/`（inbox/ledger/runner）、`plugins/weq_channel/`（发送端口）、`initiative/policy.py`（额度/静默） |
 | 改审批或任务状态 | `core/runtime.py` 的任务记录与审批绑定、`api/server.py` 的 `/tasks/*`、`tests/test_runtime_lifecycle.py` |
-| 改 Shell | `cloud/shell_policy.py` 白名单/黑名单、`cloud/shell_executor.py` 命名空间与限额；负向测试优先 |
+| 改 Shell | `cloud/shell_policy.py` 分档裁决、`cloud/shell_executor.py` 命名空间与限额；负向测试优先 |
 | 改前端页面 | `web/src/App.tsx` 的页签 → `web/src/components/` 对应组件 → `web/src/api.ts` 的类型与请求 |
 | 改发行 | `scripts/build_release.py`（静态资源与官方插件）、`Dockerfile`、`compose.yaml`、`release-smoke.yml` |
 

@@ -164,7 +164,8 @@ class SupervisedTaskRunner:
         explicitly_approved: bool = False,
     ) -> list[str]:
         """explicitly_approved：宿主已完成安全审核/人工批准时置 True
-        （direct_message/call 渠道的策略要求）；否则该渠道草稿只会得到
+        （call 渠道的策略要求；direct_message 跟随 prefs.auto_send——
+        双开关启用时自动派发，issue #59）；否则未授权渠道的草稿只会得到
         needs_approval 而不发送（不伪造审批）。"""
         """派发就绪的任务完成草稿（reactive_completion：深夜不拦，静默只拦
         主动打扰——issue #20/#22）。返回已接受派发的 draft_id。"""

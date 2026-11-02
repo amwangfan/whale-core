@@ -61,6 +61,23 @@ def test_inner_state_persists_and_user_can_reset():
     assert state.load().style == "neutral"
 
 
+def test_inner_state_style_is_free_form():
+    """issue #59：style 不再限四个阶段性标签——任意非空短标签可用，
+    ALLOWED_STYLES 仅为建议值；空/超长仍拒绝。"""
+    store = InMemoryStore()
+    state = InnerStateStore(store)
+    assert state.update(style="开心").style == "开心"
+    assert state.update(style="  犯困想摸鱼  ").style == "犯困想摸鱼"
+    assert len(state.update(style="x" * 40).style) == 24  # 截断有界
+    for bad in ("", "   "):
+        try:
+            state.update(style=bad)
+        except ValueError:
+            pass
+        else:
+            assert False, f"empty style should raise: {bad!r}"
+
+
 def test_deepseek_companion_opt_in_curated_context():
     from whale_core.core.companion import WhaleCompanion
     from whale_core.memory.store import PersonaContinuity
@@ -76,3 +93,21 @@ def test_deepseek_companion_opt_in_curated_context():
             assert "未审查" not in " ".join(memories)
             return "记得这件事"
     WhaleCompanion(store, FakeText(), curator=cur).chat("模拟电路")
+
+
+def test_inner_state_scoped_by_conversation():
+    """issue #54：未完话题按会话作用域隔离；全局风格/兴趣不泄漏进会话态。"""
+    store = InMemoryStore()
+    g = InnerStateStore(store)
+    a = InnerStateStore(store, scope="private:1001")
+    b = InnerStateStore(store, scope="group:2002")
+    g.update(style="curious", add_interest="芯片")
+    a.update(open_topic="期末复习计划")
+    b.update(open_topic="群友约饭")
+    assert a.load().unfinished_topics == ("期末复习计划",)
+    assert b.load().unfinished_topics == ("群友约饭",)
+    assert g.load().unfinished_topics == ()
+    assert a.load().style == "neutral"  # 会话态不继承全局风格
+    a.reset()
+    assert a.load().unfinished_topics == ()
+    assert b.load().unfinished_topics == ("群友约饭",)  # 只清自己的作用域

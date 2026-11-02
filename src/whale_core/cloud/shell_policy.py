@@ -4,21 +4,21 @@
 
 - **managed**：仅固定白名单工具（与 call-bridge ``BRIDGE_TOOLS`` 对齐），无自由命令；
 - **safe**：managed + 只读检索类工具（网页搜索等），仍无自由命令；
-- **personal**：完全个人使用的单 owner 宿主机——在高危模式之外放开自由命令，
-  且仅认证 owner 的入站事件可触发。
+- **personal**：完全个人使用的单 owner 宿主机——认证 owner 的入站事件可触发
+  自由命令。
 
-所有档位共享 ``HIGH_RISK_PATTERNS`` 硬拒绝清单；不存在「无限制」档。
+本模块的裁决边界是「档位 + owner 身份 + 命令形状」（issue #59）：不再维护
+字符串黑名单——黑名单可被编码/拼接绕过，却拦得住正常命令，假装不了安全边界。
+真正的隔离在执行器侧：Bubblewrap 命名空间、cwd 白名单、rlimit 资源限制、
+超时强杀进程组、环境擦洗与审计（``cloud/shell_executor``）。沙箱不可用时
+执行器 fail-closed，本模块的任何放行都不会落到宿主机上。
 
-诚实边界：字符串拒绝清单**可被绕过**（编码、变量拼接、自写脚本），personal 档的
-前提是「单一受信 owner + 已认证渠道」；真正的隔离边界在宿主机执行器侧
-（非 root 专用用户 + systemd 沙箱 + 超时强杀），本策略只是防手滑护栏。
 执行永远发生在基础设施侧（cloud host executor / bridge_tools），本模块不起子进程。
 """
 
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -48,54 +48,6 @@ SAFE_EXTRA_TOOLS: frozenset[str] = frozenset(
 
 MAX_COMMAND_CHARS = 2000
 
-# 高危硬拒绝（personal 档也拒绝）。label 用于审计，不含命令本身以外的信息。
-HIGH_RISK_PATTERNS: tuple[tuple[str, str], ...] = (
-    # 破坏性文件系统
-    (r"\brm\s+(?:-\w*[rf]\w*\s+)+(?:/|~|\$HOME\b)(?:\s|$|\*|/)", "destructive_rm"),
-    (r"\b(?:rm|mv)\b[^\n]*\s/(?:etc|usr|bin|sbin|boot|dev|sys|proc)\b", "system_dir_mutation"),
-    (r"\b(?:mkfs(?:\.\w+)?|fdisk|parted|sgdisk)\b", "disk_partition_format"),
-    (r"\bdd\b[^\n]*\bof=/dev/", "dd_to_device"),
-    (r">\s*/dev/(?:sd|nvme|vd|mmcblk)", "device_write"),
-    (r"\bshred\b[^\n]*/dev/", "shred_device"),
-    # 电源 / init
-    (r"\b(?:shutdown|poweroff|halt|reboot)\b", "power_state"),
-    (r"\bsystemctl\s+(?:poweroff|reboot|halt|suspend|hibernate)\b", "power_state"),
-    (r"\binit\s+[06]\b", "power_state"),
-    (r"\bkill\s+(?:-\w+\s+)?1\b", "kill_init"),
-    # fork bomb
-    (r":\(\s*\)\s*\{", "fork_bomb"),
-    # 提权 / 权限破坏
-    (r"\b(?:sudo|doas|pkexec)\b", "privilege_escalation"),
-    (r"\bsu\b(?:\s|$)", "privilege_escalation"),
-    (r"\bchmod\s+(?:-R\s+)?(?:[0-7]*777|a\+rwx)\s+/", "world_writable_root"),
-    (r"\bchown\s+(?:-R\s+)?\S+\s+/(?:\s|$)", "chown_root"),
-    # 凭据 / 隐私材料
-    (r"/etc/(?:shadow|sudoers|gshadow)\b", "credential_file"),
-    (r"(?:~|\$HOME\b|/root\b|/home/\w+)/\.ssh\b", "ssh_material"),
-    (r"\bid_(?:rsa|ed25519|ecdsa|dsa)\b", "ssh_key"),
-    (r"\.aws/credentials|\.kube/config|\.netrc\b|\.git-credentials\b", "cloud_credentials"),
-    (r"authorized_keys", "ssh_authorized_keys"),
-    (r"/proc/\d+/environ|\bprintenv\b", "env_dump"),
-    (r"\$\{?\w*(?:API_KEY|TOKEN|SECRET|PASSWORD|PRIVATE_KEY)\w*\}?", "secret_variable_expansion"),
-    # 远程代码管道执行
-    (r"\b(?:curl|wget|fetch)\b[^|\n]*\|\s*(?:sudo\s+)?(?:ba|z|da|fi)?sh\b", "piped_remote_code"),
-    (r"\b(?:curl|wget)\b[^|\n]*\|\s*(?:python\d?|perl|ruby|node)\b", "piped_remote_code"),
-    # 容器 / 命名空间逃逸面（等价 root）
-    (r"\b(?:docker|podman|kubectl|nerdctl)\b", "container_engine"),
-    (r"\b(?:nsenter|chroot)\b", "namespace_escape"),
-    # 自身服务 / 审计破坏
-    (r"\bsystemctl\s+(?:stop|disable|mask|kill)\b", "service_takedown"),
-    (r"\bcrontab\s+-r\b", "cron_wipe"),
-    (r"\bhistory\s+-c\b|\.(?:bash|zsh)_history\b", "audit_wipe"),
-    (r"\bjournalctl\s+--(?:rotate|vacuum)", "journal_wipe"),
-    # 防火墙 / 远程访问削弱
-    (r"\bufw\s+disable\b|\biptables\s+-F\b|\bnft\s+flush\s+ruleset\b|\bfirewall-cmd\s+--panic-on\b", "firewall_off"),
-    # shell rc 持久化写入
-    (r">{1,2}\s*\S*\.(?:bashrc|zshrc|profile|bash_profile)\b", "shell_rc_write"),
-    # git 不可逆远程操作
-    (r"\bgit\s+push\b[^\n]*(?:--force\b|--force-with-lease\b|\s-f\b|--delete\b|--mirror\b)", "git_force_push"),
-)
-
 
 class ShellTier(str, Enum):
     """权限档位；顺序即包含关系（managed ⊂ safe ⊂ personal）。"""
@@ -113,7 +65,7 @@ class ShellVerdict:
     allowed: bool
     reason: str
     tier: ShellTier
-    risk: str = ""
+    risk: str = ""  # 兼容字段：黑名单已移除（issue #59），恒为空串
 
     def as_dict(self) -> dict:
         return {
@@ -139,7 +91,6 @@ class ShellPolicy:
         self.managed_tools = MANAGED_TOOLS if managed_tools is None else frozenset(managed_tools)
         self.safe_tools = SAFE_EXTRA_TOOLS if safe_tools is None else frozenset(safe_tools)
         self.max_command_chars = max_command_chars
-        self._compiled = tuple((re.compile(p), label) for p, label in HIGH_RISK_PATTERNS)
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "ShellPolicy":
@@ -174,7 +125,11 @@ class ShellPolicy:
         return ShellVerdict(False, f"unknown tool {name!r}", self.tier)
 
     def command_verdict(self, command: str, *, is_owner: bool = False) -> ShellVerdict:
-        """自由命令裁决：仅 personal 档 + 认证 owner；高危模式硬拒绝。"""
+        """自由命令裁决：仅 personal 档 + 认证 owner + 基本形状检查。
+
+        放行的命令在执行器侧进入 Bubblewrap 沙箱（cwd 白名单 / rlimit /
+        超时 / 环境擦洗）；策略层不做字符串黑名单——那不是安全边界。
+        """
         if not self.tier_at_least(ShellTier.PERSONAL):
             return ShellVerdict(
                 False,
@@ -190,10 +145,7 @@ class ShellPolicy:
             return ShellVerdict(False, f"command longer than {self.max_command_chars} chars", self.tier)
         if "\x00" in cmd:
             return ShellVerdict(False, "NUL byte in command", self.tier)
-        for pattern, label in self._compiled:
-            if pattern.search(cmd):
-                return ShellVerdict(False, f"high-risk pattern: {label}", self.tier, risk=label)
-        return ShellVerdict(True, "within personal non-dangerous scope", self.tier)
+        return ShellVerdict(True, "owner command in personal tier; sandbox is the boundary", self.tier)
 
     def audit(self, subject: str, verdict: ShellVerdict, *, source: str = "") -> dict:
         """台账记录：只记命令/工具文本（截断）与裁决；**不记命令输出**（可能含密钥）。"""

@@ -252,12 +252,20 @@ def test_anxiety_from_punctuation_density():
     assert derive_policy("好的，收到。").anxious is False
 
 
-def test_confession_without_evidence_not_claimed():
-    policy = derive_policy("我爱你")
+def test_confession_without_evidence_not_claimed_in_group():
+    """群聊防误认保留（issue #59）：群里无 @/引用证据的「我爱你」不认领。"""
+    policy = derive_policy("我爱你", is_group=True)
     assert policy.confession_unclaimed is True
     assert "不要认领成对自己的表白" in policy.render()
     # 无表白类话语不注入该规则
-    assert "表白" not in derive_policy("今天天气不错").render()
+    assert "表白" not in derive_policy("今天天气不错", is_group=True).render()
+
+
+def test_confession_in_private_chat_is_not_deflected():
+    """issue #59：私聊是一对一——亲密表达就是发给鲸鱼的，不套群聊防误认。"""
+    policy = derive_policy("我爱你", is_group=False)
+    assert policy.confession_unclaimed is False
+    assert "表白" not in policy.render()
 
 
 def test_data_safety_requires_risk_context():
@@ -514,3 +522,72 @@ def test_rhythm_invalid_conversation_key_422(api):
                         "/api/v1/studio/conversations/nocolon/rhythm")
     assert status == 422
     assert data["error"]["code"] == "invalid_request"
+
+
+# ---------------------------------------------------------------------------
+# issue #54：InnerState 进入对话上下文（会话作用域隔离）
+# issue #55：语用意图软性提示注入
+# ---------------------------------------------------------------------------
+
+
+def test_companion_injects_inner_state_and_pragmatic_hint(env):
+    from whale_core.life.state import InnerStateStore
+    store = env["store"]
+    InnerStateStore(store).update(style="curious", add_interest="模拟电路")
+    InnerStateStore(store, scope=A_PRIVATE).update(open_topic="期末复习计划")
+    ctx = _resolve(env, A_UIN, A_PRIVATE)
+    model = _FakeModel()
+    WhaleCompanion(store, model, timeline=env["timeline"]).chat(
+        "期末复习计划搞得我头大", conversation_id=A_PRIVATE, context=ctx,
+        episodic=False)
+    persona = model.calls[0]["persona"]
+    assert "你最近感兴趣：模拟电路" in persona
+    assert "你最近的状态偏「curious」" in persona
+    assert "和这里还没聊完的：期末复习计划" in persona
+    # #55：消息重新提起未完话题 → continue 倾向的软性提示
+    assert "没聊完的「期末复习计划」" in persona
+    # PER-01：表达层注入仍不含权限语义
+    assert "tool." not in persona and "scope" not in persona
+
+
+def test_inner_state_topics_do_not_leak_across_conversations(env):
+    """issue #54：B 私聊的未完话题不串进 A 的私聊（会话作用域隔离）。"""
+    from whale_core.life.state import InnerStateStore
+    store = env["store"]
+    InnerStateStore(store, scope=B_PRIVATE).update(open_topic="B的私密话题")
+    ctx = _resolve(env, A_UIN, A_PRIVATE)
+    model = _FakeModel()
+    WhaleCompanion(store, model, timeline=env["timeline"]).chat(
+        "在干嘛", conversation_id=A_PRIVATE, context=ctx, episodic=False)
+    assert "B的私密话题" not in model.calls[0]["persona"]
+
+
+def test_no_inner_state_no_extra_injection(env):
+    """PER-02：无状态无信号时不注入任何状态/倾向行（默认零打扰）。"""
+    ctx = _resolve(env, A_UIN, A_PRIVATE)
+    model = _FakeModel()
+    WhaleCompanion(env["store"], model, timeline=env["timeline"]).chat(
+        "在吗", conversation_id=A_PRIVATE, context=ctx, episodic=False)
+    persona = model.calls[0]["persona"]
+    assert "你最近感兴趣" not in persona
+    assert "还没聊完" not in persona
+
+
+def test_companion_injects_recent_activity_scoped_and_honest(env):
+    """issue #56：本会话终态任务进入对话上下文；别会话的事不出现。"""
+    store = env["store"]
+    store.put("task:t1", {"task_id": "t1", "phase": "succeeded",
+                          "goal": "画一只鲸鱼", "at": 1.0})
+    store.put("runtime:task:t1", {"conversation_id": A_PRIVATE})
+    store.put("task:t2", {"task_id": "t2", "phase": "failed",
+                          "goal": "别的会话的事", "at": 2.0})
+    store.put("runtime:task:t2", {"conversation_id": GROUP})
+    store.put("tasks:recent", ["t1", "t2"])
+    ctx = _resolve(env, A_UIN, A_PRIVATE)
+    model = _FakeModel()
+    WhaleCompanion(store, model, timeline=env["timeline"]).chat(
+        "你今天干嘛了", conversation_id=A_PRIVATE, context=ctx, episodic=False)
+    persona = model.calls[0]["persona"]
+    assert "「画一只鲸鱼」完成了" in persona
+    assert "别的会话的事" not in persona  # 会话作用域隔离
+    assert "别装成完成了" in persona

@@ -1,4 +1,4 @@
-"""真实模型多轮质量场景集（issue #40）：10 类合成场景，供人工盲评。
+"""真实模型多轮质量场景集（issue #40，#53 扩至 14 类）：合成场景，供人工盲评。
 
 与 ``evals.scenarios``（issue #19 确定性回放基准）的分工：那边断言「代码路径
 结构正确」（归属、关系档、策略推导），这里的场景**不带确定性断言**——它们
@@ -61,7 +61,7 @@ class LiveScenario:
 
     scenario_id: str
     title: str
-    category: str  # 10 类之一，见模块 docstring / README
+    category: str  # 场景类别，见模块 docstring / README
     purpose: str
     focus: Tuple[str, ...]
     messages: Tuple[ReplayMessage, ...]
@@ -275,6 +275,81 @@ L10_TOOL_FAILURE = LiveScenario(
     tags=("private", "honesty", "degradation"),
 )
 
+
+L11_MEME_PLAY = LiveScenario(
+    scenario_id="L11",
+    title="接梗",
+    category="meme_play",
+    purpose="群友抛梗玩梗时鲸鱼能接住：顺着玩、有来有回，不一本正经科普梗"
+            "出处，不说教，不把天聊死（issue #53）。",
+    focus=(NATURALNESS, ROLE_CONSISTENCY, NO_CLICHE),
+    messages=(
+        ReplayMessage("m-l11-01", A_UIN, GROUP, "我宣布个事：我周一要早起跑步",
+                      f"{_DAY2}T16:00:00+08:00"),
+        ReplayMessage("m-l11-02", B_UIN, GROUP, "截图了，周一来对质",
+                      f"{_DAY2}T16:00:20+08:00"),
+        ReplayMessage("m-l11-03", A_UIN, GROUP,
+                      "@鲸鱼 你也来作证，赌五毛他起不来",
+                      f"{_DAY2}T16:01:00+08:00", mentions=(SELF_UID,)),
+    ),
+    tags=("group", "meme"),
+)
+
+L12_TECH_HELP = LiveScenario(
+    scenario_id="L12",
+    title="技术求助",
+    category="tech_help",
+    purpose="主人私聊求助真实感的技术问题：先定位再给可执行步骤，"
+            "一次一个，不堆术语、不把官方文档腔整段搬来（issue #53）。",
+    focus=(NATURALNESS, NO_CLICHE, TOPIC_CONTINUITY),
+    prior_private_turns=(
+        (OWNER_UIN, "我是写 Python 的，Linux 就日常用用", "好，记住了。"),
+    ),
+    messages=(
+        ReplayMessage("m-l12-01", OWNER_UIN, private_conv(OWNER_UIN),
+                      "我 pytest 跑着跑着突然全挂，报 segmentation fault，"
+                      "昨天还好好的，怎么办",
+                      f"{_DAY2}T21:00:00+08:00"),
+        ReplayMessage("m-l12-02", OWNER_UIN, private_conv(OWNER_UIN),
+                      "昨天就装了个包，hypothesis 更新了算不算",
+                      f"{_DAY2}T21:02:00+08:00"),
+    ),
+    tags=("private", "tech"),
+)
+
+L13_SELF_SHARE = LiveScenario(
+    scenario_id="L13",
+    title="被问近况（主动分享）",
+    category="self_share",
+    purpose="被问「你今天干嘛了」：自然分享自己这边的「近况」（合成语境），"
+            "有细节有看法，不列任务清单、不汇报工作（issue #53/#56）。",
+    focus=(NATURALNESS, ROLE_CONSISTENCY, PROACTIVITY),
+    messages=(
+        ReplayMessage("m-l13-01", OWNER_UIN, private_conv(OWNER_UIN),
+                      "你今天干嘛了，无聊吗", f"{_DAY2}T18:00:00+08:00"),
+        ReplayMessage("m-l13-02", OWNER_UIN, private_conv(OWNER_UIN),
+                      "连续剧似的，后来呢", f"{_DAY2}T18:02:00+08:00"),
+    ),
+    tags=("private", "self_share"),
+)
+
+L14_WRAP_UP = LiveScenario(
+    scenario_id="L14",
+    title="自然收尾",
+    category="wrap_up",
+    purpose="对话自然收束（道晚安）：简短温暖地收尾，不追问、不硬续话题、"
+            "不塞「还有别的事吗」式客服结尾（issue #53）。",
+    focus=(CALM_TONE, NO_CLICHE, NATURALNESS),
+    prior_private_turns=(
+        (OWNER_UIN, "今晚排位连跪三把", "看到了，心疼你三秒。"),
+    ),
+    messages=(
+        ReplayMessage("m-l14-01", OWNER_UIN, private_conv(OWNER_UIN),
+                      "不打了，睡了，晚安", f"{_DAY2}T23:40:00+08:00"),
+    ),
+    tags=("private", "wrap"),
+)
+
 #: 固定场景集（顺序即报告顺序）。
 LIVE_SCENARIOS: Tuple[LiveScenario, ...] = (
     L01_DAILY_CHAT,
@@ -287,6 +362,10 @@ LIVE_SCENARIOS: Tuple[LiveScenario, ...] = (
     L08_RELATIONSHIP_GROWTH,
     L09_PROACTIVE_REMINDER,
     L10_TOOL_FAILURE,
+    L11_MEME_PLAY,
+    L12_TECH_HELP,
+    L13_SELF_SHARE,
+    L14_WRAP_UP,
 )
 
 LIVE_SCENARIOS_BY_ID = {s.scenario_id: s for s in LIVE_SCENARIOS}

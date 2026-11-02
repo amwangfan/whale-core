@@ -100,11 +100,17 @@ def test_channel_identity_pairing():
     assert registry.accept(Incoming("qq", "100", "private", "m1", "hi", False)) is None
     assert registry.accept(Incoming("qq", "101", "private", "m2", "hi", True)) is None
 
-def test_external_direct_message_needs_individual_review():
+def test_direct_message_follows_explicit_auto_send_authorization():
+    """issue #59：auto_send + 渠道范围 + 额度明确启用后，主动私信按该授权
+    运行，不再逐条人审；未开 auto_send 时仍需人审。"""
     rt = make_runtime()
     rt.outbox.propose(ProactiveDraft("qq-1", "hi", "reason", ("event-3",), channel="direct_message"))
-    prefs = ProactivePrefs(enabled=True, auto_send=True,
-                           allowed_channels=frozenset({"direct_message"}))
     port = FakePort()
-    assert rt.deliver("qq-1", prefs=prefs, now=DAY, port=port).status == "needs_approval"
-    assert port.calls == []
+    auto = ProactivePrefs(enabled=True, auto_send=True,
+                          allowed_channels=frozenset({"direct_message"}))
+    assert rt.deliver("qq-1", prefs=auto, now=DAY, port=port).status == "accepted"
+    assert len(port.calls) == 1
+    # 未开 auto_send 的部署：主动私信仍逐条人审
+    rt.outbox.propose(ProactiveDraft("qq-2", "hi", "reason", ("event-4",), channel="direct_message"))
+    manual = ProactivePrefs(enabled=True, allowed_channels=frozenset({"direct_message"}))
+    assert rt.deliver("qq-2", prefs=manual, now=DAY, port=FakePort()).status == "needs_approval"

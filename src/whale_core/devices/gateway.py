@@ -498,12 +498,80 @@ class DeviceGateway:
         log.warning("设备 %s 回报 error ref_id=%s code=%s message=%s",
                     st.device_id, p["ref_id"], p["code"], p["message"])
 
+    #: issue #52：终态/未知态动作记录的保留窗口（默认 7 天）——保留期内
+    #: 迟到回执可核对、重复提交可命中幂等查重；过期才清理。
+    ACTION_RETENTION_MS = 7 * 24 * 3600 * 1000
+    #: 非终态记录过 expires_at 后的宽限期（默认 24h）：有效重试窗口内
+    #: 幂等键绝不提前释放；过宽限先落 unknown 标记，再按终态规则清理。
+    ACTION_PENDING_GRACE_MS = 24 * 3600 * 1000
+
+    def sweep_action_retention(self, *, now: int | None = None,
+                               max_deletes: int = 500) -> dict:
+        """有界清理设备动作回执/幂等记录/反向索引（issue #52）。
+
+        - 终态（executed/failed/unknown）且过保留窗口 → 删除动作记录 +
+          反向索引（device:action-id:*）+ 回执流水（device:receipts:*）；
+        - 非终态且过 expires_at + 宽限 → 落 ``unknown`` 过期标记（保留窗口
+          内仍可由 action_status 核对、迟到终态回执照常对账），不删除；
+        - 仍在有效重试窗口内的记录一律不动（幂等键不提前释放）；
+        - 孤儿回执流水（无对应动作记录）直接清；
+        - 单趟删除量封顶 ``max_deletes``，其余下轮再清。
+
+        不改变撤销与回执核对语义：撤销设备只影响新动作授权，既有记录按
+        同一窗口老化。返回 ``{"scanned", "deleted", "marked_unknown"}``。
+        """
+        now = now if now is not None else now_ms()
+        scanned = deleted = marked = 0
+        for key in list(self.store.keys()):
+            if not key.startswith("device:action:"):
+                continue
+            scanned += 1
+            record = self.store.get(key)
+            if not isinstance(record, dict):
+                continue
+            state = str(record.get("state") or "")
+            created = int(record.get("created_at") or 0)
+            expires = int(record.get("expires_at") or 0)
+            device_id = str(record.get("device_id") or "")
+            action_id = str(record.get("action_id") or "")
+            if state in TERMINAL_RECEIPT_STATES:
+                if created + self.ACTION_RETENTION_MS >= now:
+                    continue  # 保留窗口内：可核对、可被查重
+                if deleted >= max_deletes:
+                    continue
+                self.store.delete(key)
+                if device_id and action_id:
+                    self.store.delete(f"device:action-id:{device_id}:{action_id}")
+                    self.store.delete(f"device:receipts:{device_id}:{action_id}")
+                deleted += 1
+            elif now > expires + self.ACTION_PENDING_GRACE_MS:
+                # 过宽限的非终态：落 unknown 过期标记（下轮按终态清理）
+                record["state"] = "unknown"
+                record["updated_at"] = now
+                self.store.put(key, record)
+                marked += 1
+        # 孤儿回执流水（动作记录已不在）一并清，同受删除上限约束
+        for key in list(self.store.keys()):
+            if deleted >= max_deletes:
+                break
+            if not key.startswith("device:receipts:"):
+                continue
+            parts = key.split(":", 3)
+            if len(parts) < 4:
+                continue
+            device_id, action_id = parts[2], parts[3]
+            if self.store.get(f"device:action-id:{device_id}:{action_id}") is None:
+                self.store.delete(key)
+                deleted += 1
+        return {"scanned": scanned, "deleted": deleted, "marked_unknown": marked}
+
     # ------------------------------------------------------------------
     # 心跳离线扫描（内存状态即可，§2/§6）
     # ------------------------------------------------------------------
 
     def _sweep_loop(self) -> None:
         interval = max(0.2, min(self.heartbeat_timeout / 3, 10.0))
+        last_retention_sweep = 0.0
         while not self.stopping.wait(interval):
             now = time.monotonic()
             with self.lock:
@@ -516,6 +584,16 @@ class DeviceGateway:
                     self._emit("device:heartbeat_timeout", device_id)
                     log.warning("设备 %s 超过 %ss 无心跳，标记离线",
                                 device_id, self.heartbeat_timeout)
+            # issue #52：动作回执保留清理搭既有 sweep 线程（不另建后台系统），
+            # 每小时一趟、每趟删除量封顶。
+            if now - last_retention_sweep >= 3600:
+                last_retention_sweep = now
+                try:
+                    stats = self.sweep_action_retention()
+                    if stats.get("deleted") or stats.get("marked_unknown"):
+                        log.info("设备动作保留清理：%s", stats)
+                except Exception:
+                    log.warning("设备动作保留清理失败（下轮重试）", exc_info=True)
 
     # ------------------------------------------------------------------
     # 下行通道（管理 API 线程调用）

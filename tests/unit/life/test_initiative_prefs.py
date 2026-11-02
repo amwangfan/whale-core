@@ -85,9 +85,12 @@ class TestQuietHoursBehavior:
             draft_id="d2", channel="direct_message", text="主动提醒",
             reason="t", evidence=("e",)))
         noon = datetime(2026, 11, 1, 4, 0, tzinfo=timezone.utc)  # = CST 12:00
+        # issue #59：auto_send 启用后 direct_message 按授权自动派发；白天不触发静默压制
         verdict = outbox.inspect("d2", self._prefs(), now=noon)
-        # direct_message 永远人工审批（既定政策）；白天不触发静默压制
-        assert verdict.status == "needs_approval"
+        assert verdict.status == "ready"
+        # 未开 auto_send 的部署仍需逐条人审
+        manual = self._prefs(auto_send=False)
+        assert outbox.inspect("d2", manual, now=noon).status == "needs_approval"
 
     def test_passive_reply_exempt_in_quiet(self):
         store = InMemoryStore()
@@ -98,8 +101,8 @@ class TestQuietHoursBehavior:
         night = datetime(2026, 11, 1, 19, 30, tzinfo=timezone.utc)  # = CST 03:30
         verdict = outbox.inspect("d3", self._prefs(), now=night,
                                  response_origin="reactive_inbound")
-        # #22：被动回复豁免静默——不应是 deferred；direct_message 仍需人工审批
-        assert verdict.status == "needs_approval"
+        # #22：被动回复豁免静默——不应是 deferred；auto_send 下 DM 直接就绪（#59）
+        assert verdict.status == "ready"
 
     def test_daily_budget_caps_proactive(self):
         store = InMemoryStore()

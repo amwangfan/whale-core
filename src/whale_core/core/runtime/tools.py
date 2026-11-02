@@ -37,6 +37,9 @@ class ToolSpec:
     ``action`` 把该工具映射到一个已注册插件动作（风险级由 manifest 裁决，
     不由工具自declare）；缺映射的非只读工具一律拒绝执行。
     - ``handler``：同步可调用，返回**短文本结果**（长输出由 Runtime 截断）。
+    - ``isolation``：``"thread"``（默认，进程内工作线程）或 ``"process"``
+      （独立子进程执行，超时/取消即杀进程组——issue #50，仅 handler 可
+      pickle 的 read_only 工具可选；网关派发的 executor 插件不适用）。
     """
 
     name: str
@@ -46,6 +49,7 @@ class ToolSpec:
     plugin_id: str = ""
     action: str = ""
     handler: Callable[[Mapping[str, Any]], str] | None = None
+    isolation: str = "thread"
 
     def __post_init__(self) -> None:
         if not (self.name or "").strip():
@@ -53,6 +57,10 @@ class ToolSpec:
         if not (self.capability or "").strip():
             raise ValueError("tool requires a capability id")
         RiskClass(self.risk_class)  # 非法风险级构造即失败
+        if self.isolation not in ("thread", "process"):
+            raise ValueError("isolation must be 'thread' or 'process'")
+        if self.isolation == "process" and self.risk_class != RiskClass.READ_ONLY.value:
+            raise ValueError("process isolation is only for read_only handler tools")
 
 
 class ToolRegistry:

@@ -299,8 +299,10 @@ class ProactiveOutbox:
         limit, count = self._quota_view(prefs, date, passive_reply=reactive)
         if count >= limit:
             return DispatchVerdict("over_budget", "daily delivery cap", draft_id)
-        # A call is always reviewed; auto_send is limited to explicitly allowed low-risk channels.
-        if not explicitly_approved and (draft.channel in {"call", "direct_message"} or not prefs.auto_send):
+        # issue #59：direct_message 跟随 auto_send——双开关、渠道范围与每日
+        # 额度明确启用后，主动私信按该授权运行，不再逐条人审；call 始终单独
+        # 授权 + 逐条人审（不随 auto_send 放开）。
+        if not explicitly_approved and (draft.channel == "call" or not prefs.auto_send):
             return DispatchVerdict("needs_approval", "human review required", draft_id)
         return DispatchVerdict("ready", "authorized and within budget", draft_id)
 
