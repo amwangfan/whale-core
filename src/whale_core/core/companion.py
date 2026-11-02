@@ -168,8 +168,11 @@ class WhaleCompanion:
                 import logging
                 logging.getLogger(__name__).exception(
                     "G4 relationship/expression hint failed; continuing without")
-        if self.planning_hint:
-            persona_text = (persona_text or "") + "\n\n" + self.planning_hint
+        _hint = self.planning_hint
+        if callable(_hint):  # 宿主可按轮提供动态提示（如素材库为空不挂表情说明）
+            _hint = _hint()
+        if _hint:
+            persona_text = (persona_text or "") + "\n\n" + _hint
         if self.curator is not None:
             memories = [str(hit.record.content.get("summary", ""))
                         for hit in _recall(self.curator, original, spaces,

@@ -36,6 +36,9 @@ PLANNING_HINT = (
 
 SILENCE_MARK = "[[沉默]]"
 _FOLLOW_RE = re.compile(r"\[\[稍后补充[:：]([^\]\n]{1,60})\]\]")
+# issue #57：反应图意图标记——模型只提语义标签（如 [[表情:开心]]），
+# 实际选图由素材检索层完成（模型不拼任何文件路径/URL）。
+_REACTION_RE = re.compile(r"\[\[表情[:：]([^\]\n]{1,20})\]\]")
 # 气泡分隔：任何 ◆ 一律视为分隔（独占一行/行首内联/句中夹带都认）。
 # ◆ 不是正常中文用字，模型只会从规划提示里学到它——出现即标记。
 # 2026-11-01 两次修复：先放行首内联形态，再放开句中形态（生产实证
@@ -123,6 +126,7 @@ class ReplyPlan:
     tone_target: str = ""          # warm | neutral | calm | ""（无目标）
     length_target: str = ""        # short | normal | ""
     delay_ms: int = 0              # 可选延迟（0 = 立即；由宿主节奏决定，不由模型）
+    reaction_tag: str = ""         # issue #57：反应图语义意图（标签；选图由素材层完成）
 
 
 def derive_plan_guidance(*, familiarity: str = "stranger", anxious: bool = False,
@@ -143,13 +147,15 @@ def derive_plan_guidance(*, familiarity: str = "stranger", anxious: bool = False
 def plan_reply(text: str, *, is_group: bool, max_segments: int,
                tone_target: str = "", length_target: str = "") -> ReplyPlan:
     """把模型原始输出解析为发言计划（确定性；无标记走既有规则拆分）。"""
-    def _mk(bubbles, *, silent=False, follow_up="", planner, delay_ms=0):
+    def _mk(bubbles, *, silent=False, follow_up="", planner, delay_ms=0,
+            reaction_tag=""):
         action = "observe" if silent else ("follow_up" if follow_up else "reply")
         return ReplyPlan(
             tuple(b for b in (_tidy_bubble(t) for t in bubbles) if b),
             silent=silent, follow_up=follow_up, planner=planner,
             action=action, tone_target=tone_target,
-            length_target=length_target, delay_ms=delay_ms)
+            length_target=length_target, delay_ms=delay_ms,
+            reaction_tag=reaction_tag)
 
     raw = str(text or "").strip()
     if not raw:
@@ -157,6 +163,15 @@ def plan_reply(text: str, *, is_group: bool, max_segments: int,
     # 沉默标记只认开头（防正文注入伪造沉默/归属）
     if raw.startswith(SILENCE_MARK):
         return _mk((), silent=True, planner="silent")
+    # issue #57：反应图意图（语义标签，选图由宿主素材层完成）；与「稍后补充」
+    # 同纪律——围栏代码块内不当标记，剥全部出现、带回第一个标签。
+    reaction_tag = ""
+    parts = _FENCE_RE.split(raw)
+    first_reaction = next(
+        (m for p in parts if (m := _REACTION_RE.search(p))), None)
+    if first_reaction is not None:
+        reaction_tag = first_reaction.group(1).strip()
+        raw = _map_outside_fences(raw, lambda p: _REACTION_RE.sub("", p)).strip()
     # 稍后补充：剥离**所有**标记文本（模型可能写多个，search 只剥一个会漏），
     # 第一个原因带回给调用方（调用方决定是否真有后续事件）。
     # 围栏代码块内的 [[…]] 是代码内容，不当标记处理。
@@ -166,7 +181,7 @@ def plan_reply(text: str, *, is_group: bool, max_segments: int,
     if first is not None:
         follow_up = first.group(1).strip()
         raw = _map_outside_fences(raw, lambda p: _FOLLOW_RE.sub("", p)).strip()
-    if not raw:
+    if not raw and not reaction_tag:
         return _mk((), silent=True, follow_up=follow_up, planner="silent")
 
     if _BUBBLE_SEP_RE.search(raw):
@@ -175,11 +190,12 @@ def plan_reply(text: str, *, is_group: bool, max_segments: int,
         if len(parts) > cap:
             # 超出上限的尾部合并进最后一个气泡（内容不丢，不静默截断）
             parts = [*parts[:cap - 1], "\n".join(parts[cap - 1:])]
-        return _mk(parts, follow_up=follow_up, planner="model")
+        return _mk(parts, follow_up=follow_up, planner="model",
+                   reaction_tag=reaction_tag)
 
     # 无显式规划标记：回落既有语义分段（fallback，不是模型规划）
     return _mk(split_reply(raw, is_group=is_group, max_segments=max_segments),
-               follow_up=follow_up, planner="fallback")
+               follow_up=follow_up, planner="fallback", reaction_tag=reaction_tag)
 
 
 def clean_reply_text(text: str) -> str:

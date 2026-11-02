@@ -47,8 +47,10 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -714,6 +716,26 @@ def cmd_run(args) -> int:
         if hasattr(_inner_port, "send_image"):
             _inner_port.artifact_reader = lambda aid: cap.artifacts.read(aid)
 
+    # issue #57：反应图片/表情素材库（主人显式导入；模型只提语义标签，
+    # 选图/去重/频控由素材层完成；无素材或发送失败退回纯文字）。
+    from whale_core.life.reaction_media import ReactionMediaStore
+    reaction_store = ReactionMediaStore(store, cap.artifacts)
+
+    def _reaction_persona_id(conversation: str) -> str:
+        """素材的角色归属口径：会话绑定卡 > 全局活跃卡；取不到 = 全局。"""
+        try:
+            from whale_core.life.context_resolver import derive_kind
+            from whale_core.memory.bindings import BindingStore
+            from whale_core.memory.spaces import SpaceStore
+            kind = derive_kind("qq", conversation)
+            key = f"qq:{kind.value}:{conversation}"
+            pid = BindingStore(store, SpaceStore(store)).persona_for(key)
+            if pid:
+                return pid
+        except Exception:
+            pass
+        return str(store.get("persona:active_card") or "")
+
     # 意图模型（可选，默认关）：QQ_INTENT_MODEL=<模型 id> 开启；规则优先（显式
     # 搜索指令本地识别零额外调用），LLM 规划用于其余消息。实测选型见 gap-analysis。
     # 2026-11-01 owner 决策「不走代理」：QQ_INTENT_BASE_URL/QQ_INTENT_API_KEY
@@ -914,6 +936,105 @@ def cmd_run(args) -> int:
         receipt = plugin_gateway.dispatch(send_message_intent(conversation_id, reply, draft_id=draft_id))
         print(f"  [恢复补发] {draft_id} → {receipt}")
 
+    def _owner_reply_direct(conversation_id: str, text: str) -> None:
+        """主人私聊确定性指令的应答：与恢复补发同款 草稿+审批+网关 链。"""
+        draft_id = f"qq-reaction-cmd:{uuid.uuid4().hex[:12]}"
+        workflow.outbox.propose(ProactiveDraft(
+            draft_id=draft_id, text=text,
+            reason="表情素材管理指令的确认回执",
+            evidence=(f"qq:{conversation_id}:cmd",), channel="direct_message",
+            target_conversation=conversation_id))
+        owner_draft_ids.add(draft_id)
+        approved_draft_ids.add(draft_id)
+        receipt = plugin_gateway.dispatch(send_message_intent(
+            conversation_id, text, draft_id=draft_id))
+        print(f"  [表情指令] {draft_id} → {receipt}")
+
+    def _handle_reaction_command(event) -> bool:
+        """主人私聊的表情素材管理指令（issue #57）。命中并已处理 → True。
+
+        - 存表情：标签1,标签2（须附图；图存私有产物库，字节不进 kv）；
+        - 删表情：<media_id>；
+        - 表情列表。
+        私人聊天图片只在主人显式发指令时入库，绝不自动变成共享素材。
+        """
+        if not live_auto:
+            return False
+        text = (event.text or "").strip()
+        conv = str(event.conversation)
+        if conv.startswith("group:"):
+            return False  # 素材管理只在主人私聊（群友无权动素材库）
+        if text.startswith(("存表情：", "存为表情：", "存表情:", "存为表情:")):
+            raw_tags = text.split("：", 1)[-1] if "：" in text else text.split(":", 1)[-1]
+            tags = [t for t in re.split(r"[,，、\s]+", raw_tags) if t]
+            images = workflow._attachment_images(event) \
+                if getattr(event, "attachments", None) else ()
+            if not tags or not images:
+                _owner_reply_direct(conv, "存表情要同时附一张图和至少一个标签，"
+                                    "比如：存表情：开心（配图）")
+                return True
+            if cap.artifacts is None:
+                _owner_reply_direct(conv, "产物存储没启用，存不了图。")
+                return True
+            data, mime = images[0]
+            artifact = cap.artifacts.save_bytes(data, mime)
+            media = reaction_store.add(
+                artifact.id, tags,
+                persona_id=_reaction_persona_id(conv))
+            _owner_reply_direct(
+                conv, f"存好了「{', '.join(media.tags)}」（id {media.media_id}）。"
+                      "聊天里我应景时会用。")
+            return True
+        if text.startswith(("删表情：", "删表情:")):
+            media_id = text.split("：", 1)[-1] if "：" in text else text.split(":", 1)[-1]
+            ok = reaction_store.remove(media_id.strip())
+            _owner_reply_direct(conv, "删掉了。" if ok else "没找到这个表情 id。")
+            return True
+        if text.strip() in ("表情列表", "表情包列表"):
+            items = reaction_store.list(
+                persona_id=_reaction_persona_id(conv))
+            if not items:
+                _owner_reply_direct(conv, "还没有表情素材。私聊发图+「存表情：标签」就能存。")
+            else:
+                lines = [f"- {m.media_id}：{', '.join(m.tags)}"
+                         f"{'（全局）' if not m.persona_id else ''}" for m in items]
+                _owner_reply_direct(conv, "表情素材：\n" + "\n".join(lines[:20]))
+            return True
+        return False
+
+    def _maybe_send_reaction(conversation: str, plan) -> None:
+        """模型提了反应图意图（[[表情:标签]]）时素材层选图直发（issue #57）。
+
+        无素材/频控中/近期重复/读取或发送失败 → 安静退回纯文字
+        （文字气泡已发，不补发不报错）。
+        """
+        tag = getattr(plan, "reaction_tag", "") or ""
+        if not tag or not live_auto:
+            return
+        try:
+            media = reaction_store.pick(
+                (tag,), persona_id=_reaction_persona_id(conversation),
+                conversation_id=conversation)
+            if media is None:
+                return
+            data = reaction_store.read_bytes(media)
+            if not data:
+                return
+            peer_type = "group" if conversation.startswith("group:") else "c2c"
+            target = conversation.split(":", 1)[1] if ":" in conversation else ""
+            ok = send_port.send_image_to(
+                peer_type, target, data,
+                filename=f"reaction-{media.media_id}.png") \
+                if hasattr(send_port, "send_image_to") else False
+            print(f"  [表情] 「{tag}」→ 素材 {media.media_id} "
+                  f"{'已发' if ok else '发送失败'}")
+            if ok and peer_type == "group":
+                timeline.append(conversation,
+                                message_id=f"selfreaction:{uuid.uuid4().hex[:8]}",
+                                sender_id=self_uin, text="[图片]", is_self=True)
+        except Exception as exc:
+            print(f"  [表情] fail-soft：{type(exc).__name__}")
+
     if workflow.orchestrator is not None:
         recovered = workflow.orchestrator.recover_interrupted_tasks(
             on_complete=lambda cid, reply, status: _send_recovery(cid, reply))
@@ -995,6 +1116,13 @@ def cmd_run(args) -> int:
                      principal_id=event.sender_id or "owner",
                      message_id=event.message_id)
         _tspan(_tid, "received", "ok")
+        # issue #57：主人私聊的表情素材管理指令（存表情/删表情/表情列表）
+        # 确定性处理，不进模型（与 记住/忘掉 指令同纪律）。
+        if not event.conversation.startswith("group:") \
+                and _handle_reaction_command(event):
+            _tspan(_tid, "command", "ok", reason_code="reaction_media")
+            _tfin(_tid, "replied", summary="表情素材指令已处理")
+            return
         # G1/G3.4：群里即使是主人也先裁决「该不该回」——未 @/引用机器人
         # 的群消息只入时间线，不触发回复（主人在群里同样不提权不打扰）。
         if event.conversation.startswith("group:"):
@@ -1132,6 +1260,8 @@ def cmd_run(args) -> int:
             # issue #39：收尾——全段送达 replied；部分送达 partial
             _tfin(_tid, "replied" if _sent_segs == len(segments) else "partial",
                   summary=f"{_sent_segs}/{len(segments)} 段已发送")
+            if _sent_segs:
+                _maybe_send_reaction(event.conversation, _plan)
             # 2026-11-01 审批积压治理：多气泡主草稿已被 #i 分段取代（分段台账
             # 各自 accepted），主草稿标 superseded 终态，不占审批列表。
             if len(segments) > 1:
@@ -1327,6 +1457,8 @@ def cmd_run(args) -> int:
               "failed" if _send_failed and _sent_segs == 0
               else ("replied" if _sent_segs == len(segments) else "partial"),
               summary=f"{_sent_segs}/{len(segments)} 段已发送")
+        if _sent_segs:
+            _maybe_send_reaction(incoming.conversation, _plan)
         # 2026-11-01 审批积压治理：直发路径不过网关/台账，回复草稿的
         # 「draft」状态会永远悬在审批列表——发送成功后补终态。
         if _sent_segs and result.get("draft_id"):
@@ -1395,6 +1527,22 @@ def cmd_run(args) -> int:
         "被逗了可以俏皮地怼回去，不用端着、不用说教、不用一本正经。"
         "提到或称呼群友时直接用他们的群名片/昵称（时间线里 […|名字] 就是），"
         "不要念 ID 或代号。")
+    # issue #57：反应图能力说明只在素材库非空时出现（每轮动态求值；
+    # 模型只提语义标签，选图/频控由素材层兜底，发不出就纯文字）。
+    _base_planning_hint = workflow.companion.planning_hint
+
+    def _dynamic_planning_hint():
+        hint = _base_planning_hint
+        try:
+            if reaction_store.list():
+                hint += ("\n想在文字之外配一张应景的表情图时，可以在回复结尾写 "
+                         "[[表情:标签]]（标签比如 开心/疑惑/庆祝/无语——按素材"
+                         "实际标签来）；有匹配素材才会真的发出去，别每轮都用。")
+        except Exception:
+            pass
+        return hint
+
+    workflow.companion.planning_hint = _dynamic_planning_hint
     if not self_uid:
         try:
             import glob as _glob, json as _json
