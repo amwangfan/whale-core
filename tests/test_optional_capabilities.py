@@ -411,3 +411,17 @@ def test_no_minimax_key_no_minimax_models(tmp_path):
     tts_spec = tools.for_capability('tts.synthesize')[0]
     assert 'speech-02' not in tts_spec.description
     assert 'MiniMax' not in tools.for_capability('media.video.generate')[0].description
+
+
+def test_music_tool_gated_off_by_default_and_on_with_flag(tmp_path, monkeypatch):
+    """唱歌工具默认不注册（账号资格未就绪）；WHALE_MINIMAX_MUSIC=1 才挂载。"""
+    registry, tools = PluginRegistry(), ToolRegistry()
+    configure_optional_capabilities(registry, tools, InMemoryStore(),
+        env={'WHALE_MINIMAX_API_KEY':'k'}, artifact_dir=tmp_path)
+    assert tools.for_capability('media.music.generate') == []
+    registry2, tools2 = PluginRegistry(), ToolRegistry()
+    configure_optional_capabilities(registry2, tools2, InMemoryStore(),
+        env={'WHALE_MINIMAX_API_KEY':'k', 'WHALE_MINIMAX_MUSIC':'1'},
+        artifact_dir=tmp_path)
+    spec = tools2.for_capability('media.music.generate')
+    assert spec and 'music-3.0' in spec[0].description

@@ -100,8 +100,8 @@ class _MiniMaxBase:
             code = base_resp.get("status_code")
             if code not in (None, 0):
                 kind = {1002: "quota", 1039: "quota", 1004: "auth", 2049: "auth",
-                        1008: "quota", 1026: "rejected", 2013: "bad_response"}.get(
-                    int(code), "server")
+                        1008: "quota", 1026: "rejected", 2013: "bad_response",
+                        2153: "rejected"}.get(int(code), "server")
                 raise MiniMaxError(kind, f"minimax base_resp {code}")
         return data
 
@@ -159,6 +159,57 @@ class MiniMaxVideoProvider(_MiniMaxBase):
 
     def cancel(self, task_id: str) -> bool:
         return False  # MiniMax 视频无取消接口（官方文档未提供）
+
+
+MUSIC_MODELS = frozenset({"music-3.0", "music-cover"})
+
+
+class MiniMaxMusicProvider(_MiniMaxBase):
+    """MiniMax 音乐/唱歌生成（POST /v1/music_generation，同步返回）。
+
+    官方契约（platform.minimax.cn 文档，2026-11-02 核实）：
+    - model: music-3.0（写歌）/ music-cover（翻唱）；
+    - prompt 定风格情绪，lyrics（10–1000 字）定唱词，可带 [verse]/[chorus]
+      段落标签；无 lyrics 时可开 lyrics_optimizer 自动写词；
+    - audio_setting: sample_rate/bitrate/format（wav/mp3/flac）；
+    - output_format: "url"（推荐）或 "hex"。
+    注意：2026-08-20 起该付费接口不对新用户开放（base_resp 2153 →
+    本实现如实报 rejected，不假装可用）。
+    """
+
+    def __init__(self, *, api_key: str, base_url: str = MINIMAX_BASE,
+                 model: str = "music-3.0", timeout: float = 300.0) -> None:
+        super().__init__(api_key=api_key, base_url=base_url, timeout=timeout)
+        if model not in MUSIC_MODELS:
+            raise ValueError(f"unknown minimax music model {model!r}")
+        self.model = model
+
+    def generate(self, prompt: str, *, lyrics: str = "") -> str:
+        """生成歌曲，返回音频 https URL。"""
+        prompt = (prompt or "").strip()[:1500]
+        if not prompt:
+            raise ValueError("prompt must be non-empty")
+        body = {
+            "model": self.model,
+            "prompt": prompt,
+            "audio_setting": {"sample_rate": 44100, "bitrate": 256000,
+                              "format": "wav"},
+            "output_format": "url",
+        }
+        lyrics = (lyrics or "").strip()
+        if lyrics:
+            body["lyrics"] = lyrics[:1000]
+        else:
+            body["lyrics_optimizer"] = True
+        data = self._request("/v1/music_generation", body)
+        # 响应形态防御式解析：url 形态在 data.audio_url / data.audio / url
+        d = data.get("data") if isinstance(data.get("data"), dict) else {}
+        for cand in (d.get("audio_url"), d.get("audio"), data.get("audio_url"),
+                     data.get("url"), d.get("url")):
+            u = str(cand or "").strip()
+            if u.startswith("https://"):
+                return u
+        raise MiniMaxError("bad_response", "music response has no audio url")
 
 
 IMAGE_MODELS = frozenset({"image-01"})

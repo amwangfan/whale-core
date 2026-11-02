@@ -47,6 +47,7 @@ MEDIA_GENERATION_SCOPES: Tuple[str, ...] = (
     "tool.media.image.generate",
     "tool.media.video.generate",
     "tool.tts.synthesize",
+    "tool.media.music.generate",
 )
 
 

@@ -341,6 +341,42 @@ def configure_optional_capabilities(registry, tools, store, *, env: Mapping[str,
                                 + _vid_guide, handler=video))
         out.notes.append("异步视频生成已配置（可选模型：" + "、".join(sorted(video_providers)) + "）")
 
+    # 唱歌/音乐生成（MiniMax music-3.0；2026-11-02 owner 要求接入）。
+    # 注意：该付费接口 2026-08-20 起不对新用户开放（实测 base_resp 2153/HTTP 410）
+    # ——默认不注册；WHALE_MINIMAX_MUSIC=1 且账号资格就绪后启用。
+    if minimax is not None and (env.get("WHALE_MINIMAX_MUSIC") or "").strip() == "1":
+        from whale_core.plugins.minimax_media import MiniMaxMusicProvider
+        mm_music = MiniMaxMusicProvider(
+            api_key=minimax_key, base_url=minimax_base,
+            model=(env.get("WHALE_MINIMAX_MUSIC_MODEL") or "music-3.0").strip())
+        from whale_core.plugins.registry import PluginManifest
+        registry.register(
+            PluginManifest(
+                plugin_id="media_music", name="音乐生成（唱歌）", version="1.0.0",
+                kind="model", provides=("media.music.generate",),
+                description="MiniMax music_generation 写歌/翻唱端点",
+            ),
+            provider=mm_music)
+        def sing(args):
+            require("media_music")
+            url = mm_music.generate(
+                str(args.get("prompt") or args.get("query") or args.get("goal") or ""),
+                lyrics=str(args.get("lyrics") or ""))
+            if out.artifacts is None:
+                raise ValueError("artifact storage required for music output")
+            d = out.artifacts.save_reference(url).as_dict()
+            d["note"] = ("歌曲会由系统自动发送给对方；回复正文里不要包含任何"
+                         "链接或文件路径。")
+            return json.dumps(d, ensure_ascii=False)
+        tools.register(ToolSpec(
+            name="generate_song", capability="media.music.generate",
+            plugin_id="media_music",
+            description="写歌/唱歌生成（MiniMax music-3.0）：prompt 定风格情绪，"
+                        "lyrics 可选（带 [verse]/[chorus] 段落标签更佳；"
+                        "不给歌词会自动写）。产出完整歌曲音频。",
+            handler=sing))
+        out.notes.append("音乐生成已配置（music-3.0；唱歌/写歌）")
+
     realtime_url = env.get("WHALE_REALTIME_URL", "").strip()
     if realtime_url:
         register_realtime_voice(registry, OpenAICompatibleRealtime(url=realtime_url,
