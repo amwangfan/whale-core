@@ -977,7 +977,9 @@ def cmd_run(args) -> int:
                 _owner_reply_direct(conv, "产物存储没启用，存不了图。")
                 return True
             data, mime = images[0]
-            artifact = cap.artifacts.save_bytes(data, mime)
+            # 表情素材长期保留（覆盖产物默认 7 天期，issue #57）
+            artifact = cap.artifacts.save_bytes(data, mime,
+                                                retention_s=365 * 86400)
             media = reaction_store.add(
                 artifact.id, tags,
                 persona_id=_reaction_persona_id(conv))
@@ -1017,14 +1019,19 @@ def cmd_run(args) -> int:
                 conversation_id=conversation)
             if media is None:
                 return
-            data = reaction_store.read_bytes(media)
-            if not data:
+            blob = cap.artifacts.read(media.artifact_id) \
+                if cap.artifacts is not None else None
+            if not blob:
                 return
+            artifact, data = blob
+            ext = {"image/png": ".png", "image/jpeg": ".jpg",
+                   "image/webp": ".webp", "image/gif": ".gif"}.get(
+                getattr(artifact, "content_type", ""), ".png")
             peer_type = "group" if conversation.startswith("group:") else "c2c"
             target = conversation.split(":", 1)[1] if ":" in conversation else ""
             ok = send_port.send_image_to(
                 peer_type, target, data,
-                filename=f"reaction-{media.media_id}.png") \
+                filename=f"reaction-{media.media_id}{ext}") \
                 if hasattr(send_port, "send_image_to") else False
             print(f"  [表情] 「{tag}」→ 素材 {media.media_id} "
                   f"{'已发' if ok else '发送失败'}")

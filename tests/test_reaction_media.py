@@ -123,3 +123,17 @@ class TestPlannerMarker:
     def test_no_marker_default_empty(self):
         plan = plan_reply("普通回复", is_group=False, max_segments=3)
         assert plan.reaction_tag == ""
+
+
+def test_artifact_retention_override(tmp_path):
+    """issue #57 配套：长期素材可覆盖产物默认 7 天保留期。"""
+    from whale_core.plugins.artifacts import ArtifactStore
+    store = InMemoryStore()
+    arts = ArtifactStore(tmp_path, store)
+    short = arts.save_bytes(b"x" * 100, "image/png")
+    long = arts.save_bytes(b"y" * 100, "image/gif", retention_s=365 * 86400)
+    assert long.expires_at - long.created_at == 365 * 86400
+    assert short.expires_at - short.created_at == 7 * 86400
+    import pytest as _pt
+    with _pt.raises(ValueError):
+        arts.save_bytes(b"z" * 10, "image/png", retention_s=-1)
