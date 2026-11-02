@@ -122,16 +122,38 @@ class WhaleCompanion:
                 from whale_core.life.conversation_context import ConversationKind
                 from whale_core.life.expression import derive_policy
                 from whale_core.life.relationship import RelationshipResolver
+                from whale_core.life.response_planner import derive_pragmatic_intent
+                from whale_core.life.state import InnerStateStore
 
                 rel = RelationshipResolver(
                     self.store, timeline=self.timeline).state_for(
                     context, conversation_id=conversation_id)
+                is_group = (getattr(context.conversation, "kind", None)
+                            is ConversationKind.QQ_GROUP)
                 policy = derive_policy(
-                    original,
-                    is_group=(getattr(context.conversation, "kind", None)
-                              is ConversationKind.QQ_GROUP),
-                    self_facts=rel.self_facts)
-                hints = [h for h in (rel.render(), policy.render()) if h]
+                    original, is_group=is_group, self_facts=rel.self_facts)
+                # issue #54：InnerState 进入对话上下文——风格/兴趣是全局的；
+                # 未完话题按会话作用域隔离（私聊话题不串群、群话题不串私聊）。
+                g_state = InnerStateStore(self.store).load()
+                scope = str(conversation_id or "")
+                c_state = (InnerStateStore(self.store, scope=scope).load()
+                           if scope else g_state)
+                state_lines: list[str] = []
+                if g_state.interests:
+                    state_lines.append(
+                        "你最近感兴趣：" + "、".join(g_state.interests[-4:]))
+                if g_state.style and g_state.style != "neutral":
+                    state_lines.append(f"你最近的状态偏「{g_state.style[:12]}」")
+                scoped_topics = [t for t in c_state.unfinished_topics if t][:3]
+                if scope and scoped_topics:
+                    state_lines.append("和这里还没聊完的：" + "；".join(scoped_topics))
+                # issue #55：语用意图软性参考（确定性推导，不加模型调用，
+                # 不指定话术）——接梗/认真回应/分享/承接/自然收尾。
+                intent = derive_pragmatic_intent(
+                    original, is_group=is_group, familiarity=rel.familiarity,
+                    open_topics=c_state.unfinished_topics, anxious=policy.anxious)
+                hints = [h for h in (rel.render(), policy.render(),
+                                     "\n".join(state_lines), intent.hint) if h]
                 if hints:
                     persona_text = (
                         (persona_text or "")

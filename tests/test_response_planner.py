@@ -140,3 +140,44 @@ def test_mid_line_marker_also_separates():
                       max_segments=3)
     assert plan.planner == "model"
     assert plan.bubbles == ("链路正常，我在呢。", "八点起还回学校")
+
+
+# ---------------------------------------------------------------------------
+# issue #55：语用意图（软性参考，确定性推导）
+# ---------------------------------------------------------------------------
+
+from whale_core.life.response_planner import derive_pragmatic_intent
+
+
+def test_pragmatic_intent_wrap():
+    assert derive_pragmatic_intent("晚安啦，明天聊").intent == "wrap"
+    assert derive_pragmatic_intent("嗯").intent == "wrap"
+    assert "别硬找话题" in derive_pragmatic_intent("晚安").hint
+
+
+def test_pragmatic_intent_play_requires_familiarity():
+    assert derive_pragmatic_intent("哈哈哈哈笑死", familiarity="familiar").intent == "play"
+    # 陌生人场合不给玩梗倾向（省得冒犯）
+    assert derive_pragmatic_intent("哈哈哈哈笑死", familiarity="stranger").intent == ""
+
+
+def test_pragmatic_intent_answer_and_share():
+    assert derive_pragmatic_intent("这个报错怎么办？一直复现").intent == "answer"
+    assert derive_pragmatic_intent("我今天去看了海").intent == "share"
+
+
+def test_pragmatic_intent_continue_open_topic():
+    intent = derive_pragmatic_intent("模拟电路那题我终于会了",
+                                     open_topics=("等「模拟电路作业」的结果",))
+    # 话题文本不含于消息 → 不命中
+    assert intent.intent == ""
+    intent = derive_pragmatic_intent("等「模型」的结果出来了吗",
+                                     open_topics=("等「模型」的结果",))
+    assert intent.intent == "continue"
+
+
+def test_pragmatic_intent_anxious_and_calm_default():
+    # 焦虑语境不强行给倾向（ExpressionPolicy 已在引导节奏）
+    assert derive_pragmatic_intent("哈哈", anxious=True).intent == ""
+    assert derive_pragmatic_intent("在吗").intent == ""
+    assert derive_pragmatic_intent("").intent == ""

@@ -522,3 +522,52 @@ def test_rhythm_invalid_conversation_key_422(api):
                         "/api/v1/studio/conversations/nocolon/rhythm")
     assert status == 422
     assert data["error"]["code"] == "invalid_request"
+
+
+# ---------------------------------------------------------------------------
+# issue #54：InnerState 进入对话上下文（会话作用域隔离）
+# issue #55：语用意图软性提示注入
+# ---------------------------------------------------------------------------
+
+
+def test_companion_injects_inner_state_and_pragmatic_hint(env):
+    from whale_core.life.state import InnerStateStore
+    store = env["store"]
+    InnerStateStore(store).update(style="curious", add_interest="模拟电路")
+    InnerStateStore(store, scope=A_PRIVATE).update(open_topic="期末复习计划")
+    ctx = _resolve(env, A_UIN, A_PRIVATE)
+    model = _FakeModel()
+    WhaleCompanion(store, model, timeline=env["timeline"]).chat(
+        "期末复习计划搞得我头大", conversation_id=A_PRIVATE, context=ctx,
+        episodic=False)
+    persona = model.calls[0]["persona"]
+    assert "你最近感兴趣：模拟电路" in persona
+    assert "你最近的状态偏「curious」" in persona
+    assert "和这里还没聊完的：期末复习计划" in persona
+    # #55：消息重新提起未完话题 → continue 倾向的软性提示
+    assert "没聊完的「期末复习计划」" in persona
+    # PER-01：表达层注入仍不含权限语义
+    assert "tool." not in persona and "scope" not in persona
+
+
+def test_inner_state_topics_do_not_leak_across_conversations(env):
+    """issue #54：B 私聊的未完话题不串进 A 的私聊（会话作用域隔离）。"""
+    from whale_core.life.state import InnerStateStore
+    store = env["store"]
+    InnerStateStore(store, scope=B_PRIVATE).update(open_topic="B的私密话题")
+    ctx = _resolve(env, A_UIN, A_PRIVATE)
+    model = _FakeModel()
+    WhaleCompanion(store, model, timeline=env["timeline"]).chat(
+        "在干嘛", conversation_id=A_PRIVATE, context=ctx, episodic=False)
+    assert "B的私密话题" not in model.calls[0]["persona"]
+
+
+def test_no_inner_state_no_extra_injection(env):
+    """PER-02：无状态无信号时不注入任何状态/倾向行（默认零打扰）。"""
+    ctx = _resolve(env, A_UIN, A_PRIVATE)
+    model = _FakeModel()
+    WhaleCompanion(env["store"], model, timeline=env["timeline"]).chat(
+        "在吗", conversation_id=A_PRIVATE, context=ctx, episodic=False)
+    persona = model.calls[0]["persona"]
+    assert "你最近感兴趣" not in persona
+    assert "还没聊完" not in persona

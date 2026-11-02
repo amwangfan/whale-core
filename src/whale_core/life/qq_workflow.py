@@ -150,6 +150,36 @@ class QqInboundWorkflow:
                 out.append((image.data, image.mime))
         return tuple(out)
 
+    def _topic_open_pending(self, event: OwnerEvent, text: str) -> None:
+        """慢任务 ack → 该会话挂一条未完话题（issue #54 写路径：真实互动）。
+
+        话题标签从请求文本确定性截取（不调模型）；只在有补发回调时挂——
+        没有补发链路的话题永远等不到关闭，不挂。全部 fail soft。
+        """
+        if self._completion_sender is None:
+            return
+        label = (text or "").strip().replace("\n", " ")[:18]
+        if not label:
+            return
+        try:
+            from whale_core.life.state import InnerStateStore
+            InnerStateStore(self.store, scope=str(event.conversation)).update(
+                open_topic=f"等「{label}」的结果")
+        except Exception:
+            pass
+
+    def _topic_close_pending(self, event: OwnerEvent, text: str) -> None:
+        """慢任务补发完成 → 关掉对应未完话题（issue #54）。"""
+        label = (text or "").strip().replace("\n", " ")[:18]
+        if not label:
+            return
+        try:
+            from whale_core.life.state import InnerStateStore
+            InnerStateStore(self.store, scope=str(event.conversation)).update(
+                close_topic=f"等「{label}」的结果")
+        except Exception:
+            pass
+
     def _on_async_complete(self, event: OwnerEvent, result) -> None:
         """两段式慢任务的完成回调：审核通过后交宿主补发真实结果。
 
@@ -161,6 +191,8 @@ class QqInboundWorkflow:
         reply = getattr(result, "reply", "") or ""
         if not reply.strip():
             return
+        # 补发到达 = 这条未完话题有了结果（无论正常送达还是审核兜底交代）
+        self._topic_close_pending(event, getattr(event, "text", ""))
         receipts = getattr(result, "receipts", ())
         # 2026-11-02 生产实证：视频工具是异步的（generate_video 提交即返回
         # pending），外层任务带着「视频还在跑」就收口干杯了——视频任务从此
@@ -297,6 +329,8 @@ class QqInboundWorkflow:
                 result = self.orchestrator.handle_envelope_async(
                     envelope,
                     on_complete=lambda r, ev=event: self._on_async_complete(ev, r))
+                if getattr(result, "status", "") == "ack":
+                    self._topic_open_pending(event, text)
             else:
                 result = self.orchestrator.handle_envelope(envelope)
             reply = result.reply
@@ -577,6 +611,8 @@ class QqInboundWorkflow:
             result = self.orchestrator.handle_envelope_async(
                 envelope,
                 on_complete=lambda r, ev=event: self._on_async_complete(ev, r))
+            if getattr(result, "status", "") == "ack":
+                self._topic_open_pending(event, text)
         else:
             result = self.orchestrator.handle_envelope(envelope)
         reply = (result.reply or "").strip()

@@ -193,3 +193,82 @@ def clean_reply_text(text: str) -> str:
     if plan.silent:
         return ""
     return "\n".join(plan.bubbles)
+
+
+# ---------------------------------------------------------------------------
+# issue #55：语用意图与表达倾向（软性参考，非模板）
+# ---------------------------------------------------------------------------
+
+#: 收尾信号：对话在自然收束（道晚安/短确认/先撤了）。
+_WRAP_WORDS = ("晚安", "去睡了", "先睡了", "先这样", "先这样啦", "回头说",
+               "回聊", "拜拜", "拜~", "溜了", "先撤", "去忙了", "去吃饭")
+_WRAP_ACKS = frozenset({"嗯", "嗯嗯", "好", "好的", "好哒", "行", "行吧", "ok",
+                        "OK", "收到", "好嘞", "哦哦", "噢", "哦"})
+#: 玩梗/轻松信号（避免「草」这类高误命中单字——「草莓」「草原」不是梗）。
+_PLAY_WORDS = ("哈哈", "哈哈哈", "笑死", "笑不活", "233", "xswl", "绷不住",
+               "绝了", "离大谱", "好家伙", "hhh", "HHH", "😂", "🤣")
+#: 认真求解信号（问题词 + 有足够内容）。
+_ASK_WORDS = ("为什么", "怎么办", "怎么", "如何", "什么", "哪", "能不能", "可以吗",
+              "是不是", "有没有", "帮我", "求", "请教")
+#: 对方在分享自己的事。
+_SHARE_WORDS = ("我今天", "我刚", "我最近", "我昨天", "上次我", "我家", "我们")
+
+
+@dataclass(frozen=True)
+class PragmaticIntent:
+    """本轮的表达倾向（表达层软性参考，无权限语义；``intent=""`` 表示无倾向）。
+
+    意图由确定性信号推导（不输出生成模板、不指定话术），模型收到的是
+    一句软性提示，仍由人格决定具体怎么表达（issue #55）。
+    """
+
+    intent: str = ""   # play | answer | share | continue | wrap | ""
+    hint: str = ""     # 注入人格层的一行软提示；intent=="" 时为空串
+
+
+def derive_pragmatic_intent(
+    text: str,
+    *,
+    is_group: bool = False,
+    familiarity: str = "stranger",
+    open_topics: Tuple[str, ...] = (),
+    anxious: bool = False,
+) -> PragmaticIntent:
+    """从当前消息 + 关系 + 未完话题推导本轮表达倾向（纯函数，无模型调用）。
+
+    规则与顺序（每轮至多一个倾向，命中即止）：
+    - 焦虑语境不强行给倾向（ExpressionPolicy 已在引导安抚节奏）；
+    - 收尾信号 → wrap：自然结束，不硬找话题；
+    - 未完话题被重新提起 → continue：自然承接，不自然就不硬提；
+    - 玩梗信号 → play：顺着玩，别一本正经（陌生人场合不给，省得冒犯）；
+    - 实质提问 → answer：认真把事说清楚；
+    - 对方在分享自己的事 → share：回应之外可以自然说说自己的看法/近况。
+    """
+    t = (text or "").strip()
+    if not t or anxious:
+        return PragmaticIntent()
+    stripped = t.rstrip("！!？?~～。.,， ")
+    if any(w in t for w in _WRAP_WORDS) or stripped in _WRAP_ACKS:
+        return PragmaticIntent(
+            "wrap", "这轮话题在自然收尾：简短自然结束就好，别硬找话题、别追问。")
+    for topic in open_topics:
+        topic = str(topic).strip()
+        if topic and len(topic) >= 2 and (topic in t or t in topic):
+            return PragmaticIntent(
+                "continue",
+                f"这里有之前没聊完的「{topic[:24]}」：聊得自然就顺手接上，"
+                "不自然就别硬提。")
+    if any(w in t for w in _PLAY_WORDS):
+        if familiarity != "stranger":
+            return PragmaticIntent(
+                "play", "这轮气氛轻松：接得住梗就顺着玩，别一本正经、别说教。")
+        return PragmaticIntent()
+    has_question = ("?" in t or "？" in t) and len(t) >= 6
+    if has_question or any(w in t for w in _ASK_WORDS) and len(t) >= 8:
+        return PragmaticIntent(
+            "answer", "这轮适合认真回应：把事说清楚，别光顾着抖机灵。")
+    if any(w in t for w in _SHARE_WORDS):
+        return PragmaticIntent(
+            "share", "对方在分享自己的事：好好回应之外，也可以自然说说你的看法"
+            "或你的近况。")
+    return PragmaticIntent()
