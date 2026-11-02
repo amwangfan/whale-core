@@ -166,14 +166,29 @@ def test_run_live_rejects_empty_model_output(tmp_path):
                  model_name="fake", sampling={}, out_dir=tmp_path)
 
 
-def test_scenario_set_covers_ten_categories():
+def test_scenario_set_covers_fourteen_categories():
+    """issue #40 十类 + issue #53 增补四类（接梗/技术求助/主动分享/自然收尾）。"""
     categories = {s.category for s in LIVE_SCENARIOS}
     assert categories == {
         "daily_chat", "mentioned", "group_observe", "topic_switch",
         "cold_silence", "user_anxiety", "correction", "relationship_growth",
         "proactive_reminder", "tool_failure",
+        "meme_play", "tech_help", "self_share", "wrap_up",
     }
     assert all(s.focus for s in LIVE_SCENARIOS)
+
+
+def test_eval_persona_installs_and_is_idempotent():
+    """issue #53：合成基线卡缺失时自动装入，重复安装幂等，内容无权限语义。"""
+    from evals.live.eval_persona import EVAL_PERSONA_ID, ensure_eval_persona
+    store = InMemoryStore()
+    assert ensure_eval_persona(store) is True
+    assert ensure_eval_persona(store) is False
+    from whale_core.ui.persona_cards import _load_stored_card
+    card = _load_stored_card(store, EVAL_PERSONA_ID)
+    assert card is not None and card.name
+    blob = str(card.as_dict())
+    assert "tool." not in blob and "scope" not in blob
 
 
 # ---------------------------------------------------------------------------
