@@ -1370,9 +1370,36 @@ def cmd_run(args) -> int:
             return False
         return str(ans or "").strip().startswith("是")
 
+    # 2026-11-02 owner 决策：复读链命中后由意图模型判断「该不该跟」——
+    # 应景/好玩的链跟，无意义/广告/ky 的链不跟。
+    def _chain_judge(chain_text, entries) -> bool:
+        brain = globals().get("_intent_brain_ref")
+        if brain is None:
+            return True
+        lines = []
+        for e in list(entries or ())[-8:]:
+            if not isinstance(e, dict):
+                continue
+            who = "Enxi" if e.get("is_self") else "群友"
+            body = " ".join(str(e.get("text") or "").split())[:60]
+            if body:
+                lines.append(f"{who}：{body}")
+        name = bot_aliases[0] if bot_aliases else "Enxi"
+        prompt = (
+            f"群聊里正在复读刷屏这句话：「{str(chain_text)[:60]}」。\n"
+            + ("群聊最近消息：\n" + "\n".join(lines) + "\n" if lines else "")
+            + f"判断：群里名叫「{name}」的机器人跟着复读一句，是否应景、"
+              "好玩、合时宜？（无意义灌水、广告、ky 泼冷水、与当前话题无关的"
+              " → 否；应景好玩的 → 是）\n只回答一个字：是 或 否。")
+        try:
+            ans = brain.reply(prompt)
+        except Exception:
+            return False
+        return str(ans or "").strip().startswith("是")
+
     group_turn_policy = GroupTurnPolicy(
         store, bot_names=bot_aliases, quiet_now=_quiet_now,
-        directed_classifier=_llm_directed,
+        directed_classifier=_llm_directed, chain_judge=_chain_judge,
     )
 
     _member_extractor = MemberMemoryExtractor(

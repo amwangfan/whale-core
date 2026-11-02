@@ -229,6 +229,32 @@ def test_repeat_chain_guards():
                         timeline_entries=_chain(3)).action == "observe"
 
 
+def test_repeat_chain_judge_gate():
+    """2026-11-02 owner 决策：链命中后还要判断该不该跟——judge 否决则不跟，
+    judge 异常 fail-closed 不跟。"""
+    store = InMemoryStore()
+    p = GroupTurnPolicy(store, bot_names=("鲸鱼",), now_fn=lambda: T0,
+                        chain_judge=lambda t, e: False)
+    d = p.maybe_join(conversation=GROUP, text="有毒吧", activity="lively",
+                     timeline_entries=_chain(3))
+    assert d.action == "observe"  # 否决 → 旁观（落到 not_directed）
+
+    def boom(t, e):
+        raise RuntimeError("down")
+    store2 = InMemoryStore()
+    p2 = GroupTurnPolicy(store2, bot_names=("鲸鱼",), now_fn=lambda: T0,
+                         chain_judge=boom)
+    assert p2.maybe_join(conversation=GROUP, text="有毒吧", activity="lively",
+                         timeline_entries=_chain(3)).action == "observe"
+
+    store3 = InMemoryStore()
+    p3 = GroupTurnPolicy(store3, bot_names=("鲸鱼",), now_fn=lambda: T0,
+                         chain_judge=lambda t, e: True)
+    d3 = p3.maybe_join(conversation=GROUP, text="有毒吧", activity="lively",
+                       timeline_entries=_chain(3))
+    assert (d3.action, d3.reason_code) == ("join", "repeat_chain")
+
+
 def test_reason_code_recorded_without_private_content():
     """诊断落 kv：reason_code + 时间，不含消息正文。"""
     store = InMemoryStore()

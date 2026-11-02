@@ -126,7 +126,7 @@ class GroupTurnPolicy:
                  bot_names: Tuple[str, ...] = (),
                  now_fn: Optional[Callable[[], datetime]] = None,
                  quiet_now: Optional[Callable[[], bool]] = None,
-                 directed_classifier=None):
+                 directed_classifier=None, chain_judge=None):
         self.store = store
         # Host supplies explicit bot aliases; core ships no character names.
         self._names = tuple(n for n in bot_names if n)
@@ -141,6 +141,10 @@ class GroupTurnPolicy:
         # 规则全不命中被静默压制）。可调用 (text, timeline_entries) -> bool；
         # 仅在机器人近窗发过言（对话进行中）且规则不命中时调用，调用有界。
         self._directed_classifier = directed_classifier
+        # 2026-11-02 owner 决策：复读链命中后仍要判断「该不该跟」——可调用
+        # (chain_text, timeline_entries) -> bool（意图模型）；None = 命中即跟
+        # （测试/离线默认）。判定器异常 fail-closed 为不跟（宁可少跟不乱跟）。
+        self._chain_judge = chain_judge
 
     # -- 主入口 -------------------------------------------------------------
 
@@ -160,9 +164,16 @@ class GroupTurnPolicy:
 
         # 复读链检测（lively 档；非静默时段）：群友刷屏复读时跟风 +1。
         # 复读文本由调用方原文直发（不过模型）；冷却/日配额与普通插话同一保险丝。
+        # 命中后过 chain_judge 判断该不该跟（2026-11-02 owner 决策）。
         repeat_text: "str | None" = None
         if activity == "lively" and not self._quiet_now():
             repeat_text = _repeat_chain(timeline_entries)
+            if repeat_text is not None and self._chain_judge is not None:
+                try:
+                    if not self._chain_judge(repeat_text, timeline_entries):
+                        repeat_text = None
+                except Exception:
+                    repeat_text = None  # 判定器故障 = 不跟（宁可少跟）
 
         text = str(text or "")
         named = bool(self._name_re.search(text)) if self._name_re else False
