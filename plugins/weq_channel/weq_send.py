@@ -250,6 +250,201 @@ class WeQWebSendPort:
         outcome = (((body.get("result") or {}).get("data") or {}).get("json"))
         return isinstance(outcome, dict) and bool(outcome.get("ok"))
 
+    # ── 只读查询（昵称解析，2026-11-01）────────────────────────────────
+
+    def _get(self, path: str, *, auth: bool) -> tuple[int, "dict | str"]:
+        """tRPC query 只能 GET（本版本 tRPC 把 POST 一律当 mutation）。"""
+        headers: dict = {}
+        if auth:
+            if not self._cookie:
+                raise WeQSendError("no session (login first)")
+            headers["Cookie"] = self._cookie
+        request = urllib.request.Request(self.base_url + path, headers=headers,
+                                         method="GET")
+        try:
+            with self._opener(request, self.timeout) as response:  # type: ignore[operator]
+                raw = response.read()
+                status = getattr(response, "status", 200)
+        except urllib.error.HTTPError as exc:
+            try:
+                raw = exc.read()
+            except Exception:
+                raw = b""
+            status = exc.code
+        except (urllib.error.URLError, OSError, ValueError):
+            raise WeQSendError("weq web unreachable") from None
+        try:
+            parsed = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            parsed = raw.decode("utf-8", "replace")[:200]
+        return status, parsed
+
+    def member_briefs(self, group_code: str = "", uins=(), uids=()) -> list[dict]:
+        """群成员名片/昵称批量解析（/trpc/account.memberBriefs，whale 补丁端点）。
+
+        只读查询（本地成员库，不碰发送链）。返回 [{uid, uin, card, nick}]。
+        失败返回 []——昵称是增强，缺失时调用方回退代号标签，不影响主链路。
+        """
+        uins = [str(u).strip() for u in (uins or ())
+                if str(u or "").strip().isdigit()][:50]
+        uids = [str(u).strip() for u in (uids or ()) if str(u or "").strip()][:50]
+        if not uins and not uids:
+            return []
+        inp = {"groupCode": str(group_code or "").strip(), "uins": uins,
+               "uids": uids}
+        path = "/trpc/account.memberBriefs?input=" + urllib.parse.quote(
+            json.dumps({"json": inp}, ensure_ascii=False))
+        try:
+            if self._cookie is None:
+                self.login()
+            status, body = self._get(path, auth=True)
+            if status == 401:
+                self.login()
+                status, body = self._get(path, auth=True)
+        except WeQSendError:
+            return []
+        if status != 200 or not isinstance(body, dict):
+            return []
+        data = ((body.get("result") or {}).get("data") or {}).get("json")
+        members = data.get("members") if isinstance(data, dict) else None
+        if not isinstance(members, list):
+            return []
+        return [m for m in members if isinstance(m, dict)]
+
+    # ── 定向媒体发送（2026-11-01 媒体功能开放测试）─────────────────────
+    # 与 send_c2c 同一纪律：c2c 目标强校验 uid 形状（回复语义由宿主保证），
+    # 群目标必须在构造期白名单内；消息内容/模型输出永远不能指定发送目标。
+
+    def _media_target_ok(self, peer_type: str, target: str) -> bool:
+        if peer_type == "c2c":
+            return bool(UID_RE.match(str(target or "").strip()))
+        if peer_type == "group":
+            return str(target or "").strip() in self.allowed_groups
+        return False
+
+    def _post_media(self, path: str, payload: dict) -> bool:
+        if self.expected_account_uin:
+            payload["json"]["expectedAccountUin"] = self.expected_account_uin
+        if self.expected_account_config_id:
+            payload["json"]["expectedAccountConfigId"] = self.expected_account_config_id
+        try:
+            if self._cookie is None:
+                self.login()
+            status, body, _ = self._post(path, payload, auth=True)
+            if status == 401:
+                self.login()
+                status, body, _ = self._post(path, payload, auth=True)
+        except WeQSendError:
+            return False
+        if status != 200 or not isinstance(body, dict):
+            return False
+        outcome = (((body.get("result") or {}).get("data") or {}).get("json"))
+        if not isinstance(outcome, dict):
+            return False
+        self.last_receipt = outcome
+        return bool(outcome.get("ok"))
+
+    def send_image_to(self, peer_type: str, target: str, image_bytes: bytes, *,
+                      filename: str = "image.png", width: int = 0, height: int = 0) -> bool:
+        """向指定 c2c 对端/白名单群发图片（send_image 的定向版）。"""
+        peer_type = str(peer_type or "").strip()
+        target = str(target or "").strip()
+        if not self._media_target_ok(peer_type, target):
+            self.last_receipt = {"ok": False, "error": "target-not-allowed"}
+            return False
+        if not image_bytes or len(image_bytes) > 20 * 1024 * 1024:
+            return False
+        payload = {"json": {"peerType": peer_type, "targetId": target,
+                            "image": {"type": "Buffer", "data": list(image_bytes)},
+                            "fileName": filename[:100] or "image.png"}}
+        if width > 0 and height > 0:
+            payload["json"]["width"] = width
+            payload["json"]["height"] = height
+        return self._post_media("/trpc/account.sendImage", payload)
+
+    def send_voice_to(self, peer_type: str, target: str, wav_bytes: bytes, *,
+                      filename: str = "voice.wav") -> bool:
+        """向指定 c2c 对端/白名单群发语音（send_voice 的定向版）。"""
+        peer_type = str(peer_type or "").strip()
+        target = str(target or "").strip()
+        if not self._media_target_ok(peer_type, target):
+            self.last_receipt = {"ok": False, "error": "target-not-allowed"}
+            return False
+        if not wav_bytes or len(wav_bytes) > 20 * 1024 * 1024:
+            return False
+        payload = {"json": {"peerType": peer_type, "targetId": target,
+                            "wav": {"type": "Buffer", "data": list(wav_bytes)},
+                            "fileName": filename[:100] or "voice.wav"}}
+        return self._post_media("/trpc/account.sendVoice", payload)
+
+    def send_video_to(self, peer_type: str, target: str, video_bytes: bytes, *,
+                      filename: str = "video.mp4", width: int = 0, height: int = 0,
+                      duration_sec: int = 0, thumb: bytes = b"") -> bool:
+        """向指定 c2c 对端/白名单群发视频（/trpc/account.sendVideo 补丁端点）。
+
+        尺寸纪律（weq 侧实测口径）：**c2c 固定不上报 width/height**（服务端
+        schema 限制，报了会被 result=79 拒发）；group 建议给（不给安卓端可能
+        显示「文件已过期」）。
+        """
+        peer_type = str(peer_type or "").strip()
+        target = str(target or "").strip()
+        if not self._media_target_ok(peer_type, target):
+            self.last_receipt = {"ok": False, "error": "target-not-allowed"}
+            return False
+        if not video_bytes or len(video_bytes) > 100 * 1024 * 1024:
+            return False
+        payload = {"json": {"peerType": peer_type, "targetId": target,
+                            "video": {"type": "Buffer", "data": list(video_bytes)},
+                            "fileName": filename[:100] or "video.mp4"}}
+        if peer_type == "group" and width > 0 and height > 0:
+            payload["json"]["width"] = width
+            payload["json"]["height"] = height
+        if duration_sec > 0:
+            payload["json"]["durationSec"] = duration_sec
+        if thumb:
+            payload["json"]["thumb"] = {"type": "Buffer", "data": list(thumb)}
+        return self._post_media("/trpc/account.sendVideo", payload)
+
+    def send_file_to(self, peer_type: str, target: str, path: str, *,
+                     filename: str = "") -> bool:
+        """向指定 c2c 对端/白名单群发文件（/trpc/account.sendFile）。
+
+        ``path`` 是 weq-web 所在机的本地路径（桌面文件走原路径上传）。
+        2026-11-01 实测：c2c 原生视频气泡被服务端 result=79 拒发（群正常），
+        私聊视频经本方法以文件形态送达。
+        """
+        peer_type = str(peer_type or "").strip()
+        target = str(target or "").strip()
+        if not self._media_target_ok(peer_type, target):
+            self.last_receipt = {"ok": False, "error": "target-not-allowed"}
+            return False
+        path = str(path or "").strip()
+        if not path:
+            return False
+        payload = {"json": {"peerType": peer_type, "targetId": target, "path": path}}
+        if filename:
+            payload["json"]["fileName"] = filename[:100]
+        if self.expected_account_uin:
+            payload["json"]["expectedAccountUin"] = self.expected_account_uin
+        if self.expected_account_config_id:
+            payload["json"]["expectedAccountConfigId"] = self.expected_account_config_id
+        try:
+            if self._cookie is None:
+                self.login()
+            status, body, _ = self._post("/trpc/account.sendFile", payload, auth=True)
+            if status == 401:
+                self.login()
+                status, body, _ = self._post("/trpc/account.sendFile", payload, auth=True)
+        except WeQSendError:
+            return False
+        if status != 200 or not isinstance(body, dict):
+            return False
+        outcome = (((body.get("result") or {}).get("data") or {}).get("json"))
+        if not isinstance(outcome, dict):
+            return False
+        self.last_receipt = outcome
+        return bool(outcome.get("ok") or outcome.get("sent"))
+
     # ── OutboundPort ─────────────────────────────────────────
 
     def send_c2c(self, uid: str, text: str) -> bool:
@@ -489,3 +684,36 @@ def _send_mixed_impl(self, parts: list[tuple[str, str]]) -> bool:
         if not self._send_text_payload(content if kind == "image" else f"[图片 {label}]"):
             ok_all = False
     return ok_all
+
+
+class ConversationRoutingPort:
+    """按草稿目标会话路由发送（OutboundPort 装饰器）。
+
+    2026-11-01 修复：网关/Outbox 链路里 ``port.send(draft)`` 只走内层端口的
+    固定目标（owner 私聊），群里的回复被送进 owner 私聊。本端口按
+    ``draft.target_conversation`` 路由：
+
+    - ``group:<code>`` → ``send_group_text``（白名单群）；
+    - ``private:<uid>`` 且非 owner → ``send_c2c``（回复语义对端）；
+    - 其余（空 / owner 私聊 / 无会话信息）→ 内层 ``send``（原行为不变）。
+
+    只换路由，不改配额/审批/账本语义（那些在 Outbox 层已完成）。
+    """
+
+    def __init__(self, inner, *, owner_uid: str = "") -> None:
+        self._inner = inner
+        self._owner_uid = str(owner_uid or "")
+
+    def send(self, draft) -> bool:
+        conv = str(getattr(draft, "target_conversation", "") or "")
+        if conv.startswith("group:") and hasattr(self._inner, "send_group_text"):
+            return bool(self._inner.send_group_text(conv.split(":", 1)[1], draft.text))
+        if conv.startswith("private:"):
+            uid = conv.split(":", 1)[1]
+            if uid and uid != self._owner_uid and hasattr(self._inner, "send_c2c"):
+                return bool(self._inner.send_c2c(uid, draft.text))
+        return bool(self._inner.send(draft))
+
+    def __getattr__(self, name):
+        # 其余端口能力（send_voice / artifact_reader / window 等）透传给内层
+        return getattr(self._inner, name)

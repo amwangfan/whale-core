@@ -54,9 +54,9 @@ class SearchIntentRouter:
             hints = {
                 "web.search": "query: 搜索词, limit: 结果数量",
                 "web.fetch": "url: 要读取的公开HTTP(S)链接",
-                "media.image.generate": "prompt: 图片描述, size: 可选图片尺寸",
-                "media.video.generate": "prompt: 视频描述",
-                "tts.synthesize": "text: 要朗读的文字",
+                "media.image.generate": "prompt: 图片描述, size: 可选图片尺寸, model: 可选（用户指定才填）",
+                "media.video.generate": "prompt: 视频描述, model: 可选（用户指定才填）",
+                "tts.synthesize": "text: 要朗读的文字, model/voice: 可选（用户指定才填）",
                 "asr.transcribe": "audio: 已提供的音频数据或资源引用；缺音频时澄清",
                 "shell.execute": "command: 命令字符串；执行仍受宿主审批和沙箱限制",
             }

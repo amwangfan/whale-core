@@ -27,6 +27,9 @@ class ProactiveDraft:
     expires_at: datetime | None = None
     # 主题标签（可选）：主动行为的主题去重键（roadmap P2-3），如 "weather:shanghai"。
     topic: str = ""
+    # 目标会话（可选）：如 "group:1124744261" / "private:<uid>"。
+    # 2026-11-01 修复：群回复曾因此信息丢失而落进 owner 私聊。
+    target_conversation: str = ""
 
     def __post_init__(self) -> None:
         if not self.draft_id or not self.text.strip() or not self.reason.strip() or not self.evidence:
@@ -42,7 +45,8 @@ class ProactiveDraft:
                 "channel": self.channel, "importance": self.importance,
                 "created_at": self.created_at.isoformat(),
                 "expires_at": self.expires_at.isoformat() if self.expires_at else None,
-                "topic": self.topic[:80]}
+                "topic": self.topic[:80],
+                "target_conversation": self.target_conversation[:160]}
 
     @classmethod
     def from_dict(cls, data: dict) -> ProactiveDraft:
@@ -51,7 +55,8 @@ class ProactiveDraft:
                    channel=data["channel"], importance=float(data["importance"]),
                    created_at=datetime.fromisoformat(data["created_at"]),
                    expires_at=datetime.fromisoformat(data["expires_at"]) if data.get("expires_at") else None,
-                   topic=str(data.get("topic") or ""))
+                   topic=str(data.get("topic") or ""),
+                   target_conversation=str(data.get("target_conversation") or ""))
 
 
 # ---------------------------------------------------------------------------
@@ -342,6 +347,23 @@ class ProactiveOutbox:
                        {"status": status, "reason": "channel accepted" if accepted else "delivery not confirmed",
                         "attempts": 1, "at": now.isoformat()})
         return DispatchVerdict(status, "sent to channel" if accepted else "uncertain; manual review", draft_id)
+
+    def close(self, draft_id: str, *, status: str = "closed",
+              reason: str = "") -> bool:
+        """终态关闭一个永不派发/已被取代的草稿（2026-11-01 审批积压治理）。
+
+        适用：沉默轮（[[沉默]] 规划不发送）、多气泡主草稿（实际派发由 #i 分段
+        草稿承担）、直发路径已送达的回复草稿（ stranger/群直发不过网关，台账
+        需要人工补终态）。控制台审批列表排除 closed/superseded/accepted/unknown。
+        """
+        if status not in ("closed", "superseded", "accepted"):
+            raise ValueError("close status must be closed|superseded|accepted")
+        if self.get(draft_id) is None:
+            return False
+        self.store.put(f"life:ledger:{draft_id}",
+                       {"status": status, "reason": reason,
+                        "attempts": 0, "at": self._now().isoformat()})
+        return True
 
     def feedback(self, draft_id: str, feedback: str) -> None:
         if feedback not in {"useful", "irrelevant", "dismissed", "not_now"}:

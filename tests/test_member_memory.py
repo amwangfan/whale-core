@@ -737,6 +737,16 @@ def test_optin_watermark_excludes_opted_out_interval(env):
     t1 = datetime(2026, 11, 1, 12, 0, tzinfo=timezone.utc)
     timeline.append(GROUP, message_id="m-during", sender_id=A_UIN,
                     text="我在退出期间说的事", send_time=t1.isoformat())
+    # 水位过滤用的是 recorded_at（记录时刻，生产里≈发送时刻）；append 按真实
+    # 当前时间打 recorded_at——测试要把两条消息的 recorded_at 钉到水位之前，
+    # 否则跨过 watermark 时刻跑测试会时间炸弹式失败（2026-11-01 21:00 实证）。
+    entries = list(store.get("timeline:" + GROUP) or [])
+    for e in entries:
+        if e.get("message_id") == "m-old":
+            e["recorded_at"] = t0.isoformat()
+        elif e.get("message_id") == "m-during":
+            e["recorded_at"] = t1.isoformat()
+    store.put("timeline:" + GROUP, entries)
     consents.opt_in(A_PRINCIPAL)
     note_optin_watermark(store, A_PRINCIPAL,
                          now=datetime(2026, 11, 1, 13, 0, tzinfo=timezone.utc))

@@ -188,8 +188,9 @@ def _qq_workflow(tmp_path, tool_handler):
                            allowed_channels=frozenset({"direct_message"}))
     sent: list = []
 
-    def completion_sender(event, reply, audio_ids=()):
-        sent.append({"event": event, "reply": reply, "audio_ids": audio_ids})
+    def completion_sender(event, reply, audio_ids=(), image_ids=()):
+        sent.append({"event": event, "reply": reply, "audio_ids": audio_ids,
+                     "image_ids": image_ids})
 
     workflow = QqInboundWorkflow(
         store, _StubBrain(), prefs=prefs, orchestrator=orc,

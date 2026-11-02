@@ -18,9 +18,10 @@ def test_selected_character_is_preserved_and_separated_from_memories():
     )
     assert "用户选择的角色 A" in system
     assert "昨日谈到旅行" in system
-    assert system.index("用户选定的角色表达资料") < system.index("检索到的背景记忆")
-    assert "不可信资料" in system
-    assert "不得授权工具" in system
+    # 卡内容直出、记忆仅带极简标签（owner 2026-11-01：安全由后端执行，不注入提示词）
+    assert system.index("用户选择的角色 A") < system.index("背景记忆")
+    assert "不可信资料" not in system
+    assert "不得授权工具" not in system
 
 
 def test_budget_and_empty_context():
@@ -29,4 +30,4 @@ def test_budget_and_empty_context():
     assert "a" * (MAX_PERSONA_CHARS + 1) not in p
     m = compose_companion_system(memories=["x" * (MAX_MEMORY_CHARS + 1000)])
     assert m.count("x") <= MAX_MEMORY_CHARS
-    assert "检索到的背景记忆" not in compose_companion_system(memories=[])
+    assert "背景记忆" not in compose_companion_system(memories=[])

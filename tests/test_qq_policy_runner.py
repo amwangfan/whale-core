@@ -252,3 +252,30 @@ def test_manual_approve_without_live_config_records_unknown(runner):
     # unknown 不自动重试：再次 dispatch → already_attempted
     again = runner.dispatch_approved(store, "qq-reply:m3", port=runner.ConsoleSendPort())
     assert again == "already_attempted"
+
+
+def test_multibubble_segments_each_need_outbox_entry():
+    """2026-11-01 生产事故：多气泡分段用 ``主草稿id#i`` 派发，但台账只有主草稿
+    → 网关 outbox 模式查不到分段 → fail:missing:not found 全段丢发。
+    修复纪律：分段派发前各自 propose 入台账。"""
+    store = InMemoryStore()
+    outbox = ProactiveOutbox(store)
+    day = datetime(2026, 11, 1, 12, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    prefs = ProactivePrefs(enabled=True, allowed_channels=frozenset({"direct_message"}),
+                           quiet_start=dtime(0), quiet_end=dtime(0))
+    base = "qq-reply:multi-1"
+    segments = ["第一段", "第二段"]
+    outbox.propose(ProactiveDraft(base, "第一段\n第二段", "r", ("e",),
+                                  channel="direct_message"))
+    # 反事实：未入台账的分段 id 派发被拒（事故形态）
+    missing = outbox.dispatch(f"{base}#0", prefs, now=day, port=TruePort(),
+                              explicitly_approved=True, passive_reply=True)
+    assert "missing" in f"{missing.status}:{missing.reason}" or missing.status != "accepted"
+    # 修复后：分段各自 propose → 各段 accepted
+    for i, seg in enumerate(segments):
+        outbox.propose(ProactiveDraft(f"{base}#{i}", seg, "多气泡分段", ("e",),
+                                      channel="direct_message"))
+    verdicts = [outbox.dispatch(f"{base}#{i}", prefs, now=day, port=TruePort(),
+                                explicitly_approved=True, passive_reply=True)
+                for i in range(2)]
+    assert [v.status for v in verdicts] == ["accepted", "accepted"]

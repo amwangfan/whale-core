@@ -89,74 +89,257 @@ def configure_optional_capabilities(registry, tools, store, *, env: Mapping[str,
     def save(reference: str) -> str:
         return out.artifacts.save_reference(reference).url if out.artifacts else reference
 
+    # MiniMax（图像 + 视频 + 语音）：WHALE_MINIMAX_API_KEY 配了才注册
+    # （key 由 owner 自填）。位置必须在 image/speech/video 装配之前：
+    # 三者的可选模型清单与默认模型都要并入 MiniMax 模型。
+    minimax_key = (env.get("WHALE_MINIMAX_API_KEY") or "").strip()
+    minimax_base = (env.get("WHALE_MINIMAX_BASE_URL") or "").strip() or "https://api.minimaxi.com"
+    minimax = None
+    if minimax_key:
+        from whale_core.plugins.minimax_media import (
+            MiniMaxImageProvider, MiniMaxTTSProvider, MiniMaxVideoProvider)
+        minimax = (MiniMaxVideoProvider, MiniMaxTTSProvider, MiniMaxImageProvider)
+        out.notes.append("MiniMax 已配置（图像 + 视频 + 语音模型可选）")
+
+    # 2026-11-01 owner 决策：生图/视频默认二次元动漫画风（群友实测反馈
+    # 写实向出图违和）。对方提示词里已带风格词（写实/真人/油画…）时以其为准。
+    media_style = (env.get("WHALE_MEDIA_STYLE") or "二次元动漫风格").strip()
+    import re as _re
+    _STYLE_CUES_RE = _re.compile(
+        r"写实|真人|照片|photoreal|realistic|cosplay|油画|水彩|素描|像素|"
+        r"二次元|动漫|漫画|插画|古风|国风|赛博|3[dD]|风格", _re.I)
+
+    def _with_media_style(prompt: str) -> str:
+        p = (prompt or "").strip()
+        if not p or not media_style or _STYLE_CUES_RE.search(p):
+            return p
+        return p + "，" + media_style
+
     image_base, image_key, image_kind = _resolve_capability_env(env, "IMAGE")
-    if image_base:
-        if image_kind == "dashscope":
-            from whale_core.plugins.dashscope_media import DashScopeImageProvider
-            image_provider = DashScopeImageProvider(base_url=image_base, api_key=image_key,
-                model=env.get("WHALE_IMAGE_MODEL") or "qwen-image-3.0")
-        else:
-            image_provider = OpenAIImagesProvider(base_url=image_base, api_key=image_key,
-                model=env.get("WHALE_IMAGE_MODEL") or "dall-e-3")
-        register_image_gen(registry, provider=image_provider)
-        default_size = "1328*1328" if image_kind == "dashscope" else "1024x1024"
-        def generate(args):
-            result = require("media_image").generate(str(args.get("prompt") or args.get("query") or args.get("goal") or ""),
-                size=str(args.get("size") or default_size), n=int(args.get("n") or 1))
-            # 同时回原始 URL（签名临时链接，QQ 等外部渠道可直接打开）
-            # 与本地工件引用（控制台内可管理）；工件复制实现持久保存。
-            return json.dumps({"task_id":result.task_id, "status":result.status,
-                               "images":[save(r) for r in result.images],
-                               "urls":[r for r in result.images]}, ensure_ascii=False)
-        tools.register(ToolSpec(name="generate_image", capability="media.image.generate", plugin_id="media_image",
-                                description="按提示生成图片，返回已保存的图片链接", handler=generate))
-        out.notes.append("图像生成已配置")
+    if image_base or minimax is not None:
+        mm_image_name = "minimax-" + (env.get("WHALE_MINIMAX_IMAGE_MODEL") or "image-01").strip()
+        # 默认模型：显式 WHALE_IMAGE_MODEL 优先；其次 MiniMax（owner 决策：
+        # 画图模型切成 minimax）；再回退供应商默认。
+        vendor_default = "qwen-image-3.0" if image_kind == "dashscope" else "dall-e-3"
+        image_default = (env.get("WHALE_IMAGE_MODEL") or "").strip() \
+            or (mm_image_name if minimax is not None else vendor_default)
+        # 候选清单：默认 + 显式列表 + 供应商默认（默认被切去 MiniMax 时
+        # qwen 等仍保留为可选项，不悄悄消失）
+        seen_models: set[str] = set()
+        image_models = []
+        for m in [image_default] + [
+                x.strip() for x in (env.get("WHALE_IMAGE_MODELS") or "").split(",")
+            ] + ([vendor_default] if image_base else []):
+            if m and m not in seen_models:
+                seen_models.add(m)
+                image_models.append(m)
+        image_providers = {}
+        for m in image_models:
+            if m == mm_image_name or m.startswith("minimax-"):
+                continue  # MiniMax 模型在下方单独装配
+            if not image_base:
+                continue
+            if image_kind == "dashscope":
+                from whale_core.plugins.dashscope_media import DashScopeImageProvider
+                image_providers[m] = DashScopeImageProvider(base_url=image_base, api_key=image_key, model=m)
+            else:
+                image_providers[m] = OpenAIImagesProvider(base_url=image_base, api_key=image_key, model=m)
+        if minimax is not None:
+            image_providers[mm_image_name] = minimax[2](
+                api_key=minimax_key, base_url=minimax_base,
+                model=mm_image_name.removeprefix("minimax-"))
+        if image_default not in image_providers:
+            # 显式指定的默认模型不可用（如 key 未配）→ 回退到任一可用模型
+            if not image_providers:
+                image_default = ""
+            else:
+                out.notes.append(f"图像默认模型 {image_default} 不可用，回退 "
+                                 + sorted(image_providers)[0])
+                image_default = sorted(image_providers)[0]
+        if image_default:
+            image_provider = image_providers[image_default]
+            register_image_gen(registry, provider=image_provider)
+            default_size = "1328*1328" if image_kind == "dashscope" else "1024x1024"
+            def generate(args):
+                require("media_image")  # 注册被撤销即拒绝（保 disable 语义）
+                # 2026-11-01：允许指定生图模型（owner 决策）；未知模型诚实报错并列可用
+                model = str(args.get("model") or "").strip()
+                provider = image_provider
+                if model:
+                    provider = image_providers.get(model)
+                    if provider is None:
+                        raise ValueError(
+                            f"未知生图模型 {model!r}（可用：{', '.join(sorted(image_providers))}）")
+                result = provider.generate(
+                    _with_media_style(str(args.get("prompt") or args.get("query") or args.get("goal") or "")),
+                    size=str(args.get("size") or default_size), n=int(args.get("n") or 1))
+                # 只回本地工件引用（2026-11-01「恶意链接」事件：裸签名 URL 被
+                # 模型贴进 QQ 正文触发安全警告且外部打不开）。图片由系统作为
+                # 真实图片消息发出，模型不应在正文里贴任何链接/路径。
+                return json.dumps({"task_id":result.task_id, "status":result.status,
+                                   "model": model or image_default,
+                                   "images":[save(r) for r in result.images],
+                                   "note":"图片会由系统自动发送给对方；回复正文里"
+                                          "不要包含任何图片链接或文件路径。"},
+                                  ensure_ascii=False)
+            # 2026-11-02 owner 决策：允许意图模型按需求选供应商——选型指南
+            # 进工具描述（意图规划器可见的唯一渠道）。
+            _IMAGE_GUIDE = {
+                "minimax-image-01": "二次元/人像审美强、自带提示词优化、出图快（默认首选）",
+                "qwen-image-3.0": "写实风/复杂构图/图内带文字的渲染更强",
+            }
+            _img_guide = "；".join(
+                f"{m}（{_IMAGE_GUIDE[m]}）" if m in _IMAGE_GUIDE else m
+                for m in sorted(image_providers))
+            tools.register(ToolSpec(name="generate_image", capability="media.image.generate", plugin_id="media_image",
+                                    description="按提示生成图片（默认二次元动漫画风，对方要求别的风格时以其为准）；"
+                                    "可用 model 参数指定模型：" + _img_guide, handler=generate))
+            out.notes.append("图像生成已配置（可选模型：" + "、".join(sorted(image_providers)) + "）")
 
     speech_base, speech_key, speech_kind = _resolve_capability_env(env, "SPEECH")
-    if speech_base:
-        common = {"base_url": speech_base, "api_key": speech_key}
-        if speech_kind == "dashscope":
-            from whale_core.plugins.dashscope_media import DashScopeASRProvider, DashScopeTTSProvider
-            asr = DashScopeASRProvider(**common, model=env.get("WHALE_ASR_MODEL") or "fun-asr-flash-2026-06-15")
-            tts = DashScopeTTSProvider(**common, model=env.get("WHALE_TTS_MODEL") or "qwen-audio-3.0-tts-flash",
-                                       voice=env.get("WHALE_TTS_VOICE") or "alloy")
-        else:
-            asr = OpenAICompatibleASR(**common, model=env.get("WHALE_ASR_MODEL") or "whisper-1")
-            tts = OpenAICompatibleTTS(**common, model=env.get("WHALE_TTS_MODEL") or "tts-1", voice=env.get("WHALE_TTS_VOICE") or "alloy")
-        register_speech(registry, asr=asr, tts=tts)
-        def transcribe(args):
-            encoded = str(args.get("audio_base64") or "")
-            if not encoded or len(encoded)>35*1024*1024:
-                raise ValueError("audio_base64 required or exceeds limit")
-            return require("speech_asr").transcribe(base64.b64decode(encoded, validate=True), lang=str(args.get("lang") or "zh"), format=str(args.get("format") or "wav"))
-        def speak(args):
-            audio = require("speech_tts").synthesize(str(args.get("text") or ""), voice=str(args.get("voice") or ""), rate=float(args.get("rate") or 1))
-            if out.artifacts is None:
-                raise ValueError("artifact storage required for speech output")
-            return json.dumps(out.artifacts.save_bytes(audio, "audio/mpeg").as_dict())
-        tools.register(ToolSpec(name="transcribe_audio", capability="asr.transcribe", plugin_id="speech_asr", handler=transcribe))
-        tools.register(ToolSpec(name="synthesize_speech", capability="tts.synthesize", plugin_id="speech_tts", handler=speak))
-        out.notes.append("语音识别与合成已配置")
+    tts_providers: dict = {}
+    tts_default = ""
+    # 2026-11-01 owner 决策「qwen/ds 不走代理」：MiniMax TTS 不再依赖 dashscope
+    # 基座存在——无 WHALE_MEDIA/SPEECH_BASE_URL 时也能独立挂载（仅 TTS；
+    # MiniMax 无 ASR，语音识别随 dashscope 基座缺席而缺席，诚实不挂）。
+    if speech_base or minimax is not None:
+        mm_tts_model = (env.get("WHALE_MINIMAX_TTS_MODEL") or "speech-02-hd").strip()
+        mm_tts_voice = (env.get("WHALE_MINIMAX_TTS_VOICE") or "female-tianmei").strip()
+        if speech_base:
+            common = {"base_url": speech_base, "api_key": speech_key}
+            tts_default = env.get("WHALE_TTS_MODEL") or ("qwen-audio-3.0-tts-flash" if speech_kind == "dashscope" else "tts-1")
+            if speech_kind == "dashscope":
+                from whale_core.plugins.dashscope_media import DashScopeASRProvider, DashScopeTTSProvider
+                asr = DashScopeASRProvider(**common, model=env.get("WHALE_ASR_MODEL") or "fun-asr-flash-2026-06-15")
+                # 默认 + WHALE_TTS_MODELS 追加（音色不跨模型，每个模型各记自己的音色）
+                tts_models = [tts_default] + [
+                    m.strip() for m in (env.get("WHALE_TTS_MODELS") or "").split(",")
+                    if m.strip() and m.strip() != tts_default]
+                for m in tts_models:
+                    voice = (env.get("WHALE_TTS_VOICE") or "longanlingxin") if m == tts_default else ""
+                    tts_providers[m] = DashScopeTTSProvider(**common, model=m, voice=voice)
+            else:
+                asr = OpenAICompatibleASR(**common, model=env.get("WHALE_ASR_MODEL") or "whisper-1")
+                tts_providers[tts_default] = OpenAICompatibleTTS(**common, model=tts_default, voice=env.get("WHALE_TTS_VOICE") or "alloy")
+            register_speech(registry, asr=asr, tts=tts_providers[tts_default])
+            def transcribe(args):
+                encoded = str(args.get("audio_base64") or "")
+                if not encoded or len(encoded)>35*1024*1024:
+                    raise ValueError("audio_base64 required or exceeds limit")
+                return require("speech_asr").transcribe(base64.b64decode(encoded, validate=True), lang=str(args.get("lang") or "zh"), format=str(args.get("format") or "wav"))
+            tools.register(ToolSpec(name="transcribe_audio", capability="asr.transcribe", plugin_id="speech_asr", handler=transcribe))
+        # MiniMax 语音并入可选模型（音色 id 是 MiniMax 平台体系，不跨 dashscope）
+        if minimax is not None:
+            tts_providers[mm_tts_model] = minimax[1](
+                api_key=minimax_key, base_url=minimax_base,
+                model=mm_tts_model, voice=mm_tts_voice)
+        if not tts_default:
+            tts_default = mm_tts_model if minimax is not None else ""
+        elif tts_default not in tts_providers:
+            # 显式默认不可用（如基座已撤）→ 回退任一可用模型
+            out.notes.append(f"语音默认模型 {tts_default} 不可用，回退 "
+                             + sorted(tts_providers)[0])
+            tts_default = sorted(tts_providers)[0]
+        if not speech_base and tts_default:
+            # 仅 MiniMax：只挂 TTS 插件（无 ASR 可挂，诚实缺席）
+            from whale_core.plugins.registry import PluginManifest
+            from whale_core.plugins.speech import TTS_SYNTHESIZE
+            registry.register(
+                PluginManifest(
+                    plugin_id="speech_tts", name="TTS（语音合成）", version="1.0.0",
+                    kind="model", provides=(TTS_SYNTHESIZE,),
+                    description="MiniMax t2a_v2 语音合成端点",
+                ),
+                provider=tts_providers[tts_default])
+        if tts_default:
+            def speak(args):
+                # 2026-11-01：允许指定语音模型/音色（owner 决策）；未知模型诚实报错
+                model = str(args.get("model") or "").strip()
+                provider = tts_providers[tts_default]
+                if model:
+                    provider = tts_providers.get(model)
+                    if provider is None:
+                        raise ValueError(
+                            f"未知语音模型 {model!r}（可用：{', '.join(sorted(tts_providers))}）")
+                audio = provider.synthesize(str(args.get("text") or ""), voice=str(args.get("voice") or ""), rate=float(args.get("rate") or 1))
+                if out.artifacts is None:
+                    raise ValueError("artifact storage required for speech output")
+                # 2026-11-01：同生图——只回工件引用 + 勿贴链接提示（模型曾把
+                # /api/v1/artifacts/ 写成 [语音](url) 发进群，URL 外部打不开）。
+                _r = out.artifacts.save_bytes(audio, "audio/mpeg").as_dict()
+                _r["note"] = ("语音会由系统自动作为语音消息发送给对方；"
+                              "回复正文里不要包含任何链接或文件路径。")
+                return json.dumps(_r, ensure_ascii=False)
+            tools.register(ToolSpec(name="synthesize_speech", capability="tts.synthesize", plugin_id="speech_tts",
+                                    description="文本转语音；可用 model 参数指定模型（"
+                                    + "、".join(sorted(tts_providers)) + "）", handler=speak))
+            out.notes.append(
+                ("语音识别与合成已配置" if speech_base
+                 else "语音合成已配置（仅 MiniMax；无 ASR 基座，识别未挂载）")
+                + "（语音可选模型：" + "、".join(sorted(tts_providers)) + "）")
 
     video_base, video_key, _video_kind = _resolve_capability_env(env, "VIDEO")
-    if video_base:
-        video_model = env.get("WHALE_VIDEO_MODEL") or "happyhorse-1.1-t2v"
-        if "happyhorse" in video_model:
-            from whale_core.plugins.media_video import DashScopeHappyHorseVideoProvider
-            provider = DashScopeHappyHorseVideoProvider(base_url=video_base,
-                api_key=video_key or env.get("DASHSCOPE_API_KEY", ""), model=video_model)
-        else:
-            provider = DashScopeWanVideoProvider(base_url=video_base,
-                api_key=video_key or env.get("DASHSCOPE_API_KEY", ""), model=video_model)
+    # 2026-11-01 owner 决策「不走代理」：MiniMax 视频不再依赖 dashscope 基座——
+    # 无 WHALE_MEDIA/VIDEO_BASE_URL 时独立挂载，happyhorse/wan 随基座缺席而缺席。
+    if video_base or minimax is not None:
+        mm_video_model = (env.get("WHALE_MINIMAX_VIDEO_MODEL") or "MiniMax-Hailuo-2.3").strip()
+        video_model = (env.get("WHALE_VIDEO_MODEL") or "").strip() \
+            or (mm_video_model if (minimax is not None and not video_base)
+                else "happyhorse-1.1-t2v")
+        video_models = [video_model] + [
+            m.strip() for m in (env.get("WHALE_VIDEO_MODELS") or "").split(",")
+            if m.strip() and m.strip() != video_model]
+        video_providers = {}
+        for m in video_models:
+            if m in ("MiniMax-Hailuo-2.3", "MiniMax-Hailuo-02", "T2V-01",
+                     "T2V-01-Director"):
+                continue  # MiniMax 模型在下方单独装配
+            if not video_base:
+                continue
+            if "happyhorse" in m:
+                from whale_core.plugins.media_video import DashScopeHappyHorseVideoProvider
+                video_providers[m] = DashScopeHappyHorseVideoProvider(base_url=video_base,
+                    api_key=video_key or env.get("DASHSCOPE_API_KEY", ""), model=m)
+            else:
+                video_providers[m] = DashScopeWanVideoProvider(base_url=video_base,
+                    api_key=video_key or env.get("DASHSCOPE_API_KEY", ""), model=m)
+        if minimax is not None:
+            video_providers[mm_video_model] = minimax[0](
+                api_key=minimax_key, base_url=minimax_base, model=mm_video_model)
+        if video_model not in video_providers:
+            # 显式默认不可用（如基座已撤）→ 回退任一可用模型
+            out.notes.append(f"视频默认模型 {video_model} 不可用，回退 "
+                             + sorted(video_providers)[0])
+            video_model = sorted(video_providers)[0]
+        provider = video_providers[video_model]
         register_video_gen(registry, provider=provider)
-        out.video_manager = VideoTaskManager(store, provider, artifact_store=out.artifacts, min_poll_interval=15)
+        out.video_manager = VideoTaskManager(store, provider, artifact_store=out.artifacts,
+                                             min_poll_interval=15,
+                                             providers=video_providers,
+                                             default_model=video_model)
         def video(args):
             require("media_video")
-            task = out.video_manager.submit(str(args.get("prompt") or args.get("query") or ""),
-                duration_s=int(args.get("duration_s") or 5), size=str(args.get("size") or "1280x720"))
+            # 2026-11-01：允许指定视频模型（owner 决策）；未知模型诚实报错并列可用
+            model = str(args.get("model") or "").strip()
+            task = out.video_manager.submit(
+                _with_media_style(str(args.get("prompt") or args.get("query") or "")),
+                duration_s=int(args.get("duration_s") or 5), size=str(args.get("size") or "1280x720"),
+                model=model)
             return json.dumps(task.as_dict(), ensure_ascii=False)
-        tools.register(ToolSpec(name="generate_video", capability="media.video.generate", plugin_id="media_video", handler=video))
-        out.notes.append("异步视频生成已配置（DashScope Wan）")
+        # 2026-11-02 owner 决策：视频模型选型指南进工具描述（意图规划器据此选路）
+        _VIDEO_GUIDE = {
+            "happyhorse-1.1-t2v": "通用首选：时长3–15s灵活、画幅比例多、出片快",
+            "happyhorse-1.0-t2v": "happyhorse 上一代，备选",
+            "MiniMax-Hailuo-2.3": "复杂动作/人物表演/物理感更强、1080P；只支持6/10s、16:9",
+        }
+        _vid_guide = "；".join(
+            f"{m}（{_VIDEO_GUIDE[m]}）" if m in _VIDEO_GUIDE else m
+            for m in sorted(video_providers))
+        tools.register(ToolSpec(name="generate_video", capability="media.video.generate", plugin_id="media_video",
+                                description="按提示生成视频（异步任务；默认二次元动漫画风，"
+                                "对方要求别的风格时以其为准）；可用 model 参数指定模型："
+                                + _vid_guide, handler=video))
+        out.notes.append("异步视频生成已配置（可选模型：" + "、".join(sorted(video_providers)) + "）")
 
     realtime_url = env.get("WHALE_REALTIME_URL", "").strip()
     if realtime_url:

@@ -116,6 +116,46 @@ def test_timeline_render_keeps_attribution():
     assert "［0000|" in out2
 
 
+def test_render_prefers_resolved_names():
+    """2026-11-01 owner 决策：装配 name_resolver 后标签用群名片/昵称，
+    不再是「群友<hash>」代号；未解析的仍回退代号。"""
+    store = InMemoryStore()
+    tl = GroupTimelineStore(store)
+    tl.append("group:1", message_id="aaaabbbb", sender_id="10001", text="在吗")
+    tl.append("group:1", message_id="ccccdddd", sender_id="10002", text="在")
+    tl.append("group:1", message_id="eeeeffff", sender_id="10003", text="来了")
+    tl.name_resolver = lambda conv, pairs: {"10001": "游荡者", "10002": "枕竹听"}
+    out = tl.render_for_model("group:1")
+    assert "[bbbb|游荡者]" in out
+    assert "[dddd|在]" not in out  # 标签是昵称「在」？不——10002 的名是枕竹听
+    assert "[dddd|枕竹听]" in out
+    assert "[ffff|群友" in out  # 未解析者回退代号
+
+
+def test_render_name_collision_gets_deterministic_suffix():
+    """同群两名成员同名片：追加 uin 尾4 确定性消歧（按 sender_id 排序）。"""
+    store = InMemoryStore()
+    tl = GroupTimelineStore(store)
+    tl.append("group:1", message_id="aaaabbbb", sender_id="10001", text="x")
+    tl.append("group:1", message_id="ccccdddd", sender_id="10002", text="y")
+    tl.name_resolver = lambda conv, pairs: {"10001": "阿白", "10002": "阿白"}
+    out = tl.render_for_model("group:1")
+    assert "阿白·0001" in out
+    assert "阿白·0002" in out
+
+
+def test_render_resolver_failure_falls_back():
+    """resolver 抛异常不影响渲染（昵称是增强，主链路不挂）。"""
+    store = InMemoryStore()
+    tl = GroupTimelineStore(store)
+    tl.append("group:1", message_id="aaaabbbb", sender_id="10001", text="在吗")
+    def _boom(conv, pairs):
+        raise RuntimeError("weq down")
+    tl.name_resolver = _boom
+    out = tl.render_for_model("group:1")
+    assert "[bbbb|群友" in out
+
+
 # ---------------------------------------------------------------------------
 # 回复目标裁决
 # ---------------------------------------------------------------------------
