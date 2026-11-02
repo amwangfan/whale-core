@@ -78,7 +78,10 @@
             "phone.device.safe_action",
             "glasses.card.show",
             "glasses.card.update",
-            "glasses.card.dismiss"
+            "glasses.card.dismiss",
+            "device.agent.control",
+            "device.agent.observe",
+            "device.agent.shell"
           ],
           "description": "请求调用的能力（§5），端侧校验白名单"
         },
@@ -107,7 +110,10 @@
               "phone.device.safe_action",
               "glasses.card.show",
               "glasses.card.update",
-              "glasses.card.dismiss"
+              "glasses.card.dismiss",
+              "device.agent.control",
+              "device.agent.observe",
+              "device.agent.shell"
             ],
             "description": "能力名（§5）"
           },

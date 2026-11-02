@@ -31,6 +31,8 @@ DEVICE_CAPABILITIES: tuple[str, ...] = (
     "phone.call.ring", "phone.call.audio", "phone.device.safe_action",
     # V1.1（whale-mobile GL-01）：眼镜 HUD（端侧无桥时降级手机通知）
     "glasses.card.show", "glasses.card.update", "glasses.card.dismiss",
+    # V1.1（core#58）：Root 手机自主体（UI 控制/观察/Shell）
+    "device.agent.control", "device.agent.observe", "device.agent.shell",
 )
 
 PAIR_CODE_TTL_S = 600
