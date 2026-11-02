@@ -20,7 +20,7 @@ T0 = datetime(2026, 11, 1, 12, 0, tzinfo=timezone.utc)
 
 
 def _policy(store, *, quiet=False, now=T0):
-    return GroupTurnPolicy(store, now_fn=lambda: now,
+    return GroupTurnPolicy(store, bot_names=("鲸鱼",), now_fn=lambda: now,
                            quiet_now=lambda: False if not quiet else True)
 
 
@@ -75,7 +75,7 @@ def test_cooldown_and_daily_budget():
     now = T0 + timedelta(minutes=25)
     joins = 0
     for i in range(10):
-        p2 = GroupTurnPolicy(store, now_fn=lambda: now,
+        p2 = GroupTurnPolicy(store, bot_names=("鲸鱼",), now_fn=lambda: now,
                              quiet_now=lambda: False)
         d = p2.maybe_join(conversation=GROUP, text=named, activity="balanced")
         now += timedelta(minutes=25)
@@ -98,18 +98,83 @@ def test_consecutive_limit_no_double_join():
 
 
 def test_dnd_and_quiet_hours_suppress_proactive_join():
-    """免打扰与时间静默都压制非定向主动参与。"""
+    """免打扰压制一切；时间静默只压制「没人找我」的非定向插话。"""
     store = InMemoryStore()
     p = _policy(store)
     d = p.maybe_join(conversation=GROUP, text="鲸鱼这个怎么弄",
                      activity="lively", dnd=True)
     assert (d.action, d.reason_code) == ("observe", "dnd")
 
+    # 时间静默 + 无指向闲聊 → 压制
     store2 = InMemoryStore()
     p2 = GroupTurnPolicy(store2, now_fn=lambda: T0, quiet_now=lambda: True)
-    d2 = p2.maybe_join(conversation=GROUP, text="鲸鱼这个怎么弄",
+    d2 = p2.maybe_join(conversation=GROUP, text="今晚吃啥",
                        activity="lively")
     assert (d2.action, d2.reason_code) == ("observe", "quiet_hours")
+
+
+def test_quiet_hours_directed_still_answers():
+    """2026-11-01 owner 决策：静默时段里明确找鲸鱼的（直呼其名/承接请求）
+    仍要回应——静默只压制主动插话；且不耗主动配额/冷却。"""
+    # 直呼其名
+    store = InMemoryStore()
+    p = _policy(store, quiet=True)
+    d = p.maybe_join(conversation=GROUP, text="鲸鱼这个怎么弄",
+                     activity="lively")
+    assert (d.action, d.reason_code) == ("join", "quiet_directed")
+    # 不耗主动配额
+    assert store.get(f"life:turnbudget:2026-11-01:{GROUP}") is None
+    # 承接请求（机器人刚发言 + 「你+请求动词」）
+    store2 = InMemoryStore()
+    p2 = _policy(store2, quiet=True)
+    d2 = p2.maybe_join(conversation=GROUP, text="那你再画一张吧",
+                       activity="lively",
+                       timeline_entries=({"is_self": True, "text": "刚画完"},))
+    assert (d2.action, d2.reason_code) == ("join", "quiet_directed")
+    # 静默时段的 bare question（没点名）仍压制——不算明确找它
+    store3 = InMemoryStore()
+    p3 = _policy(store3, quiet=True)
+    d3 = p3.maybe_join(conversation=GROUP, text="这个报错什么意思？",
+                       activity="lively")
+    assert (d3.action, d3.reason_code) == ("observe", "quiet_hours")
+
+
+def test_llm_classifier_rescues_quiet_hours_directed():
+    """2026-11-02 owner 决策实证：「说出来各位的名字哦」无「你」无问号，
+    规则全不命中——意图模型兜底判定向，静默时段照样回应。"""
+    store = InMemoryStore()
+    p = GroupTurnPolicy(store, bot_names=("鲸鱼",), now_fn=lambda: T0,
+                        quiet_now=lambda: True,
+                        directed_classifier=lambda text, entries: True)
+    tl = ({"is_self": True, "text": "我刚录了句语音"},)
+    d = p.maybe_join(conversation=GROUP, text="说出来各位的名字哦",
+                     activity="lively", timeline_entries=tl)
+    assert (d.action, d.reason_code) == ("join", "quiet_directed")
+
+
+def test_llm_classifier_not_called_without_self_context():
+    """机器人近窗没发言（非对话进行中）→ 不调用判定器，保持旁观。"""
+    calls = []
+    store = InMemoryStore()
+    p = GroupTurnPolicy(store, bot_names=("鲸鱼",), now_fn=lambda: T0,
+                        quiet_now=lambda: True,
+                        directed_classifier=lambda t, e: calls.append(1) or True)
+    d = p.maybe_join(conversation=GROUP, text="今晚吃啥", activity="lively",
+                     timeline_entries=({"is_self": False, "text": "别人说的"},))
+    assert (d.action, d.reason_code) == ("observe", "quiet_hours")
+    assert calls == []
+
+
+def test_llm_classifier_failure_fails_soft():
+    """判定器抛异常 = 无信号，不放大为参与。"""
+    def boom(t, e):
+        raise RuntimeError("model down")
+    store = InMemoryStore()
+    p = GroupTurnPolicy(store, bot_names=("鲸鱼",), now_fn=lambda: T0,
+                        quiet_now=lambda: True, directed_classifier=boom)
+    d = p.maybe_join(conversation=GROUP, text="说个名字", activity="lively",
+                     timeline_entries=({"is_self": True, "text": "x"},))
+    assert (d.action, d.reason_code) == ("observe", "quiet_hours")
 
 
 def test_reason_code_recorded_without_private_content():
@@ -128,3 +193,53 @@ def test_unknown_activity_falls_back_to_balanced():
     p = _policy(store)
     d = p.maybe_join(conversation=GROUP, text="鲸鱼看下", activity="bogus")
     assert d.action == "join"  # 按 balanced 判定（fail 到中间档）
+
+
+
+def test_no_bundled_aliases_and_no_empty_regex_match():
+    store = InMemoryStore()
+    policy = GroupTurnPolicy(store, now_fn=lambda: T0)
+    assert policy.maybe_join(
+        conversation=GROUP, text="鲸鱼帮我看下？", activity="balanced"
+    ).reason_code == "not_directed"
+    assert GroupTurnPolicy(InMemoryStore(), bot_names=("阿澜",),
+                           now_fn=lambda: T0).maybe_join(
+        conversation=GROUP, text="阿澜帮我看下？",
+        activity="balanced"
+    ).action == "join"
+
+
+def test_followup_request_after_bot_speaks_joins_lively():
+    """2026-11-01 生产实证：「那你画个蜥蜴爬宠的图吧」——无 @ 无名无问号，
+    但机器人刚在群里说过话（时间线近窗有 is_self）且是「你+请求动词」
+    承接句式 → lively 档应主动接话。"""
+    store = InMemoryStore()
+    p = _policy(store)
+    tl = [{"is_self": False, "text": "群里有人喜欢爬宠吗"},
+          {"is_self": True, "text": "好，我这就搜搜，稍等"},
+          {"is_self": False, "text": "搜索是付费功能"}]
+    d = p.maybe_join(conversation=GROUP, text="那你画个蜥蜴爬宠的图吧",
+                     activity="lively", timeline_entries=tl)
+    assert d.action == "join"
+
+
+def test_followup_requires_recent_self_and_lively():
+    store = InMemoryStore()
+    # 机器人近期没说话 → 不接（群友互相喊话不认领）
+    p = _policy(store)
+    tl = [{"is_self": False, "text": "你画个看看"}]
+    d = p.maybe_join(conversation=GROUP, text="你画个蜥蜴看看",
+                     activity="lively", timeline_entries=tl)
+    assert d.reason_code == "not_directed"
+    # balanced 档无此信号
+    p2 = _policy(InMemoryStore())
+    d2 = p2.maybe_join(conversation=GROUP, text="你画个蜥蜴看看",
+                       activity="balanced",
+                       timeline_entries=[{"is_self": True, "text": "我在"}])
+    assert d2.reason_code == "not_directed"
+    # 普通闲聊句式不命中（无承接动词）
+    p3 = _policy(InMemoryStore())
+    d3 = p3.maybe_join(conversation=GROUP, text="明天天气真不错",
+                       activity="lively",
+                       timeline_entries=[{"is_self": True, "text": "我在"}])
+    assert d3.reason_code == "not_directed"

@@ -45,7 +45,7 @@ beforeEach(() => {
 });
 
 describe("PersonaPanel 快速创建 / 导入 / 试玩 / 草稿（issue #37）", () => {
-  it("新建表单：默认区只有 5+1 个字段，进阶设置默认折叠，模板选项齐全", async () => {
+  it("新建表单：默认区只有 5+1 个字段，无预制角色模板", async () => {
     mockStudioFetch();
     const { container } = renderPanel();
     fireEvent.click(screen.getByText("新建人物卡"));
@@ -72,14 +72,8 @@ describe("PersonaPanel 快速创建 / 导入 / 试玩 / 草稿（issue #37）", 
     expect(screen.getByText("进阶设置")).toBeTruthy();
     expect(screen.getByLabelText(/卡 ID/)).toBeTruthy();
 
-    // 从模板开始：起步模板 + 内置卡底稿
-    const tpl = screen.getByLabelText("从模板开始") as HTMLSelectElement;
-    const optionTexts = Array.from(tpl.querySelectorAll("option")).map(
-      (o) => o.textContent,
-    );
-    expect(optionTexts).toContain("温柔陪伴");
-    expect(optionTexts).toContain("效率助手");
-    expect(optionTexts).toContain("冷静鲸鱼（内置默认）");
+    // 核心不提供任何预制人格或起步模板。
+    expect(screen.queryByLabelText("从模板开始")).toBeNull();
   });
 
   it("导入预览：解析展示映射/字段值，确认导入后填进表单并随保存提交", async () => {
@@ -215,7 +209,7 @@ describe("PersonaPanel 快速创建 / 导入 / 试玩 / 草稿（issue #37）", 
 
     await screen.findByText("试玩回复：好呀，几点出发？");
     expect(screen.getByText("基线回复：听起来不错。")).toBeTruthy();
-    expect(screen.getByText("默认人格（当前生效）")).toBeTruthy();
+    expect(screen.getByText("当前生效配置（可能无角色）")).toBeTruthy();
     expect(screen.getByText("当前卡（草稿）")).toBeTruthy();
     expect(screen.getByText("sha-base-1")).toBeTruthy();
     expect(screen.getByText("sha-trial-1")).toBeTruthy();
@@ -232,7 +226,7 @@ describe("PersonaPanel 快速创建 / 导入 / 试玩 / 草稿（issue #37）", 
     expect(body.input).toBe("周末一起去爬山吗？");
     const card = body.card as Record<string, unknown>;
     expect(card).toBeTruthy();
-    expect(card.name).toBe("鲸鱼"); // 表单默认角色名
+    expect(card.name).toBe(""); // 新建卡不预选角色身份
   });
 
   it("草稿：编辑中途取消后重开表单提示恢复/放弃，恢复后内容回填", async () => {

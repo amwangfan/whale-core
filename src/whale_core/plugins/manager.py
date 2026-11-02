@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -177,7 +177,9 @@ class PluginManager:
                 for seq in ("inputs", "actions", "provides"):
                     if seq in kwargs:
                         kwargs[seq] = tuple(kwargs[seq])
-                manifest = PluginManifest(**kwargs)
+                # Directory configuration is untrusted provenance even if its
+                # JSON claims to be a bundled plugin.
+                manifest = replace(PluginManifest(**kwargs), trust="external")
             except (ValueError, TypeError, json.JSONDecodeError) as exc:
                 self.errors.append(
                     {"path": str(file), "error": f"{type(exc).__name__}: {exc}"}

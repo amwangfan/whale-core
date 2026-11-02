@@ -5,8 +5,10 @@
 - **服务端强制 ACL**（不靠前端过滤）：
   - protected_original → 整体拒绝（403 vault_restricted），原始库浏览只走
     ``/studio/vault/records``（脱敏、审计、owner 管理通道）；
-  - member_private → 管理通道只见**元数据行**（无 summary/正文），全文管理
-    只走成员本人路径（``/studio/members/memory/*``，MEM-02/03）；
+  - member_private → **管理通道（owner Bearer）全量可见可治理**（owner 决策
+    2026-11-01 修订：后台维护者需要完整可见性以便管理与调试；隐私边界在
+    **对话召回侧**保持不变——群聊/他人会话仍不可见成员私有记忆，MEM-02/03
+    的对话侧双门不动）；
   - 其余空间（owner_working_copy / group_space / shareable_fork / 遗留未分区）
     → owner 管理通道全量可读可治理。
 - 分页在服务端（offset/limit，limit ≤ 200）；存储层按 space_id 索引查询，
@@ -51,7 +53,7 @@ _SCOPE_NOTES = {
     MemorySpaceType.SHAREABLE_FORK.value:
         "受控副本：仅绑定了它的会话可用",
     MemorySpaceType.MEMBER_PRIVATE.value:
-        "群友私有：仅本人已认证私聊可见；管理通道只展示元数据",
+        "群友私有：对话召回仅本人已认证私聊；管理面（owner）可见",
     "": "遗留未分区记录（迁移前数据）",
 }
 
@@ -225,8 +227,9 @@ def _browse(handler, ctx, svc: StudioServices) -> None:
         _audit(ctx, "memory.browse", outcome="denied", reason="vault_restricted")
         raise StudioError(403, "vault_restricted",
                           "原始库记录请走 /studio/vault/records（脱敏视图）")
-    metadata_only = any(
-        r is not None and r.type is MemorySpaceType.MEMBER_PRIVATE for r in refs)
+    # owner 决策 2026-11-01：管理面对 member_private 全量可见（对话召回侧
+    # 的本人限制不变）。保留字段位，恒 False。
+    metadata_only = False
 
     q = handler.query
     raw_kind = (q.get("kind", [""])[0] or "").strip()
@@ -305,10 +308,8 @@ def _record_for_owner_op(ctx, svc: StudioServices, key: str):
     if ref is not None and ref.type is MemorySpaceType.PROTECTED_ORIGINAL:
         raise StudioError(403, "vault_restricted",
                           "原始库记录不可在管理面改写；纠错请新建工作副本记录")
-    if ref is not None and ref.type is MemorySpaceType.MEMBER_PRIVATE:
-        raise StudioError(403, "member_private_restricted",
-                          "群友私有记忆只能由本人经已认证私聊管理"
-                          "（/studio/members/memory/*）")
+    # owner 决策 2026-11-01：管理面可治理 member_private（纠错/过期/删除
+    # 照常审计）；成员本人路径保留不变。
     return rec
 
 

@@ -35,6 +35,7 @@
 | `media_image.py` | `media.image.generate` 契约 + OpenAI 兼容生图 |
 | `media_video.py` | `media.video.generate` 异步任务契约 + DashScope Wan |
 | `dashscope_media.py` | DashScope 兼容协议媒体 provider（生图/ASR/TTS） |
+| `minimax_media.py` | MiniMax 媒体 provider（视频生成 / t2a_v2 TTS） |
 | `speech.py` | ASR/TTS 契约 + OpenAI 兼容 provider |
 | `pcm_voice.py` | whale-io PCM wire 实时音频适配 |
 | `realtime_voice.py` | 原生 Realtime WebSocket 会话 |

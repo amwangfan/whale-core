@@ -150,13 +150,11 @@ class HybridCurator:
                 try:
                     summaries = [str(candidates[i].content.get("summary", ""))
                                  for i in idxs]
-                    try:
-                        vectors = self.embedder.embed([query, *summaries],
-                                                      namespace=sid)
-                    except TypeError:
-                        # 兼容未实现 namespace 分区的旧 embedder（退化为不分区，
-                        # 缓存隔离失效但功能可用；我们的 provider 均已支持）。
-                        vectors = self.embedder.embed([query, *summaries])
+                    # Namespace support is mandatory for shared embeddings.
+                    # A legacy provider without this parameter must degrade to
+                    # lexical retrieval, never silently share cross-space cache.
+                    vectors = self.embedder.embed([query, *summaries],
+                                                  namespace=sid)
                     qv = vectors[0]
                     for pos, i in enumerate(idxs):
                         vecs_by_key[rec_key(candidates, i)] = (qv, vectors[1 + pos])

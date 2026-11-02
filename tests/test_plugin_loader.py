@@ -104,3 +104,47 @@ def test_load_dir_no_register_function(tmp_path):
     (tmp_path / "main.py").write_text("X = 1\n", encoding="utf-8")
     with pytest.raises(PluginLoadError):
         load_plugin_dir(PluginRegistry(), tmp_path)
+
+
+def test_internal_typeerror_does_not_repeat_registration(tmp_path):
+    (tmp_path / "plugin.json").write_text(json.dumps({
+        "plugin_id": "once", "actions": ["ping"],
+        "action_risk": {"ping": "read_only"}}), encoding="utf-8")
+    (tmp_path / "main.py").write_text(
+        "from whale_core.plugins.manifest import PluginManifest\n"
+        "def register(registry, **kwargs):\n"
+        "    registry.register(PluginManifest(plugin_id='once', name='once', "
+        "version='1', actions=('ping',), "
+        "action_risk={'ping':'read_only'}))\n"
+        "    raise TypeError('internal error')\n", encoding="utf-8")
+
+    class CountingRegistry(PluginRegistry):
+        def __init__(self):
+            super().__init__()
+            self.calls = 0
+
+        def register(self, manifest, **kwargs):
+            self.calls += 1
+            return super().register(manifest, **kwargs)
+
+    registry = CountingRegistry()
+    with pytest.raises(TypeError, match="internal error"):
+        load_plugin_dir(registry, tmp_path)
+    assert registry.calls == 1
+
+
+def test_external_directory_cannot_claim_bundled_registration(tmp_path):
+    (tmp_path / "plugin.json").write_text(json.dumps({
+        "plugin_id": "fake", "trust": "bundled", "actions": ["send"],
+        "action_risk": {"send": "communicate"}}), encoding="utf-8")
+    (tmp_path / "main.py").write_text(
+        "from whale_core.plugins.manifest import PluginManifest\n"
+        "def register(registry):\n"
+        "    registry.register(PluginManifest(plugin_id='fake', name='fake', "
+        "version='1', actions=('send',), "
+        "action_risk={'send':'communicate'}, trust='bundled'))\n",
+        encoding="utf-8")
+    registry = PluginRegistry()
+    manifest = load_plugin_dir(registry, tmp_path)
+    assert manifest.trust == "external"
+    assert registry.manifest("fake").trust == "external"

@@ -133,6 +133,7 @@ class ToolExecutionMixin:
                 break
             payload = note.split(":ok:", 1)[-1]
             results.append(f"[{spec.name}] {payload}")
+            journal = self.store.get(f"runtime:task:{task_id}") or journal
             journal.update(next_step=step + 1, results=results, receipts=receipts)
             self.store.put(f"runtime:task:{task_id}", journal)
             # The approval applies only to one action, never later steps.
@@ -144,6 +145,7 @@ class ToolExecutionMixin:
         record = self.store.get(f"task:{task_id}") or {}
         if record.get("cancel_requested"):
             status = "unknown" if record.get("in_flight") else "cancelled"
+        journal = self.store.get(f"runtime:task:{task_id}") or journal
         journal.update(receipts=receipts, results=results)
         self.store.put(f"runtime:task:{task_id}", journal)
         saved = self._save_task(task_id, plan, status, receipts)
@@ -195,6 +197,16 @@ class ToolExecutionMixin:
                     record.get("pending_fingerprint") != fingerprint or
                     record.get("approval_token") != token):
                 return "scope_denied", f"tool-denied:{spec.name}:approval-scope-changed"
+            # Durable pre-dispatch marker. Unknown external effects after a
+            # crash must not be replayed as untouched tasks.
+            journal = self.store.get(f"runtime:task:{task_id}")
+            if not isinstance(journal, dict):
+                raise ValueError("task journal unavailable before dispatch")
+            journal["dispatch_started"] = {
+                "step": step, "tool": spec.name, "at": time.time(),
+                "fingerprint": fingerprint,
+            }
+            self.store.put(f"runtime:task:{task_id}", journal)
             record.update(status="running", phase="running", in_flight=True,
                           step=step,
                           pending_fingerprint=fingerprint, approval_token=token)
@@ -279,6 +291,7 @@ class ToolExecutionMixin:
             payload = note.split(":ok:", 1)[-1]
             results.append(f"[{spec.name}] {payload}")
             step += 1
+            journal = self.store.get(f"runtime:task:{task_id}") or journal
             journal.update(next_step=step, results=results, receipts=receipts)
             self.store.put(f"runtime:task:{task_id}", journal)
             # The approval applies only to one action, never later steps.

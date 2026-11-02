@@ -184,7 +184,7 @@ class QqInboundWorkflow:
                 return
         if self._completion_sender is not None:
             try:
-                self._completion_sender(event, reply, audio_ids)
+                self._completion_sender(event, reply, audio_ids, image_ids)
             except Exception:
                 if self.orchestrator is not None and task_id:
                     self.orchestrator.mark_delivery_failed(
@@ -311,6 +311,7 @@ class QqInboundWorkflow:
             reason="QQ 入站消息的回复草稿（owner 已配对）",
             evidence=(f"qq:{event.conversation}:{event.message_id}",),
             channel=REPLY_CHANNEL,
+            target_conversation=event.conversation,
         )
         proposed = self.outbox.propose(draft)
         # QQ 入站回复是**被动回复**（owner 先说话）：走被动策略——静默时段是否
@@ -554,7 +555,14 @@ class QqInboundWorkflow:
         envelope = InputEnvelope(
             conversation_id=event.conversation, text=text, source="qq:stranger",
             channel=channel, sender_id=sender, images=images)
-        result = self.orchestrator.handle_envelope(envelope)
+        # 2026-11-01 修复：陌生人/群成员路径同样走两段式——慢任务（生图实测
+        # 60-180s）先 ack 后补发；此前同步路径 60s 即 tool-timeout 全灭。
+        if self._completion_sender is not None:
+            result = self.orchestrator.handle_envelope_async(
+                envelope,
+                on_complete=lambda r, ev=event: self._on_async_complete(ev, r))
+        else:
+            result = self.orchestrator.handle_envelope(envelope)
         reply = (result.reply or "").strip()
         if not reply:
             return {"empty_reply": True}

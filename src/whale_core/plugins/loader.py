@@ -23,7 +23,9 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -54,7 +56,7 @@ def read_plugin_manifest(path: str | Path) -> PluginManifest:
         raise PluginLoadError(
             f"plugin api_version {api_version!r} incompatible with core {PLUGIN_API_VERSION!r}")
     try:
-        return PluginManifest(
+        parsed = PluginManifest(
             plugin_id=str(data["plugin_id"]),
             name=str(data.get("name") or data["plugin_id"]),
             version=str(data.get("version") or "0.0.0"),
@@ -67,8 +69,9 @@ def read_plugin_manifest(path: str | Path) -> PluginManifest:
             action_risk=dict(data.get("action_risk") or {}),
             provides=tuple(data.get("provides") or ()),
             api_version=api_version,
-            trust=str(data.get("trust") or "bundled"),
+            trust=str(data.get("trust") or "external"),
         )
+        return replace(parsed, trust="external")
     except (ValueError, KeyError) as exc:
         raise PluginLoadError(f"invalid manifest in {root}: {exc}") from exc
 
@@ -133,9 +136,31 @@ def load_plugin_dir(
     if not callable(register):
         raise PluginLoadError(f"{entrypoint} has no callable register()")
     kwargs = {"tools": tools, "env": env, "store": store, **register_kwargs}
+    # Select compatible kwargs before invocation: plugin-internal TypeError
+    # must never trigger a second register() call.
     try:
-        register(registry, **kwargs)
-    except TypeError:
-        # 兼容更窄的注册签名（如渠道插件只收宿主依赖）
-        register(registry, **register_kwargs)
+        signature = inspect.signature(register)
+        variadic = any(p.kind is inspect.Parameter.VAR_KEYWORD
+                       for p in signature.parameters.values())
+        selected = (kwargs if variadic else
+                    {k: v for k, v in kwargs.items() if k in signature.parameters})
+        signature.bind(registry, **selected)
+    except (TypeError, ValueError) as exc:
+        raise PluginLoadError(
+            f"invalid register signature in {root}: {type(exc).__name__}"
+        ) from exc
+
+    class ExternalRegistry:
+        """Cap registered manifests at external provenance; not a sandbox."""
+        def __init__(self, target):
+            self._target = target
+
+        def register(self, declared, **wiring):
+            return self._target.register(replace(declared, trust="external"),
+                                         **wiring)
+
+        def __getattr__(self, name):
+            return getattr(self._target, name)
+
+    register(ExternalRegistry(registry), **selected)
     return manifest

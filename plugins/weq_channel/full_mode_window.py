@@ -133,15 +133,29 @@ class FullModeWindow:
     # ── 开关与就绪探测 ────────────────────────────────────────────
 
     def is_allowed(self) -> bool:
-        """getFullModeState.allowed（完整模式当前是否就绪/可用）。"""
+        """getFullModeState.allowed（策略门：autoAttachQq=true 写入即真）。"""
         result = self._call(TRPC_FULL_MODE_STATE)
         return bool((result or {}).get("allowed"))
 
+    def is_ready(self) -> bool:
+        """getFullModeState.ready（SSO 会话已登记，此刻真可发）。
+
+        ready 字段是 2026-11-01 才加的：旧 weq-web 返回里没有它，
+        缺失时回落 allowed（行为同旧版，向后兼容）。
+        见 docs/fullmode-ready-field-20261101.md：allowed 只是策略门，
+        冷启动首次开窗全量收割 ~4.7s，跑在就绪前会丢发。
+        """
+        result = self._call(TRPC_FULL_MODE_STATE)
+        if not isinstance(result, dict) or not result.get("allowed"):
+            return False
+        ready = result.get("ready")
+        return bool(ready) if ready is not None else True
+
     def open(self) -> None:
-        """开窗：置 autoAttachQq=true → 轮询就绪 → grace 等收割 → 落 state_file。"""
+        """开窗：置 autoAttachQq=true → 轮询就绪（ready 位）→ grace → 落 state_file。"""
         self._call(TRPC_SET_AUTO_ATTACH, {"json": {"enabled": True}})
         deadline = time.time() + self.ready_timeout_s
-        while not self.is_allowed():
+        while not self.is_ready():
             if time.time() >= deadline:
                 raise FullModeWindowError("full mode not ready in time")
             time.sleep(self.poll_interval_s)
@@ -200,29 +214,93 @@ class WindowedSendPort:
         """
         with self._lock:
             self.sends += 1
+            return self._through_window(lambda: self._inner.send(draft))
+
+    def _through_window(self, fn):
+        """开窗（需要时）→ 执行 → touch 续期。供非 draft 直发通道复用。
+
+        2026-11-01 事故修复：陌生人/群回复若绕过本包装直调内层端口，
+        开窗逻辑被跳过 → 关窗态发送被 weq-web 以「完全离线模式」拒绝。
+        所有直发方法（c2c/群文本、图/语音/视频）一律经此穿窗。
+        """
+        try:
+            if not self._window_open():
+                self._open_window()
+        except FullModeWindowError as exc:
+            self.open_errors += 1
+            self._open = False
+            print(f"[窗口] 开窗失败（不阻断发送，按既有语义如实记账）：{exc}")
+        try:
+            return fn()
+        finally:
+            # 无论开窗/发送成败都续期：失败发送也算窗口活跃；开窗半吊子态
+            # （set(true) 成功但轮询超时）也由 closer 据此超时纠正关窗。
             try:
-                if not self._window_open():
-                    self._open_window()
-            except FullModeWindowError as exc:
-                self.open_errors += 1
-                self._open = False
-                print(f"[窗口] 开窗失败（不阻断发送，按既有语义如实记账）：{exc}")
-            try:
-                return self._inner.send(draft)
-            finally:
-                # 无论开窗/发送成败都续期：失败发送也算窗口活跃；开窗半吊子态
-                # （set(true) 成功但轮询超时）也由 closer 据此超时纠正关窗。
-                try:
-                    self.window.touch()
-                except OSError as exc:
-                    print(f"[窗口] touch 失败（空闲计时可能失真）：{exc}")
+                self.window.touch()
+            except OSError as exc:
+                print(f"[窗口] touch 失败（空闲计时可能失真）：{exc}")
+
+    def send_c2c(self, uid: str, text: str) -> bool:
+        """穿窗的 c2c 文本直发（陌生人/成员私聊回复）。"""
+        if not hasattr(self._inner, "send_c2c"):
+            return False
+        return self._through_window(lambda: self._inner.send_c2c(uid, text))
+
+    def send_group_text(self, group_code: str, text: str) -> bool:
+        """穿窗的群文本直发（白名单群回复）。"""
+        if not hasattr(self._inner, "send_group_text"):
+            return False
+        return self._through_window(lambda: self._inner.send_group_text(group_code, text))
+
+    def send_voice(self, wav_bytes: bytes, **kw) -> bool:
+        if not hasattr(self._inner, "send_voice"):
+            return False
+        return self._through_window(lambda: self._inner.send_voice(wav_bytes, **kw))
+
+    def send_image(self, image_bytes: bytes, **kw) -> bool:
+        if not hasattr(self._inner, "send_image"):
+            return False
+        return self._through_window(lambda: self._inner.send_image(image_bytes, **kw))
+
+    def send_image_to(self, peer_type: str, target: str, image_bytes: bytes, **kw) -> bool:
+        if not hasattr(self._inner, "send_image_to"):
+            return False
+        return self._through_window(
+            lambda: self._inner.send_image_to(peer_type, target, image_bytes, **kw))
+
+    def send_voice_to(self, peer_type: str, target: str, wav_bytes: bytes, **kw) -> bool:
+        if not hasattr(self._inner, "send_voice_to"):
+            return False
+        return self._through_window(
+            lambda: self._inner.send_voice_to(peer_type, target, wav_bytes, **kw))
+
+    def send_video_to(self, peer_type: str, target: str, video_bytes: bytes, **kw) -> bool:
+        if not hasattr(self._inner, "send_video_to"):
+            return False
+        return self._through_window(
+            lambda: self._inner.send_video_to(peer_type, target, video_bytes, **kw))
+
+    def send_file_to(self, peer_type: str, target: str, path: str, **kw) -> bool:
+        if not hasattr(self._inner, "send_file_to"):
+            return False
+        return self._through_window(
+            lambda: self._inner.send_file_to(peer_type, target, path, **kw))
+
+    def member_briefs(self, group_code: str = "", uins=(), uids=()) -> list:
+        """昵称解析是本地库只读查询，不穿窗、不触发开窗（窗口纪律只管发送）。"""
+        if not hasattr(self._inner, "member_briefs"):
+            return []
+        try:
+            return self._inner.member_briefs(group_code, uins=uins, uids=uids)
+        except Exception:
+            return []  # 昵称是增强，查询失败回退代号标签
 
     # ── 窗口管理 ────────────────────────────────────────────────
 
     def _window_open(self) -> bool:
-        """以服务端真实状态为准（跨进程安全）：探测 getFullModeState。"""
+        """以服务端真实状态为准（跨进程安全）：探测 getFullModeState.ready。"""
         try:
-            self._open = self.window.is_allowed()
+            self._open = self.window.is_ready()
         except FullModeWindowError:
             self._open = False
         return self._open

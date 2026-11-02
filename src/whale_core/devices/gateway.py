@@ -452,12 +452,37 @@ class DeviceGateway:
         action_id, state = p["action_id"], p.get("state")
         # 回执状态机：received/accepted 中间态记录落库；
         # executed/failed/unknown 终态才 resolve 等待方（§4「接受」≠「已执行」）。
+        # Ignore receipts for unknown action IDs *before* writing any data.
+        # This also prevents an authenticated device from flooding unbounded
+        # receipt records with arbitrary UUIDs.
+        lookup = self.store.get(f"device:action-id:{st.device_id}:{action_id}")
+        if not isinstance(lookup, str):
+            log.warning("unmapped action receipt for device=%s action=%s",
+                        st.device_id, action_id)
+            return
         with self.lock:
             key = f"device:receipts:{st.device_id}:{action_id}"
             receipts = self.store.get(key) or []
             if isinstance(receipts, list):
-                receipts = receipts + [{"state": str(state), "ts": now_ms()}]
+                receipts = (receipts + [{"state": str(state), "ts": now_ms()}])[-32:]
                 self.store.put(key, receipts)
+        # Persist terminal outcome against the original idempotency key, so a
+        # late receipt or process restart can be reconciled without replay.
+        if isinstance(lookup, str):
+            action_key = f"device:action:{st.device_id}:{lookup}"
+            with self.lock:
+                record = self.store.get(action_key)
+                if isinstance(record, dict) and record.get("action_id") == action_id:
+                    # First terminal receipt wins: a conflicting delayed
+                    # terminal must not rewrite an already recorded outcome.
+                    if record.get("state") not in TERMINAL_RECEIPT_STATES:
+                        record.update(state=state, updated_at=now_ms())
+                        if state in TERMINAL_RECEIPT_STATES:
+                            record["receipt"] = {
+                                k: p[k] for k in ("state", "executed_at", "error_code")
+                                if k in p
+                            }
+                        self.store.put(action_key, record)
         if state in TERMINAL_RECEIPT_STATES:
             pend = self.pending.pop(action_id, None)
             if pend is not None:
@@ -574,15 +599,21 @@ class DeviceGateway:
             raise GatewayError("invalid_message", "idempotency_key 长度须为 8..128")
         action_id = uuid.uuid4().hex
         idem_store_key = f"device:action:{device_id}:{idem_key}"
-        with self.lock:
-            if self.store.get(idem_store_key) is not None:
-                raise GatewayError(
-                    "duplicate", f"幂等键 {idem_key} 已对该设备下发过")
-            self.store.put(idem_store_key, {
+        def reserve(tx):
+            if tx.get(idem_store_key) is not None:
+                return False
+            tx.put(idem_store_key, {
                 "device_id": device_id, "idempotency_key": idem_key,
                 "action_id": action_id, "capability": capability,
-                "created_at": now_ms(),
+                "created_at": now_ms(), "expires_at": now_ms() + int(timeout_s * 1000),
+                "state": "pending",
             })
+            tx.put(f"device:action-id:{device_id}:{action_id}", idem_key)
+            return True
+
+        if not self.store.transact(reserve):
+            raise GatewayError(
+                "duplicate", f"幂等键 {idem_key} 已对该设备下发过")
         payload: dict[str, Any] = {
             "action_id": action_id,
             "capability": capability,
@@ -606,6 +637,21 @@ class DeviceGateway:
             return dict(pend.result or {})
         finally:
             self.pending.pop(action_id, None)
+
+    def action_status(self, device_id: str, idempotency_key: str) -> dict:
+        """Read existing action state; never re-dispatch on timeout/restart."""
+        if not (8 <= len(idempotency_key) <= 128):
+            raise GatewayError("invalid_message", "invalid idempotency_key")
+        record = self.store.get(f"device:action:{device_id}:{idempotency_key}")
+        if not isinstance(record, dict):
+            raise GatewayError("not_found", "unknown action idempotency key")
+        result = dict(record)
+        # A restart drops pending in-memory waiters; the durable reservation
+        # remains, so uncertain side effects require reconciliation.
+        if (result.get("state") not in TERMINAL_RECEIPT_STATES
+                and now_ms() > int(result.get("expires_at") or 0)):
+            result["state"] = "unknown"
+        return result
 
     # ------------------------------------------------------------------
     # 生命周期

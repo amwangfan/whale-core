@@ -41,33 +41,64 @@ JUDGES_SUMMARY_FILENAME = "judges_scores.json"
 
 @dataclass(frozen=True)
 class JudgeProvider:
-    """一个裁判平台（全部 OpenAI 兼容 chat completions 协议）。"""
+    """一个裁判模型（全部 OpenAI 兼容 chat completions 协议）。
+
+    owner 决策 2026-11-01：生产所有模型都走当前已接入的统一平台
+    （``DEEPSEEK_BASE_URL`` 端点 + ``DEEPSEEK_API_KEY``），kimi/qwen/glm
+    只是该平台上的模型 id；配置了平台专属 key/端点 env 时优先用专属。
+    """
 
     name: str            # 注册名（报告/文件名用）
-    env_key: str         # 读取 API key 的环境变量名
-    base_url: str        # OpenAI 兼容 base
     default_model: str   # 默认裁判模型 id
     model_env: str       # 可用该 env 覆盖模型 id
-    base_url_env: str = ""   # 可用该 env 覆盖端点（如生产 DEEPSEEK_BASE_URL）
+    key_envs: tuple      # 按优先级读取 API key 的 env 名
+    base_envs: tuple     # 按优先级读取端点的 env 名
+    fallback_base: str   # 无任何端点 env 时的官方默认
 
 
 #: 平台注册表。模型 id 默认按 owner 指定；各平台实际模型 id 以官方文档为准，
 #: 可用对应 *_MODEL env 覆盖（不改代码）。
 JUDGE_PROVIDERS: tuple[JudgeProvider, ...] = (
-    JudgeProvider("deepseek", "DEEPSEEK_API_KEY",
-                  "https://api.deepseek.com/v1", "deepseek-chat",
+    JudgeProvider("deepseek", "deepseek-chat",
                   "WHALE_JUDGE_DEEPSEEK_MODEL",
-                  base_url_env="DEEPSEEK_BASE_URL"),
-    JudgeProvider("kimi", "MOONSHOT_API_KEY",
-                  "https://api.moonshot.cn/v1", "kimi-k3",
-                  "WHALE_JUDGE_KIMI_MODEL"),
-    JudgeProvider("qwen", "DASHSCOPE_API_KEY",
-                  "https://dashscope.aliyuncs.com/compatible-mode/v1",
-                  "qwen3-max", "WHALE_JUDGE_QWEN_MODEL"),
-    JudgeProvider("glm", "ZHIPU_API_KEY",
-                  "https://open.bigmodel.cn/api/paas/v4", "glm-5.2",
-                  "WHALE_JUDGE_GLM_MODEL"),
+                  ("DEEPSEEK_API_KEY",), ("DEEPSEEK_BASE_URL",),
+                  "https://api.deepseek.com/v1"),
+    JudgeProvider("kimi", "kimi-k3",
+                  "WHALE_JUDGE_KIMI_MODEL",
+                  ("MOONSHOT_API_KEY", "DEEPSEEK_API_KEY"),
+                  ("MOONSHOT_BASE_URL", "DEEPSEEK_BASE_URL"),
+                  "https://api.moonshot.cn/v1"),
+    JudgeProvider("qwen", "qwen3.8-max",
+                  "WHALE_JUDGE_QWEN_MODEL",
+                  ("DASHSCOPE_API_KEY", "DEEPSEEK_API_KEY"),
+                  ("DASHSCOPE_BASE_URL", "DEEPSEEK_BASE_URL"),
+                  "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+    JudgeProvider("glm", "glm-5.2",
+                  "WHALE_JUDGE_GLM_MODEL",
+                  ("ZHIPU_API_KEY", "DEEPSEEK_API_KEY"),
+                  ("ZHIPU_BASE_URL", "DEEPSEEK_BASE_URL"),
+                  "https://open.bigmodel.cn/api/paas/v4"),
 )
+
+
+def _first_env(env: Mapping[str, str], names) -> str:
+    for n in names:
+        value = (env.get(n) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def effective_key_env(p: JudgeProvider, env: Mapping[str, str]) -> str:
+    """实际提供 key 的 env 名（仅用于展示来源；不回显值）。"""
+    for n in p.key_envs:
+        if (env.get(n) or "").strip():
+            return n
+    return p.key_envs[0]
+
+
+def effective_base_url(p: JudgeProvider, env: Mapping[str, str]) -> str:
+    return _first_env(env, p.base_envs) or p.fallback_base
 
 
 def effective_model(p: JudgeProvider, env: Mapping[str, str]) -> str:
@@ -84,12 +115,12 @@ def probe_judges(env: Mapping[str, str]) -> list[dict]:
     """返回各平台可用性（含模型 id；**绝不含 key**）。"""
     out = []
     for p in JUDGE_PROVIDERS:
-        key = (env.get(p.env_key) or "").strip()
+        key = _first_env(env, p.key_envs)
         out.append({
             "name": p.name,
             "available": bool(key),
             "model": effective_model(p, env),
-            "env_key": p.env_key,  # 只提示变量名，不回显值
+            "env_key": effective_key_env(p, env),  # 只提示变量名，不回显值
         })
     return out
 
@@ -97,12 +128,11 @@ def probe_judges(env: Mapping[str, str]) -> list[dict]:
 def make_judge_callable(provider: JudgeProvider, env: Mapping[str, str],
                         *, timeout: float = 60.0) -> Callable[[str], str]:
     """按平台装配真实裁判 callable（OpenAI 兼容；复用 DeepSeekCompanion）。"""
-    api_key = (env.get(provider.env_key) or "").strip()
+    api_key = _first_env(env, provider.key_envs)
     if not api_key:
-        raise ValueError(f"{provider.env_key} 未配置")
+        raise ValueError(f"{'/'.join(provider.key_envs)} 未配置")
     model = effective_model(provider, env)
-    base_url = ((env.get(provider.base_url_env) or "").strip()
-                or provider.base_url) if provider.base_url_env else provider.base_url
+    base_url = effective_base_url(provider, env)
     from whale_core.core.deepseek import DeepSeekCompanion
 
     client = DeepSeekCompanion(api_key=api_key, base_url=base_url,
@@ -129,10 +159,10 @@ def run_multi_judge(env: Mapping[str, str], pairs: Sequence[Mapping], *,
         if only and provider.name not in only:
             continue
         model_id = effective_model(provider, env)
-        if not (env.get(provider.env_key) or "").strip():
+        if not _first_env(env, provider.key_envs):
             results[provider.name] = {
                 "status": "skipped_no_key", "model": model_id,
-                "env_key": provider.env_key,
+                "env_key": "/".join(provider.key_envs),
             }
             continue
         try:

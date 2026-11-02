@@ -332,6 +332,45 @@ def cmd_run(args) -> int:
             except Exception:
                 pass
 
+    # ---- 会话自愈（owner 决策 2026-11-01：运行核心不依赖人工/对话介入） ----
+    # QQ 账号会话周期性掉线（发送 fail:unknown）时，runner 自行 reopen 账号
+    # 并重试一次；仍失败则如实记 failed，等下一波入站再试。冷却 300s 防抖。
+    _send_fail_streak = {"n": 0, "last": 0.0}
+
+    def _maybe_recover_channel(tid) -> bool:
+        """连续发送失败 ≥2 且过冷却 → 跑 weq reopen 脚本。返回是否尝试恢复。"""
+        import subprocess as _sp
+        _send_fail_streak["n"] += 1
+        now = time.time()
+        if _send_fail_streak["n"] < 2 or \
+                now - _send_fail_streak["last"] < 300:
+            return False
+        script = os.environ.get(
+            "WHALE_WEQ_REOPEN_SCRIPT", "/opt/whale/scripts/weq-reopen-account.py")
+        if not Path(script).is_file():
+            return False
+        _send_fail_streak["last"] = now
+        print(f"  [自愈] 连续发送失败 {_send_fail_streak['n']} 次，"
+              f"尝试重连 QQ 账号会话…")
+        _tspan(tid, "recovery", "executed", detail="weq reopen")
+        try:
+            proc = _sp.run(["python3", script], capture_output=True,
+                           text=True, timeout=45)
+            ok = proc.returncode == 0 and "ok" in (proc.stdout or "")
+            print(f"  [自愈] {'成功' if ok else '未生效'}")
+            if ok:
+                _send_fail_streak["n"] = 0
+            return ok
+        except Exception as exc:
+            print(f"  [自愈] 脚本异常：{type(exc).__name__}")
+            return False
+
+    def _send_ok(receipt) -> bool:
+        """发送回执统一判定（网关 receipt 字符串或端口 bool）。"""
+        if isinstance(receipt, bool):
+            return receipt
+        return ":fail" not in str(receipt)
+
     # S1：服务端会话上下文解析器——群里主人不提权、未配对即普通主体；
     # S2：绑定存储接入（会话 → 记忆空间/角色卡，vault 硬拒）。
     from whale_core.life.context_resolver import (
@@ -412,18 +451,30 @@ def cmd_run(args) -> int:
                                  context_resolver=context_resolver,
                                  stranger_daily_limit=_stranger_limit)
 
-    def _send_audio_artifacts(audio_ids) -> None:
-        """把任务产生的音频产物发成 QQ 语音消息。"""
+    def _send_audio_artifacts(audio_ids, *, peer_type: str = "",
+                              target: str = "") -> int:
+        """把任务产生的音频产物发成 QQ 语音消息；返回实际送达条数。
+
+        2026-11-01 修复：补发场景的语音此前无条件 send_voice（owner 定向），
+        群/陌生人请求的语音会落进 owner 私聊——与图片一样按会话定向发送。
+        """
+        sent = 0
         if not audio_ids or cap.artifacts is None:
-            return
+            return sent
         for aid in audio_ids[:2]:
             try:
                 blob = cap.artifacts.read(aid)
                 data = blob[1] if isinstance(blob, tuple) else blob
-                ok = send_port.send_voice(data, filename=f"{aid[:8]}.wav")
+                if peer_type and target and hasattr(send_port, "send_voice_to"):
+                    ok = send_port.send_voice_to(peer_type, target, data,
+                                                 filename=f"{aid[:8]}.wav")
+                else:
+                    ok = send_port.send_voice(data, filename=f"{aid[:8]}.wav")
                 print(f"  [语音] {aid[:8]} → {'已发' if ok else '发送失败'}")
+                sent += 1 if ok else 0
             except Exception as exc:
                 print(f"  [语音] {aid[:8]} 读取失败：{type(exc).__name__}")
+        return sent
 
     def _plan_segments(text, *, is_group, rhythm, anxious=False,
                        familiarity="stranger"):
@@ -452,6 +503,36 @@ def cmd_run(args) -> int:
     # 不在发送前重读 current_epoch 把中途新消息吞进基线。
     turn_epoch_by_msg: dict[str, int] = {}
 
+    # 两段式补发的顺序门闩（2026-11-02 生产实证：TTS 只花 8s，补发抢在
+    # ack 前面发出去——ack 当时还在等开窗）。补发等主流程（ack 发送侧）
+    # 收尾后再发；超时放行（宁可乱序也不丢补发）。
+    import threading as _threading
+    _turns_inflight: set[str] = set()
+    _turns_cv = _threading.Condition()
+
+    def _turn_begin(mid: str) -> None:
+        if mid:
+            with _turns_cv:
+                _turns_inflight.add(mid)
+
+    def _turn_end(mid: str) -> None:
+        if not mid:
+            return
+        with _turns_cv:
+            _turns_inflight.discard(mid)
+            _turns_cv.notify_all()
+
+    def _await_turn(mid: str, timeout: float = 90.0) -> None:
+        if not mid:
+            return
+        deadline = time.monotonic() + timeout
+        with _turns_cv:
+            while mid in _turns_inflight:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                _turns_cv.wait(remaining)
+
     def _note_turn_epoch(message_id: str, epoch: int) -> None:
         if not message_id or not epoch:
             return
@@ -460,19 +541,68 @@ def cmd_run(args) -> int:
             for k in list(turn_epoch_by_msg)[:250]:
                 turn_epoch_by_msg.pop(k, None)
 
-    def _send_completion(event, reply: str, audio_ids=()) -> None:
+    def _send_completion(event, reply: str, audio_ids=(), image_ids=()) -> None:
         """两段式补发：草稿+审批+网关发送（与主回复同一条发送链）。"""
         if not live_auto:
             return
-        # 语音产物先发（单独一条语音消息），文字补发随后
-        _send_audio_artifacts(audio_ids)
+        # 顺序门闩：主流程（ack）还在开窗/发送时等它收尾，补发不抢跑
+        _await_turn(str(getattr(event, "message_id", "") or ""))
+        conv = str(getattr(event, "conversation", "") or "")
+        peer_type = "group" if conv.startswith("group:") else "c2c"
+        target = conv.split(":", 1)[1] if ":" in conv else ""
+        _is_group = conv.startswith("group:")
+
+        def _note_self_media(kind: str, n: int = 1) -> None:
+            """媒体补发也回写群时间线（is_self）——模型随后能在时间线里看到
+            自己发过图/语音，群友评论「这图…」时接得上话（2026-11-01 实证：
+            图片没进时间线，bot 对评论图片的消息答非所问）。"""
+            if not (_is_group and n > 0):
+                return
+            try:
+                timeline.append(conv, message_id=(
+                    f"selfmedia:{getattr(event, 'message_id', '')}:{kind}"),
+                    sender_id=self_uin, text=f"[{kind}]", is_self=True)
+            except Exception:
+                pass
+        # 语音产物先发（单独一条语音消息），按来件会话定向（修复：此前无条件
+        # 发 owner 私聊，群/陌生人请求的语音串到了 owner 那边）。
+        _note_self_media("语音", _send_audio_artifacts(
+            audio_ids, peer_type=peer_type, target=target))
+        # 图片产物：真实图片消息发到补发会话（2026-11-01 修复：此前补发只带
+        # 文本里的 /api/v1/artifacts/ 本地路径，群/私聊外部根本打不开）。
+        if image_ids and cap.artifacts is not None:
+            _img_sent = 0
+            for aid in image_ids[:2]:
+                try:
+                    blob = cap.artifacts.read(aid)
+                    data = blob[1] if isinstance(blob, tuple) else blob
+                    ok = send_port.send_image_to(
+                        peer_type, target, data, filename=f"{aid[:8]}.png") \
+                        if hasattr(send_port, "send_image_to") else False
+                    print(f"  [补发图片] {aid[:8]} → {peer_type}:{target[:12]}… "
+                          f"{'已发' if ok else '发送失败'}")
+                    _img_sent += 1 if ok else 0
+                except Exception as exc:
+                    print(f"  [补发图片] {aid[:8]} 读取失败：{type(exc).__name__}")
+            _note_self_media("图片", _img_sent)
+            # 文本里的媒体引用一律净化成 [图片]（plan 层已做；这里保底）
+            import re as _re
+            reply = _re.sub(r"!\[[^\]]*\]\([^)\n]+\)", "[图片]", str(reply))
+            reply = _re.sub(
+                r"https?://[^\s)\]）>\"']*(?:oss[-\w]*\.aliyuncs\.com|dashscope)"
+                r"[^\s)\]）>\"']*", "[图片]", reply)
+            reply = _re.sub(r"/api/v1/artifacts/[A-Za-z0-9_-]+", "[图片]",
+                            reply).strip()
+            if not reply:
+                return
         draft_id = f"qq-followup:{event.message_id}"
         from whale_core.life.initiative import ProactiveDraft
         workflow.outbox.propose(ProactiveDraft(
             draft_id=draft_id, text=reply,
             reason="两段式慢任务完成后的补发（ack 已发）",
             evidence=(f"qq:{event.conversation}:{event.message_id}",),
-            channel="direct_message"))
+            channel="direct_message",
+            target_conversation=event.conversation))
         # G3/issue #17：补发也分段 + epoch 校验；基线 = 原请求回合的 epoch
         # （查不到才回落当前值），不把任务执行期间到达的新消息吞进基线。
         from whale_core.life.segments import split_reply
@@ -492,19 +622,47 @@ def cmd_run(args) -> int:
             rhythm=rhythm)
         if _plan.silent:
             print("  [规划] 补发内容被规划为沉默，不发送")
+            workflow.outbox.close(draft_id, reason="silent_planned")
             return
+        _sent_segs = 0
         for i, seg in enumerate(segments):
-            if not epoch_fresh(store, event.conversation, ep):
+            # 2026-11-01 owner 决策：群会话不因后续闲聊截断已开始发送的回复
+            if not event.conversation.startswith("group:")                     and not epoch_fresh(store, event.conversation, ep):
                 print(f"  [补发] 会话已有新消息，剩余 {len(segments)-i} 段作废")
                 break
             seg_id = draft_id if len(segments) == 1 else f"{draft_id}#{i}"
+            if len(segments) > 1:
+                # 同主回复路径：多段各自入台账，否则网关查不到分段草稿
+                workflow.outbox.propose(ProactiveDraft(
+                    draft_id=seg_id, text=seg,
+                    reason=f"补发多气泡分段 {i+1}/{len(segments)}（主草稿 {draft_id}）",
+                    evidence=(f"qq:{event.conversation}:{event.message_id}",),
+                    channel="direct_message",
+                    target_conversation=event.conversation))
             owner_draft_ids.add(seg_id)
             approved_draft_ids.add(seg_id)
             receipt = plugin_gateway.dispatch(send_message_intent(
                 event.conversation, seg, draft_id=seg_id))
             print(f"  [补发] {seg_id} → {receipt}")
+            _sent_segs += 1 if _send_ok(receipt) else 0
             if i + 1 < len(segments):
                 time.sleep(0.35)
+        # 补发文本也回写群时间线（is_self）——与主回复路径同纪律（2026-11-01
+        # 实证：群友评论补发的图/内容时，模型在时间线里看不到自己发过什么）。
+        if event.conversation.startswith("group:") and _sent_segs:
+            try:
+                timeline.append(event.conversation,
+                                message_id=f"selffc:{event.message_id}",
+                                sender_id=self_uin,
+                                text="\n".join(segments[:_sent_segs]),
+                                is_self=True)
+            except Exception:
+                pass
+        # 2026-11-01 审批积压治理：多段补发主草稿由 #i 分段取代，标 superseded
+        if len(segments) > 1:
+            workflow.outbox.close(
+                draft_id, status="superseded",
+                reason=f"由 {len(segments)} 个分段草稿派发（已送达 {_sent_segs} 段）")
     registry = OwnerChannelRegistry(owner_id="owner", bindings=bindings)
 
     # QQ/WeQ is registered as a channel plugin. The input adapter is consumed here
@@ -513,8 +671,13 @@ def cmd_run(args) -> int:
         QQ_WEQ_PLUGIN_ID, build_qq_weq_gateway, register_qq_weq_plugin, send_message_intent)
     from whale_core.plugins import PluginRegistry
     plugin_registry = PluginRegistry()
+    # 2026-11-01 修复：网关口按草稿 target_conversation 路由——群回复发回群里，
+    # 不再落进 owner 私聊（修复前 port.send 只认 owner 定向目标）。
+    from weq_channel.weq_send import ConversationRoutingPort
+    routed_send_port = ConversationRoutingPort(
+        send_port, owner_uid=os.environ.get("OWNER_UID", ""))
     adapter, _executor = register_qq_weq_plugin(
-        plugin_registry, port=send_port, outbox=workflow.outbox, prefs=prefs)
+        plugin_registry, port=routed_send_port, outbox=workflow.outbox, prefs=prefs)
 
     # 媒体/语音能力：统一走 configure_optional_capabilities——
     # 支持 WHALE_MEDIA_BASE_URL/WHALE_MEDIA_API_KEY 一个平台全覆盖，也可各能力
@@ -536,15 +699,20 @@ def cmd_run(args) -> int:
         if hasattr(_inner_port, "send_image"):
             _inner_port.artifact_reader = lambda aid: cap.artifacts.read(aid)
 
-    # 意图模型（可选，默认关）：QQ_INTENT_MODEL=<模型 id> 开启——同 AgentScope
-    # 平台的 OpenAI 兼容端点复用 DEEPSEEK_* 凭据；规则优先（显式搜索指令本地
-    # 识别零额外调用），LLM 规划用于其余消息。实测选型记录见 gap-analysis。
+    # 意图模型（可选，默认关）：QQ_INTENT_MODEL=<模型 id> 开启；规则优先（显式
+    # 搜索指令本地识别零额外调用），LLM 规划用于其余消息。实测选型见 gap-analysis。
+    # 2026-11-01 owner 决策「不走代理」：QQ_INTENT_BASE_URL/QQ_INTENT_API_KEY
+    # 可独立于主聊天端点（不同供应商/不同 key 时必备）；缺省回落 DEEPSEEK_*。
     intent_model_id = os.environ.get("QQ_INTENT_MODEL", "").strip()
     if intent_model_id:
         from whale_core.core.deepseek import DeepSeekCompanion  # build_brain 同款局部导入
         from whale_core.core.intent_router import SearchIntentRouter
         from whale_core.core.runtime import ConversationOrchestrator, ToolRegistry
-        intent_brain = DeepSeekCompanion(model=intent_model_id)  # 同平台不同模型
+        intent_brain = DeepSeekCompanion(
+            model=intent_model_id,
+            base_url=os.environ.get("QQ_INTENT_BASE_URL") or None,
+            api_key=os.environ.get("QQ_INTENT_API_KEY") or None)
+        globals()["_intent_brain_ref"] = intent_brain  # 群定向兜底判定器用
         if (os.environ.get("TAVILY_API_KEY") or os.environ.get("BRAVE_API_KEY")
                 or os.environ.get("WHALE_SEARCH_PROVIDER")):
             from search_web.web_fetch import register_web_fetch
@@ -570,7 +738,10 @@ def cmd_run(args) -> int:
         safety_model_id = ""               # 显式关闭
     if safety_model_id:
         from whale_core.core.deepseek import DeepSeekCompanion as _DS
-        safety_brain = _DS(model=safety_model_id)
+        # 审核模型与意图模型同一端点（QQ_INTENT_* 覆盖生效于两者）
+        safety_brain = _DS(model=safety_model_id,
+                           base_url=os.environ.get("QQ_INTENT_BASE_URL") or None,
+                           api_key=os.environ.get("QQ_INTENT_API_KEY") or None)
 
         def _review(reply: str) -> str | None:
             prompt = (
@@ -689,10 +860,15 @@ def cmd_run(args) -> int:
                             attachments=tuple(merged_attach))
         if batch.message_ids and len(batch.message_ids) > 1:
             print(f"  [合批] {len(batch.message_ids)} 条合并为一回合 ← {batch.sender_id}")
-        if isinstance(last, OwnerEvent):
-            _dispatch_owner(event, epoch=batch.epoch)
-        else:
-            _dispatch_unpaired(event, epoch=batch.epoch)
+        # 补发顺序门闩：主流程在途期间，两段式补发等待（见 _await_turn）
+        _turn_begin(str(getattr(event, "message_id", "") or ""))
+        try:
+            if isinstance(last, OwnerEvent):
+                _dispatch_owner(event, epoch=batch.epoch)
+            else:
+                _dispatch_unpaired(event, epoch=batch.epoch)
+        finally:
+            _turn_end(str(getattr(event, "message_id", "") or ""))
         _pump_followups()
 
     def _batch_error(key, exc):
@@ -795,9 +971,14 @@ def cmd_run(args) -> int:
             _tfin(_tid, "silent")
             return
         if live_auto:
-            # 语音产物先发（同步路径的 TTS 任务产物——「语音跟我说」这类）
+            # 语音产物先发（同步路径的 TTS 任务产物——「语音跟我说」这类），
+            # 按来件会话定向（群请求的语音发回群里，不落 owner 私聊）。
             from whale_core.life.qq_workflow import _extract_audio_artifacts
-            _send_audio_artifacts(_extract_audio_artifacts(result.get("receipts")))
+            _conv = str(getattr(event, "conversation", "") or "")
+            _send_audio_artifacts(
+                _extract_audio_artifacts(result.get("receipts")),
+                peer_type="group" if _conv.startswith("group:") else "c2c",
+                target=_conv.split(":", 1)[1] if ":" in _conv else "")
             # G3：语义分段多气泡；每段发送前校验 epoch——新消息已到达则
             # 剩余片段作废（MSG-02：旧回复不越过新消息）。
             from whale_core.life.segments import split_reply
@@ -813,25 +994,47 @@ def cmd_run(args) -> int:
                 rhythm=rhythm)
             if _plan.silent:
                 print("  [规划] 本轮规划为沉默，不发送")
+                # 2026-11-01 审批积压治理：沉默轮的草稿终态关闭，不占审批列表
+                workflow.outbox.close(result["draft_id"], reason="silent_planned")
                 _tspan(_tid, "plan", "skipped", reason_code="silent_planned")
                 _tfin(_tid, "silent")
                 return
             _sent_segs = 0
             for i, seg in enumerate(segments):
-                if not epoch_fresh(store, event.conversation, ep):
+                # 2026-11-01 owner 决策：群里别人接着说 ≠ 截断机器人已开始
+                # 的回复（群节奏快，截断表现为「部分完成」残句）；私聊保留。
+                if not event.conversation.startswith("group:")                         and not epoch_fresh(store, event.conversation, ep):
                     print(f"  [分段] 会话已有新消息，剩余 {len(segments)-i} 段作废")
                     _tspan(_tid, "send", "skipped", reason_code="epoch_stale",
                            detail=f"剩余 {len(segments)-i} 段作废")
                     break
                 seg_id = result["draft_id"] if len(segments) == 1 \
                     else f"{result['draft_id']}#{i}"
+                if len(segments) > 1:
+                    # 多气泡分段各自需要台账条目：网关 outbox 模式按 draft_id
+                    # 查台账，带 #i 后缀的分段 id 未 propose 会 fail:missing
+                    # （2026-11-01 生产实证：多段回复全段丢发）。
+                    from whale_core.life.initiative import ProactiveDraft as _PD
+                    workflow.outbox.propose(_PD(
+                        draft_id=seg_id, text=seg,
+                        reason=f"多气泡分段 {i+1}/{len(segments)}"
+                               f"（主草稿 {result['draft_id']}）",
+                        evidence=(f"qq:{event.conversation}:{event.message_id}",),
+                        channel="direct_message",
+                        target_conversation=event.conversation))
                 owner_draft_ids.add(seg_id)
                 approved_draft_ids.add(seg_id)
                 receipt = plugin_gateway.dispatch(send_message_intent(
                     event.conversation, seg, draft_id=seg_id))
+                # 会话自愈：失败后自动 reopen 账号并重试本段一次
+                if not _send_ok(receipt) and _maybe_recover_channel(_tid):
+                    receipt = plugin_gateway.dispatch(send_message_intent(
+                        event.conversation, seg, draft_id=seg_id))
                 print(f"  [插件网关] 段{i+1}/{len(segments)} {receipt}")
                 # issue #39：回执即真相——gateway 回执含 fail 时如实记 failed
-                _ok_send = ":fail" not in str(receipt)
+                _ok_send = _send_ok(receipt)
+                if _ok_send:
+                    _send_fail_streak["n"] = 0
                 _tspan(_tid, "send", "executed" if _ok_send else "failed",
                        reason_code="" if _ok_send else "send_failed",
                        detail=f"段{i+1}/{len(segments)}")
@@ -841,6 +1044,22 @@ def cmd_run(args) -> int:
             # issue #39：收尾——全段送达 replied；部分送达 partial
             _tfin(_tid, "replied" if _sent_segs == len(segments) else "partial",
                   summary=f"{_sent_segs}/{len(segments)} 段已发送")
+            # 2026-11-01 审批积压治理：多气泡主草稿已被 #i 分段取代（分段台账
+            # 各自 accepted），主草稿标 superseded 终态，不占审批列表。
+            if len(segments) > 1:
+                workflow.outbox.close(
+                    result["draft_id"], status="superseded",
+                    reason=f"由 {len(segments)} 个分段草稿派发（已送达 "
+                           f"{_sent_segs} 段）")
+            # G1 补全（2026-11-01 生产实证：模型看不到自己回过什么，重复接旧话茬）：
+            # 网关路径的群回复也回写时间线（is_self），记录**实际发出的净文本**
+            # （分段内容，非带规划标记的原始回复）。
+            if event.conversation.startswith("group:") and _sent_segs:
+                timeline.append(event.conversation,
+                                message_id=f"self:{event.message_id}",
+                                sender_id=self_uin,
+                                text="\n".join(segments[:_sent_segs]),
+                                is_self=True)
         elif args.auto_approve:
             # --auto-approve remains isolated dry-run: no real Outbox or plugin executor.
             dispatch_dry_run(store, result["draft_id"])
@@ -933,7 +1152,9 @@ def cmd_run(args) -> int:
         # 陌生人回复：owner 定向的网关/Outbox 发送口不适用（draft 未入
         # Outbox 账本 + port 锁定 owner 目标）。陌生人/群回复走端口的
         # 回复语义直发方法（目标 = 来件对端/白名单群，已在上方过安全审核）。
-        port_inner = getattr(send_port, "_inner", send_port)
+        # 2026-11-01 修复：直发也走外层 WindowedSendPort（穿窗），不再解包
+        # _inner 绕过完整模式窗口——否则关窗态下陌生人/群回复必发送失败。
+        port_inner = send_port
         # G3：分段 + epoch 校验（新消息到达则剩余段作废）
         from whale_core.life.segments import split_reply
         from whale_core.life.batching import current_epoch, epoch_fresh
@@ -947,13 +1168,15 @@ def cmd_run(args) -> int:
                                          rhythm=rhythm)
         if _plan.silent:
             print("  [规划] 本轮规划为沉默，不发送")
+            if result.get("draft_id"):
+                workflow.outbox.close(result["draft_id"], reason="silent_planned")
             _tspan(_tid, "plan", "skipped", reason_code="silent_planned")
             _tfin(_tid, "silent")
             return
         _sent_segs = 0
         _send_failed = False
         for i, seg in enumerate(segments):
-            if not epoch_fresh(store, incoming.conversation, ep):
+            if not is_group and not epoch_fresh(store, incoming.conversation, ep):
                 print(f"  [分段] 会话已有新消息，剩余 {len(segments)-i} 段作废")
                 _tspan(_tid, "send", "skipped", reason_code="epoch_stale",
                        detail=f"剩余 {len(segments)-i} 段作废")
@@ -962,12 +1185,20 @@ def cmd_run(args) -> int:
                 group_code = incoming.conversation.split(":", 1)[1]
                 ok = port_inner.send_group_text(group_code, seg) \
                     if hasattr(port_inner, "send_group_text") else False
+                if not ok and _maybe_recover_channel(_tid):
+                    ok = port_inner.send_group_text(group_code, seg) \
+                        if hasattr(port_inner, "send_group_text") else False
                 print(f"  [群回复] 段{i+1}/{len(segments)} {'已发送' if ok else '发送失败'} ← {group_code}")
             else:
                 peer_uid = incoming.conversation.split(":", 1)[1]
                 ok = port_inner.send_c2c(peer_uid, seg) \
                     if hasattr(port_inner, "send_c2c") else False
+                if not ok and _maybe_recover_channel(_tid):
+                    ok = port_inner.send_c2c(peer_uid, seg) \
+                        if hasattr(port_inner, "send_c2c") else False
                 print(f"  [陌生人回复] 段{i+1}/{len(segments)} {'已发送' if ok else '发送失败'} ← {peer_uid[:12]}…")
+            if ok:
+                _send_fail_streak["n"] = 0
             _tspan(_tid, "send", "executed" if ok else "failed",
                    reason_code="" if ok else "send_failed",
                    detail=f"段{i+1}/{len(segments)}")
@@ -979,11 +1210,21 @@ def cmd_run(args) -> int:
               "failed" if _send_failed and _sent_segs == 0
               else ("replied" if _sent_segs == len(segments) else "partial"),
               summary=f"{_sent_segs}/{len(segments)} 段已发送")
-        if is_group and ok:
-            # G1：自己的发言也进时间线（is_self），模型上下文才完整
+        # 2026-11-01 审批积压治理：直发路径不过网关/台账，回复草稿的
+        # 「draft」状态会永远悬在审批列表——发送成功后补终态。
+        if _sent_segs and result.get("draft_id"):
+            workflow.outbox.close(
+                result["draft_id"], status="accepted",
+                reason=f"直发路径已送达 {_sent_segs}/{len(segments)} 段")
+        if is_group and _sent_segs:
+            # G1：自己的发言也进时间线（is_self），模型上下文才完整。
+            # 记实际发出的净文本（分段拼接），不记带 ◆ 规划标记的原始回复——
+            # 否则标记泄漏进时间线，反过来教会模型继续内联用 ◆。
             timeline.append(incoming.conversation,
                             message_id=f"self:{incoming.message_id}",
-                            sender_id=self_uin, text=reply, is_self=True)
+                            sender_id=self_uin,
+                            text="\n".join(segments[:_sent_segs]),
+                            is_self=True)
 
     def on_mass(meta):
         print(f"[mass] {meta['chatType']}:{meta['convId']} seq {meta['fromSeq']}→{meta['toSeq']} "
@@ -993,6 +1234,15 @@ def cmd_run(args) -> int:
     from whale_core.memory.timeline import GroupTimelineStore
     from whale_core.life.reply_target import ReplyTargetResolver
     timeline = GroupTimelineStore(store)
+    # 2026-11-01 owner 决策：时间线标签用群名片/昵称，不再是「群友<hash>」
+    # 代号（生产实证：机器人称呼群友只会念出一串 ID，"像乱码"）。
+    # 昵称仅作展示标签；解析失败自动回退代号，不影响主链路。
+    try:
+        from weq_channel.name_directory import WeqNameDirectory
+        timeline.name_resolver = WeqNameDirectory(store, send_port).resolver()
+        print("[昵称] 群成员昵称目录已装配（uin→群名片/昵称，24h 缓存）")
+    except Exception as exc:
+        print(f"[昵称] 昵称目录装配失败，回退代号标签：{type(exc).__name__}")
     workflow.companion.timeline = timeline
     self_uid = os.environ.get("QQ_SELF_UID", "").strip()
     # issue #15：时间线渲染标注「@我」需要自身 uid
@@ -1000,6 +1250,34 @@ def cmd_run(args) -> int:
     # issue #23：QQ 会话启用回复规划标记（◆ 多气泡 / [[沉默]] / [[稍后补充]]）
     from whale_core.life.response_planner import PLANNING_HINT
     workflow.companion.planning_hint = PLANNING_HINT
+    # 2026-11-01 生产实证：对话模型不知道自身能力会虚假否认（「画图我做不到」）。
+    # 按实际挂载的工具补一句能力自述（宿主事实层，非角色卡内容）。
+    _cap_names = []
+    if tools.for_capability("web.search"):
+        _cap_names.append("搜索")
+    if tools.for_capability("media.image.generate"):
+        _cap_names.append("画图")
+    if tools.for_capability("media.video.generate"):
+        _cap_names.append("生成视频")
+    if tools.for_capability("tts.synthesize"):
+        _cap_names.append("发语音")
+    if _cap_names:
+        workflow.companion.planning_hint += (
+            "\n你当前具备这些能力：" + "、".join(_cap_names) +
+            "——对方提出这类需求时会有任务流程接住处理，答应下来即可，"
+            "不要自称做不到或不会。")
+    # 读图能力自述（2026-11-01 生产实证：模型一边真读图一边说「读不了」）——
+    # 诚实口径：当条消息附带的图能直接看到；没被 @/没触发回复的旧图看不到。
+    workflow.companion.planning_hint += (
+        "\n对方当条消息里附带的图片你能直接看到内容并讨论；"
+        "别再说自己读不了图——之前看图猜内容都是真看到了，不是瞎猜。")
+    # 2026-11-01 owner 决策：群友实测反馈「太严肃、太有原则」。放开手脚聊——
+    # 原则与安全由系统后台把关，人格层不端着、不布道。称呼用群名片/昵称。
+    workflow.companion.planning_hint += (
+        "\n群里都是熟人朋友，大家说话很随意：放开了聊——接梗、吐槽、开玩笑、"
+        "被逗了可以俏皮地怼回去，不用端着、不用说教、不用一本正经。"
+        "提到或称呼群友时直接用他们的群名片/昵称（时间线里 […|名字] 就是），"
+        "不要念 ID 或代号。")
     if not self_uid:
         try:
             import glob as _glob, json as _json
@@ -1025,7 +1303,48 @@ def cmd_run(args) -> int:
         return ProactiveOutbox._is_quiet(
             _dt.now(ZoneInfo(prefs.tz)).time(), prefs)
 
-    group_turn_policy = GroupTurnPolicy(store, quiet_now=_quiet_now)
+    # 从显式选择的角色卡/宿主配置取得称呼，不在核心硬编码角色名。
+    from whale_core.ui.persona_cards import active_card
+    selected_card = active_card(store)
+    bot_aliases = tuple(dict.fromkeys(
+        n.strip() for n in (
+            (selected_card.name if selected_card else ""),
+            *os.environ.get("WHALE_BOT_NAMES", "").split(","),
+        ) if n.strip()
+    ))
+
+    # 2026-11-02 owner 决策：规则判不出的「是不是在找鲸鱼」由意图模型兜底
+    # （实证：「说出来各位的名字哦」无「你」无问号被静默压制，其实是对着
+    # 鲸鱼刚发的语音说的）。仅在机器人近窗发过言时调用，调用有界。
+    def _llm_directed(text, entries) -> bool:
+        brain = globals().get("_intent_brain_ref")
+        if brain is None:
+            return False
+        lines = []
+        for e in list(entries or ())[-6:]:
+            if not isinstance(e, dict):
+                continue
+            who = "Enxi" if e.get("is_self") else "群友"
+            body = " ".join(str(e.get("text") or "").split())[:80]
+            if body:
+                lines.append(f"{who}：{body}")
+        name = bot_aliases[0] if bot_aliases else "Enxi"
+        prompt = (
+            f"判断一条群聊消息是不是在对群里名叫「{name}」的机器人说话"
+            "（叫她回应、让她做事、接着她的话头说事都算；群友之间互相聊、"
+            "单纯陈述不算）。\n"
+            + ("群聊最近消息：\n" + "\n".join(lines) + "\n" if lines else "")
+            + f"最新一条：{str(text)[:200]}\n只回答一个字：是 或 否。")
+        try:
+            ans = brain.reply(prompt)
+        except Exception:
+            return False
+        return str(ans or "").strip().startswith("是")
+
+    group_turn_policy = GroupTurnPolicy(
+        store, bot_names=bot_aliases, quiet_now=_quiet_now,
+        directed_classifier=_llm_directed,
+    )
 
     _member_extractor = MemberMemoryExtractor(
         store, timeline, MemberConsentStore(store), _bindings, _spaces)

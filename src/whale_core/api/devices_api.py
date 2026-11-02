@@ -10,6 +10,7 @@
 - ``POST   /devices/{id}/revoke``    同上（不便发 DELETE 的控制台）
 - ``POST   /devices/{id}/query``     下发 sensor.query，deadline 内等 result
 - ``POST   /devices/{id}/action``    下发 action.request，等终态回执
+- ``POST   /devices/{id}/action/status``  按幂等键查状态（只读，不重发）
 - ``GET    /devices/ws``             提示：WS 长连在独立监听端口（见 ws_url）
 
 WS 端点本体在 devices.gateway.DeviceGateway（websockets 可选依赖）；
@@ -207,6 +208,18 @@ def dispatch_devices(handler, method: str, parts: list[str]) -> None:
 
         if len(parts) == 3 and parts[2] == "query" and method == "POST":
             _downlink(handler, gateway, device_id, op="query")
+            return
+        if len(parts) == 4 and parts[2:] == ["action", "status"] and method == "POST":
+            body = handler._body_json()
+            if body is None or not isinstance(body.get("idempotency_key"), str):
+                send(400, _error("bad_request", "idempotency_key required"))
+                return
+            try:
+                result = gateway.action_status(device_id, body["idempotency_key"])
+            except GatewayError as exc:
+                send(_GATEWAY_STATUS.get(exc.code, 500), _error(exc.code, str(exc)))
+                return
+            send(200, _json_bytes({"result": result}))
             return
         if len(parts) == 3 and parts[2] == "action" and method == "POST":
             _downlink(handler, gateway, device_id, op="action")

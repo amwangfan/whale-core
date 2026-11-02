@@ -67,6 +67,7 @@ class VideoTask:
     error: str = ""
     created_at: float = 0.0
     updated_at: float = 0.0
+    model: str = ""        # 生成所用模型（多模型路由；空 = 默认 provider）
 
     def as_dict(self) -> dict[str, Any]:
         """JSON 可序列化视图（供 MemoryStore kv 持久化）。"""
@@ -78,6 +79,7 @@ class VideoTask:
             "error": self.error,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "model": self.model,
         }
 
     @classmethod
@@ -91,6 +93,7 @@ class VideoTask:
             error=str(data.get("error") or ""),
             created_at=float(data.get("created_at") or 0.0),
             updated_at=float(data.get("updated_at") or 0.0),
+            model=str(data.get("model") or ""),
         )
 
 
@@ -145,7 +148,9 @@ class VideoTaskManager:
     - 未知 task_id 的 poll/cancel 抛 ``VideoError(kind="not_found")``。
     """
 
-    def __init__(self, store: Any, provider: VideoProvider, *, artifact_store=None, min_poll_interval: float = 0):
+    def __init__(self, store: Any, provider: VideoProvider, *, artifact_store=None, min_poll_interval: float = 0,
+                 providers: Mapping[str, VideoProvider] | None = None,
+                 default_model: str = ""):
         self._store = store
         self._provider = provider
         self._lock = threading.RLock()
@@ -153,15 +158,34 @@ class VideoTaskManager:
         self.artifact_store = artifact_store
         self.min_poll_interval = max(0, min_poll_interval)
         self._last_poll: dict[str, float] = {}
+        # 多模型路由（2026-11-01：允许调用方指定模型）：model 名 → provider。
+        # 默认 provider 挂在 default_model 名下；未知模型名提交期即拒（诚实报错）。
+        self._providers: dict[str, VideoProvider] = dict(providers or {})
+        self._default_model = str(default_model or "")
+        if self._default_model and provider is not None:
+            self._providers.setdefault(self._default_model, provider)
 
     @property
     def provider(self) -> VideoProvider:
         return self._provider
 
+    @property
+    def available_models(self) -> tuple[str, ...]:
+        return tuple(sorted(self._providers)) if self._providers else ()
+
+    def _provider_for(self, model: str) -> VideoProvider:
+        if not model or not self._providers:
+            return self._provider
+        found = self._providers.get(model)
+        if found is None:
+            raise VideoError("config", f"unknown video model {model!r} "
+                                       f"(available: {', '.join(self.available_models)})")
+        return found
+
     # ---- 生命周期 ----
 
     def submit(self, prompt: str, *, duration_s: int = DEFAULT_DURATION_S,
-               size: str = DEFAULT_SIZE) -> VideoTask:
+               size: str = DEFAULT_SIZE, model: str = "") -> VideoTask:
         """校验参数 → provider.submit → 落库为 pending 任务。
 
         provider 抛出的非 VideoError 异常一律上抛为 ``VideoError(kind="network")``
@@ -170,8 +194,10 @@ class VideoTaskManager:
         prompt = _validate_prompt(prompt)
         duration_s = _clamp_duration(duration_s)
         size = _validate_size(size)
+        model = str(model or "").strip()
+        provider = self._provider_for(model)
         try:
-            task_id = self._provider.submit(prompt, duration_s=duration_s, size=size)
+            task_id = provider.submit(prompt, duration_s=duration_s, size=size)
         except VideoError:
             raise
         except Exception as exc:
@@ -184,7 +210,7 @@ class VideoTaskManager:
             raise VideoError("bad_response", "provider returned an empty task_id")
         now = time.time()
         task = VideoTask(task_id=task_id, status=STATUS_PENDING, prompt=prompt,
-                         created_at=now, updated_at=now)
+                         created_at=now, updated_at=now, model=model)
         self._save(task)
         return task
 
@@ -210,7 +236,7 @@ class VideoTaskManager:
             return task
         self._last_poll[task_id] = time.monotonic()
         try:
-            status, url, error = self._provider.poll(task_id)
+            status, url, error = self._provider_for(task.model).poll(task_id)
         except Exception as exc:
             task = replace(task, error=f"transient:{type(exc).__name__}",
                            updated_at=time.time())
@@ -252,7 +278,7 @@ class VideoTaskManager:
         if task.status in TERMINAL_STATUSES:
             return False
         try:
-            ok = bool(self._provider.cancel(task_id))
+            ok = bool(self._provider_for(task.model).cancel(task_id))
         except Exception:
             return False
         if ok:

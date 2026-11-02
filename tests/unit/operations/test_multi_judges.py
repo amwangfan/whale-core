@@ -50,14 +50,25 @@ class TestRunMultiJudge:
         return make
 
     def test_only_available_providers_scored(self):
-        env = {"DEEPSEEK_API_KEY": "k", "MOONSHOT_API_KEY": "k"}
+        # 专属 key 优先；无专属时回落共享网关 key（DEEPSEEK_API_KEY）
+        env = {"MOONSHOT_API_KEY": "k"}  # 只有 kimi 专属 key
+        summary = run_multi_judge(
+            env, PAIRS,
+            callable_factory=self._factory({"kimi": GOOD_JSON}))
+        assert set(summary["judged_providers"]) == {"kimi"}
+        assert summary["providers"]["qwen"]["status"] == "skipped_no_key"
+        assert summary["providers"]["glm"]["status"] == "skipped_no_key"
+        assert summary["providers"]["deepseek"]["status"] == "skipped_no_key"
+
+    def test_shared_gateway_key_enables_all(self):
+        """owner 决策：所有模型走统一平台（共享 key+端点）。"""
+        env = {"DEEPSEEK_API_KEY": "k", "DEEPSEEK_BASE_URL": "https://gw.local/v1"}
         summary = run_multi_judge(
             env, PAIRS,
             callable_factory=self._factory(
-                {"deepseek": GOOD_JSON, "kimi": GOOD_JSON}))
-        assert set(summary["judged_providers"]) == {"deepseek", "kimi"}
-        assert summary["providers"]["qwen"]["status"] == "skipped_no_key"
-        assert summary["providers"]["glm"]["status"] == "skipped_no_key"
+                {n: GOOD_JSON for n in ("deepseek", "kimi", "qwen", "glm")}))
+        assert set(summary["judged_providers"]) == {
+            "deepseek", "kimi", "qwen", "glm"}
         deepseek = summary["providers"]["deepseek"]
         assert len(deepseek["scores"]) == 2
         assert summary["disclaimer"]
@@ -93,5 +104,6 @@ class TestRunMultiJudge:
         # 环境里恰好有 DEEPSEEK_API_KEY 时不走 2（取决于测试环境）——
         # 这里只验证：无 key 时输出明确且非零
         import os
-        if not any(os.environ.get(p.env_key) for p in JUDGE_PROVIDERS):
+        all_key_envs = {n for p in JUDGE_PROVIDERS for n in p.key_envs}
+        if not any(os.environ.get(n) for n in all_key_envs):
             assert rc == 2

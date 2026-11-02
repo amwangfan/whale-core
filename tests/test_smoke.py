@@ -264,8 +264,8 @@ def test_bridge_gateway_stub_defaults() -> None:
 
 def test_ui_persona_hud_and_look() -> None:
     persona = WhalePersona()
-    assert persona.name == "鲸鱼"
-    assert persona.taboos
+    assert persona.name == ""
+    assert persona.taboos == ()
     style = VoiceStyle()
     assert style.locale == "zh-CN"
     hud = HudPresentation(headline="在路上", lines=("预计 10 分钟",))

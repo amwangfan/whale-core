@@ -542,6 +542,13 @@ def test_action_receipt_state_machine(api):
         receipts = gateway.store.get(
             f"device:receipts:{sim.device_id}:{action_id}")
         assert [r["state"] for r in receipts] == ["received", "accepted", "executed"]
+        # The owner can reconcile by idempotency key without dispatching again.
+        status, body = _req(
+            api, "POST", f"/api/v1/devices/{sim.device_id}/action/status",
+            body={"idempotency_key": "idem-test-0001"})
+        assert status == 200
+        assert body["result"]["state"] == "executed"
+        assert body["result"]["receipt"]["state"] == "executed"
     finally:
         sim.close()
 
@@ -609,5 +616,40 @@ def test_revoke_rechecked_per_frame(rig):
         assert err["payload"]["code"] == "device_revoked"
         with pytest.raises(ConnectionClosed):
             sim.recv()
+    finally:
+        sim.close()
+
+
+def test_late_action_receipt_can_be_reconciled_after_waiter_is_gone(api):
+    sim, gateway = _api_rig(api)
+    sim.connect(gateway.port)
+    try:
+        box, thread = _http_in_thread(
+            api, "POST", f"/api/v1/devices/{sim.device_id}/action",
+            {"capability": "phone.notification.post",
+             "idempotency_key": "idem-late-0001", "timeout": 1})
+        request = sim.recv()
+        action_id = request["payload"]["action_id"]
+        # Simulate the HTTP waiter disappearing (including after a restart).
+        with gateway.lock:
+            gateway.pending.pop(action_id, None)
+        sim.send(sim.frame("action.receipt", {
+            "action_id": action_id, "state": "executed",
+            "executed_at": now_ms()}))
+        status, result = _req(
+            api, "POST", f"/api/v1/devices/{sim.device_id}/action/status",
+            body={"idempotency_key": "idem-late-0001"})
+        # WS and HTTP handlers run in separate threads; eventual persisted
+        # outcome must be observable even with no waiting request.
+        deadline = time.monotonic() + 2
+        while status == 200 and result["result"]["state"] != "executed" and time.monotonic() < deadline:
+            time.sleep(0.02)
+            status, result = _req(
+                api, "POST", f"/api/v1/devices/{sim.device_id}/action/status",
+                body={"idempotency_key": "idem-late-0001"})
+        assert status == 200
+        assert result["result"]["state"] == "executed"
+        assert result["result"]["action_id"] == action_id
+        thread.join(timeout=10)
     finally:
         sim.close()

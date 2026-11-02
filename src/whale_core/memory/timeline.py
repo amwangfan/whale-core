@@ -31,6 +31,12 @@ class GroupTimelineStore:
         self.store = store
         self.max_entries = max(1, min(int(max_entries), 2000))
         self.max_age_s = max_age_s
+        # 2026-11-01 owner 决策：渲染标签优先用群名片/昵称（代号群友<hash>
+        # 机器人念不出来、群友也看不懂）。可调用契约：
+        # (conversation_id, [(sender_id, sender_uid), ...]) -> {sender_id: 名字}
+        # 由宿主（QQ runner）装配；None = 保持代号行为（默认，测试/离线安全）。
+        # 昵称仅作展示标签，永不作为身份键/权限依据（issue #15 纪律不变）。
+        self.name_resolver = None
 
     def append(self, conversation_id: str, *, message_id: str, sender_id: str,
                text: str, sender_uid: str = "", send_time: str = "",
@@ -76,21 +82,21 @@ class GroupTimelineStore:
                          self_uid: str = "") -> str:
         """模型可读的带归属时间线（可信容器格式；正文按不可信数据处理）。
 
-        每条一行：``[#msg尾4|群友hash]（↩回复#尾4） 正文`` —— 归属映射回
+        每条一行：``[#msg尾4|发送者标签]（↩回复#尾4） 正文`` —— 归属映射回
         真实消息 ID，群成员不坍缩成同一个 user（ID-01）。正文中的换行压平，
         防止伪造行结构冒充他人发言或系统消息。
 
-        群友标签纪律（issue #15）：
-        - 标签是 ``sender_id`` 的纯函数：同一发送者在同一次渲染与不同窗口
-          内保持一致；绝不按消息条数重新编号（同一人连发两条不能变成
-          两个「群友」）；
-        - 不同 sender 的短哈希碰撞用**确定性**消歧：按 sender_id 排序后
-          逐步加长哈希前缀（6→8→10…），结果只取决于窗口内的 sender 集合，
-          与消息顺序无关；
-        - 昵称永不作为身份键；标签不含任何 QQ UIN 片段。
+        发送者标签（2026-11-01 owner 决策）：装配了 name_resolver 时优先
+        群名片/昵称（机器人能称呼、群友看得懂）；未装配/解析失败回退
+        「群友<hash>」代号。昵称只是展示标签——身份键纪律（issue #15）不变：
+        - 同一发送者在同一次渲染内标签一致；哈希兜底时跨窗口也稳定；
+        - 碰撞消歧确定性（哈希加长前缀 / 同名昵称追加 uin 尾号）；
+        - 昵称永不作为身份键、权限依据或记忆归属键。
         """
         entries = self.recent(conversation_id, limit=limit)
-        labels = _stable_sender_labels(entries)
+        labels = _stable_sender_labels(
+            entries, conversation_id=conversation_id,
+            name_resolver=self.name_resolver)
         msg_label = {e["message_id"]: e["message_id"][-4:] for e in entries}
 
         def _reply_marks(e) -> str:
@@ -119,18 +125,43 @@ class GroupTimelineStore:
         return "\n".join(lines)
 
 
-def _stable_sender_labels(entries: tuple[dict, ...]) -> dict[str, str]:
-    """message_id → 稳定归属标签（「我」或「群友<hash>」）。
+def _stable_sender_labels(entries: tuple[dict, ...], *,
+                          conversation_id: str = "",
+                          name_resolver=None) -> dict[str, str]:
+    """message_id → 稳定归属标签（「我」/群名片昵称/「群友<hash>」兜底）。
 
     同一 sender_id 恒同标签；碰撞按 sender_id 排序后确定性加长前缀。
+    昵称同名碰撞（两人同群名片）时追加「·uin尾4」确定性消歧。
     """
     senders: list[str] = sorted({
         str(e.get("sender_id") or "?") for e in entries if not e.get("is_self")
     })
+    names: dict[str, str] = {}
+    if name_resolver is not None and senders:
+        pairs = [(s, next((str(e.get("sender_uid") or "") for e in entries
+                          if str(e.get("sender_id") or "?") == s), ""))
+                 for s in senders]
+        try:
+            resolved = name_resolver(conversation_id, pairs)
+        except Exception:
+            resolved = {}
+        if isinstance(resolved, dict):
+            names = {str(k): str(v).strip() for k, v in resolved.items()
+                     if str(v or "").strip()}
+    # 同名消歧：同名 sender 集合内按 sender_id 排序统一追加尾号（确定性）
+    by_name: dict[str, list[str]] = {}
+    for s in senders:
+        if s in names:
+            by_name.setdefault(names[s], []).append(s)
+    for nm, owners in by_name.items():
+        if len(owners) > 1:
+            for s in sorted(owners):
+                names[s] = f"{nm}·{s[-4:]}"
     sender_label = _unique_hashes(senders)
     return {
         e["message_id"]: ("我" if e.get("is_self")
-                          else f"群友{sender_label[str(e.get('sender_id') or '?')]}")
+                          else names.get(str(e.get("sender_id") or "?"))
+                          or f"群友{sender_label[str(e.get('sender_id') or '?')]}")
         for e in entries
     }
 

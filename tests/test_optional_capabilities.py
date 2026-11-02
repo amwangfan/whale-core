@@ -66,6 +66,106 @@ def test_image_tool_stores_output_and_disable_revokes_handler(tmp_path, monkeypa
     with pytest.raises(ValueError): spec.handler({'prompt':'鲸鱼'})
 
 
+def test_image_tool_result_has_no_bare_urls(tmp_path, monkeypatch):
+    """2026-11-01「恶意链接」事件：工具结果不再回裸签名 URL（模型会贴进
+    QQ 正文触发安全警告）；只留本地工件引用 + 不贴链接的提示。"""
+    registry, tools = PluginRegistry(), ToolRegistry()
+    configure_optional_capabilities(registry, tools, InMemoryStore(),
+        env={'WHALE_IMAGE_BASE_URL':'http://localhost:1234/v1',
+             'WHALE_IMAGE_PROVIDER':'openai'}, artifact_dir=tmp_path)
+    payload = {'data':[{'b64_json':base64.b64encode(b'image').decode()}]}
+    monkeypatch.setattr(provider_http, 'open_request', lambda *a,**k: io.BytesIO(json.dumps(payload).encode()))
+    spec = tools.for_capability('media.image.generate')[0]
+    result = json.loads(spec.handler({'prompt':'鲸鱼'}))
+    assert 'urls' not in result
+    assert 'note' in result and '不要包含' in result['note']
+    assert result['images'][0].startswith('/api/v1/artifacts/')
+
+
+def test_media_style_default_anime_and_explicit_style_wins(tmp_path, monkeypatch):
+    """2026-11-01 owner 决策：默认二次元动漫画风；提示词自带风格词不追加。"""
+    registry, tools = PluginRegistry(), ToolRegistry()
+    configure_optional_capabilities(registry, tools, InMemoryStore(),
+        env={'WHALE_IMAGE_BASE_URL':'http://localhost:1234/v1',
+             'WHALE_IMAGE_PROVIDER':'openai'}, artifact_dir=tmp_path)
+    seen = []
+    payload = {'data':[{'b64_json':base64.b64encode(b'img').decode()}]}
+    def transport(req, **kw):
+        seen.append(json.loads(req.data).get('prompt',''))
+        return io.BytesIO(json.dumps(payload).encode())
+    monkeypatch.setattr(provider_http, 'open_request', transport)
+    spec = tools.for_capability('media.image.generate')[0]
+    spec.handler({'prompt':'一只小鲸鱼'})
+    spec.handler({'prompt':'一只写实照片风的小鲸鱼'})
+    spec.handler({'prompt':'一只小鲸鱼', })  # 再画一张无风格的
+    assert seen[0].endswith('二次元动漫风格')
+    assert seen[1] == '一只写实照片风的小鲸鱼'  # 显式风格不被覆盖
+    assert seen[2].endswith('二次元动漫风格')
+    # 环境可关/可换
+    registry2, tools2 = PluginRegistry(), ToolRegistry()
+    configure_optional_capabilities(registry2, tools2, InMemoryStore(),
+        env={'WHALE_IMAGE_BASE_URL':'http://localhost:1234/v1',
+             'WHALE_IMAGE_PROVIDER':'openai', 'WHALE_MEDIA_STYLE':''}, artifact_dir=tmp_path)
+
+
+def test_minimax_image_default_when_key_present(tmp_path, monkeypatch):
+    """MiniMax key 就位：图像默认模型切成 minimax-image-01（owner 决策），
+    qwen 仍列可选；key 缺席则保持 qwen 默认。"""
+    registry, tools = PluginRegistry(), ToolRegistry()
+    configure_optional_capabilities(registry, tools, InMemoryStore(),
+        env={'WHALE_IMAGE_BASE_URL':'http://localhost:1234/v1',
+             'WHALE_IMAGE_PROVIDER':'dashscope',
+             'WHALE_MINIMAX_API_KEY':'k'}, artifact_dir=tmp_path)
+    spec = tools.for_capability('media.image.generate')[0]
+    assert 'minimax-image-01' in spec.description
+    assert 'qwen-image-3.0' in spec.description
+    # 默认模型路由到 MiniMax provider（HTTP 协议层在 test_minimax_media 覆盖）
+    from whale_core.plugins.media_image import ImageTaskResult
+    from whale_core.plugins import minimax_media as _mm
+    calls = []
+    def _fake_generate(self, prompt, *, size='1328*1328', n=1):
+        calls.append(prompt)
+        return ImageTaskResult(task_id='t', status='succeeded',
+            images=('data:image/png;base64,'+base64.b64encode(b'img').decode(),))
+    monkeypatch.setattr(_mm.MiniMaxImageProvider, 'generate', _fake_generate)
+    result = json.loads(spec.handler({'prompt':'鲸鱼'}))
+    assert result['model'] == 'minimax-image-01' and calls
+    # key 缺席：minimax 模型不出现
+    registry3, tools3 = PluginRegistry(), ToolRegistry()
+    configure_optional_capabilities(registry3, tools3, InMemoryStore(),
+        env={'WHALE_IMAGE_BASE_URL':'http://localhost:1234/v1',
+             'WHALE_IMAGE_PROVIDER':'dashscope'}, artifact_dir=tmp_path)
+    spec3 = tools3.for_capability('media.image.generate')[0]
+    assert 'minimax' not in spec3.description
+
+
+def test_minimax_only_full_media_stack_no_proxy(tmp_path, monkeypatch):
+    """2026-11-01 owner 决策「不走代理」：仅 MiniMax key、无任何 dashscope 基座时，
+    图/视频/语音全部照常挂载（MiniMax 官方直连），ASR 诚实缺席。"""
+    registry, tools = PluginRegistry(), ToolRegistry()
+    bundle = configure_optional_capabilities(registry, tools, InMemoryStore(),
+        env={'WHALE_MINIMAX_API_KEY':'k'}, artifact_dir=tmp_path)
+    # 图像：默认 minimax-image-01
+    img = tools.for_capability('media.image.generate')[0]
+    assert 'minimax-image-01' in img.description and 'qwen' not in img.description
+    # 语音：speech-02-hd 挂载；无 ASR
+    tts = tools.for_capability('tts.synthesize')[0]
+    assert 'speech-02-hd' in tts.description
+    assert tools.for_capability('asr.transcribe') == []
+    # 视频：默认 MiniMax-Hailuo-2.3
+    vid = tools.for_capability('media.video.generate')[0]
+    assert 'MiniMax-Hailuo-2.3' in vid.description
+    assert bundle.video_manager is not None
+    assert set(bundle.video_manager._providers) == {'MiniMax-Hailuo-2.3'}
+    # TTS 真实调用链（mock 传输层，hex 音频解码）
+    wav = b'RIFF' + b'\x00' * 40
+    monkeypatch.setattr(provider_http, 'open_request',
+        lambda req, **kw: io.BytesIO(json.dumps(
+            {'data':{'audio':wav.hex()}, 'base_resp':{'status_code':0}}).encode()))
+    result = json.loads(tts.handler({'text':'你好'}))
+    assert bundle.artifacts.read(result['artifact_id'])[1] == wav
+
+
 def test_wan_http_protocol_and_state_validation(monkeypatch):
     calls = []
     responses = [{'output':{'task_id':'job-1'}}, {'output':{'task_status':'SUCCEEDED','video_url':'https://cdn.example/x.mp4'}}, {}]
@@ -252,3 +352,62 @@ def test_pcm_bridge_fields_in_settings_contract():
                   "WHALE_PCM_BRIDGE_PUBLIC_WS_URL"):
         assert field in SERVICE_FIELDS
     assert "WHALE_PCM_BRIDGE_TOKEN" in SECRET_FIELDS
+
+
+def test_media_model_selection_and_minimax_registration(tmp_path, monkeypatch):
+    """2026-11-01 owner 决策：图/视频/语音工具可按 model 参数选模型；
+    未知模型诚实报错并列可用清单；MiniMax 配 key 才注册。"""
+    env = {
+        'WHALE_MEDIA_BASE_URL': 'http://localhost:1234/v1',
+        'WHALE_MEDIA_API_KEY': 'sk-test',
+        'WHALE_IMAGE_MODELS': 'qwen-image-2.0',
+        'WHALE_TTS_MODELS': 'qwen-audio-3.0-tts-plus',
+        'WHALE_VIDEO_MODELS': 'wan3.0-video',
+        'WHALE_MINIMAX_API_KEY': 'mm-key',
+    }
+    registry, tools = PluginRegistry(), ToolRegistry()
+    bundle = configure_optional_capabilities(registry, tools, InMemoryStore(),
+                                             env=env, artifact_dir=tmp_path)
+
+    # 图像：默认 qwen-image-3.0 + 追加 qwen-image-3.0 外的模型；未知模型诚实报错
+    img_spec = tools.for_capability('media.image.generate')[0]
+    payload = {'output': {'choices': [{'message': {'content': [
+        {'image': 'https://cdn.example/a.png'}]}}]}}
+    monkeypatch.setattr(provider_http, 'open_request',
+                        lambda *a, **k: io.BytesIO(json.dumps(payload).encode()))
+    # 工件落盘会真实抓取 URL——本测试只关心模型路由，stub 掉下载
+    class _StubArtifact:
+        url = '/api/v1/artifacts/stub'
+    monkeypatch.setattr(bundle.artifacts, 'save_reference',
+                        lambda ref, **kw: _StubArtifact())
+    r = json.loads(img_spec.handler({'prompt': '鲸', 'model': 'qwen-image-2.0'}))
+    assert r['model'] == 'qwen-image-2.0'
+    with pytest.raises(ValueError) as ei:
+        img_spec.handler({'prompt': '鲸', 'model': 'dall-e-9'})
+    assert 'qwen-image-2.0' in str(ei.value) and '未知生图模型' in str(ei.value)
+
+    # 语音：dashscope flash/plus + minimax speech-02-hd 注册进可选模型
+    tts_spec = tools.for_capability('tts.synthesize')[0]
+    assert 'speech-02-hd' in tts_spec.description
+    with pytest.raises(ValueError) as ei:
+        tts_spec.handler({'text': '你好', 'model': 'no-such'})
+    assert '未知语音模型' in str(ei.value)
+
+    # 视频：happyhorse + wan3.0-video + MiniMax-Hailuo-2.3 全部可选
+    v_spec = tools.for_capability('media.video.generate')[0]
+    assert 'wan3.0-video' in v_spec.description
+    assert 'MiniMax-Hailuo-2.3' in v_spec.description
+    assert bundle.video_manager is not None
+    assert 'MiniMax-Hailuo-2.3' in bundle.video_manager.available_models
+    with pytest.raises(VideoError):
+        bundle.video_manager.submit('鲸', model='no-such-video')
+
+
+def test_no_minimax_key_no_minimax_models(tmp_path):
+    registry, tools = PluginRegistry(), ToolRegistry()
+    bundle = configure_optional_capabilities(registry, tools, InMemoryStore(),
+        env={'WHALE_MEDIA_BASE_URL': 'http://localhost:1234/v1',
+             'WHALE_MEDIA_API_KEY': 'sk-test'}, artifact_dir=tmp_path)
+    tts_spec = tools.for_capability('tts.synthesize')[0]
+    assert 'speech-02' not in tts_spec.description
+    assert 'MiniMax' not in tools.for_capability('media.video.generate')[0].description
