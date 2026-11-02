@@ -255,6 +255,20 @@ def test_repeat_chain_judge_gate():
     assert (d3.action, d3.reason_code) == ("join", "repeat_chain")
 
 
+def test_bare_punctuation_is_not_a_question():
+    """2026-11-02 生产实证：单个「？」不触发 lively 提问接话。"""
+    store = InMemoryStore()
+    p = _policy(store)
+    d = p.maybe_join(conversation=GROUP, text="？", activity="lively")
+    assert (d.action, d.reason_code) == ("observe", "not_directed")
+    # 有内容的提问照常接
+    store2 = InMemoryStore()
+    p2 = _policy(store2)
+    d2 = p2.maybe_join(conversation=GROUP, text="这个报错什么意思？",
+                       activity="lively")
+    assert d2.action == "join"
+
+
 def test_reason_code_recorded_without_private_content():
     """诊断落 kv：reason_code + 时间，不含消息正文。"""
     store = InMemoryStore()

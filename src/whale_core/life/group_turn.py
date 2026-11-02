@@ -45,6 +45,11 @@ COOLDOWN_MIN = {"quiet": 60, "balanced": 20, "lively": 8}
 _QUESTION_RE = re.compile(
     r"[?？]|怎么|如何|为什么|为啥|请问|求[助教]|有人[会知]|怎么办|是什么")
 
+def _has_content(text: str) -> bool:
+    """剥掉标点/空白后还剩 ≥2 个有效字符才算「有内容」（防 bare ？/！ 误判）。"""
+    return len(re.sub(r"[\s\W_]+", "", str(text or ""))) >= 2
+
+
 #: 承接请求信号（lively 档补充，2026-11-01 生产实证）：机器人近期在群里发过言
 #: 时的「那你画个…吧」「你再唱一首」类跟进句式——无 @ 无名但明确是叫我做事。
 _FOLLOWUP_RE = re.compile(
@@ -177,7 +182,9 @@ class GroupTurnPolicy:
 
         text = str(text or "")
         named = bool(self._name_re.search(text)) if self._name_re else False
-        question = bool(_QUESTION_RE.search(text))
+        # 提问信号要有实际内容：光一个「？」不算提问（2026-11-02 生产实证：
+        # 单个问号被 lively 当提问接话，还对上了旧话茬，答非所问）。
+        question = bool(_QUESTION_RE.search(text)) and _has_content(text)
         # lively 补充信号：时间线近窗有机器人自己的发言（我刚参与过），
         # 且本条是「你+请求动词」的承接句式 → 视为叫我做事的跟进请求。
         follow_up = (
