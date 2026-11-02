@@ -216,6 +216,18 @@ def test_bundled_communicate_keeps_host_auto_approve() -> None:
     assert "auto-approved" in verdict.reason
 
 
+def test_external_communicate_bypasses_action_level_auto_approve() -> None:
+    """issue #59：auto_approve_actions 与 auto_approve_risks 同纪律——
+    external 插件的非 read_only 动作不被宿主按动作免审放宽。"""
+    registry = PluginRegistry()
+    registry.register(EXT_CHAT, executor=SpyExecutor())
+    policy = PluginActionPolicy(
+        registry, auto_approve_actions=frozenset({"ext_chat.send_message"}))
+    verdict = policy.evaluate("ext_chat", "send_message", is_owner=True)
+    assert verdict.status == "needs_approval"
+    assert "external" in verdict.reason
+
+
 def test_external_communicate_ready_after_explicit_approval() -> None:
     verdict = _evaluate(EXT_CHAT, "send_message", explicitly_approved=True)
     assert verdict.status == "ready"

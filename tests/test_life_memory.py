@@ -61,6 +61,23 @@ def test_inner_state_persists_and_user_can_reset():
     assert state.load().style == "neutral"
 
 
+def test_inner_state_style_is_free_form():
+    """issue #59：style 不再限四个阶段性标签——任意非空短标签可用，
+    ALLOWED_STYLES 仅为建议值；空/超长仍拒绝。"""
+    store = InMemoryStore()
+    state = InnerStateStore(store)
+    assert state.update(style="开心").style == "开心"
+    assert state.update(style="  犯困想摸鱼  ").style == "犯困想摸鱼"
+    assert len(state.update(style="x" * 40).style) == 24  # 截断有界
+    for bad in ("", "   "):
+        try:
+            state.update(style=bad)
+        except ValueError:
+            pass
+        else:
+            assert False, f"empty style should raise: {bad!r}"
+
+
 def test_deepseek_companion_opt_in_curated_context():
     from whale_core.core.companion import WhaleCompanion
     from whale_core.memory.store import PersonaContinuity

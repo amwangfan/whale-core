@@ -252,12 +252,20 @@ def test_anxiety_from_punctuation_density():
     assert derive_policy("好的，收到。").anxious is False
 
 
-def test_confession_without_evidence_not_claimed():
-    policy = derive_policy("我爱你")
+def test_confession_without_evidence_not_claimed_in_group():
+    """群聊防误认保留（issue #59）：群里无 @/引用证据的「我爱你」不认领。"""
+    policy = derive_policy("我爱你", is_group=True)
     assert policy.confession_unclaimed is True
     assert "不要认领成对自己的表白" in policy.render()
     # 无表白类话语不注入该规则
-    assert "表白" not in derive_policy("今天天气不错").render()
+    assert "表白" not in derive_policy("今天天气不错", is_group=True).render()
+
+
+def test_confession_in_private_chat_is_not_deflected():
+    """issue #59：私聊是一对一——亲密表达就是发给鲸鱼的，不套群聊防误认。"""
+    policy = derive_policy("我爱你", is_group=False)
+    assert policy.confession_unclaimed is False
+    assert "表白" not in policy.render()
 
 
 def test_data_safety_requires_risk_context():

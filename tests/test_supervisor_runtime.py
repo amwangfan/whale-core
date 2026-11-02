@@ -123,11 +123,17 @@ def test_followup_dispatch_is_reactive_completion_quiet_exempt():
                        steps_budget=1, time_budget_s=10)
     runner.run_pending(lambda r: ("rcpt", "任务结果"))
     port = TruePort()
-    # direct_message 渠道需宿主显式批准（安全审核通过后才发）——不伪造审批：
-    assert runner.dispatch_ready_followups(prefs, port=port, now=night) == []
-    accepted = runner.dispatch_ready_followups(prefs, port=port, now=night,
-                                               explicitly_approved=True)
+    # issue #59：auto_send 启用后 direct_message 按授权自动派发（深夜续答
+    # reactive_completion 豁免静默）；未开 auto_send 时不伪造审批、不派发：
+    accepted = runner.dispatch_ready_followups(prefs, port=port, now=night)
     assert accepted and port.sent == accepted  # 深夜续答送达
+    manual = ProactivePrefs(enabled=True,
+                            allowed_channels=frozenset({"direct_message"}),
+                            daily_limit=10)
+    runner.submit_goal("t2", context=_Ctx(), scope=("tool.web.search",),
+                       steps_budget=1, time_budget_s=10)
+    runner.run_pending(lambda r: ("rcpt", "任务结果"))
+    assert runner.dispatch_ready_followups(manual, port=TruePort(), now=night) == []
     # 对照：主动草稿同刻被静默拦下
     outbox.propose(ProactiveDraft("u1", "主动问候", "r", ("e",),
                                   channel="direct_message"))

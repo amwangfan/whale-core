@@ -22,9 +22,11 @@ def _executor(**kw) -> ShellExecutor:
 # ---------- 策略前置 ----------
 
 def test_policy_denied_before_spawn():
-    result = _executor().run("rm -rf /", is_owner=True)
+    # 空命令在策略层即拒绝（不起子进程）；危险字形命令的边界是沙箱而非
+    # 字符串黑名单（issue #59）。
+    result = _executor().run("   ", is_owner=True)
     assert result.status == "denied"
-    assert "destructive_rm" in result.verdict_reason
+    assert "empty" in result.verdict_reason
     assert result.exit_code is None
 
 

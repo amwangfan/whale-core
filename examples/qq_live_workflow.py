@@ -141,10 +141,18 @@ def risk_prefs(store=None) -> ProactivePrefs:
     return load_prefs(store, base)
 
 
+# 进程级双开关状态（issue #59）：cmd_run 启动时判定一次并置位。置位后
+# 主动私信（direct_message）经 ProactiveOutbox 按授权自动派发——渠道范围、
+# 每日额度、静默时段照常约束；电话仍单独授权 + 逐条人审。
+_PROCESS_LIVE_AUTO = False
+
+
 def _env_risk_prefs() -> ProactivePrefs:
     """风控策略（issue #13 统一口径）：被动回复与主动行为是两套预算。
 
     - 主动：DAILY_LIMIT 默认 10/天 + QUIET 22–7（与 docs/research §6.5 一致）；
+      双开关（--live-auto-send + QQ_LIVE_AUTOSEND=1）已启用时 auto_send=True，
+      主动私信按该授权自动派发（issue #59），不再逐条人审；
     - 被动回复（仅回应已配对 owner 入站）：PASSIVE_DAILY_LIMIT 默认 200/天为
       防跑飞保险丝（自激循环/风暴），PASSIVE_REPLY_IN_QUIET 默认开——深夜
       owner 来件照常回复（对话延续不是打扰）；豁免**只**作用于被动回复。
@@ -155,6 +163,7 @@ def _env_risk_prefs() -> ProactivePrefs:
     return ProactivePrefs(
         enabled=True,
         allowed_channels=frozenset({"direct_message"}),
+        auto_send=_PROCESS_LIVE_AUTO,
         daily_limit=int(os.environ.get("DAILY_LIMIT", "10")),
         quiet_start=dtime(int(os.environ.get("QUIET_START", "22"))),
         quiet_end=dtime(int(os.environ.get("QUIET_END", "7"))),
@@ -166,13 +175,16 @@ def _env_risk_prefs() -> ProactivePrefs:
 
 def policy_summary(prefs: ProactivePrefs) -> str:
     """启动公示的生效策略（只含策略参数，不含任何密钥）。"""
+    approval = ("主动私信按授权自动派发（双开关已启用；渠道/额度/静默仍约束）"
+                if prefs.auto_send else
+                "人工逐条（--auto-approve 仅 dry-run 演示；无人值守真实发送需 "
+                "--live-auto-send + QQ_LIVE_AUTOSEND=1 双开关）")
     return (
         f"[策略] 主动: 上限={prefs.daily_limit}/日 静默={prefs.quiet_start.hour:02d}:00–"
         f"{prefs.quiet_end.hour:02d}:00 | "
         f"被动回复: 上限={prefs.passive_daily_limit}/日 "
         f"静默豁免={'是' if prefs.passive_reply_in_quiet else '否'} | "
-        f"审批: 人工逐条（--auto-approve 仅 dry-run 演示；无人值守真实发送需 "
-        f"--live-auto-send + QQ_LIVE_AUTOSEND=1 双开关）"
+        f"审批: {approval}"
     )
 
 
@@ -405,14 +417,16 @@ def cmd_run(args) -> int:
         return any(auth_service.consume_grant_use(
             g, action_fingerprint=fingerprint, required_scope=required_scope)
             for g in grant_ids)
-    prefs = risk_prefs(store)
-    print(policy_summary(prefs))
-
-    # issue #12：审批/发送模式判定（fail closed）
+    # issue #12：审批/发送模式判定（fail closed）——先判定双开关再算策略，
+    # 让 risk_prefs 拿到进程级 live_auto 状态（issue #59 一致生效链路）。
+    global _PROCESS_LIVE_AUTO
     live_auto = live_auto_send_enabled(args)
+    _PROCESS_LIVE_AUTO = live_auto
     if args.live_auto_send and not live_auto:
         print("错误：--live-auto-send 还需环境 QQ_LIVE_AUTOSEND=1（双开关防误开，见 --help）。")
         return 2
+    prefs = risk_prefs(store)
+    print(policy_summary(prefs))
     if live_auto:
         if not weq_live_configured():
             print("错误：无人值守真实发送需配齐 WEQ_WEB_TOKEN/WEQ_WEB_URL/OWNER_UID。")

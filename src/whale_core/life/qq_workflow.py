@@ -3,7 +3,7 @@
 与 life/initiative 的保守默认对齐：
 - 策略前置闸门：prefs 未启用或 direct_message 渠道未授权时**不调用 AI**（省 token，
   也不产生草稿）；静默时段/每日额度等仍由 ProactiveOutbox.inspect 在草稿后裁决。
-- 回复只进 ProactiveOutbox 成为待审草稿（direct_message 渠道强制逐条人工批准），
+- 回复只进 ProactiveOutbox 成为待审草稿（direct_message 跟随 auto_send 授权；未启用时逐条人工批准，issue #59），
   本模块**不发送任何消息**。真实发送是 Phase 2（NapCat 小号或 WeQ 受控发送接口，
   见 docs/research-weq-deepseek-qq.md §6）。
 - AI 走 core.companion.WhaleCompanion：人格连续性上下文 + MemoryCurator 召回 +

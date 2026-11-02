@@ -13,7 +13,9 @@
 （PER-02：不把安慰/亲昵/长度强制为固定模板）。
 
 客服式表达修复（§6.2）内建为条件规则：先判断焦虑/未保存数据、一次一个
-问题或步骤、不机械复读安慰、不冒认表白、危及数据的操作先确认风险。
+问题或步骤、不机械复读安慰、危及数据的操作先确认风险。「表白不认领」
+只在群聊生效（issue #59）：群里的「我爱你」没有 @/引用证据时不冒认；
+私聊是一对一场景，亲密表达就是发给鲸鱼的，不套用群聊防误认规则。
 """
 
 from __future__ import annotations
@@ -39,7 +41,8 @@ _DATA_WORDS = ("论文", "没保存", "未保存", "文档", "稿子", "方案",
 _DEVICE_TROUBLE_WORDS = (
     "卡死", "死机", "动不了", "蓝屏", "崩溃", "很卡", "卡顿", "强制关机", "重启")
 
-#: 表白类话语（无明确发给鲸鱼的证据时不得认领——§6.2）。
+#: 表白类话语（群聊中无明确发给鲸鱼的证据时不得认领——§6.2；私聊不适用，
+#: 见 issue #59）。
 _CONFESSION_RE = re.compile(r"我爱你|我喜欢你|爱你哟|表白|嫁给我|做我(?:男|女)朋友")
 
 _PUNCT = "！!？?"
@@ -94,7 +97,7 @@ class ExpressionPolicy:
             lines.append("对方有专业背景：可以给出完整技术解释，不必刻意简化。")
         if self.confession_unclaimed:
             lines.append(
-                "收到「我爱你」类话语但没有明确发给你的证据（@或引用）时，"
+                "群聊里收到「我爱你」类话语但没有明确发给你的证据（@或引用）时，"
                 "不要认领成对自己的表白，不制造亲昵。")
         if self.length == "short" and not self.anxious and not self.one_step_at_a_time:
             lines.append("回复保持简短。")
@@ -130,7 +133,8 @@ def derive_policy(
     if confirm_data_safety:
         reasons.append("unsaved_data_risk")
 
-    confession = bool(_CONFESSION_RE.search(text))
+    # 表白防误认只在群聊生效（issue #59）：私聊就是发给鲸鱼的，不套群聊规则。
+    confession = is_group and bool(_CONFESSION_RE.search(text))
     if confession:
         reasons.append("confession_like_text")
 

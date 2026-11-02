@@ -8,7 +8,7 @@
 - 入站必须经 ``OwnerChannelRegistry`` 显式配对：未鉴权、未配对事件一律产出 None；
   群聊默认拒绝（``accept_group=False``），群内容永远按不可信输入处理。
 - 出站只做「单个预先配对对端」的 ``send_private_msg``，默认 ``enabled=False``；
-  能不能发由 initiative 策略层决定（``direct_message`` 渠道强制逐条人工批准），
+  能不能发由 initiative 策略层决定（``direct_message`` 跟随 auto_send 授权；未启用时逐条人工批准，issue #59），
   本端口只负责传输受理。
 - ``send`` 返回 True 仅表示 OneBot 受理（retcode=0），不代表送达或已读；
   任何失败返回 False，由 ``ProactiveOutbox`` 记 unknown，不自动重试。
@@ -281,7 +281,7 @@ class OneBotOutboundPort:
 
     - 构造时绑定单个对端 user_id（已配对 owner 的 QQ 号）；不支持群发、不支持换目标；
     - 默认 enabled=False：构造了也不发，必须显式开启；
-    - 是否走到 send 由 ProactiveOutbox 策略层决定（direct_message 强制逐条人工批准）；
+    - 是否走到 send 由 ProactiveOutbox 策略层决定（direct_message 跟随 auto_send 授权，issue #59）；
     - True 仅表示 OneBot 受理（retcode=0 / status=ok）；任何异常都记 False，
       账本落 unknown，不自动重试。
     """

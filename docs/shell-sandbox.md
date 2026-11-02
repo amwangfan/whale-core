@@ -14,7 +14,7 @@ executor = ShellExecutor(
 result = executor.run("ls -la", is_owner=True, cwd="/srv/whale/workspace")
 ```
 
-`is_owner` 必须来自已鉴权的宿主上下文，不能使用模型生成的布尔值。Shell 策略中的命令拒绝清单是防误操作护栏，实际隔离由内核命名空间提供。
+`is_owner` 必须来自已鉴权的宿主上下文，不能使用模型生成的布尔值。Shell 策略只做档位、owner 身份与命令形状裁决；实际隔离由内核命名空间提供，不再维护可被绕过的字符串黑名单。
 
 默认隔离包含：独立用户、PID、网络等命名空间；移除所有 capabilities；只读系统运行库；独立 `/proc`、设备目录与临时目录；只把本次显式授权工作目录挂到 `/workspace`。不挂载宿主的用户目录、`/etc`、密钥目录或 Docker socket。网络默认禁用。未指定工作目录时，每次创建权限为 700 的临时工作目录，结束后清理。
 
@@ -28,4 +28,4 @@ result = executor.run("ls -la", is_owner=True, cwd="/srv/whale/workspace")
 
 ## 在标准运行入口启用
 
-同时设置 `WHALE_SHELL_ENABLED=1` 和 `WHALE_SHELL_TIER=personal` 才允许 owner 提议自由命令；默认 managed 不执行自由命令。可在控制台设置这些明确开关，也可由部署环境注入。每个命令仍需批准，实际运行还要求非 root 的 Linux 与可用 bwrap/prlimit。工作目录仅为配置目录下的 workspace；不会把密钥、数据库或主目录挂进沙箱。macOS 上该 Linux 执行器诚实报告不可用，可连接独立 Linux 执行宿主，不能静默退到宿主 shell。
+同时设置 `WHALE_SHELL_ENABLED=1` 和 `WHALE_SHELL_TIER=personal` 才允许 owner 提议自由命令；默认 managed 不执行自由命令。可在控制台设置这些明确开关，也可由部署环境注入。personal 档下主人已明确授权个人沙箱，命令由宿主策略配置为免逐次审批（`PluginActionPolicy.auto_approve_actions`），实际运行还要求非 root 的 Linux 与可用 bwrap/prlimit。工作目录仅为配置目录下的 workspace；不会把密钥、数据库或主目录挂进沙箱。macOS 上该 Linux 执行器诚实报告不可用，可连接独立 Linux 执行宿主，不能静默退到宿主 shell。

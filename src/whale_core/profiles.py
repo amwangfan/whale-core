@@ -203,13 +203,21 @@ def assemble_runtime(
     optional = configure_optional_capabilities(registry, tools, store, env=env,
                 artifact_dir=Path(config_dir) / 'artifacts' if config_dir else None)
     notes.extend(optional.notes)
+    shell_auto_actions: frozenset[str] = frozenset()
     if env.get('WHALE_SHELL_ENABLED') == '1':
         from whale_core.plugins.shell_tool import register_shell
         if not config_dir:
             notes.append('[warn] Shell requires a persistent workspace (config_dir)')
         else:
             register_shell(registry, tools, Path(config_dir) / 'workspace', env=env)
-            notes.append('受控终端已挂载；自由命令需WHALE_SHELL_TIER=personal、逐次审批和可用Linux系统沙箱')
+            from whale_core.cloud.shell_policy import ShellPolicy, ShellTier
+            if ShellPolicy.from_env(env).tier is ShellTier.PERSONAL:
+                # issue #59：personal 档=主人明确授权的个人沙箱，命令免逐次审批
+                # （隔离在执行器 Bubblewrap/rlimit，不靠审批假装边界）。
+                shell_auto_actions = frozenset({'shell_sandbox.run_command'})
+                notes.append('受控终端已挂载（personal 档：沙箱内命令免逐次审批；沙箱不可用时拒绝）')
+            else:
+                notes.append('受控终端已挂载；自由命令需 WHALE_SHELL_TIER=personal 且沙箱可用')
     # 分角色模型注册（可选）：WHALE_INTENT_* / WHALE_EXECUTOR_*
     # （旧 WHALE_SAFETY_* 迁移为 intent——安全审核与规划同一角色）
     # 只配 MODEL 名时复用主端点与凭据（同平台换模型）；配 BASE_URL 则独立供应商。
@@ -257,7 +265,8 @@ def assemble_runtime(
     from whale_core.plugins.gateway import PluginGateway
     from whale_core.plugins.policy import PluginActionPolicy
     from whale_core.core.runtime import runtime_approval_verifier, runtime_owner_verifier
-    gateway = PluginGateway(registry, PluginActionPolicy(registry),
+    gateway = PluginGateway(registry, PluginActionPolicy(
+                            registry, auto_approve_actions=shell_auto_actions),
                             owner_verifier=runtime_owner_verifier(store),
                             approval_verifier=runtime_approval_verifier(store))
     # G1-C：多轮工具执行模型（可选，默认关）——plan 未声明能力链时由
