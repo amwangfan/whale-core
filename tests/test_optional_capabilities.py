@@ -411,3 +411,45 @@ def test_no_minimax_key_no_minimax_models(tmp_path):
     tts_spec = tools.for_capability('tts.synthesize')[0]
     assert 'speech-02' not in tts_spec.description
     assert 'MiniMax' not in tools.for_capability('media.video.generate')[0].description
+
+
+def test_music_tool_gated_off_by_default_and_on_with_flag(tmp_path, monkeypatch):
+    """唱歌工具默认不注册（账号资格未就绪）；WHALE_MINIMAX_MUSIC=1 才挂载。"""
+    registry, tools = PluginRegistry(), ToolRegistry()
+    configure_optional_capabilities(registry, tools, InMemoryStore(),
+        env={'WHALE_MINIMAX_API_KEY':'k'}, artifact_dir=tmp_path)
+    assert tools.for_capability('media.music.generate') == []
+    registry2, tools2 = PluginRegistry(), ToolRegistry()
+    configure_optional_capabilities(registry2, tools2, InMemoryStore(),
+        env={'WHALE_MINIMAX_API_KEY':'k', 'WHALE_MINIMAX_MUSIC':'1'},
+        artifact_dir=tmp_path)
+    spec = tools2.for_capability('media.music.generate')
+    assert spec and 'music-3.0' in spec[0].description
+
+
+def test_tts_default_prefers_minimax_with_qwen_options(tmp_path, monkeypatch):
+    """2026-11-02 owner 决策：语音默认=最好最自然的 MiniMax 模型；qwen 系
+    （flash/plus）经 AgentScope 作为可选模型并入，音色按模型自动给合法值。"""
+    registry, tools = PluginRegistry(), ToolRegistry()
+    configure_optional_capabilities(registry, tools, InMemoryStore(),
+        env={'WHALE_MINIMAX_API_KEY':'k', 'WHALE_MINIMAX_TTS_MODEL':'speech-2.8-hd',
+             'WHALE_SPEECH_BASE_URL':'http://localhost:9/v1',
+             'WHALE_SPEECH_PROVIDER':'dashscope',
+             'WHALE_TTS_MODEL':'speech-2.8-hd',
+             'WHALE_TTS_MODELS':'qwen-audio-3.0-tts-flash,qwen-audio-3.0-tts-plus'},
+        artifact_dir=tmp_path)
+    spec = tools.for_capability('tts.synthesize')[0]
+    assert 'speech-2.8-hd' in spec.description
+    assert 'qwen-audio-3.0-tts-flash' in spec.description
+    # ASR 随 dashscope 基座回归
+    assert tools.for_capability('asr.transcribe')
+    # 默认调用走 MiniMax（不是 qwen）
+    wav = b'RIFF' + b'\x00' * 40
+    monkeypatch.setattr(provider_http, 'open_request',
+        lambda req, **kw: io.BytesIO(json.dumps(
+            {'data':{'audio':wav.hex()}, 'base_resp':{'status_code':0}}).encode()))
+    result = json.loads(spec.handler({'text':'你好'}))
+    assert result.get('artifact_id')
+    # qwen 模型可选：指定后走 dashscope 路径（本地不可达 → 诚实报错而非静默）
+    with pytest.raises(Exception):
+        spec.handler({'text':'你好', 'model':'qwen-audio-3.0-tts-plus'})

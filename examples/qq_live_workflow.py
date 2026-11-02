@@ -597,8 +597,9 @@ def cmd_run(args) -> int:
                 return
         draft_id = f"qq-followup:{event.message_id}"
         from whale_core.life.initiative import ProactiveDraft
+        from whale_core.life.response_planner import clean_reply_text
         workflow.outbox.propose(ProactiveDraft(
-            draft_id=draft_id, text=reply,
+            draft_id=draft_id, text=clean_reply_text(reply),
             reason="两段式慢任务完成后的补发（ack 已发）",
             evidence=(f"qq:{event.conversation}:{event.message_id}",),
             channel="direct_message",
@@ -770,6 +771,79 @@ def cmd_run(args) -> int:
         workflow.orchestrator.gateway = plugin_gateway
     # 两段式慢任务补发（owner 决策 2026-10-31）：ack 先回，结果后台好了再补
     workflow._completion_sender = _send_completion
+
+    # 2026-11-02 生产实证「视频没消息了」：generate_video 提交即 pending，
+    # 外层任务带着「视频还在跑」就交付收口——视频任务无人轮询永远不来。
+    # 跟踪器：pending 视频任务 → 后台轮询 → 成了发视频、砸了诚实告知。
+    _pending_videos: dict[str, tuple[str, str, float]] = {}
+
+    def _track_video(event, vtask_id: str) -> None:
+        conv = str(getattr(event, "conversation", "") or "")
+        if conv and cap.video_manager is not None:
+            _pending_video[str(vtask_id)] = (
+                conv, str(getattr(event, "message_id", "") or ""),
+                time.time() + 3600)  # 1h 死线
+            print(f"  [视频跟踪] {str(vtask_id)[:8]}… 挂起轮询 ← {conv}")
+
+    workflow._video_pending_hook = _track_video
+
+    def _deliver_video(conv: str, url: str) -> None:
+        peer_type = "group" if conv.startswith("group:") else "c2c"
+        target = conv.split(":", 1)[1] if ":" in conv else ""
+        if not target or cap.artifacts is None:
+            return
+        try:
+            art = cap.artifacts.save_reference(url)
+            data = cap.artifacts.read(art.artifact_id)
+            blob = data[1] if isinstance(data, tuple) else data
+            ok = send_port.send_video_to(peer_type, target, blob,
+                                         filename="video.mp4",
+                                         width=1280, height=720) \
+                if hasattr(send_port, "send_video_to") else False
+            if not ok and peer_type == "c2c" and hasattr(send_port, "send_file_to"):
+                ok = send_port.send_file_to(peer_type, target, art.path) \
+                    if getattr(art, "path", "") else False
+            print(f"  [视频补发] → {peer_type}:{target[:12]}… "
+                  f"{'已发' if ok else '发送失败'}")
+            if ok and peer_type == "group":
+                try:
+                    timeline.append(conv, message_id=f"selfvideo:{url[-16:]}",
+                                    sender_id=self_uin, text="[视频]",
+                                    is_self=True)
+                except Exception:
+                    pass
+        except Exception as exc:
+            print(f"  [视频补发] 投递失败：{type(exc).__name__}")
+
+    def _video_poller() -> None:
+        while True:
+            time.sleep(25)
+            for tid, (conv, _mid, deadline) in list(_pending_videos.items()):
+                try:
+                    t = cap.video_manager.poll(tid)
+                except Exception:
+                    continue
+                if t.status == "succeeded" and t.url:
+                    _pending_videos.pop(tid, None)
+                    _deliver_video(conv, t.url)
+                elif t.status in ("failed", "cancelled"):
+                    _pending_videos.pop(tid, None)
+                    print(f"  [视频跟踪] {tid[:8]}… 生成失败（{t.error or 'provider'}）")
+                    try:
+                        if conv.startswith("group:"):
+                            send_port.send_group_text(conv.split(":", 1)[1],
+                                "视频没生成成……供应商那头没跑成，你要的话我换个模型再试")
+                        else:
+                            send_port.send_c2c(conv.split(":", 1)[1],
+                                "视频没生成成……供应商那头没跑成，你要的话我换个模型再试")
+                    except Exception:
+                        pass
+                elif time.time() > deadline:
+                    _pending_videos.pop(tid, None)
+                    print(f"  [视频跟踪] {tid[:8]}… 超时弃跟")
+
+    import threading as _th
+    _th.Thread(target=_video_poller, daemon=True, name="video-poller").start()
 
     # issue #20：监督任务泵接入既有 Outbox/发送链（不建第二套运行时）。
     # 任务完成草稿经 Outbox 裁决（reactive_completion：深夜不拦），
@@ -1102,7 +1176,7 @@ def cmd_run(args) -> int:
                     conversation=incoming.conversation, text=incoming.text,
                     activity=_rhythm2.activity, dnd=_rhythm2.dnd,
                     timeline_entries=timeline.recent(incoming.conversation,
-                                                     limit=5))
+                                                     limit=12))
                 if join.action != "join":
                     _tspan(_tid, "decide", "observe",
                            reason_code=join.reason_code or decision.reason_code)
@@ -1111,6 +1185,35 @@ def cmd_run(args) -> int:
                 print(f"  [参与] {_rhythm2.activity} 档主动接话 ← "
                       f"{incoming.account}（{join.reason_code}）")
                 _tspan(_tid, "decide", "ok", reason_code=join.reason_code)
+                if join.reason_code == "repeat_chain" and join.text:
+                    # 复读跟风（2026-11-02 owner 决策）：原文复刻直发不过模型；
+                    # 仍过安全审核（复读的是群友原文，防链本身带毒）。
+                    rep = join.text
+                    if workflow._safety_reviewer is not None:
+                        concern = workflow._safety_reviewer(rep)
+                        if concern:
+                            print(f"  [安全审核] 复读文本有顾虑：{concern[:80]} → 不跟")
+                            _tspan(_tid, "workflow", "skipped",
+                                   reason_code="safety_review")
+                            _tfin(_tid, "silent")
+                            return
+                    group_code = incoming.conversation.split(":", 1)[1]
+                    ok = send_port.send_group_text(group_code, rep) \
+                        if hasattr(send_port, "send_group_text") else False
+                    if not ok and _maybe_recover_channel(_tid):
+                        ok = send_port.send_group_text(group_code, rep) \
+                            if hasattr(send_port, "send_group_text") else False
+                    print(f"  [复读] 跟风 +1 ← {group_code} "
+                          f"{'已发送' if ok else '发送失败'}")
+                    _tspan(_tid, "send", "executed" if ok else "failed",
+                           reason_code="repeat_chain")
+                    _tfin(_tid, "replied" if ok else "failed")
+                    if ok:
+                        timeline.append(incoming.conversation,
+                                        message_id=f"self:{incoming.message_id}",
+                                        sender_id=self_uin, text=rep,
+                                        is_self=True)
+                    return
         from whale_core.life.temporary_auth import maybe_intercept_sudo
         if maybe_intercept_sudo(incoming.text) is None and not stranger_chat:
             print(f"[未配对] account={incoming.account} conv={incoming.conversation} "
@@ -1341,9 +1444,36 @@ def cmd_run(args) -> int:
             return False
         return str(ans or "").strip().startswith("是")
 
+    # 2026-11-02 owner 决策：复读链命中后由意图模型判断「该不该跟」——
+    # 应景/好玩的链跟，无意义/广告/ky 的链不跟。
+    def _chain_judge(chain_text, entries) -> bool:
+        brain = globals().get("_intent_brain_ref")
+        if brain is None:
+            return True
+        lines = []
+        for e in list(entries or ())[-8:]:
+            if not isinstance(e, dict):
+                continue
+            who = "Enxi" if e.get("is_self") else "群友"
+            body = " ".join(str(e.get("text") or "").split())[:60]
+            if body:
+                lines.append(f"{who}：{body}")
+        name = bot_aliases[0] if bot_aliases else "Enxi"
+        prompt = (
+            f"群聊里正在复读刷屏这句话：「{str(chain_text)[:60]}」。\n"
+            + ("群聊最近消息：\n" + "\n".join(lines) + "\n" if lines else "")
+            + f"判断：群里名叫「{name}」的机器人跟着复读一句，是否应景、"
+              "好玩、合时宜？（无意义灌水、广告、ky 泼冷水、与当前话题无关的"
+              " → 否；应景好玩的 → 是）\n只回答一个字：是 或 否。")
+        try:
+            ans = brain.reply(prompt)
+        except Exception:
+            return False
+        return str(ans or "").strip().startswith("是")
+
     group_turn_policy = GroupTurnPolicy(
         store, bot_names=bot_aliases, quiet_now=_quiet_now,
-        directed_classifier=_llm_directed,
+        directed_classifier=_llm_directed, chain_judge=_chain_judge,
     )
 
     _member_extractor = MemberMemoryExtractor(

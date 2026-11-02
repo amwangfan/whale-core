@@ -177,6 +177,98 @@ def test_llm_classifier_failure_fails_soft():
     assert (d.action, d.reason_code) == ("observe", "quiet_hours")
 
 
+def _chain(n, text="有毒吧", senders=("u1", "u2")):
+    return tuple({"is_self": False, "text": text,
+                  "sender_id": senders[i % len(senders)]} for i in range(n))
+
+
+def test_repeat_chain_joins_with_exact_text():
+    """2026-11-02 owner 决策：群友复读刷屏时跟风 +1（原文复刻）。"""
+    store = InMemoryStore()
+    p = _policy(store)
+    d = p.maybe_join(conversation=GROUP, text="有毒吧", activity="lively",
+                     timeline_entries=_chain(3))
+    assert (d.action, d.reason_code) == ("join", "repeat_chain")
+    assert d.text == "有毒吧"  # 复读文本带给调用方直发
+    # 跟风也耗主动配额（同一保险丝）
+    assert store.get(f"life:turnbudget:2026-11-01:{GROUP}") == 1
+
+
+def test_repeat_chain_guards():
+    # 两条不成链
+    store = InMemoryStore()
+    p = _policy(store)
+    assert p.maybe_join(conversation=GROUP, text="x", activity="lively",
+                        timeline_entries=_chain(2)).action == "observe"
+    # 同一个人刷不算链
+    store = InMemoryStore()
+    p = _policy(store)
+    assert p.maybe_join(conversation=GROUP, text="x", activity="lively",
+                        timeline_entries=_chain(4, senders=("u1",))).action == "observe"
+    # 机器人已在链中 → 不重复跟
+    store = InMemoryStore()
+    p = _policy(store)
+    tl = _chain(3) + ({"is_self": True, "text": "有毒吧"},)
+    assert p.maybe_join(conversation=GROUP, text="有毒吧", activity="lively",
+                        timeline_entries=tl).action == "observe"
+    # 静默时段不跟风（非定向插话）
+    store = InMemoryStore()
+    p = _policy(store, quiet=True)
+    d = p.maybe_join(conversation=GROUP, text="有毒吧", activity="lively",
+                     timeline_entries=_chain(3))
+    assert (d.action, d.reason_code) == ("observe", "quiet_hours")
+    # 带链接/长文不跟
+    store = InMemoryStore()
+    p = _policy(store)
+    assert p.maybe_join(conversation=GROUP, text="x", activity="lively",
+                        timeline_entries=_chain(3, text="看http://x.com")).action == "observe"
+    # balanced 档不跟风（lively 专属）
+    store = InMemoryStore()
+    p = _policy(store)
+    assert p.maybe_join(conversation=GROUP, text="有毒吧", activity="balanced",
+                        timeline_entries=_chain(3)).action == "observe"
+
+
+def test_repeat_chain_judge_gate():
+    """2026-11-02 owner 决策：链命中后还要判断该不该跟——judge 否决则不跟，
+    judge 异常 fail-closed 不跟。"""
+    store = InMemoryStore()
+    p = GroupTurnPolicy(store, bot_names=("鲸鱼",), now_fn=lambda: T0,
+                        chain_judge=lambda t, e: False)
+    d = p.maybe_join(conversation=GROUP, text="有毒吧", activity="lively",
+                     timeline_entries=_chain(3))
+    assert d.action == "observe"  # 否决 → 旁观（落到 not_directed）
+
+    def boom(t, e):
+        raise RuntimeError("down")
+    store2 = InMemoryStore()
+    p2 = GroupTurnPolicy(store2, bot_names=("鲸鱼",), now_fn=lambda: T0,
+                         chain_judge=boom)
+    assert p2.maybe_join(conversation=GROUP, text="有毒吧", activity="lively",
+                         timeline_entries=_chain(3)).action == "observe"
+
+    store3 = InMemoryStore()
+    p3 = GroupTurnPolicy(store3, bot_names=("鲸鱼",), now_fn=lambda: T0,
+                         chain_judge=lambda t, e: True)
+    d3 = p3.maybe_join(conversation=GROUP, text="有毒吧", activity="lively",
+                       timeline_entries=_chain(3))
+    assert (d3.action, d3.reason_code) == ("join", "repeat_chain")
+
+
+def test_bare_punctuation_is_not_a_question():
+    """2026-11-02 生产实证：单个「？」不触发 lively 提问接话。"""
+    store = InMemoryStore()
+    p = _policy(store)
+    d = p.maybe_join(conversation=GROUP, text="？", activity="lively")
+    assert (d.action, d.reason_code) == ("observe", "not_directed")
+    # 有内容的提问照常接
+    store2 = InMemoryStore()
+    p2 = _policy(store2)
+    d2 = p2.maybe_join(conversation=GROUP, text="这个报错什么意思？",
+                       activity="lively")
+    assert d2.action == "join"
+
+
 def test_reason_code_recorded_without_private_content():
     """诊断落 kv：reason_code + 时间，不含消息正文。"""
     store = InMemoryStore()

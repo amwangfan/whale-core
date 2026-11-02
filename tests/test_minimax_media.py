@@ -166,3 +166,51 @@ def test_manager_model_routing_and_unknown_model():
     m2 = VideoTaskManager(store, a, providers={"model-a": a, "model-b": b},
                           default_model="model-a")
     assert m2.poll(t2.task_id).url.endswith("/b.mp4")
+
+
+# ---- MiniMax 音乐生成（唱歌）----
+
+def test_minimax_music_happy_path(monkeypatch):
+    calls = []
+    monkeypatch.setattr(provider_http, "open_request", _fake_transport(
+        [{"data": {"audio_url": "https://cdn.example/song.wav"},
+          "base_resp": {"status_code": 0}}], calls))
+    from whale_core.plugins.minimax_media import MiniMaxMusicProvider
+    p = MiniMaxMusicProvider(api_key="k")
+    url = p.generate("轻快日系流行", lyrics="[verse]\n啦啦啦 阳光窗台")
+    assert url == "https://cdn.example/song.wav"
+    body = json.loads(calls[0].data)
+    assert body["model"] == "music-3.0"
+    assert body["lyrics"].startswith("[verse]")
+    assert body["output_format"] == "url"
+    assert body["audio_setting"]["format"] == "wav"
+
+
+def test_minimax_music_no_lyrics_uses_optimizer(monkeypatch):
+    calls = []
+    monkeypatch.setattr(provider_http, "open_request", _fake_transport(
+        [{"data": {"audio_url": "https://cdn.example/s.wav"},
+          "base_resp": {"status_code": 0}}], calls))
+    from whale_core.plugins.minimax_media import MiniMaxMusicProvider
+    p = MiniMaxMusicProvider(api_key="k")
+    p.generate("纯钢琴曲")
+    body = json.loads(calls[0].data)
+    assert body.get("lyrics_optimizer") is True and "lyrics" not in body
+
+
+def test_minimax_music_2153_is_rejected(monkeypatch):
+    """新用户无资格（HTTP 410/base_resp 2153）如实报 rejected，不假装可用。"""
+    calls = []
+    monkeypatch.setattr(provider_http, "open_request", _fake_transport(
+        [{"base_resp": {"status_code": 2153, "status_msg": "no new users"}}], calls))
+    from whale_core.plugins.minimax_media import MiniMaxMusicProvider
+    p = MiniMaxMusicProvider(api_key="k")
+    with pytest.raises(MiniMaxError) as ei:
+        p.generate("x")
+    assert ei.value.kind == "rejected"
+
+
+def test_minimax_music_model_validation():
+    from whale_core.plugins.minimax_media import MiniMaxMusicProvider
+    with pytest.raises(ValueError):
+        MiniMaxMusicProvider(api_key="k", model="no-such")

@@ -320,3 +320,17 @@ def test_attachments_survive_registry_and_inbox_roundtrip(tmp_path):
                           attachments=[{"kind": "pic", "url": "https://x"}])
     assert legacy.claim_next().attachments == ({"kind": "pic", "url": "https://x"},)
     legacy.close()
+
+
+def test_extract_pending_video_tasks():
+    """2026-11-02 生产实证「视频没消息了」：pending 视频任务必须被识别出来
+    交给跟踪器（此前提交即 pending，外层任务收口后无人轮询）。"""
+    from whale_core.life.qq_workflow import _extract_pending_video_tasks
+    receipts = (
+        'tool:generate_video:ok:{"task_id": "abc-1", "status": "pending"}',
+        'tool:generate_video:ok:{"task_id": "abc-2", "status": "succeeded", "url": "https://x"}',
+        'tool:search_web:ok:随便什么',
+        'tool:generate_video:ok:{"task_id": "abc-3", "status": "running"}',
+    )
+    assert _extract_pending_video_tasks(receipts) == ("abc-1", "abc-3")
+    assert _extract_pending_video_tasks(()) == ()

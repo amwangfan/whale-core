@@ -45,6 +45,11 @@ COOLDOWN_MIN = {"quiet": 60, "balanced": 20, "lively": 8}
 _QUESTION_RE = re.compile(
     r"[?？]|怎么|如何|为什么|为啥|请问|求[助教]|有人[会知]|怎么办|是什么")
 
+def _has_content(text: str) -> bool:
+    """剥掉标点/空白后还剩 ≥2 个有效字符才算「有内容」（防 bare ？/！ 误判）。"""
+    return len(re.sub(r"[\s\W_]+", "", str(text or ""))) >= 2
+
+
 #: 承接请求信号（lively 档补充，2026-11-01 生产实证）：机器人近期在群里发过言
 #: 时的「那你画个…吧」「你再唱一首」类跟进句式——无 @ 无名但明确是叫我做事。
 _FOLLOWUP_RE = re.compile(
@@ -63,14 +68,60 @@ REASON_BUDGET = "budget_exceeded"           # 当日主动参与配额用尽
 REASON_COOLDOWN = "cooldown"                # 距上次主动参与太近
 REASON_CONSECUTIVE = "consecutive_limit"    # 上一条已是鲸鱼发言，不连发
 REASON_JOIN = "join"                        # 主动参与（lively/balanced 命中依据）
+REASON_REPEAT_CHAIN = "repeat_chain"        # 复读跟风（群友刷屏链 +1）
+
+#: 复读链判定上限：文本超长（copypasta/广告风险）不参与
+_REPEAT_MAX_LEN = 50
+#: 跟风时点窗口：链太短不成链、太长不凑热闹
+_REPEAT_MIN = 3
+_REPEAT_MAX = 12
+
+
+def _repeat_chain(entries) -> "str | None":
+    """时间线末尾的复读链判定（2026-11-02 owner 决策：刷屏时跟风 +1）。
+
+    命中条件（全部）：
+    - 末尾连续 ≥3 条规范化后同文本（含当前这条新消息——它本就是链的一环）；
+    - ≥2 个不同发送者（同一个人刷屏不算链）；
+    - 机器人不在链尾（已参与过就不再跟——每条链最多跟一次）；
+    - 文本短、无链接/媒体占位/内部标记（复读内容原样发，安全起见只跟纯文本短链）。
+    命中返回链文本；否则 None。
+    """
+    tail = list(entries or ())[-_REPEAT_MAX:]
+    texts: list[str] = []
+    senders: set[str] = set()
+    for e in reversed(tail):
+        if not isinstance(e, dict):
+            break
+        if e.get("is_self"):
+            break  # 机器人已在链中 → 链对我关闭
+        t = " ".join(str(e.get("text") or "").split())
+        if not t:
+            break
+        if texts and t != texts[0]:
+            break
+        texts.append(t)
+        senders.add(str(e.get("sender_id") or e.get("sender_uid") or ""))
+    if len(texts) < _REPEAT_MIN or len(senders) < 2:
+        return None
+    t = texts[0]
+    if (len(t) > _REPEAT_MAX_LEN or "http" in t or "[[" in t
+            or "[图片" in t or "[语音]" in t or "@" in t):
+        return None
+    return t
 
 
 @dataclass(frozen=True)
 class JoinDecision:
-    """主动参与决策结果。action ∈ {"join", "observe"}。"""
+    """主动参与决策结果。action ∈ {"join", "observe"}。
+
+    ``text``：复读跟风时携带的链原文（调用方直接发送，不过模型——
+    复读的精髓就是一字不差）；普通参与为空串。
+    """
 
     action: str
     reason_code: str
+    text: str = ""
 
 
 class GroupTurnPolicy:
@@ -80,7 +131,7 @@ class GroupTurnPolicy:
                  bot_names: Tuple[str, ...] = (),
                  now_fn: Optional[Callable[[], datetime]] = None,
                  quiet_now: Optional[Callable[[], bool]] = None,
-                 directed_classifier=None):
+                 directed_classifier=None, chain_judge=None):
         self.store = store
         # Host supplies explicit bot aliases; core ships no character names.
         self._names = tuple(n for n in bot_names if n)
@@ -95,6 +146,10 @@ class GroupTurnPolicy:
         # 规则全不命中被静默压制）。可调用 (text, timeline_entries) -> bool；
         # 仅在机器人近窗发过言（对话进行中）且规则不命中时调用，调用有界。
         self._directed_classifier = directed_classifier
+        # 2026-11-02 owner 决策：复读链命中后仍要判断「该不该跟」——可调用
+        # (chain_text, timeline_entries) -> bool（意图模型）；None = 命中即跟
+        # （测试/离线默认）。判定器异常 fail-closed 为不跟（宁可少跟不乱跟）。
+        self._chain_judge = chain_judge
 
     # -- 主入口 -------------------------------------------------------------
 
@@ -112,9 +167,24 @@ class GroupTurnPolicy:
         if dnd:
             return self._record(group, JoinDecision("observe", REASON_DND))
 
+        # 复读链检测（lively 档；非静默时段）：群友刷屏复读时跟风 +1。
+        # 复读文本由调用方原文直发（不过模型）；冷却/日配额与普通插话同一保险丝。
+        # 命中后过 chain_judge 判断该不该跟（2026-11-02 owner 决策）。
+        repeat_text: "str | None" = None
+        if activity == "lively" and not self._quiet_now():
+            repeat_text = _repeat_chain(timeline_entries)
+            if repeat_text is not None and self._chain_judge is not None:
+                try:
+                    if not self._chain_judge(repeat_text, timeline_entries):
+                        repeat_text = None
+                except Exception:
+                    repeat_text = None  # 判定器故障 = 不跟（宁可少跟）
+
         text = str(text or "")
         named = bool(self._name_re.search(text)) if self._name_re else False
-        question = bool(_QUESTION_RE.search(text))
+        # 提问信号要有实际内容：光一个「？」不算提问（2026-11-02 生产实证：
+        # 单个问号被 lively 当提问接话，还对上了旧话茬，答非所问）。
+        question = bool(_QUESTION_RE.search(text)) and _has_content(text)
         # lively 补充信号：时间线近窗有机器人自己的发言（我刚参与过），
         # 且本条是「你+请求动词」的承接句式 → 视为叫我做事的跟进请求。
         follow_up = (
@@ -148,9 +218,9 @@ class GroupTurnPolicy:
             # quiet：只回应直接提及（@/引用已被 resolver 拦截；这里是直呼其名）
             if not named:
                 return self._record(group, JoinDecision("observe", REASON_QUIET_MODE))
-        elif not (named or follow_up or llm_directed
+        elif not (named or follow_up or llm_directed or repeat_text is not None
                   or (activity == "lively" and question)):
-            # balanced：需直呼其名或承接；lively：直呼其名 或 明确提问/求助/承接
+            # balanced：需直呼其名或承接；lively：直呼其名 或 明确提问/求助/承接/复读链
             return self._record(group, JoinDecision("observe", REASON_NOT_DIRECTED))
 
         # 连续发言限制：时间线最新一条已是鲸鱼自己 → 不再主动接话
@@ -178,7 +248,9 @@ class GroupTurnPolicy:
         # 通过：记账 + 冷却 + 诊断
         self.store.put(budget_key, used + 1)
         self.store.put(f"life:turncool:{group}", self._now().isoformat())
-        return self._record(group, JoinDecision("join", REASON_JOIN))
+        return self._record(group, JoinDecision(
+            "join", REASON_REPEAT_CHAIN if repeat_text else REASON_JOIN,
+            text=repeat_text or ""))
 
     def last_decision(self, conversation: str) -> Optional[dict]:
         """最近一次参与决策诊断（reason_code + at；无私人内容）。"""

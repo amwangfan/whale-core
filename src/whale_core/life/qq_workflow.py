@@ -80,6 +80,8 @@ class QqInboundWorkflow:
         # 可选补发回调（两段式慢任务）：callable(event, reply) -> None。
         # 由宿主注入真实发送路径（草稿+审批+网关）；慢任务 ack 后的结果经此补发。
         self._completion_sender = completion_sender
+        # 宿主注入：pending 视频任务跟踪回调（event, video_task_id）
+        self._video_pending_hook = None
         # issue #16：成员建档/恢复后的回调（宿主接回填管道）；
         # callable(principal_id, reason)——reason ∈ {"auto", "optin"}。
         self._on_member_provisioned = on_member_provisioned
@@ -160,6 +162,16 @@ class QqInboundWorkflow:
         if not reply.strip():
             return
         receipts = getattr(result, "receipts", ())
+        # 2026-11-02 生产实证：视频工具是异步的（generate_video 提交即返回
+        # pending），外层任务带着「视频还在跑」就收口干杯了——视频任务从此
+        # 无人轮询、永远不来。把 pending 视频任务交给宿主的跟踪器继续盯。
+        hook = getattr(self, "_video_pending_hook", None)
+        if hook is not None:
+            for tid in _extract_pending_video_tasks(receipts):
+                try:
+                    hook(event, tid)
+                except Exception:
+                    pass
         # 生图任务：模型未必把图片链接写进答复——产物 id 兜底注入，
         # 保证补发里必有图片段（本地字节直发，不经过网络/代理）。
         image_ids = _extract_image_artifacts(receipts)
@@ -306,8 +318,12 @@ class QqInboundWorkflow:
             return {"empty_reply": True, "draft_id": None}
 
         draft_id = f"qq-reply:{event.message_id}"
+        # 2026-11-02 生产实证：网关在 outbox 模式下发的是**草稿库存的文本**——
+        # 单段回复直接把带 [[稍后补充]] 标记的原文发了出去。草稿存净文本
+        # （标记只表达意图，永远不该出现在待发文本/控制台展示里）。
+        from whale_core.life.response_planner import clean_reply_text
         draft = ProactiveDraft(
-            draft_id=draft_id, text=reply,
+            draft_id=draft_id, text=clean_reply_text(reply),
             reason="QQ 入站消息的回复草稿（owner 已配对）",
             evidence=(f"qq:{event.conversation}:{event.message_id}",),
             channel=REPLY_CHANNEL,
@@ -567,6 +583,26 @@ class QqInboundWorkflow:
         if not reply:
             return {"empty_reply": True}
         return {"reply": reply}
+
+
+def _extract_pending_video_tasks(receipts) -> tuple:
+    """从回执里提「还在跑」的视频任务 id（generate_video 提交即 pending）。"""
+    import json as _json
+    ids: list = []
+    for r in receipts or ():
+        text = str(r)
+        if "generate_video" not in text or ":ok:" not in text:
+            continue
+        payload = text.split(":ok:", 1)[-1]
+        try:
+            data = _json.loads(payload)
+        except Exception:
+            continue
+        if str(data.get("status") or "") in ("pending", "running"):
+            tid = str(data.get("task_id") or "").strip()
+            if tid:
+                ids.append(tid)
+    return tuple(ids)
 
 
 def _extract_image_artifacts(receipts) -> tuple:
