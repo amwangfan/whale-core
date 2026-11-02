@@ -1102,7 +1102,7 @@ def cmd_run(args) -> int:
                     conversation=incoming.conversation, text=incoming.text,
                     activity=_rhythm2.activity, dnd=_rhythm2.dnd,
                     timeline_entries=timeline.recent(incoming.conversation,
-                                                     limit=5))
+                                                     limit=12))
                 if join.action != "join":
                     _tspan(_tid, "decide", "observe",
                            reason_code=join.reason_code or decision.reason_code)
@@ -1111,6 +1111,35 @@ def cmd_run(args) -> int:
                 print(f"  [参与] {_rhythm2.activity} 档主动接话 ← "
                       f"{incoming.account}（{join.reason_code}）")
                 _tspan(_tid, "decide", "ok", reason_code=join.reason_code)
+                if join.reason_code == "repeat_chain" and join.text:
+                    # 复读跟风（2026-11-02 owner 决策）：原文复刻直发不过模型；
+                    # 仍过安全审核（复读的是群友原文，防链本身带毒）。
+                    rep = join.text
+                    if workflow._safety_reviewer is not None:
+                        concern = workflow._safety_reviewer(rep)
+                        if concern:
+                            print(f"  [安全审核] 复读文本有顾虑：{concern[:80]} → 不跟")
+                            _tspan(_tid, "workflow", "skipped",
+                                   reason_code="safety_review")
+                            _tfin(_tid, "silent")
+                            return
+                    group_code = incoming.conversation.split(":", 1)[1]
+                    ok = send_port.send_group_text(group_code, rep) \
+                        if hasattr(send_port, "send_group_text") else False
+                    if not ok and _maybe_recover_channel(_tid):
+                        ok = send_port.send_group_text(group_code, rep) \
+                            if hasattr(send_port, "send_group_text") else False
+                    print(f"  [复读] 跟风 +1 ← {group_code} "
+                          f"{'已发送' if ok else '发送失败'}")
+                    _tspan(_tid, "send", "executed" if ok else "failed",
+                           reason_code="repeat_chain")
+                    _tfin(_tid, "replied" if ok else "failed")
+                    if ok:
+                        timeline.append(incoming.conversation,
+                                        message_id=f"self:{incoming.message_id}",
+                                        sender_id=self_uin, text=rep,
+                                        is_self=True)
+                    return
         from whale_core.life.temporary_auth import maybe_intercept_sudo
         if maybe_intercept_sudo(incoming.text) is None and not stranger_chat:
             print(f"[未配对] account={incoming.account} conv={incoming.conversation} "
