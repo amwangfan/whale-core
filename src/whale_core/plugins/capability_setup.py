@@ -205,22 +205,48 @@ def configure_optional_capabilities(registry, tools, store, *, env: Mapping[str,
     if speech_base or minimax is not None:
         mm_tts_model = (env.get("WHALE_MINIMAX_TTS_MODEL") or "speech-02-hd").strip()
         mm_tts_voice = (env.get("WHALE_MINIMAX_TTS_VOICE") or "female-tianmei").strip()
+        # MiniMax 先装——默认模型判定要看全集（2026-11-02 owner 决策：语音默认
+        # 固定「最好最自然」的 minimax 模型；qwen 系作为可选模型并入）。
+        if minimax is not None:
+            tts_providers[mm_tts_model] = minimax[1](
+                api_key=minimax_key, base_url=minimax_base,
+                model=mm_tts_model, voice=mm_tts_voice)
+        explicit_tts_default = (env.get("WHALE_TTS_MODEL") or "").strip()
         if speech_base:
             common = {"base_url": speech_base, "api_key": speech_key}
-            tts_default = env.get("WHALE_TTS_MODEL") or ("qwen-audio-3.0-tts-flash" if speech_kind == "dashscope" else "tts-1")
+            vendor_default = ("qwen-audio-3.0-tts-flash"
+                              if speech_kind == "dashscope" else "tts-1")
             if speech_kind == "dashscope":
                 from whale_core.plugins.dashscope_media import DashScopeASRProvider, DashScopeTTSProvider
+                from whale_core.plugins.minimax_media import TTS_MODELS as _MM_TTS
                 asr = DashScopeASRProvider(**common, model=env.get("WHALE_ASR_MODEL") or "fun-asr-flash-2026-06-15")
-                # 默认 + WHALE_TTS_MODELS 追加（音色不跨模型，每个模型各记自己的音色）
-                tts_models = [tts_default] + [
+                # qwen 模型清单：供应商默认 + WHALE_TTS_MODELS 里的 qwen 系
+                # （MiniMax 的 speech-* 不属于 dashscope，别误装）
+                qwen_models = [vendor_default] + [
                     m.strip() for m in (env.get("WHALE_TTS_MODELS") or "").split(",")
-                    if m.strip() and m.strip() != tts_default]
-                for m in tts_models:
-                    voice = (env.get("WHALE_TTS_VOICE") or "longanlingxin") if m == tts_default else ""
+                    if m.strip() and m.strip() != vendor_default
+                    and m.strip() not in _MM_TTS]
+                for i, m in enumerate(qwen_models):
+                    # 音色不跨模型：WHALE_TTS_VOICE 只给清单首选模型；
+                    # 空音色时 provider 按模型自动给合法默认（手册 §7）
+                    voice = (env.get("WHALE_TTS_VOICE") or "") if i == 0 else ""
                     tts_providers[m] = DashScopeTTSProvider(**common, model=m, voice=voice)
             else:
                 asr = OpenAICompatibleASR(**common, model=env.get("WHALE_ASR_MODEL") or "whisper-1")
-                tts_providers[tts_default] = OpenAICompatibleTTS(**common, model=tts_default, voice=env.get("WHALE_TTS_VOICE") or "alloy")
+                tts_providers[vendor_default] = OpenAICompatibleTTS(**common, model=vendor_default, voice=env.get("WHALE_TTS_VOICE") or "alloy")
+        # 默认模型解析：显式指定且已注册 → 用之；否则 MiniMax（最自然）→
+        # 供应商默认。显式指定未注册 = 配置错误，回退并留 note。
+        if explicit_tts_default and explicit_tts_default in tts_providers:
+            tts_default = explicit_tts_default
+        elif minimax is not None:
+            tts_default = mm_tts_model
+        elif speech_base:
+            tts_default = vendor_default
+        if tts_default and tts_default not in tts_providers:
+            out.notes.append(f"语音默认模型 {tts_default} 不可用，回退 "
+                             + sorted(tts_providers)[0])
+            tts_default = sorted(tts_providers)[0]
+        if speech_base:
             register_speech(registry, asr=asr, tts=tts_providers[tts_default])
             def transcribe(args):
                 encoded = str(args.get("audio_base64") or "")
@@ -228,18 +254,6 @@ def configure_optional_capabilities(registry, tools, store, *, env: Mapping[str,
                     raise ValueError("audio_base64 required or exceeds limit")
                 return require("speech_asr").transcribe(base64.b64decode(encoded, validate=True), lang=str(args.get("lang") or "zh"), format=str(args.get("format") or "wav"))
             tools.register(ToolSpec(name="transcribe_audio", capability="asr.transcribe", plugin_id="speech_asr", handler=transcribe))
-        # MiniMax 语音并入可选模型（音色 id 是 MiniMax 平台体系，不跨 dashscope）
-        if minimax is not None:
-            tts_providers[mm_tts_model] = minimax[1](
-                api_key=minimax_key, base_url=minimax_base,
-                model=mm_tts_model, voice=mm_tts_voice)
-        if not tts_default:
-            tts_default = mm_tts_model if minimax is not None else ""
-        elif tts_default not in tts_providers:
-            # 显式默认不可用（如基座已撤）→ 回退任一可用模型
-            out.notes.append(f"语音默认模型 {tts_default} 不可用，回退 "
-                             + sorted(tts_providers)[0])
-            tts_default = sorted(tts_providers)[0]
         if not speech_base and tts_default:
             # 仅 MiniMax：只挂 TTS 插件（无 ASR 可挂，诚实缺席）
             from whale_core.plugins.registry import PluginManifest
