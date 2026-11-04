@@ -6,21 +6,28 @@ Owner 2026-11-05 确认的分工：
 - **真正闲聊/问候文案**：仍走 DeepSeek 官方 API（更快），不要用 AgentScope 做回复。
 - 默认 ``WHALE_PROACTIVE_GREETING`` 未设 → 完全关闭；
   设为 1 且未显式 ``WHALE_PROACTIVE_GREETING_DRY_RUN=0`` → 跑循环但只记日志不发送。
+- 真发时仍需过冷却与日额度（与 ProactiveOutbox 主动额度对齐的保守默认）。
 
 权限与工具越权无关：问候是陪伴通道，不得借此挂 shell / 写操作。
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import logging
 import os
 import threading
 import time
 from typing import Callable, Protocol
-
+from zoneinfo import ZoneInfo
 
 AGENTSCOPE_BASE_URL = "https://platform.agentscope.io/v1"
 DEFAULT_INTERVAL_S = 180  # 3 min
+DEFAULT_COOLDOWN_S = 3600  # 真发后至少 1h
+DEFAULT_DAILY_QUOTA = 2
+QUOTA_KEY_PREFIX = "life:quota:proactive_greeting:"
+LAST_SENT_KEY = "life:proactive_greeting:last_sent_at"
+TZ = ZoneInfo("Asia/Shanghai")
 
 _log = logging.getLogger("whale.proactive_greeting")
 
@@ -37,8 +44,22 @@ class ReplyModel(Protocol):
     def reply(self, text: str, *, persona: str = "", memories=(), history=()) -> str: ...
 
 
+class QuotaStore(Protocol):
+    def get(self, key: str): ...
+    def put(self, key: str, value) -> None: ...
+
+
 def _truthy(raw: str) -> bool:
     return (raw or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _shanghai_day(now: datetime | None = None) -> str:
+    when = now or datetime.now(TZ)
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc).astimezone(TZ)
+    else:
+        when = when.astimezone(TZ)
+    return when.strftime("%Y-%m-%d")
 
 
 @dataclass(frozen=True)
@@ -46,6 +67,8 @@ class ProactiveGreetingConfig:
     enabled: bool = False
     dry_run: bool = True
     interval_s: int = DEFAULT_INTERVAL_S
+    cooldown_s: int = DEFAULT_COOLDOWN_S
+    daily_quota: int = DEFAULT_DAILY_QUOTA
     judge_base_url: str = AGENTSCOPE_BASE_URL
     # 回复端点故意不在这里默认 AgentScope：宿主应注入 DeepSeek 官模。
     reply_via: str = "deepseek_official"
@@ -65,7 +88,23 @@ class ProactiveGreetingConfig:
                            or DEFAULT_INTERVAL_S)
         except ValueError:
             interval = DEFAULT_INTERVAL_S
-        return cls(enabled=enabled, dry_run=dry_run, interval_s=max(30, interval))
+        try:
+            cooldown = int((e.get("WHALE_PROACTIVE_GREETING_COOLDOWN_S") or "").strip()
+                           or DEFAULT_COOLDOWN_S)
+        except ValueError:
+            cooldown = DEFAULT_COOLDOWN_S
+        try:
+            quota = int((e.get("WHALE_PROACTIVE_GREETING_DAILY_QUOTA") or "").strip()
+                        or DEFAULT_DAILY_QUOTA)
+        except ValueError:
+            quota = DEFAULT_DAILY_QUOTA
+        return cls(
+            enabled=enabled,
+            dry_run=dry_run,
+            interval_s=max(30, interval),
+            cooldown_s=max(60, cooldown),
+            daily_quota=max(0, quota),
+        )
 
 
 @dataclass
@@ -76,6 +115,50 @@ class ProactiveGreetingTick:
     reason: str = ""
     draft: str = ""
     sent: bool = False
+
+
+def check_send_budget(
+    store: QuotaStore | None,
+    cfg: ProactiveGreetingConfig,
+    *,
+    now: float | None = None,
+) -> tuple[bool, str]:
+    """真发前的额度/冷却门；dry-run 不调用。store=None 时仅检查配置额度>0。"""
+    if cfg.daily_quota <= 0:
+        return False, "quota_zero"
+    if store is None:
+        return True, "ok_no_store"
+    now_ts = time.time() if now is None else float(now)
+    last = store.get(LAST_SENT_KEY)
+    try:
+        last_ts = float(last) if last is not None else 0.0
+    except (TypeError, ValueError):
+        last_ts = 0.0
+    if last_ts and (now_ts - last_ts) < cfg.cooldown_s:
+        return False, "cooldown"
+    day = _shanghai_day(datetime.fromtimestamp(now_ts, tz=timezone.utc))
+    key = QUOTA_KEY_PREFIX + day
+    try:
+        used = int(store.get(key) or 0)
+    except (TypeError, ValueError):
+        used = 0
+    if used >= cfg.daily_quota:
+        return False, "daily_quota"
+    return True, "ok"
+
+
+def record_send(store: QuotaStore | None, *, now: float | None = None) -> None:
+    if store is None:
+        return
+    now_ts = time.time() if now is None else float(now)
+    store.put(LAST_SENT_KEY, now_ts)
+    day = _shanghai_day(datetime.fromtimestamp(now_ts, tz=timezone.utc))
+    key = QUOTA_KEY_PREFIX + day
+    try:
+        used = int(store.get(key) or 0)
+    except (TypeError, ValueError):
+        used = 0
+    store.put(key, used + 1)
 
 
 class ProactiveGreetingLoop:
@@ -89,12 +172,16 @@ class ProactiveGreetingLoop:
         reply_model: ReplyModel | None = None,
         send: Callable[[str], None] | None = None,
         situation_provider: Callable[[], str] | None = None,
+        store: QuotaStore | None = None,
+        now_fn: Callable[[], float] | None = None,
     ):
         self.config = config or ProactiveGreetingConfig()
         self.judge = judge
         self.reply_model = reply_model
         self.send = send
         self.situation_provider = situation_provider
+        self.store = store
+        self._now = now_fn or time.time
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -123,8 +210,13 @@ class ProactiveGreetingLoop:
         if self.config.dry_run:
             _log.info("proactive dry-run draft=%s", draft[:120])
             return ProactiveGreetingTick(True, reason="dry_run", draft=draft, sent=False)
+        ok, why = check_send_budget(self.store, self.config, now=self._now())
+        if not ok:
+            _log.info("proactive send blocked reason=%s draft=%s", why, draft[:80])
+            return ProactiveGreetingTick(True, reason=why, draft=draft, sent=False)
         if self.send is not None:
             self.send(draft)
+            record_send(self.store, now=self._now())
             return ProactiveGreetingTick(True, reason="sent", draft=draft, sent=True)
         return ProactiveGreetingTick(True, reason="no_send", draft=draft, sent=False)
 
@@ -138,8 +230,10 @@ class ProactiveGreetingLoop:
 
         def _run() -> None:
             _log.info(
-                "proactive greeting loop start interval=%ss dry_run=%s",
-                self.config.interval_s, self.config.dry_run)
+                "proactive greeting loop start interval=%ss dry_run=%s "
+                "cooldown=%ss daily_quota=%s",
+                self.config.interval_s, self.config.dry_run,
+                self.config.cooldown_s, self.config.daily_quota)
             # 启动后先睡一轮，避免服务刚起就打扰。
             if self._stop.wait(self.config.interval_s):
                 return

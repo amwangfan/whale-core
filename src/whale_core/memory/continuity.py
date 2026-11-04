@@ -1,6 +1,8 @@
 """人格连续性上下文：组装「当前人格摘要 + 近期事件」供 agent decide。
 
-纯本地规则 stub，不连外部 LLM / 设备。
+本地规则组装（生产路径已用）：从 MemoryStore 取人格+近期情节；
+不连外部 LLM / 设备。``WHALE_INNER_STATE_WRITEBACK`` 控制 companion
+是否把未完话题写回 InnerState（默认开）。
 """
 
 from __future__ import annotations
@@ -76,7 +78,7 @@ def build_continuity_context(
     allowed_space_ids: tuple[str, ...] | None = None,
     persona_card: Any = None,
 ) -> ContinuityContext:
-    """从 MemoryStore 组装 ContinuityContext（进程内 / stub 可用）。
+    """从 MemoryStore 组装 ContinuityContext（生产 companion / glasses 路径共用）。
 
     S2：``allowed_space_ids`` 显式限域；空元组 = 不注入任何记忆记录
     （fail closed）；None = 兼容期旧行为（存储层仍排除 protected_original）。

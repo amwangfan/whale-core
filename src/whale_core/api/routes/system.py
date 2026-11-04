@@ -96,3 +96,9 @@ def provider_test(handler) -> None:
         result = {'ok': False, 'latency_ms': int((time.monotonic()-start)*1000),
                   'error_kind': getattr(exc, 'kind', 'unavailable')}
     handler._send(200, _json_bytes({'result': result}))
+
+
+def security_defaults(handler) -> None:
+    """只读安全默认：拒绝默认、grant 边界、分类≠授权（不改 Shell ACL）。"""
+    from whale_core.security.defaults import security_defaults_snapshot
+    handler._send(200, _json_bytes({"result": security_defaults_snapshot()}))

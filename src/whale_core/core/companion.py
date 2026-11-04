@@ -54,6 +54,35 @@ def _spaces_include_vault(spaces) -> bool:
     except Exception:
         return False
 
+def _writeback_enabled() -> bool:
+    import os
+    raw = (os.environ.get("WHALE_INNER_STATE_WRITEBACK") or "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _maybe_writeback_inner_state(store: MemoryStore, *, conversation_id: str,
+                                 user_text: str) -> None:
+    """把可识别的未完话题写入会话 InnerState（生产开关默认开）。"""
+    if not _writeback_enabled() or not conversation_id or not (user_text or "").strip():
+        return
+    text = (user_text or "").strip()
+    # 过短或纯寒暄不写；问句/计划类才开话题。
+    if len(text) < 8:
+        return
+    openers = ("下次", "待会", "回头", "还没", "继续", "计划", "记得", "别忘", "帮我盯")
+    if ("?" not in text and "？" not in text
+            and not any(k in text for k in openers)):
+        return
+    try:
+        from whale_core.life.state import InnerStateStore
+        topic = text[:80].replace("\n", " ")
+        InnerStateStore(store, scope=str(conversation_id)[:160]).update(
+            open_topic=topic)
+    except Exception:
+        return
+
+
+
 class WhaleCompanion:
     def __init__(self, store: MemoryStore, model: TextCompanion, *, curator: MemoryCurator | None = None,
                  timeline=None, self_uid: str = ""):
@@ -286,6 +315,10 @@ class WhaleCompanion:
                                  space_id=target)
         if conversation_id and clean_response:
             append_turn(self.store, conversation_id, original, clean_response)
+            # 记忆/主动性闭环：轻量写回未完话题（默认开；WHALE_INNER_STATE_WRITEBACK=0 关）
+            # 只写会话作用域，不授任何权限；失败 fail-soft。
+            _maybe_writeback_inner_state(
+                self.store, conversation_id=conversation_id, user_text=original)
         return response
 
 class RealtimeTranscriptRecorder:

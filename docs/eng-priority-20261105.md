@@ -23,6 +23,13 @@
 | Studio 多人版 | 不进单 owner 生产路径 |
 | DeepSeek urllib 连接池大改 | 降级：nginx keepalive + orch 复用先吃肉 |
 
+## 本回合补齐（四轨）
+
+- #53：`--preset companion|glasses` + `evals/live/GATE.md`
+- 安全默认：`GET /api/v1/security/defaults` + docs/security-defaults.md
+- companion：InnerState 话题写回（`WHALE_INNER_STATE_WRITEBACK`，默认开）
+- 主动问候：真发冷却/日额度 + 情境注入；默认仍 off/dry-run
+
 ## 下一回合候选
 
 - 主动问候 dry-run 日志观察后考虑真发 + 与 ProactiveOutbox 额度统一

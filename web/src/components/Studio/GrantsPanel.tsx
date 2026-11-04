@@ -115,6 +115,8 @@ export default function GrantsPanel({
       <h2>临时授权</h2>
       <p className="muted">
         一次性口令验证一次即核销；租约绑定真实发送者与私聊，到期或用尽自动降权。
+        默认拒绝：未授 scope 的动作一律不放行；意图分类不能代替授权；
+        Shell 仍走独立 ACL（本面板不签发支付/删库类权限）。
       </p>
 
       <form
