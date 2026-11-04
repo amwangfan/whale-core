@@ -709,6 +709,18 @@ def cmd_run(args) -> int:
         artifact_dir=Path(args.store).parent / "artifacts")
     for note in cap.notes:
         print(f"[能力] {note}")
+    # Shell ACL：主人 personal 沙箱；QQ 非主人默认拒，sudo 租约可短暂放行
+    shell_auto_actions: frozenset[str] = frozenset()
+    if os.environ.get("WHALE_SHELL_ENABLED", "").strip() == "1":
+        from whale_core.plugins.shell_tool import register_shell, SHELL_AUTO_PAIR
+        from whale_core.cloud.shell_policy import ShellPolicy, ShellTier
+        ws = Path(args.store).parent / "workspace"
+        register_shell(plugin_registry, tools, ws, env=os.environ)
+        if ShellPolicy.from_env(os.environ).tier is ShellTier.PERSONAL:
+            shell_auto_actions = frozenset({SHELL_AUTO_PAIR})
+            print("[能力] 受控终端已挂载（personal：主人沙箱免逐次审批；非主人需 sudo 租约）")
+        else:
+            print("[能力] 受控终端已挂载（非 personal 档：自由命令仍拒绝）")
     # 图片产物本地字节直发（不经过网络/代理）：端口拿到 artifact 引用时
     # 直接从 ArtifactStore 读字节（穿透 WindowedSendPort 取内层）。
     if cap.artifacts is not None:
@@ -797,10 +809,40 @@ def cmd_run(args) -> int:
         print(f"[审核] 安全审核模型={safety_model_id}（发送前复核；顾虑转人工）")
     owner_draft_ids: set[str] = set()
     approved_draft_ids: set[str] = set()
-    plugin_gateway = build_qq_weq_gateway(
-        plugin_registry, owner_draft_ids=owner_draft_ids,
-        approved_draft_ids=approved_draft_ids)
+    from weq_channel.qq_weq_plugin import _draft_id_of
+    from whale_core.core.runtime import (
+        runtime_approval_verifier, runtime_owner_verifier, runtime_shell_grant_verifier)
+    from whale_core.plugins import PluginActionPolicy, PluginGateway
+    _rt_owner = runtime_owner_verifier(store)
+    _rt_approval = runtime_approval_verifier(store)
+    _rt_grant = runtime_shell_grant_verifier(store)
+
+    def _combined_owner(intent):
+        try:
+            if _draft_id_of(intent) in owner_draft_ids:
+                return True
+        except Exception:
+            pass
+        return bool(_rt_owner(intent))
+
+    def _combined_approval(intent):
+        try:
+            if _draft_id_of(intent) in approved_draft_ids:
+                return True
+        except Exception:
+            pass
+        return bool(_rt_approval(intent))
+
+    plugin_gateway = PluginGateway(
+        plugin_registry,
+        PluginActionPolicy(plugin_registry, auto_approve_actions=shell_auto_actions),
+        owner_verifier=_combined_owner,
+        approval_verifier=_combined_approval,
+        grant_verifier=_rt_grant,
+    )
     print(f"[插件] {QQ_WEQ_PLUGIN_ID} channel 已注册（send_message=communicate，网关门控+共享账本）")
+    if shell_auto_actions:
+        print("[插件] shell_sandbox.run_command 已纳入 personal 免审 + sudo grant 路径")
     # 编排器接上真实网关——否则 read_only 工具因 manifest 风险无法核验被拒
     # （unverified-plugin-risk，生产实证：fetch_url 被拒）
     if workflow.orchestrator is not None:
