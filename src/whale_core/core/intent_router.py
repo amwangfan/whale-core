@@ -31,6 +31,15 @@ _LOCAL_LIFE = re.compile(
     re.IGNORECASE,
 )
 
+# 显式要跑终端/沙箱命令时走 shell.safe（仍受 ACL+沙箱；非主人无 grant 会被门控拒绝）。
+_SHELL_EXPLICIT = re.compile(
+    r"(跑一下|执行一下|执行|运行).{0,12}(命令|终端|shell|bash|沙箱)"
+    r"|(用|在).{0,8}(终端|shell|沙箱|受控终端).{0,12}(执行|运行|跑)"
+    r"|run_shell|shell_sandbox"
+    r"|(执行|运行)\s*(`[^`]+`|uname\b|date\b|ls\b|pwd\b|whoami\b|cat\s+/)",
+    re.IGNORECASE,
+)
+
 
 class ReplyModel(Protocol):
     def reply(self, text: str, *, persona: str = "", memories=(), history=()) -> str: ...
@@ -73,6 +82,21 @@ class SearchIntentRouter:
                 "slots": {"query": query[:500], "limit": 5},
                 "capabilities": ["web.search"],
                 "reason": "附近/外卖类问题走只读网页搜索（不下单、不支付）",
+            }, ensure_ascii=False)
+        caps = ({s.capability for s in self.tools.specs()} if self.tools is not None else set())
+        if "shell.safe" in caps and _SHELL_EXPLICIT.search(text or ""):
+            # 尽量抽出命令：反引号优先，否则整句交给执行器（策略层会截断/拒绝）。
+            m = re.search(r"`([^`]+)`", text or "")
+            if m:
+                command = m.group(1).strip()[:500]
+            else:
+                command = (text or "").strip()[:500]
+            return json.dumps({
+                "goal": "在受控沙箱执行命令并回报输出：" + command[:200],
+                "kind": "task",
+                "slots": {"command": command},
+                "capabilities": ["shell.safe"],
+                "reason": "用户明确要求终端/沙箱执行",
             }, ensure_ascii=False)
         if self.enable_llm:
             specs = self.tools.specs() if self.tools is not None else []
