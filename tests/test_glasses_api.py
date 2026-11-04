@@ -392,10 +392,11 @@ def test_glasses_companion_triggers_search_with_provider(tmp_path):
     delegates = build_delegates(env, brain_factory=Brain, quick_brain_factory=Brain,
                                 send_port_factory=lambda: None)
     # 直接调用 companion_chat：本地生活规则应触发 task 路径
-    reply = delegates["companion_chat"](
+    reply, timing = delegates["companion_chat"](
         "附近有什么外卖", conversation_id="glasses:testloc",
         location="上海·杨浦")
     assert isinstance(reply, str) and reply.strip()
+    assert "intentMs" in timing and "totalMs" in timing
 
 
 def test_glasses_source_mounts_shell_and_latency():
@@ -405,4 +406,7 @@ def test_glasses_source_mounts_shell_and_latency():
     assert "SHELL_AUTO_PAIR" in src
     assert "WHALE_SHELL_MODEL" in src
     assert "latencyMs" in src
+    assert "intentMs" in src
+    assert "toolMs" in src
+    assert "replyMs" in src
     assert "runtime_shell_grant_verifier" in src
