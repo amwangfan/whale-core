@@ -44,6 +44,10 @@
 
 ### 阶段记录（仍在 docs/ 根部的审阅 / 验收记录）
 
+| [proactive-greeting-roadmap.md](proactive-greeting-roadmap.md) | 主动问候：默认关、开则 dry-run、3min 循环与模型分工 |
+| [eng-priority-20261105.md](eng-priority-20261105.md) | 2026-11-05 工程精简优先级与砍项 |
+
+
 | 文档 | 内容 |
 | --- | --- |
 | [g3-scenarios.md](g3-scenarios.md) | G3 三条全天助手场景验收记录（模拟器层，2026-10-31） |

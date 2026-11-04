@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import argparse
+import threading
 import json
 import os
 import secrets
@@ -215,6 +216,11 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
         return WhaleCompanion(store, brain_factory(),
                               curator=MemoryCurator(store))
 
+    # 单 owner 通道：复用 companion/orchestrator，避免每请求重建搜索/shell 插件。
+    # ThreadingHTTPServer 下用锁串行化一轮 handle，避免改 location / intent 上下文竞态。
+    _orch_lock = threading.Lock()
+    _cached: dict = {"companion": None, "orch": None, "quick": None}
+
     def _build_search_orchestrator(companion):
         """与 QQ runner 同款：搜索 +（可选）主人 shell + IntentRouter。
 
@@ -287,56 +293,79 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
             store, companion, intent_model=intent, tools=tools, gateway=gateway)
 
     def companion_chat(text: str, conversation_id: str,
-                       location: str = "") -> str:
+                       location: str = "") -> tuple[str, dict]:
+        """返回 (reply, timing)；timing 含 intentMs/toolMs/replyMs/totalMs。"""
         from whale_core.core.runtime import InputEnvelope
-        companion = _make_companion()
-        companion.planning_hint = _GLASSES_LOCAL_LIFE_HINT
-        brain = companion.model
-        try:
-            brain.default_location = location or None
-        except Exception:
-            pass
-        orch = _build_search_orchestrator(companion)
-        if orch is not None:
-            # 把位置摘要塞进意图上下文：SearchIntentRouter 本地生活规则会读
-            # 「当前位置：」行；LLM 规划也能把地点当缺省。
-            _orig_ctx = orch._intent_context
+        import time as _time
+        t_all = _time.perf_counter()
+        with _orch_lock:
+            if _cached["companion"] is None:
+                companion = _make_companion()
+                companion.planning_hint = _GLASSES_LOCAL_LIFE_HINT
+                _cached["companion"] = companion
+                _cached["orch"] = _build_search_orchestrator(companion)
+            companion = _cached["companion"]
+            orch = _cached["orch"]
+            brain = companion.model
+            try:
+                brain.default_location = location or None
+            except Exception:
+                pass
+            if orch is not None:
+                # 把位置摘要塞进意图上下文：SearchIntentRouter 本地生活规则会读
+                # 「当前位置：」行；LLM 规划也能把地点当缺省。
+                _orig_ctx = orch._intent_context
 
-            def _intent_context_with_location(conversation_id, text, *,
-                                             allowed_spaces=None):
-                base = _orig_ctx(conversation_id, text,
-                                 allowed_spaces=allowed_spaces)
-                from whale_core.core.prompt_composer import format_location_context
-                loc_line = format_location_context(location=location or None)
-                return (loc_line + ("\n" + base if base else ""))[:1500]
+                def _intent_context_with_location(conversation_id, text, *,
+                                                 allowed_spaces=None):
+                    base = _orig_ctx(conversation_id, text,
+                                     allowed_spaces=allowed_spaces)
+                    from whale_core.core.prompt_composer import format_location_context
+                    loc_line = format_location_context(location=location or None)
+                    return (loc_line + ("\n" + base if base else ""))[:1500]
 
-            orch._intent_context = _intent_context_with_location  # type: ignore
-            result = orch.handle_envelope(InputEnvelope(
-                conversation_id=conversation_id, text=text,
-                source="glasses:phone", channel="glasses",
-                owner_id=cfg.owner_uin or cfg.owner_uid))
-            return result.reply
-        # 无搜索 provider：退回纯陪伴（仍注入位置到 system）。
-        return companion.chat(
-            text, conversation_id=conversation_id, location=location or None)
+                orch._intent_context = _intent_context_with_location  # type: ignore
+                result = orch.handle_envelope(InputEnvelope(
+                    conversation_id=conversation_id, text=text,
+                    source="glasses:phone", channel="glasses",
+                    owner_id=cfg.owner_uin or cfg.owner_uid))
+                timing = {
+                    "intentMs": int(getattr(result, "intent_ms", 0) or 0),
+                    "toolMs": int(getattr(result, "tool_ms", 0) or 0),
+                    "replyMs": int(getattr(result, "reply_ms", 0) or 0),
+                    "totalMs": int((_time.perf_counter() - t_all) * 1000),
+                }
+                return result.reply, timing
+            # 无搜索 provider：退回纯陪伴（仍注入位置到 system）。
+            reply = companion.chat(
+                text, conversation_id=conversation_id, location=location or None)
+            total = int((_time.perf_counter() - t_all) * 1000)
+            return reply, {"intentMs": 0, "toolMs": 0, "replyMs": total, "totalMs": total}
 
-    def quick_chat(text: str, location: str = "") -> str:
-        brain = quick_brain_factory()
-        try:
-            brain.default_location = location or None
-        except Exception:
-            pass
-        persona = (
-            "用一两句口语简明回答，不展开、不追问。\n"
-            + _GLASSES_LOCAL_LIFE_HINT)
+    def quick_chat(text: str, location: str = "") -> tuple[str, dict]:
+        import time as _time
         import inspect
-        kwargs = {"persona": persona}
-        try:
-            if "location" in inspect.signature(brain.reply).parameters:
-                kwargs["location"] = location or None
-        except (TypeError, ValueError):
-            pass
-        return brain.reply(text, **kwargs)
+        t0 = _time.perf_counter()
+        with _orch_lock:
+            if _cached["quick"] is None:
+                _cached["quick"] = quick_brain_factory()
+            brain = _cached["quick"]
+            try:
+                brain.default_location = location or None
+            except Exception:
+                pass
+            persona = (
+                "用一两句口语简明回答，不展开、不追问。\n"
+                + _GLASSES_LOCAL_LIFE_HINT)
+            kwargs = {"persona": persona}
+            try:
+                if "location" in inspect.signature(brain.reply).parameters:
+                    kwargs["location"] = location or None
+            except (TypeError, ValueError):
+                pass
+            reply = brain.reply(text, **kwargs)
+        total = int((_time.perf_counter() - t0) * 1000)
+        return reply, {"intentMs": 0, "toolMs": 0, "replyMs": total, "totalMs": total}
 
     if send_port_factory is None:
         def send_port_factory():
@@ -456,26 +485,32 @@ def make_handler(delegates):
                 getattr(self.server, "glasses_env", {}) or {},
                 delegates["store"], body)
             try:
-                import time as _time
-                _t0 = _time.perf_counter()
                 if mode == "quick":
-                    reply = delegates["quick_chat"](text, location=location)
+                    reply, timing = delegates["quick_chat"](text, location=location)
                 else:
-                    reply = delegates["companion_chat"](
+                    reply, timing = delegates["companion_chat"](
                         text, conversation_id=f"glasses:{session_id}",
                         location=location)
-                latency_ms = int((_time.perf_counter() - _t0) * 1000)
+                latency_ms = int(timing.get("totalMs") or 0)
                 if not (reply or "").strip():
                     _json_response(self, 200, {"reply": None, "sessionId": session_id,
                                                "mode": mode, "error": "empty reply",
-                                               "latencyMs": latency_ms})
+                                               "latencyMs": latency_ms,
+                                               "intentMs": timing.get("intentMs", 0),
+                                               "toolMs": timing.get("toolMs", 0),
+                                               "replyMs": timing.get("replyMs", 0)})
                     return
                 payload = {"reply": reply, "sessionId": session_id, "mode": mode}
-                # 调试可观测：不回传坐标原文，只回是否已知位置；latencyMs 便于眼镜端体感核对。
+                # 调试可观测：不回传坐标原文，只回是否已知位置；分阶段耗时便于体感核对。
                 payload["locationKnown"] = bool(location)
                 payload["latencyMs"] = latency_ms
+                payload["intentMs"] = int(timing.get("intentMs") or 0)
+                payload["toolMs"] = int(timing.get("toolMs") or 0)
+                payload["replyMs"] = int(timing.get("replyMs") or 0)
                 print(f"[glasses] mode={mode} session={session_id[:8]} "
-                      f"latencyMs={latency_ms} loc={bool(location)} "
+                      f"latencyMs={latency_ms} intentMs={payload['intentMs']} "
+                      f"toolMs={payload['toolMs']} replyMs={payload['replyMs']} "
+                      f"loc={bool(location)} "
                       f"chars_in={len(text)} chars_out={len(reply or '')}",
                       flush=True)
                 _json_response(self, 200, payload)
@@ -571,6 +606,37 @@ def main(argv=None) -> int:
     server.glasses_token = cfg.token  # type: ignore[attr-defined]
     server.owner_uin = cfg.owner_uin  # type: ignore[attr-defined]
     server.glasses_env = env  # type: ignore[attr-defined]
+
+    greeting_loop = None
+    try:
+        from whale_core.life.proactive_greeting import (
+            ProactiveGreetingConfig, ProactiveGreetingLoop)
+        from whale_core.core.deepseek import DeepSeekCompanion
+        gcfg = ProactiveGreetingConfig.from_env(env)
+        if gcfg.enabled:
+            judge = DeepSeekCompanion(
+                model=(env.get("QQ_INTENT_MODEL") or "").strip() or None,
+                base_url=(env.get("QQ_INTENT_BASE_URL") or gcfg.judge_base_url
+                          ).strip() or gcfg.judge_base_url,
+                api_key=(env.get("QQ_INTENT_API_KEY") or "").strip() or None)
+            reply_model = DeepSeekCompanion(
+                model=(env.get("DEEPSEEK_MODEL") or "").strip() or None,
+                base_url=(env.get("DEEPSEEK_BASE_URL") or "").strip() or None,
+                api_key=(env.get("DEEPSEEK_API_KEY") or "").strip() or None)
+
+            def _send(draft: str) -> None:
+                ok, _ = delegates["qq_send"](draft)
+                if not ok:
+                    print("[proactive] send failed", flush=True)
+
+            greeting_loop = ProactiveGreetingLoop(
+                config=gcfg, judge=judge, reply_model=reply_model, send=_send)
+            if greeting_loop.start_background():
+                print(f"proactive greeting loop on interval={gcfg.interval_s}s "
+                      f"dry_run={gcfg.dry_run}", flush=True)
+    except Exception as exc:  # noqa: BLE001 — 问候循环失败不阻止主服务
+        print(f"[proactive] not started: {type(exc).__name__}", flush=True)
+
     print(f"whale-glasses-api 监听 http://{args.host}:{args.port}"
           f"（/v1/chat /v1/qq/reply /v1/health /openapi.json）")
     try:
@@ -578,6 +644,8 @@ def main(argv=None) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        if greeting_loop is not None:
+            greeting_loop.stop_background()
         server.server_close()
     return 0
 

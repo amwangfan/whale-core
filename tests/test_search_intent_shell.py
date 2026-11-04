@@ -67,3 +67,11 @@ def test_fuzzy_write_may_call_intent_llm():
     assert echo.calls == 1
     plan = json.loads(raw)
     assert plan["kind"] == "clarify"
+
+
+def test_baidu_google_shortcuts_route_search():
+    router = SearchIntentRouter(model=_Boom(), enable_llm=True, tools=None)
+    for text in ("百度一下量子计算", "谷歌一下 rust async", "google一下 fastapi"):
+        plan = json.loads(router.plan(text))
+        assert plan["kind"] == "task", text
+        assert "web.search" in plan["capabilities"]

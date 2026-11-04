@@ -23,7 +23,9 @@ from whale_core.core.intent_plan import plan_from_model_text, IntentPlanError
 
 _SEARCH = re.compile(
     r"^\s*(?:请|麻烦|能不能|可以|帮我|帮忙|给我|你能|能否|请你|请帮我|帮我查一下|麻烦你)?\s*"
-    r"(?:搜索|搜一下|搜搜|查一下|查查|查找|检索|上网搜|上网查|search|look\s+up)\s*"
+    r"(?:搜索|搜一下|搜搜|查一下|查查|查找|检索|上网搜|上网查|"
+    r"百度一下|谷歌一下|google\s*(?:一下|下)?|bing\s*(?:一下|下)?|"
+    r"search|look\s+up)\s*"
     r"(?:一下|一下子|关于|有关|下|：|:|，|,|\s)*",
     re.IGNORECASE,
 )
@@ -155,7 +157,8 @@ class SearchIntentRouter:
             "仅可选择以下当前已挂载能力：" + "；".join(catalog) + "。"
             "澄清要克制：能从上下文/记忆合理推断的缺省值就直接默认（如地点类请求"
             "没明说地点时，默认用户所在地；用户有出行信息时，用行程目的地或出发地）；"
-            "确实无法推断才 clarify。"
+            "用户说『画个猫』『念这段』这类已够用的媒体请求不要 clarify；"
+            "确实无法推断才 clarify，且 clarification_question 只用一句口语短问。"
         )
         if context:
             prompt += f"\n上下文（记忆与近期对话，供推断缺省值）：\n{context[:1500]}"
