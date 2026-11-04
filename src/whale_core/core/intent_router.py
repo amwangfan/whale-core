@@ -21,6 +21,16 @@ _SEARCH = re.compile(
     re.IGNORECASE,
 )
 
+# 附近/外卖等本地生活问询：无显式「搜索」动词时也走 web.search（AskAi 式），
+# 仍只读搜索，不触发下单/支付能力。
+_LOCAL_LIFE = re.compile(
+    r"(附近|周边|旁边|周围).{0,16}(外卖|餐馆|饭店|美食|吃的|好吃的|咖啡|奶茶|小吃|"
+    r"超市|便利店|药店|医院|景点|停车场)"
+    r"|(外卖|美团|饿了么|到家|闪购)"
+    r"|((有什么|哪有|哪里有|推荐).{0,12}(外卖|吃的|餐馆|饭店))",
+    re.IGNORECASE,
+)
+
 
 class ReplyModel(Protocol):
     def reply(self, text: str, *, persona: str = "", memories=(), history=()) -> str: ...
@@ -47,6 +57,23 @@ class SearchIntentRouter:
                     "capabilities": ["web.search"],
                     "reason": "用户明确要求搜索公开信息",
                 }, ensure_ascii=False)
+        if _LOCAL_LIFE.search(text or ""):
+            query = (text or "").strip()[:500]
+            # 把意图上下文里的位置线索拼进 query，便于「附近外卖」命中本地结果。
+            loc_hint = ""
+            for line in (context or "").splitlines():
+                if line.startswith("当前位置：") or line.startswith("位置："):
+                    loc_hint = line.split("：", 1)[-1].strip()
+                    break
+            if loc_hint and loc_hint not in ("未知",) and "未知" not in loc_hint:
+                query = f"{loc_hint} {query}"
+            return json.dumps({
+                "goal": "搜索并回答本地生活／附近信息：" + query[:300],
+                "kind": "task",
+                "slots": {"query": query[:500], "limit": 5},
+                "capabilities": ["web.search"],
+                "reason": "附近/外卖类问题走只读网页搜索（不下单、不支付）",
+            }, ensure_ascii=False)
         if self.enable_llm:
             specs = self.tools.specs() if self.tools is not None else []
             capabilities = ({s.capability for s in specs} if self.tools is not None

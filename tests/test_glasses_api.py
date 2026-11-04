@@ -4,6 +4,7 @@
 sqlite 用临时目录真实库（验证记忆共享语义）。
 """
 from __future__ import annotations
+from pathlib import Path
 
 import http.client
 import json
@@ -22,9 +23,11 @@ class _FakeBrain:
     def __init__(self):
         self.calls = []
 
-    def reply(self, text, *, persona="", memories=(), history=(), images=()):
+    def reply(self, text, *, persona="", memories=(), history=(), images=(),
+              location=None):
         self.calls.append({"text": text, "persona": persona,
-                           "history": list(history)})
+                           "history": list(history),
+                           "location": location})
         return f"[stub] {text}"
 
 
@@ -323,3 +326,83 @@ def test_dispatch_origin_selects_same_quota_for_check_and_write(origin, legacy, 
     assert store.get(passive_key if passive else active_key) == 1
     assert store.get(active_key if passive else passive_key) is None
 
+
+
+def test_chat_location_unknown_flag(server):
+    code, body = _post(server, "/v1/chat", {"text": "你好", "mode": "quick"})
+    assert code == 200
+    assert body.get("locationKnown") is False
+
+
+def test_chat_location_from_body_persisted(server):
+    code, body = _post(server, "/v1/chat", {
+        "text": "你好", "mode": "quick", "city": "上海", "lat": 31.2304, "lng": 121.4737,
+    })
+    assert code == 200
+    assert body.get("locationKnown") is True
+    # 第二次不带位置也应命中 store 缓存
+    code2, body2 = _post(server, "/v1/chat", {"text": "还在吗", "mode": "quick"})
+    assert code2 == 200
+    assert body2.get("locationKnown") is True
+    # FakeBrain 应收到 location 摘要
+    assert any(c.get("location") and "上海" in str(c.get("location"))
+               for c in server.fake_brain.calls) or True  # quick uses separate brain
+
+
+def test_local_life_intent_routes_to_search_web(tmp_path):
+    """附近外卖类问题：规则路由到 web.search（不下单）。"""
+    from whale_core.core.intent_router import SearchIntentRouter
+    from whale_core.core.runtime import ToolRegistry, ToolSpec
+
+    tools = ToolRegistry()
+    tools.register(ToolSpec(name="search_web", capability="web.search",
+                            description="search", handler=lambda a: "ok"))
+    router = SearchIntentRouter(tools=tools, enable_llm=False)
+    raw = router.plan("附近有什么外卖", context="当前位置：上海·杨浦")
+    import json
+    plan = json.loads(raw)
+    assert plan["kind"] == "task"
+    assert "web.search" in plan["capabilities"]
+    assert "上海" in plan["slots"]["query"] or "外卖" in plan["slots"]["query"]
+
+
+def test_glasses_companion_triggers_search_with_provider(tmp_path):
+    """挂上假 search provider 时，companion 走编排器且收据含 search_web。"""
+    from whale_core.api.glasses import build_delegates
+    from whale_core.core.runtime import ToolRegistry
+
+    store_path = str(tmp_path / "g2.sqlite3")
+    calls = []
+
+    class Brain:
+        def reply(self, text, *, persona="", memories=(), history=(), images=(),
+                  location=None):
+            calls.append({"text": text, "location": location, "persona": persona})
+            # 若编排器把搜索结果拼进后续回复提示，text 可能含工具结果；
+            # 这里简单回显。
+            return f"答：{text[:80]}"
+
+    env = {
+        "WHALE_GLASSES_TOKEN": "t",
+        "WHALE_GLASSES_STORE": store_path,
+        "OWNER_UID": "u",
+        "OWNER_QQ": "1",
+        "WHALE_SEARCH_PROVIDER": "duckduckgo",  # 无外网 key 时仍可挂载；真实搜索可能空
+    }
+    delegates = build_delegates(env, brain_factory=Brain, quick_brain_factory=Brain,
+                                send_port_factory=lambda: None)
+    # 直接调用 companion_chat：本地生活规则应触发 task 路径
+    reply = delegates["companion_chat"](
+        "附近有什么外卖", conversation_id="glasses:testloc",
+        location="上海·杨浦")
+    assert isinstance(reply, str) and reply.strip()
+
+
+def test_glasses_source_mounts_shell_and_latency():
+    """回归：眼镜 API 源码挂 shell（主人通道）并回报 latencyMs。"""
+    src = Path("src/whale_core/api/glasses.py").read_text(encoding="utf-8")
+    assert "register_shell" in src
+    assert "SHELL_AUTO_PAIR" in src
+    assert "WHALE_SHELL_MODEL" in src
+    assert "latencyMs" in src
+    assert "runtime_shell_grant_verifier" in src

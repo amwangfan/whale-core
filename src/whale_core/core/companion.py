@@ -71,20 +71,21 @@ class WhaleCompanion:
     def chat(self, text: str, *, conversation_id: str = "", user_text: str | None = None,
              images: Sequence[bytes] = (), turn_key: str = "",
              episodic: bool = True, context=None, allowed_spaces=None,
-             write_space: str | None = None,
+             write_space: str | None = None, location: str | None = None,
              on_delta=None, should_stop=None, metrics=None, on_phase=None) -> str:
         with conversation_lock(self.store, conversation_id):
             return self._chat(text, conversation_id=conversation_id, user_text=user_text,
                               images=images, turn_key=turn_key, episodic=episodic,
                               context=context, allowed_spaces=allowed_spaces,
-                              write_space=write_space, on_delta=on_delta,
+                              write_space=write_space, location=location,
+                              on_delta=on_delta,
                               should_stop=should_stop, metrics=metrics,
                               on_phase=on_phase)
 
     def _chat(self, text: str, *, conversation_id: str = "", user_text: str | None = None,
               images: Sequence[bytes] = (), turn_key: str = "",
               episodic: bool = True, context=None, allowed_spaces=None,
-              write_space: str | None = None,
+              write_space: str | None = None, location: str | None = None,
               on_delta=None, should_stop=None, metrics=None, on_phase=None) -> str:
         original = text if user_text is None else user_text
         # issue #45：真实阶段反馈（接收→上下文/记忆构建→模型请求→整理）；
@@ -221,6 +222,15 @@ class WhaleCompanion:
         kwargs = {"persona": persona_text, "memories": memories, "history": history}
         if images:
             kwargs["images"] = images
+        if location is not None:
+            # DeepSeekCompanion 等支持 location= 时注入 system；旧 FakeBrain 忽略未知参数会炸，
+            # 故仅在模型签名接受时透传。
+            import inspect as _inspect_loc
+            try:
+                if "location" in _inspect_loc.signature(self.model.reply).parameters:
+                    kwargs["location"] = location
+            except (TypeError, ValueError):
+                pass
         if on_phase is not None:
             on_phase("model")
         # issue #45：模型支持流式回调时透传（DeepSeekCompanion）；不支持的

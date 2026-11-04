@@ -752,7 +752,11 @@ def cmd_run(args) -> int:
     # 搜索指令本地识别零额外调用），LLM 规划用于其余消息。实测选型见 gap-analysis。
     # 2026-11-01 owner 决策「不走代理」：QQ_INTENT_BASE_URL/QQ_INTENT_API_KEY
     # 可独立于主聊天端点（不同供应商/不同 key 时必备）；缺省回落 DEEPSEEK_*。
-    intent_model_id = os.environ.get("QQ_INTENT_MODEL", "").strip()
+    # Shell 审操模型：WHALE_SHELL_MODEL 优先（AgentScope 上的 kimi-k3 等），
+    # 未设时回落 QQ_INTENT_MODEL；端点/Key 仍用 QQ_INTENT_*。
+    intent_model_id = (
+        os.environ.get("WHALE_SHELL_MODEL", "").strip()
+        or os.environ.get("QQ_INTENT_MODEL", "").strip())
     if intent_model_id:
         from whale_core.core.deepseek import DeepSeekCompanion  # build_brain 同款局部导入
         from whale_core.core.intent_router import SearchIntentRouter

@@ -48,8 +48,101 @@ def _load_env_file(path) -> dict:
 
 MAX_TEXT_CHARS = 4000
 
+# 最近一次客户端上报的位置（粗粒度摘要，禁止把高精度轨迹当长期记忆写别处）。
+LOCATION_STORE_KEY = "glasses:last_location"
+
+# companion 路径附加约束：外卖/本地生活只搜索建议，不下单不支付。
+_GLASSES_LOCAL_LIFE_HINT = (
+    "本地生活约束：可以搜索附近商家、评价与公开信息并给出建议或应用深链提示；"
+    "不要声称已经下单、已经支付或正在代下单；本通道不支持自动点外卖/支付。"
+)
+
+
+def _coerce_coord(value) -> float | None:
+    if value is None or value is False:
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    if num != num:  # NaN
+        return None
+    return num
+
+
+def summarize_location_fields(
+    *,
+    city: str = "",
+    location: str = "",
+    lat=None,
+    lng=None,
+) -> str:
+    """把请求/存储里的位置字段收成一行摘要（城市优先，其次自由文本，再次经纬度）。"""
+    city = (city or "").strip()[:80]
+    location = (location or "").strip()[:120]
+    lat_f = _coerce_coord(lat)
+    lng_f = _coerce_coord(lng)
+    parts: list[str] = []
+    if city:
+        parts.append(city)
+    if location and location not in parts:
+        parts.append(location)
+    if lat_f is not None and lng_f is not None:
+        # 保留约城市街区精度，避免把原始高精度坐标灌进提示词。
+        parts.append(f"约 {lat_f:.4f},{lng_f:.4f}")
+    return "；".join(parts)[:200]
+
+
+def resolve_request_location(env: dict, store, body: dict | None) -> str:
+    """位置解析优先级：请求体 → store 最近上报 → 环境默认 → 空（调用方写「未知」）。
+
+    请求体可选字段：``location`` / ``city`` / ``lat`` / ``lng``。
+    环境：``WHALE_DEFAULT_CITY`` 或 ``WHALE_HOME_CITY`` 或 ``WHALE_LOCATION``。
+    """
+    body = body or {}
+    summary = summarize_location_fields(
+        city=str(body.get("city") or ""),
+        location=str(body.get("location") or ""),
+        lat=body.get("lat"),
+        lng=body.get("lng"),
+    )
+    if summary:
+        try:
+            store.put(LOCATION_STORE_KEY, {
+                "summary": summary,
+                "city": str(body.get("city") or "")[:80],
+                "location": str(body.get("location") or "")[:120],
+                "lat": _coerce_coord(body.get("lat")),
+                "lng": _coerce_coord(body.get("lng")),
+            })
+        except Exception:
+            pass
+        return summary
+    try:
+        cached = store.get(LOCATION_STORE_KEY)
+    except Exception:
+        cached = None
+    if isinstance(cached, dict):
+        cached_summary = str(cached.get("summary") or "").strip()
+        if cached_summary:
+            return cached_summary[:200]
+        cached_summary = summarize_location_fields(
+            city=str(cached.get("city") or ""),
+            location=str(cached.get("location") or ""),
+            lat=cached.get("lat"),
+            lng=cached.get("lng"),
+        )
+        if cached_summary:
+            return cached_summary
+    for key in ("WHALE_DEFAULT_CITY", "WHALE_HOME_CITY", "WHALE_LOCATION"):
+        val = (env.get(key) or "").strip()
+        if val:
+            return val[:200]
+    return ""
+
 
 class GlassesConfig:
+
     def __init__(self, env: dict):
         self.token = (env.get("WHALE_GLASSES_TOKEN") or "").strip()
         self.store_path = (env.get("WHALE_GLASSES_STORE")
@@ -116,18 +209,132 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
                 api_key=(env.get("WHALE_QUICK_API_KEY") or env.get("QQ_INTENT_API_KEY")
                          or "").strip() or None)
 
-    def companion_chat(text: str, conversation_id: str) -> str:
+    def _make_companion():
         from whale_core.core.companion import WhaleCompanion
         from whale_core.memory.curation import MemoryCurator
-        companion = WhaleCompanion(store, brain_factory(),
-                                   curator=MemoryCurator(store))
-        # context=None：沿用全局活跃角色卡（persona:active_card），与
-        # 控制台/兼容期同口径；会话历史与记忆按 glasses:<sessionId> 隔离连续。
-        return companion.chat(text, conversation_id=conversation_id)
+        return WhaleCompanion(store, brain_factory(),
+                              curator=MemoryCurator(store))
 
-    def quick_chat(text: str) -> str:
-        return quick_brain_factory().reply(
-            text, persona="用一两句口语简明回答，不展开、不追问。")
+    def _build_search_orchestrator(companion):
+        """与 QQ runner 同款：搜索 +（可选）主人 shell + IntentRouter。
+
+        眼镜/手机通道经 WHALE_GLASSES_TOKEN 鉴权，视为主人身份：personal 档下
+        可挂 shell_sandbox（与 QQ owner 路径同 ACL）。无搜索且无 shell 时返回 None。
+        """
+        has_search = bool(
+            env.get("TAVILY_API_KEY") or env.get("BRAVE_API_KEY")
+            or env.get("WHALE_SEARCH_PROVIDER")
+            or env.get("WHALE_DEEPSEEK_SEARCH_API_KEY"))
+        shell_on = env.get("WHALE_SHELL_ENABLED", "").strip() == "1"
+        if not has_search and not shell_on:
+            return None
+        from whale_core.core.intent_router import SearchIntentRouter
+        from whale_core.core.runtime import (
+            ConversationOrchestrator, ToolRegistry, runtime_shell_grant_verifier)
+        from whale_core.plugins.registry import PluginRegistry
+        from whale_core.plugins.gateway import PluginGateway
+        from whale_core.plugins.policy import PluginActionPolicy
+
+        plugin_registry = PluginRegistry()
+        tools = ToolRegistry()
+        if has_search:
+            from search_web.web_fetch import register_web_fetch
+            from search_web.web_search import register_web_search, select_provider
+            register_web_search(
+                plugin_registry, tools, provider=select_provider(env))
+            register_web_fetch(plugin_registry, tools)
+
+        shell_auto_actions: frozenset[str] = frozenset()
+        if shell_on:
+            from pathlib import Path as _Path
+            from whale_core.plugins.shell_tool import register_shell, SHELL_AUTO_PAIR
+            from whale_core.cloud.shell_policy import ShellPolicy, ShellTier
+            ws = _Path(cfg.store_path).parent / "workspace"
+            register_shell(plugin_registry, tools, ws, env=env)
+            if ShellPolicy.from_env(env).tier is ShellTier.PERSONAL:
+                shell_auto_actions = frozenset({SHELL_AUTO_PAIR})
+
+        gateway = PluginGateway(
+            plugin_registry,
+            PluginActionPolicy(plugin_registry, auto_approve_actions=shell_auto_actions),
+            # 本服务 HTTP 层已用 WHALE_GLASSES_TOKEN 鉴权，视为主人手机/眼镜通道。
+            owner_verifier=lambda _intent: True,
+            approval_verifier=lambda _intent: True,
+            grant_verifier=runtime_shell_grant_verifier(store),
+        )
+        # Shell 审操 / 意图规划：优先 WHALE_SHELL_MODEL，其次眼镜意图，再次 QQ 意图。
+        # 端点与 Key 一律沿用 QQ_INTENT_*（AgentScope），只换模型名环境变量。
+        intent_model_id = (
+            (env.get("WHALE_SHELL_MODEL")
+             or env.get("WHALE_GLASSES_INTENT_MODEL")
+             or env.get("QQ_INTENT_MODEL")
+             or "").strip())
+        intent_brain = None
+        enable_llm = bool(intent_model_id)
+        if enable_llm:
+            from whale_core.core.deepseek import DeepSeekCompanion
+            intent_brain = DeepSeekCompanion(
+                model=intent_model_id,
+                base_url=(env.get("WHALE_GLASSES_INTENT_BASE_URL")
+                          or env.get("QQ_INTENT_BASE_URL") or "").strip() or None,
+                api_key=(env.get("WHALE_GLASSES_INTENT_API_KEY")
+                         or env.get("QQ_INTENT_API_KEY") or "").strip() or None)
+        intent = SearchIntentRouter(
+            model=intent_brain, enable_llm=enable_llm, tools=tools)
+        return ConversationOrchestrator(
+            store, companion, intent_model=intent, tools=tools, gateway=gateway)
+
+    def companion_chat(text: str, conversation_id: str,
+                       location: str = "") -> str:
+        from whale_core.core.runtime import InputEnvelope
+        companion = _make_companion()
+        companion.planning_hint = _GLASSES_LOCAL_LIFE_HINT
+        brain = companion.model
+        try:
+            brain.default_location = location or None
+        except Exception:
+            pass
+        orch = _build_search_orchestrator(companion)
+        if orch is not None:
+            # 把位置摘要塞进意图上下文：SearchIntentRouter 本地生活规则会读
+            # 「当前位置：」行；LLM 规划也能把地点当缺省。
+            _orig_ctx = orch._intent_context
+
+            def _intent_context_with_location(conversation_id, text, *,
+                                             allowed_spaces=None):
+                base = _orig_ctx(conversation_id, text,
+                                 allowed_spaces=allowed_spaces)
+                from whale_core.core.prompt_composer import format_location_context
+                loc_line = format_location_context(location=location or None)
+                return (loc_line + ("\n" + base if base else ""))[:1500]
+
+            orch._intent_context = _intent_context_with_location  # type: ignore
+            result = orch.handle_envelope(InputEnvelope(
+                conversation_id=conversation_id, text=text,
+                source="glasses:phone", channel="glasses",
+                owner_id=cfg.owner_uin or cfg.owner_uid))
+            return result.reply
+        # 无搜索 provider：退回纯陪伴（仍注入位置到 system）。
+        return companion.chat(
+            text, conversation_id=conversation_id, location=location or None)
+
+    def quick_chat(text: str, location: str = "") -> str:
+        brain = quick_brain_factory()
+        try:
+            brain.default_location = location or None
+        except Exception:
+            pass
+        persona = (
+            "用一两句口语简明回答，不展开、不追问。\n"
+            + _GLASSES_LOCAL_LIFE_HINT)
+        import inspect
+        kwargs = {"persona": persona}
+        try:
+            if "location" in inspect.signature(brain.reply).parameters:
+                kwargs["location"] = location or None
+        except (TypeError, ValueError):
+            pass
+        return brain.reply(text, **kwargs)
 
     if send_port_factory is None:
         def send_port_factory():
@@ -243,18 +450,33 @@ def make_handler(delegates):
                 return
             session_id = str(body.get("sessionId") or "").strip() or uuid.uuid4().hex
             session_id = session_id[:64]
+            location = resolve_request_location(
+                getattr(self.server, "glasses_env", {}) or {},
+                delegates["store"], body)
             try:
+                import time as _time
+                _t0 = _time.perf_counter()
                 if mode == "quick":
-                    reply = delegates["quick_chat"](text)
+                    reply = delegates["quick_chat"](text, location=location)
                 else:
                     reply = delegates["companion_chat"](
-                        text, conversation_id=f"glasses:{session_id}")
+                        text, conversation_id=f"glasses:{session_id}",
+                        location=location)
+                latency_ms = int((_time.perf_counter() - _t0) * 1000)
                 if not (reply or "").strip():
                     _json_response(self, 200, {"reply": None, "sessionId": session_id,
-                                               "mode": mode, "error": "empty reply"})
+                                               "mode": mode, "error": "empty reply",
+                                               "latencyMs": latency_ms})
                     return
-                _json_response(self, 200, {"reply": reply, "sessionId": session_id,
-                                           "mode": mode})
+                payload = {"reply": reply, "sessionId": session_id, "mode": mode}
+                # 调试可观测：不回传坐标原文，只回是否已知位置；latencyMs 便于眼镜端体感核对。
+                payload["locationKnown"] = bool(location)
+                payload["latencyMs"] = latency_ms
+                print(f"[glasses] mode={mode} session={session_id[:8]} "
+                      f"latencyMs={latency_ms} loc={bool(location)} "
+                      f"chars_in={len(text)} chars_out={len(reply or '')}",
+                      flush=True)
+                _json_response(self, 200, payload)
             except Exception as exc:
                 # 内容错误不当网络错误暴露给镜片（交接单 §1）
                 _json_response(self, 200, {"reply": None, "sessionId": session_id,
@@ -346,6 +568,7 @@ def main(argv=None) -> int:
     server = ThreadingHTTPServer((args.host, args.port), handler)
     server.glasses_token = cfg.token  # type: ignore[attr-defined]
     server.owner_uin = cfg.owner_uin  # type: ignore[attr-defined]
+    server.glasses_env = env  # type: ignore[attr-defined]
     print(f"whale-glasses-api 监听 http://{args.host}:{args.port}"
           f"（/v1/chat /v1/qq/reply /v1/health /openapi.json）")
     try:

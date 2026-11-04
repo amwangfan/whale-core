@@ -1,6 +1,10 @@
-"""Prompt assembly: neutral baseline, selected role, bounded memory."""
+"""Prompt assembly: neutral baseline, selected role, bounded memory, wall clock."""
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from whale_core.core.prompt_composer import (
     MAX_PERSONA_CHARS, MAX_MEMORY_CHARS, compose_companion_system,
+    format_current_datetime, format_location_context,
 )
 
 
@@ -31,3 +35,27 @@ def test_budget_and_empty_context():
     m = compose_companion_system(memories=["x" * (MAX_MEMORY_CHARS + 1000)])
     assert m.count("x") <= MAX_MEMORY_CHARS
     assert "背景记忆" not in compose_companion_system(memories=[])
+
+
+def test_current_datetime_injected_asia_shanghai():
+    fixed = datetime(2026, 11, 5, 0, 45, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+    line = format_current_datetime(now=fixed)
+    assert line == "当前时间（Asia/Shanghai）：2026-11-05 00:45:30 星期四"
+    system = compose_companion_system(now=fixed)
+    assert line in system
+    # HOST_CONTRACT first, then wall clock
+    assert system.index("你是对话助手") < system.index("当前时间（Asia/Shanghai）")
+
+
+def test_location_injected_or_unknown():
+    unknown = format_location_context(location=None)
+    assert unknown.startswith("当前位置：未知")
+    known = format_location_context(location="上海·杨浦")
+    assert known == "当前位置：上海·杨浦"
+    fixed = datetime(2026, 11, 5, 0, 45, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+    system = compose_companion_system(now=fixed, location="上海·杨浦")
+    assert format_current_datetime(now=fixed) in system
+    assert "当前位置：上海·杨浦" in system
+    assert system.index("当前时间") < system.index("当前位置：上海·杨浦")
+    system_u = compose_companion_system(now=fixed, location="")
+    assert "当前位置：未知" in system_u
