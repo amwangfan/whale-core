@@ -1866,7 +1866,6 @@ def cmd_run(args) -> int:
               f"succeeded={counts['succeeded']}；启动收回过期租约={listener.recovered}")
     print(f"[监听] http://{listener.host}:{listener.port}/（等 WeQ SSE 推送；Ctrl+C 退出）")
     try:
-        import time
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
