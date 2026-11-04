@@ -63,3 +63,66 @@ def test_real_send_when_dry_run_off():
 def test_background_start_requires_enabled():
     loop = ProactiveGreetingLoop(config=ProactiveGreetingConfig())
     assert loop.start_background() is False
+
+
+def test_quota_blocks_real_send():
+    from whale_core.life.proactive_greeting import (
+        ProactiveGreetingConfig, ProactiveGreetingLoop, record_send, LAST_SENT_KEY)
+
+    class Mem:
+        def __init__(self):
+            self.d = {}
+        def get(self, k):
+            return self.d.get(k)
+        def put(self, k, v):
+            self.d[k] = v
+
+    class J:
+        def reply(self, text, **kw):
+            return "yes"
+    class R:
+        def reply(self, text, **kw):
+            return "嗨"
+
+    store = Mem()
+    record_send(store, now=1_000_000.0)
+    sent = []
+    cfg = ProactiveGreetingConfig.from_env({
+        "WHALE_PROACTIVE_GREETING": "1",
+        "WHALE_PROACTIVE_GREETING_DRY_RUN": "0",
+        "WHALE_PROACTIVE_GREETING_COOLDOWN_S": "3600",
+    })
+    tick = ProactiveGreetingLoop(
+        config=cfg, judge=J(), reply_model=R(), send=lambda s: sent.append(s),
+        store=store, now_fn=lambda: 1_000_000.0 + 10,
+    ).tick()
+    assert tick.sent is False and tick.reason == "cooldown"
+    assert sent == []
+    assert store.get(LAST_SENT_KEY) == 1_000_000.0
+
+
+def test_dry_run_skips_quota_consumption():
+    from whale_core.life.proactive_greeting import (
+        ProactiveGreetingConfig, ProactiveGreetingLoop, QUOTA_KEY_PREFIX)
+
+    class Mem:
+        def __init__(self):
+            self.d = {}
+        def get(self, k):
+            return self.d.get(k)
+        def put(self, k, v):
+            self.d[k] = v
+
+    class J:
+        def reply(self, text, **kw):
+            return "yes"
+    class R:
+        def reply(self, text, **kw):
+            return "草稿"
+
+    store = Mem()
+    cfg = ProactiveGreetingConfig.from_env({"WHALE_PROACTIVE_GREETING": "1"})
+    ProactiveGreetingLoop(
+        config=cfg, judge=J(), reply_model=R(), send=lambda s: None, store=store,
+    ).tick()
+    assert not any(k.startswith(QUOTA_KEY_PREFIX) for k in store.d)

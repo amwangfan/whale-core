@@ -591,3 +591,36 @@ def test_companion_injects_recent_activity_scoped_and_honest(env):
     assert "「画一只鲸鱼」完成了" in persona
     assert "别的会话的事" not in persona  # 会话作用域隔离
     assert "别装成完成了" in persona
+
+
+def test_inner_state_writeback_on_open_topic(tmp_path, monkeypatch):
+    from whale_core.core.companion import WhaleCompanion
+    from whale_core.life.state import InnerStateStore
+    from whale_core.memory.store import InMemoryStore
+
+    class Brain:
+        def reply(self, text, **kw):
+            return "好，下次继续帮你盯。"
+
+    store = InMemoryStore()
+    monkeypatch.setenv("WHALE_INNER_STATE_WRITEBACK", "1")
+    WhaleCompanion(store, Brain()).chat(
+        "下次记得帮我盯一下期末复习计划？", conversation_id="private:u1")
+    topics = InnerStateStore(store, scope="private:u1").load().unfinished_topics
+    assert topics and "复习" in topics[0]
+
+
+def test_inner_state_writeback_can_disable(monkeypatch):
+    from whale_core.core.companion import WhaleCompanion
+    from whale_core.life.state import InnerStateStore
+    from whale_core.memory.store import InMemoryStore
+
+    class Brain:
+        def reply(self, text, **kw):
+            return "嗯"
+
+    store = InMemoryStore()
+    monkeypatch.setenv("WHALE_INNER_STATE_WRITEBACK", "0")
+    WhaleCompanion(store, Brain()).chat(
+        "下次记得帮我盯一下期末复习计划？", conversation_id="private:u2")
+    assert InnerStateStore(store, scope="private:u2").load().unfinished_topics == ()

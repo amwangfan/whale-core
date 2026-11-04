@@ -629,11 +629,33 @@ def main(argv=None) -> int:
                 if not ok:
                     print("[proactive] send failed", flush=True)
 
+            def _situation() -> str:
+                """从 InnerState + 近期活动拼情境；失败则空串（判断端默认谨慎）。"""
+                try:
+                    from whale_core.life.state import InnerStateStore
+                    store = delegates.get("store")
+                    if store is None:
+                        return ""
+                    g = InnerStateStore(store).load()
+                    bits = []
+                    if g.style and g.style != "neutral":
+                        bits.append(f"风格={g.style}")
+                    if g.interests:
+                        bits.append("兴趣=" + "、".join(g.interests[-3:]))
+                    if g.unfinished_topics:
+                        bits.append("未完=" + "；".join(g.unfinished_topics[-2:]))
+                    return "；".join(bits)
+                except Exception:
+                    return ""
+
             greeting_loop = ProactiveGreetingLoop(
-                config=gcfg, judge=judge, reply_model=reply_model, send=_send)
+                config=gcfg, judge=judge, reply_model=reply_model, send=_send,
+                situation_provider=_situation,
+                store=delegates.get("store"))
             if greeting_loop.start_background():
                 print(f"proactive greeting loop on interval={gcfg.interval_s}s "
-                      f"dry_run={gcfg.dry_run}", flush=True)
+                      f"dry_run={gcfg.dry_run} cooldown={gcfg.cooldown_s}s "
+                      f"quota={gcfg.daily_quota}", flush=True)
     except Exception as exc:  # noqa: BLE001 — 问候循环失败不阻止主服务
         print(f"[proactive] not started: {type(exc).__name__}", flush=True)
 
