@@ -170,7 +170,7 @@ class ProactiveGreetingLoop:
         config: ProactiveGreetingConfig | None = None,
         judge: JudgeModel | None = None,
         reply_model: ReplyModel | None = None,
-        send: Callable[[str], None] | None = None,
+        send: Callable[[str], bool | None] | None = None,
         situation_provider: Callable[[], str] | None = None,
         store: QuotaStore | None = None,
         now_fn: Callable[[], float] | None = None,
@@ -202,6 +202,12 @@ class ProactiveGreetingLoop:
             return ProactiveGreetingTick(False, reason=f"judge:{verdict[:40]}")
         if self.reply_model is None:
             return ProactiveGreetingTick(True, reason="yes_no_reply_model")
+        # 真发路径：额度/冷却耗尽时提前返回，避免再调回复模型浪费 token。
+        if not self.config.dry_run:
+            ok, why = check_send_budget(self.store, self.config, now=self._now())
+            if not ok:
+                _log.info("proactive send blocked early reason=%s", why)
+                return ProactiveGreetingTick(True, reason=why, draft="", sent=False)
         draft = (self.reply_model.reply(
             "写一句简短自然的主动问候（中文，一两句）。不要提问连环，不要提工具。",
             persona="", memories=(), history=()) or "").strip()
@@ -210,12 +216,13 @@ class ProactiveGreetingLoop:
         if self.config.dry_run:
             _log.info("proactive dry-run draft=%s", draft[:120])
             return ProactiveGreetingTick(True, reason="dry_run", draft=draft, sent=False)
-        ok, why = check_send_budget(self.store, self.config, now=self._now())
-        if not ok:
-            _log.info("proactive send blocked reason=%s draft=%s", why, draft[:80])
-            return ProactiveGreetingTick(True, reason=why, draft=draft, sent=False)
         if self.send is not None:
-            self.send(draft)
+            send_ok = self.send(draft)
+            # False = 明确失败；None/True 视为成功（兼容旧回调只副作用不返回值）。
+            if send_ok is False:
+                _log.info("proactive send failed draft=%s", draft[:80])
+                return ProactiveGreetingTick(
+                    True, reason="send_failed", draft=draft, sent=False)
             record_send(self.store, now=self._now())
             return ProactiveGreetingTick(True, reason="sent", draft=draft, sent=True)
         return ProactiveGreetingTick(True, reason="no_send", draft=draft, sent=False)

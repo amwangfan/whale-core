@@ -176,6 +176,28 @@ def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict) 
     handler.wfile.write(body)
 
 
+
+def install_request_location_intent_wrapper(orch, request_location: dict) -> None:
+    """把「当前请求位置」注入 orch._intent_context；全生命周期只包装一次。
+
+    ``request_location`` 是可变 dict，键 ``value`` 由每轮 companion_chat 写入。
+    若每次请求都重新包装，闭包会嵌套捕获旧位置，导致东京→大阪仍含东京。
+    """
+    if orch is None or getattr(orch, "_glasses_loc_wrapped", False):
+        return
+    _orig_ctx = orch._intent_context
+
+    def _intent_context_with_location(conversation_id, text, *, allowed_spaces=None):
+        base = _orig_ctx(conversation_id, text, allowed_spaces=allowed_spaces)
+        from whale_core.core.prompt_composer import format_location_context
+        loc_line = format_location_context(
+            location=request_location.get("value") or None)
+        return (loc_line + ("\n" + base if base else ""))[:1500]
+
+    orch._intent_context = _intent_context_with_location  # type: ignore
+    orch._glasses_loc_wrapped = True  # type: ignore[attr-defined]
+
+
 def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
                     send_port_factory=None):
     """装配委派对象（测试注入假件；生产用真实件）。
@@ -220,6 +242,8 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
     # ThreadingHTTPServer 下用锁串行化一轮 handle，避免改 location / intent 上下文竞态。
     _orch_lock = threading.Lock()
     _cached: dict = {"companion": None, "orch": None, "quick": None}
+    # 当前请求位置：由 companion_chat 每轮写入；intent 包装只装一次并读取此状态。
+    _request_location: dict = {"value": ""}
 
     def _build_search_orchestrator(companion):
         """与 QQ runner 同款：搜索 +（可选）主人 shell + IntentRouter。
@@ -314,17 +338,9 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
             if orch is not None:
                 # 把位置摘要塞进意图上下文：SearchIntentRouter 本地生活规则会读
                 # 「当前位置：」行；LLM 规划也能把地点当缺省。
-                _orig_ctx = orch._intent_context
-
-                def _intent_context_with_location(conversation_id, text, *,
-                                                 allowed_spaces=None):
-                    base = _orig_ctx(conversation_id, text,
-                                     allowed_spaces=allowed_spaces)
-                    from whale_core.core.prompt_composer import format_location_context
-                    loc_line = format_location_context(location=location or None)
-                    return (loc_line + ("\n" + base if base else ""))[:1500]
-
-                orch._intent_context = _intent_context_with_location  # type: ignore
+                # 包装只安装一次；每轮只更新当前请求位置，避免层层嵌套。
+                _request_location["value"] = location or ""
+                install_request_location_intent_wrapper(orch, _request_location)
                 result = orch.handle_envelope(InputEnvelope(
                     conversation_id=conversation_id, text=text,
                     source="glasses:phone", channel="glasses",
@@ -624,10 +640,11 @@ def main(argv=None) -> int:
                 base_url=(env.get("DEEPSEEK_BASE_URL") or "").strip() or None,
                 api_key=(env.get("DEEPSEEK_API_KEY") or "").strip() or None)
 
-            def _send(draft: str) -> None:
+            def _send(draft: str) -> bool:
                 ok, _ = delegates["qq_send"](draft)
                 if not ok:
                     print("[proactive] send failed", flush=True)
+                return bool(ok)
 
             def _situation() -> str:
                 """从 InnerState + 近期活动拼情境；失败则空串（判断端默认谨慎）。"""

@@ -410,3 +410,64 @@ def test_glasses_source_mounts_shell_and_latency():
     assert "toolMs" in src
     assert "replyMs" in src
     assert "runtime_shell_grant_verifier" in src
+
+
+def test_intent_location_wrapper_installs_once_and_updates():
+    """回归：位置 intent 包装只装一次；东京→大阪不得嵌套保留东京。"""
+    from whale_core.api.glasses import install_request_location_intent_wrapper
+
+    class Orch:
+        def __init__(self):
+            self.n_wrap_reads = 0
+
+        def _intent_context(self, conversation_id, text, *, allowed_spaces=None):
+            return f"BASE:{text}"
+
+    orch = Orch()
+    request_location = {"value": ""}
+
+    install_request_location_intent_wrapper(orch, request_location)
+    first_fn = orch._intent_context
+    assert getattr(orch, "_glasses_loc_wrapped") is True
+
+    # 第二次安装必须是 no-op（同一包装函数，不嵌套）
+    install_request_location_intent_wrapper(orch, request_location)
+    assert orch._intent_context is first_fn
+
+    request_location["value"] = "东京"
+    ctx1 = orch._intent_context("c1", "找餐厅")
+    assert "东京" in ctx1
+    assert "大阪" not in ctx1
+    assert ctx1.count("当前位置") + ctx1.count("位置") >= 1 or "东京" in ctx1
+
+    request_location["value"] = "大阪"
+    ctx2 = orch._intent_context("c1", "找餐厅")
+    assert "大阪" in ctx2
+    assert "东京" not in ctx2
+    # 不得因嵌套包装而出现两份位置行/旧城残留
+    assert ctx2.count("大阪") == 1
+
+
+def test_intent_location_wrapper_nested_bug_would_keep_old_city():
+    """对照：若每轮重新包装，大阪上下文会仍含东京——证明修法必要。"""
+    from whale_core.core.prompt_composer import format_location_context
+
+    class Orch:
+        def _intent_context(self, conversation_id, text, *, allowed_spaces=None):
+            return "BASE"
+
+    orch = Orch()
+    # 模拟旧 bug：每轮重新包装
+    for city in ("东京", "大阪"):
+        _orig = orch._intent_context
+        loc = city
+
+        def _wrap(conversation_id, text, *, allowed_spaces=None, _orig=_orig, _loc=loc):
+            base = _orig(conversation_id, text, allowed_spaces=allowed_spaces)
+            loc_line = format_location_context(location=_loc)
+            return (loc_line + ("\n" + base if base else ""))[:1500]
+
+        orch._intent_context = _wrap
+
+    nested = orch._intent_context("c", "x")
+    assert "东京" in nested and "大阪" in nested
