@@ -749,7 +749,9 @@ def cmd_run(args) -> int:
         return str(store.get("persona:active_card") or "")
 
     # 意图模型（可选，默认关）：QQ_INTENT_MODEL=<模型 id> 开启；规则优先（显式
-    # 搜索指令本地识别零额外调用），LLM 规划用于其余消息。实测选型见 gap-analysis。
+    # 搜索/本地生活/shell.safe 本地识别零额外调用）。enable_llm=True 时路由器仍会
+    # 对普通闲聊跳过意图 LLM（kind=chat），仅模糊写/媒体等 toolish 才打 kimi；
+    # 闲聊回复走 companion/DeepSeek 官模。实测选型见 gap-analysis。
     # 2026-11-01 owner 决策「不走代理」：QQ_INTENT_BASE_URL/QQ_INTENT_API_KEY
     # 可独立于主聊天端点（不同供应商/不同 key 时必备）；缺省回落 DEEPSEEK_*。
     # Shell 审操模型：WHALE_SHELL_MODEL 优先（AgentScope 上的 kimi-k3 等），
@@ -780,7 +782,7 @@ def cmd_run(args) -> int:
             intent_model=SearchIntentRouter(model=intent_brain, enable_llm=True, tools=tools),
             tools=tools, context_resolver=context_resolver,
             grant_gate=_grant_gate)
-        print(f"[意图] 模型={intent_model_id}（规则优先+LLM 规划；{tool_note}）")
+        print(f"[意图] 模型={intent_model_id}（规则优先；闲聊跳过 LLM；模糊写可 LLM；{tool_note}）")
 
     # 安全审核模型（可选，默认关）：QQ_SAFETY_MODEL=<模型 id> 开启——
     # 回复发送前由该模型复核；有顾虑的草稿强制转人工审批（不自动发）。

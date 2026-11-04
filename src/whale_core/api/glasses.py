@@ -262,8 +262,10 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
             approval_verifier=lambda _intent: True,
             grant_verifier=runtime_shell_grant_verifier(store),
         )
-        # Shell 审操 / 意图规划：优先 WHALE_SHELL_MODEL，其次眼镜意图，再次 QQ 意图。
+        # Shell 审操 / 模糊写意图：优先 WHALE_SHELL_MODEL，其次眼镜意图，再次 QQ 意图。
         # 端点与 Key 一律沿用 QQ_INTENT_*（AgentScope），只换模型名环境变量。
+        # SearchIntentRouter：规则未命中的闲聊默认 kind=chat 跳过意图 LLM；
+        # 仅模糊写/媒体等 toolish 才会打 kimi；显式 search/shell 规则零 LLM。
         intent_model_id = (
             (env.get("WHALE_SHELL_MODEL")
              or env.get("WHALE_GLASSES_INTENT_MODEL")
