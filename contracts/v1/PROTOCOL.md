@@ -68,6 +68,8 @@
 - 隐私级：`public` / `owner_private` / `owner_sensitive` / `device_secret`（永不进感知事件）。
 - 能力命名：`screen.context.read` `screen.history.search` `screen.evidence.read` `screen.live.subscribe` `phone.notification.post` `phone.notification.read` `phone.call.ring` `phone.call.audio` `phone.device.safe_action`。
 - V1.1 候选（GL-01）：`glasses.card.show` / `glasses.card.update` / `glasses.card.dismiss`（眼镜 HUD；无桥/离线时端侧降级手机通知并回执 provider_ref=degraded:*，绝不伪报 shown）。
+- V1.1（core#58 安卓自主体）：`device.agent.control`（启动/点击/滚动/按键/输入/媒体控制）、`device.agent.observe`（UI 树/截图观察）、`device.agent.shell`（Root Shell 执行与持续会话）；`action.receipt` 增可选 `result`（summary ≤2000 + output_ref 不透明引用）；大输出经 `device.agent.output.read` 查询拉取。Root 命令仅在该设备执行；不做命令白名单，以资源限制/会话管理/紧急停止防失控。
+- `device.agent.output.read` 是独立、仅用于 `sensor.query` 的敏感读取 scope；`control`/`observe`/`shell` 不隐含它。旧配对的 scope 不自动扩大，须经主人重新批准配对以获得该 scope；hello/ack 同步声明。core 仍按 operation 检查设备注册 scope；可信管理 API Bearer 鉴权不变。端侧每次读取重新检查模块开关、全局暂停及紧急停止，`agent:out:` 另须持续 Root Shell 授权；关闭授权后不准读缓存。仅接受 `agent:ui:latest`、`agent:out:<安全文件名>`（1..128 个 ASCII 字母/数字/下划线/连字符/点，不含 `..`）与 `agent:shot:shot-<数字>.jpg`，拒绝路径、未知类别或畸形引用；云端 read scope 不替代这些本地检查。
 - 默认最小权限；群聊/非主人会话对 screen.* 一律硬上限拒绝。
 
 ## 6. 幂等与离线

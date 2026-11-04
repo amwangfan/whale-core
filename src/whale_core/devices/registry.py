@@ -33,6 +33,8 @@ DEVICE_CAPABILITIES: tuple[str, ...] = (
     "glasses.card.show", "glasses.card.update", "glasses.card.dismiss",
     # V1.1（core#58）：Root 手机自主体（UI 控制/观察/Shell）
     "device.agent.control", "device.agent.observe", "device.agent.shell",
+    # Query-only scope; never implied by control/observe/shell or granted retroactively.
+    "device.agent.output.read",
 )
 
 PAIR_CODE_TTL_S = 600

@@ -76,6 +76,8 @@ def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict) 
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.send_header("Content-Length", str(len(body)))
+    if handler.close_connection:
+        handler.send_header("Connection", "close")
     handler.end_headers()
     handler.wfile.write(body)
 
@@ -177,14 +179,28 @@ def make_handler(delegates):
                     and secrets.compare_digest(header[7:].strip(), token))
 
         def _read_json(self) -> dict | None:
-            length = int(self.headers.get("Content-Length") or 0)
-            if length <= 0 or length > MAX_BODY_BYTES:
-                return None
+            lengths = self.headers.get_all("Content-Length", [])
             try:
-                data = json.loads(self.rfile.read(length))
+                # No chunk decoder: reject ambiguous framing without reading it.
+                if (self.headers.get("Transfer-Encoding") is not None
+                        or len(lengths) != 1
+                        or not lengths[0].isascii()
+                        or not lengths[0].isdigit()):
+                    raise ValueError("invalid body framing")
+                length = int(lengths[0])
+                if length <= 0 or length > MAX_BODY_BYTES:
+                    raise ValueError("invalid body length")
+                raw = self.rfile.read(length)
+                if len(raw) != length:
+                    raise ValueError("incomplete body")
+                data = json.loads(raw)
+                if not isinstance(data, dict):
+                    raise ValueError("expected json object")
+                return data
             except (ValueError, UnicodeDecodeError):
+                # An unread body must never become the next HTTP request.
+                self.close_connection = True
                 return None
-            return data if isinstance(data, dict) else None
 
         def do_GET(self):
             if self.path == "/v1/health":
@@ -194,10 +210,12 @@ def make_handler(delegates):
             if self.path == "/openapi.json":
                 _json_response(self, 200, _openapi())
                 return
+            self.close_connection = True
             _json_response(self, 404, {"error": "not found"})
 
         def do_POST(self):
             if not self._authorized():
+                self.close_connection = True
                 _json_response(self, 401, {"error": "unauthorized"})
                 return
             if self.path == "/v1/chat":
@@ -206,6 +224,7 @@ def make_handler(delegates):
             if self.path == "/v1/qq/reply":
                 self._qq_reply()
                 return
+            self.close_connection = True
             _json_response(self, 404, {"error": "not found"})
 
         def _chat(self):

@@ -5,7 +5,9 @@ sqlite 用临时目录真实库（验证记忆共享语义）。
 """
 from __future__ import annotations
 
+import http.client
 import json
+import socket
 import threading
 import urllib.error
 import urllib.request
@@ -149,4 +151,175 @@ def test_qq_reply_empty_400_and_failure_honest(server):
     code, r = _post(server, "/v1/qq/reply", {"text": "在吗"})
     assert code == 200 and r["ok"] is False
     assert r["error"] in ("unknown", "accepted") or r["error"]
+
+
+def test_http11_auth_retry_reconnects_cleanly(server):
+    conn = http.client.HTTPConnection("127.0.0.1", server._test_port, timeout=3)
+    try:
+        conn.request("POST", "/v1/chat", body=json.dumps({"text": "hi"}),
+                     headers={"Authorization": "Bearer wrong"})
+        response = conn.getresponse()
+        assert response.status == 401
+        assert response.getheader("Connection") == "close"
+        assert json.loads(response.read())["error"] == "unauthorized"
+        conn.request("POST", "/v1/chat",
+                     body=json.dumps({"text": "retry", "mode": "quick"}),
+                     headers={"Authorization": "Bearer phone-token"})
+        response = conn.getresponse()
+        assert response.status == 200
+        assert json.loads(response.read())["reply"]
+    finally:
+        conn.close()
+
+
+def _assert_raw_rejection_closes(server, path, headers, body, status):
+    with socket.create_connection(("127.0.0.1", server._test_port), timeout=3) as sock:
+        request = (f"POST {path} HTTP/1.1\r\nHost: localhost\r\n".encode()
+                   + headers + b"\r\n" + body
+                   + b"GET /v1/health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        sock.sendall(request)
+        response = http.client.HTTPResponse(sock)
+        try:
+            response.begin()
+            assert response.status == status
+            assert response.getheader("Connection") == "close"
+            assert json.loads(response.read())["error"]
+            assert sock.recv(1) == b""
+        finally:
+            response.close()
+    assert server.fake_port.sent == []
+    assert server.fake_brain.calls == []
+
+
+@pytest.mark.parametrize("path,token,status", [
+    ("/v1/chat", "wrong", 401),
+    ("/v1/qq/reply", "wrong", 401),
+    ("/v1/unknown", "phone-token", 404),
+])
+def test_unread_post_body_rejection_closes(server, path, token, status):
+    _assert_raw_rejection_closes(
+        server, path,
+        f"Authorization: Bearer {token}\r\nContent-Length: 2\r\n".encode(),
+        b"{}", status)
+
+
+@pytest.mark.parametrize("path", ["/v1/chat", "/v1/qq/reply"])
+@pytest.mark.parametrize("framing,body", [
+    (b"", b"{}"),
+    (b"Content-Length: abc\r\n", b"{}"),
+    (b"Content-Length: -1\r\n", b"{}"),
+    (b"Content-Length: +2\r\n", b"{}"),
+    (b"Content-Length: 0\r\n", b"{}"),
+    (b"Content-Length: 65537\r\n", b"{}"),
+    (b"Content-Length: 2\r\nContent-Length: 2\r\n", b"{}"),
+    (b"Content-Length: 2\r\nContent-Length: 3\r\n", b"{}"),
+    (b"Content-Length: 2, 2\r\n", b"{}"),
+    (b"Transfer-Encoding: chunked\r\n", b"2\r\n{}\r\n0\r\n\r\n"),
+    (b"Transfer-Encoding: chunked\r\nContent-Length: 2\r\n", b"{}"),
+    (b"Content-Length: 2\r\n", b"xx"),
+    (b"Content-Length: 1\r\n", b"\xff"),
+    (b"Content-Length: 2\r\n", b"[]"),
+])
+def test_invalid_body_framing_or_json_closes(server, path, framing, body):
+    _assert_raw_rejection_closes(
+        server, path, b"Authorization: Bearer phone-token\r\n" + framing,
+        body, 400)
+
+
+def test_http11_valid_requests_keep_connection(server):
+    conn = http.client.HTTPConnection("127.0.0.1", server._test_port, timeout=3)
+    try:
+        original_socket = None
+        for _ in range(2):
+            conn.request("POST", "/v1/chat",
+                         body=json.dumps({"text": "hi", "mode": "quick"}),
+                         headers={"Authorization": "Bearer phone-token"})
+            response = conn.getresponse()
+            assert response.status == 200
+            assert json.loads(response.read())["reply"]
+            assert conn.sock is not None
+            if original_socket is None:
+                original_socket = conn.sock
+            else:
+                assert conn.sock is original_socket
+    finally:
+        conn.close()
+
+
+def test_qq_reply_passive_quota_and_quiet_exemption(server, monkeypatch):
+    from datetime import datetime, timezone
+    from whale_core.api import glasses
+    from whale_core.life.initiative import ProactiveDraft, ProactiveOutbox, ProactivePrefs
+
+    night = datetime(2026, 11, 3, 15, 0, tzinfo=timezone.utc)  # Shanghai 23:00
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return night.astimezone(tz) if tz else night.replace(tzinfo=None)
+
+    monkeypatch.setattr(glasses, "datetime", FixedDateTime)
+    store = SqliteMemoryStore(server._store_path)
+    try:
+        store.put("life:proactive:prefs", {
+            "daily_limit": 0, "passive_daily_limit": 1,
+            "quiet_start": "22:00", "quiet_end": "07:00",
+        })
+        replies = [_post(server, "/v1/qq/reply", {"text": "口述回复"})
+                   for _ in range(3)]
+        assert [code for code, _ in replies] == [200, 200, 200]
+        assert replies[0][1]["ok"] is True
+        assert [body["error"] for _, body in replies[1:]] == ["over_budget"] * 2
+        assert server.fake_port.sent == [("u_owner", "口述回复")]
+        assert store.get("life:quota:passive:2026-11-03") == 1
+        assert store.get("life:quota:2026-11-03") is None
+        outbox = ProactiveOutbox(store)
+        outbox.propose(ProactiveDraft("night-proactive", "hi", "r", ("e",),
+                                      channel="direct_message"))
+        prefs = ProactivePrefs(enabled=True, auto_send=True,
+                               allowed_channels=frozenset({"direct_message"}),
+                               daily_limit=10, passive_daily_limit=1)
+        assert outbox.inspect("night-proactive", prefs, now=night,
+                              response_origin="unsolicited").status == "deferred"
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("origin,legacy,passive", [
+    (None, False, False),
+    (None, True, True),
+    ("reactive_inbound", False, True),
+    ("reactive_completion", False, True),
+    ("reactive_completion", True, True),
+    ("unsolicited", True, False),
+    ("bogus", True, False),
+])
+def test_dispatch_origin_selects_same_quota_for_check_and_write(origin, legacy, passive):
+    from datetime import datetime, time, timezone
+    from whale_core.life.initiative import ProactiveDraft, ProactiveOutbox, ProactivePrefs
+    from whale_core.memory.store import InMemoryStore
+
+    class Port:
+        def send(self, draft):
+            return True
+
+    store = InMemoryStore()
+    outbox = ProactiveOutbox(store)
+    prefs = ProactivePrefs(enabled=True, auto_send=True,
+                           allowed_channels=frozenset({"direct_message"}),
+                           daily_limit=1, passive_daily_limit=1,
+                           quiet_start=time(0), quiet_end=time(0), tz="UTC")
+    now = datetime(2026, 11, 3, 12, tzinfo=timezone.utc)
+    statuses = []
+    for i in range(2):
+        outbox.propose(ProactiveDraft(f"origin-{i}", "hi", "r", ("e",),
+                                      channel="direct_message"))
+        verdict = outbox.dispatch(f"origin-{i}", prefs, now=now, port=Port(),
+                                  passive_reply=legacy, response_origin=origin)
+        statuses.append(verdict.status)
+    assert statuses == ["accepted", "over_budget"]
+    active_key = "life:quota:2026-11-03"
+    passive_key = "life:quota:passive:2026-11-03"
+    assert store.get(passive_key if passive else active_key) == 1
+    assert store.get(active_key if passive else passive_key) is None
 

@@ -33,6 +33,11 @@ registry 与校验器本身纯 stdlib，缺依赖时管理端点回 503）。
 | `DELETE /api/v1/devices/{id}` / `POST /api/v1/devices/{id}/revoke` | 吊销：状态即时生效 + `kick()` 在线连接（先回 `error.device_revoked` 再关闭，§3） |
 | `POST /api/v1/devices/{id}/query` | `{operation, filters?, max_items?, timeout?}` → 下发 `sensor.query`，deadline 内等 `sensor.result`；设备离线 409 `unavailable`，越权 403 `scope_denied`，超时 504 `expired` |
 | `POST /api/v1/devices/{id}/action` | `{capability, args?, idempotency_key?, authorized_scope?, approval_ref?, timeout?}` → `action.request`；幂等键查重（重复 409 `duplicate`），等待**终态**回执 |
+| `POST /api/v1/devices/{id}/action/status` | `{idempotency_key}` → 查询既有动作状态，不重新执行；终态 `receipt` 保留 `executed_at`、`error_code`、`provider_ref` 与 `result`（如设备提供） |
+
+动作首次回执、手机重复动作重放、Core 重启后的状态对账均保留结果摘要和不透明输出引用。手机端新增回执内容随现有队列策略加密持久化；旧记录没有保存过的结果无法补回，不应为补结果自动重执行动作。
+
+大输出通过 `/query` 的 `operation="device.agent.output.read"` 与 `filters.output_ref` 拉取，需要独立的设备注册 scope，旧设备授权不会自动扩大；须由主人显式重新配对批准。端侧还检查模块开关、全局暂停、紧急停止及对应输出的本地授权。此 scope 不授予执行 Shell 或采集新截图的能力。
 
 设备 WSS：`ws://<host>:<api_port+2>/api/v1/devices/ws`（长连，不套 voice.py 的
 60s 票据/会话超时；TLS 由外层反代终结，§1）。连接即下发 `auth.challenge`；
