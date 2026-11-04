@@ -58,7 +58,7 @@ class SearchIntentRouter:
                 "media.video.generate": "prompt: 视频描述, model: 可选（用户指定才填）",
                 "tts.synthesize": "text: 要朗读的文字, model/voice: 可选（用户指定才填）",
                 "asr.transcribe": "audio: 已提供的音频数据或资源引用；缺音频时澄清",
-                "shell.execute": "command: 命令字符串；执行仍受宿主审批和沙箱限制",
+                "shell.safe": "command: 命令字符串；仅主人或有效 sudo shell 租约；执行仍受沙箱限制",
             }
             catalog = []
             for capability in sorted(capabilities):

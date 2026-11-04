@@ -471,10 +471,24 @@ def test_codes_lifecycle(api):
 
 def test_code_create_rejects_ungrantable_scope(api):
     server, _ = api
+    # shell.safe 现已纳入 GRANTABLE（sudo 临时放行）；仍拒绝未知/高危伪造 scope
     status, raw = _req(server, "POST", "/api/v1/auth/temporary/codes",
-                       body={"scopes": ["tool.shell.safe"]})
+                       body={"scopes": ["tool.shell.root", "payment.charge"]})
     assert status == 422
     assert _json(raw)["error"]["code"] == "invalid_request"
+
+
+def test_code_create_allows_shell_safe_scope(api):
+    server, _ = api
+    status, raw = _req(server, "POST", "/api/v1/auth/temporary/codes",
+                       body={"scopes": ["tool.shell.safe"], "grant_max_uses": 2})
+    assert status == 200
+    created = _json(raw)["result"]
+    assert created["code"] and created["code_id"].startswith("oc-")
+    status, raw = _req(server, "GET", "/api/v1/auth/temporary/codes")
+    mine = next(c for c in _json(raw)["result"]["codes"]
+                if c["code_id"] == created["code_id"])
+    assert "tool.shell.safe" in mine["allowed_scopes"]
 
 
 def test_code_custom_phrase_strength_gate(api):

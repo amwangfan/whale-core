@@ -124,11 +124,18 @@ class ShellPolicy:
             )
         return ShellVerdict(False, f"unknown tool {name!r}", self.tier)
 
-    def command_verdict(self, command: str, *, is_owner: bool = False) -> ShellVerdict:
-        """自由命令裁决：仅 personal 档 + 认证 owner + 基本形状检查。
+    def command_verdict(
+        self,
+        command: str,
+        *,
+        is_owner: bool = False,
+        has_shell_grant: bool = False,
+    ) -> ShellVerdict:
+        """自由命令裁决：personal 档 + (认证 owner | 有效 sudo shell 租约) + 形状。
 
-        放行的命令在执行器侧进入 Bubblewrap 沙箱（cwd 白名单 / rlimit /
-        超时 / 环境擦洗）；策略层不做字符串黑名单——那不是安全边界。
+        QQ 非主人即使 ``WHALE_SHELL_TIER=personal`` 也不得自由命令；唯一例外是
+        ``temporary_auth`` 签发且未过期的 ``tool.shell.safe`` 租约（has_shell_grant）。
+        放行后仍进 Bubblewrap；策略层不做字符串黑名单。
         """
         if not self.tier_at_least(ShellTier.PERSONAL):
             return ShellVerdict(
@@ -136,8 +143,12 @@ class ShellPolicy:
                 f"free-form commands require personal tier (current: {self.tier.value})",
                 self.tier,
             )
-        if not is_owner:
-            return ShellVerdict(False, "personal commands require authenticated owner", self.tier)
+        if not (is_owner or has_shell_grant):
+            return ShellVerdict(
+                False,
+                "personal commands require authenticated owner or active sudo shell grant",
+                self.tier,
+            )
         cmd = command or ""
         if not cmd.strip():
             return ShellVerdict(False, "empty command", self.tier)
@@ -145,7 +156,12 @@ class ShellPolicy:
             return ShellVerdict(False, f"command longer than {self.max_command_chars} chars", self.tier)
         if "\x00" in cmd:
             return ShellVerdict(False, "NUL byte in command", self.tier)
-        return ShellVerdict(True, "owner command in personal tier; sandbox is the boundary", self.tier)
+        who = "owner" if is_owner else "sudo-grant"
+        return ShellVerdict(
+            True,
+            f"{who} command in personal tier; sandbox is the boundary",
+            self.tier,
+        )
 
     def audit(self, subject: str, verdict: ShellVerdict, *, source: str = "") -> dict:
         """台账记录：只记命令/工具文本（截断）与裁决；**不记命令输出**（可能含密钥）。"""

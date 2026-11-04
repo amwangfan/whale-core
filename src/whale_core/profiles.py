@@ -264,11 +264,13 @@ def assemble_runtime(
         notes.append("LLM 意图识别已启用（WHALE_INTENT_MODEL_ENABLED=1）")
     from whale_core.plugins.gateway import PluginGateway
     from whale_core.plugins.policy import PluginActionPolicy
-    from whale_core.core.runtime import runtime_approval_verifier, runtime_owner_verifier
+    from whale_core.core.runtime import (
+        runtime_approval_verifier, runtime_owner_verifier, runtime_shell_grant_verifier)
     gateway = PluginGateway(registry, PluginActionPolicy(
                             registry, auto_approve_actions=shell_auto_actions),
                             owner_verifier=runtime_owner_verifier(store),
-                            approval_verifier=runtime_approval_verifier(store))
+                            approval_verifier=runtime_approval_verifier(store),
+                            grant_verifier=runtime_shell_grant_verifier(store))
     # G1-C：多轮工具执行模型（可选，默认关）——plan 未声明能力链时由
     # llm.tool_executor 角色逐轮提议工具；固定链仍是稳定保底模式。
     executor_model = None

@@ -62,6 +62,7 @@ from whale_core.core.runtime.policy import (
     _action_fingerprint,
     runtime_approval_verifier,
     runtime_owner_verifier,
+    runtime_shell_grant_verifier,
     validate_tool_manifest,
 )
 from whale_core.core.runtime.response_assembly import (

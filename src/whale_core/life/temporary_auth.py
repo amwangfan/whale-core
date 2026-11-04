@@ -39,11 +39,12 @@ SUDO_PREFIXES: Tuple[str, ...] = ("sudo ", "sudo　", "SUDO ")
 #: 低熵口令允许的最大 scope 集合（低风险）
 LOW_ENTROPY_SCOPES = frozenset({SCOPE_CHAT_BASIC, SCOPE_TASK_READ_SELF})
 
-#: 租约允许携带的 scope 上限（高风险动作永远不在此列——shell/支付/删数据
-#  仍需既有审批链，INV-04）
+#: 租约允许携带的 scope 上限。支付/删库等永不在此列（INV-04）。
+#: ``tool.shell.safe`` 可经 sudo 临时授予陌生人私聊（到期/用尽收回）；
+#: 仍须 personal 档 + 执行器沙箱，且不进群上限。
 GRANTABLE_SCOPES = frozenset({
     SCOPE_CHAT_BASIC, SCOPE_TASK_READ_SELF,
-    "tool.web.search", "outbox.submit", "device.notify",
+    "tool.web.search", "tool.shell.safe", "outbox.submit", "device.notify",
     # D3：设备面 scope 族（screen.* / phone.*）纳入可授予集合；
     # 实际能否生效仍由 context_resolver 矩阵裁决（screen.* 仅 owner
     # 私聊/API owner，群聊硬上限拒绝）——列入此处只是「允许租约携带」。

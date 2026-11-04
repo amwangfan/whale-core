@@ -35,11 +35,13 @@ class PluginGateway:
         *,
         owner_verifier: Callable[[ActionIntent], bool] | None = None,
         approval_verifier: Callable[[ActionIntent], bool] | None = None,
+        grant_verifier: Callable[[ActionIntent], bool] | None = None,
     ) -> None:
         self.registry = registry
         self.policy = policy
         self._owner_verifier = owner_verifier or (lambda _intent: False)
         self._approval_verifier = approval_verifier or (lambda _intent: False)
+        self._grant_verifier = grant_verifier or (lambda _intent: False)
         self.last_verdict: PluginVerdict | None = None
         self.dispatch_log: list[str] = []
 
@@ -69,11 +71,16 @@ class PluginGateway:
             # A failed auth/approval lookup must fail closed.
             is_owner = False
             explicitly_approved = False
+        try:
+            grant_authorized = bool(self._grant_verifier(intent)) if not is_owner else False
+        except Exception:
+            grant_authorized = False
         verdict = self.policy.evaluate(
             plugin_id,
             action,
             is_owner=is_owner,
             explicitly_approved=explicitly_approved,
+            grant_authorized=grant_authorized,
             args=args,
             reserve_transaction=True,
         )
@@ -88,8 +95,13 @@ class PluginGateway:
             return receipt
 
         executor = self.registry.executor(plugin_id) or NullPluginExecutor()
+        # 仅 shell 执行器需要宿主身份标志；其它插件保持原 args（测例/契约兼容）
+        exec_args = dict(args)
+        if plugin_id == "shell_sandbox":
+            exec_args["_whale_is_owner"] = bool(is_owner)
+            exec_args["_whale_shell_grant"] = bool(grant_authorized)
         try:
-            ok, text = executor.execute(action, target, args)
+            ok, text = executor.execute(action, target, exec_args)
         except Exception:
             ok, text = False, "executor error"
         receipt = f"plugin:{plugin_id}:{action}:{'ok' if ok else 'fail'}:{str(text)[:120]}"
