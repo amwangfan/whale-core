@@ -14,7 +14,7 @@ import json
 from whale_core.core.runtime import ToolSpec
 from whale_core.plugins.artifacts import ArtifactStore
 from whale_core.plugins.media_image import OpenAIImagesProvider, register_image_gen
-from whale_core.plugins.media_video import DashScopeWanVideoProvider, VideoTaskManager, register_video_gen
+from whale_core.plugins.media_video import DashScopeWanVideoProvider, VideoTaskManager, register_video_gen  # noqa: F401  (VideoTaskManager 经 video_gen 网关持有)
 from whale_core.plugins.speech import OpenAICompatibleASR, OpenAICompatibleTTS, register_speech
 from whale_core.plugins.realtime_voice import OpenAICompatibleRealtime, register_realtime_voice
 
@@ -301,21 +301,23 @@ def configure_optional_capabilities(registry, tools, store, *, env: Mapping[str,
                 ),
                 provider=tts_providers[tts_default])
         if tts_default:
+            # 2026-11-05 owner 定版流程：语音收口进 SpeechGenGateway
+            # （plugins/speech_gen.py 单文件）——文本 + 模型/音色/语速选择。
+            from whale_core.plugins.speech_gen import SpeechGenGateway
+            speech_gateway = SpeechGenGateway(tts_providers, default_model=tts_default)
             def speak(args):
-                # 2026-11-01：允许指定语音模型/音色（owner 决策）；未知模型诚实报错
-                model = str(args.get("model") or "").strip()
-                provider = tts_providers[tts_default]
-                if model:
-                    provider = tts_providers.get(model)
-                    if provider is None:
-                        raise ValueError(
-                            f"未知语音模型 {model!r}（可用：{', '.join(sorted(tts_providers))}）")
-                audio = provider.synthesize(str(args.get("text") or ""), voice=str(args.get("voice") or ""), rate=float(args.get("rate") or 1))
+                result = speech_gateway.synthesize(
+                    str(args.get("text") or ""),
+                    model=str(args.get("model") or ""),
+                    voice=str(args.get("voice") or ""),
+                    rate=float(args.get("rate") or 1))
                 if out.artifacts is None:
                     raise ValueError("artifact storage required for speech output")
                 # 2026-11-01：同生图——只回工件引用 + 勿贴链接提示（模型曾把
                 # /api/v1/artifacts/ 写成 [语音](url) 发进群，URL 外部打不开）。
-                _r = out.artifacts.save_bytes(audio, "audio/mpeg").as_dict()
+                _r = out.artifacts.save_bytes(result.audio, "audio/mpeg").as_dict()
+                _r["model"] = result.model
+                _r["voice"] = result.voice
                 _r["note"] = ("语音会由系统自动作为语音消息发送给对方；"
                               "回复正文里不要包含任何链接或文件路径。")
                 return json.dumps(_r, ensure_ascii=False)
@@ -360,21 +362,24 @@ def configure_optional_capabilities(registry, tools, store, *, env: Mapping[str,
             out.notes.append(f"视频默认模型 {video_model} 不可用，回退 "
                              + sorted(video_providers)[0])
             video_model = sorted(video_providers)[0]
-        provider = video_providers[video_model]
-        register_video_gen(registry, provider=provider)
-        out.video_manager = VideoTaskManager(store, provider, artifact_store=out.artifacts,
-                                             min_poll_interval=15,
-                                             providers=video_providers,
-                                             default_model=video_model)
+        register_video_gen(registry, provider=video_providers[video_model])
+        # 2026-11-05 owner 定版流程：视频收口进 VideoGenGateway
+        # （plugins/video_gen.py 单文件）——提示词 + 模型/时长/尺寸选择；
+        # 异步任务生命周期（轮询/取消/持久化/产物落存）由网关内嵌
+        # VideoTaskManager 托管，out.video_manager 暴露给宿主跟踪线程。
+        from whale_core.plugins.video_gen import VideoGenGateway
+        video_gateway = VideoGenGateway(
+            video_providers, default_model=video_model, store=store,
+            artifact_store=out.artifacts, min_poll_interval=15)
+        out.video_manager = video_gateway.manager
         def video(args):
             require("media_video")
-            # 2026-11-01：允许指定视频模型（owner 决策）；未知模型诚实报错并列可用
-            model = str(args.get("model") or "").strip()
-            task = out.video_manager.submit(
+            result = video_gateway.generate(
                 _with_media_style(str(args.get("prompt") or args.get("query") or "")),
-                duration_s=int(args.get("duration_s") or 5), size=str(args.get("size") or "1280x720"),
-                model=model)
-            return json.dumps(task.as_dict(), ensure_ascii=False)
+                model=str(args.get("model") or ""),
+                duration_s=int(args.get("duration_s") or 5),
+                size=str(args.get("size") or "1280x720"))
+            return json.dumps(result.as_dict(), ensure_ascii=False)
         # 2026-11-02 owner 决策：视频模型选型指南进工具描述（意图规划器据此选路）
         _VIDEO_GUIDE = {
             "happyhorse-1.1-t2v": "通用首选：时长3–15s灵活、画幅比例多、出片快",
