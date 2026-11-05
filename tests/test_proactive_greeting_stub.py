@@ -223,3 +223,36 @@ def test_quota_exhausted_skips_reply_model():
     assert tick.draft == ""
     assert reply.n == 0
     assert sent == []
+
+
+def test_daily_quota_zero_means_unlimited():
+    """owner 2026-11-05：DAILY_QUOTA=0 → 不限（仍受冷却）。"""
+    from whale_core.life.proactive_greeting import (
+        ProactiveGreetingConfig, check_send_budget, record_send)
+
+    class Mem:
+        def __init__(self):
+            self.d = {}
+        def get(self, k):
+            return self.d.get(k)
+        def put(self, k, v):
+            self.d[k] = v
+
+    store = Mem()
+    cfg = ProactiveGreetingConfig.from_env({
+        "WHALE_PROACTIVE_GREETING": "1",
+        "WHALE_PROACTIVE_GREETING_DRY_RUN": "0",
+        "WHALE_PROACTIVE_GREETING_DAILY_QUOTA": "0",
+        "WHALE_PROACTIVE_GREETING_COOLDOWN_S": "60",
+    })
+    assert cfg.daily_quota == 0
+    now = 5_000_000.0
+    # 即使已记过多次发送，quota=0 也不拦
+    record_send(store, now=now - 120)
+    record_send(store, now=now - 120)
+    ok, why = check_send_budget(store, cfg, now=now)
+    assert ok and why == "ok_unlimited"
+    # 冷却仍生效
+    record_send(store, now=now - 10)
+    ok2, why2 = check_send_budget(store, cfg, now=now)
+    assert not ok2 and why2 == "cooldown"

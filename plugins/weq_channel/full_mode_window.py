@@ -328,6 +328,10 @@ class WindowedSendPort:
         self.closes += 1
         print(f"[窗口] close (第{self.closes}次)")
 
+    def __getattr__(self, name):
+        # 透传内层能力：login/_get/_cookie/last_receipt/artifact_reader 等
+        return getattr(self._inner, name)
+
     # ── 空闲关窗（仅 runner 主进程调用；approve 子进程不起 closer）─────
 
     def start_closer(self, idle_min: float | None = None) -> None:

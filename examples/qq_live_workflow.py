@@ -24,8 +24,8 @@ flock）；本文件同时保留为可运行示例，生产 systemd 当前仍直
   stub（如实记 unknown，不冒充受理，不触网）。
 
 风控策略（issue #13，env 覆盖默认值，run 启动打印生效策略、不打印密钥）：
-- 主动行为：DAILY_LIMIT（默认 **10**/天）+ QUIET_START/QUIET_END（默认 **22–7** 点）；
-- 被动回复（仅回应已配对 owner 入站）：PASSIVE_DAILY_LIMIT（默认 200/天，防跑飞
+- 主动行为：DAILY_LIMIT（默认 **10**/天，**0=不限**）+ QUIET_START/QUIET_END（默认 **22–7** 点）；
+- 被动回复（仅回应已配对 owner 入站）：PASSIVE_DAILY_LIMIT（默认 200/天，**0=不限**，防跑飞
   保险丝）+ PASSIVE_REPLY_IN_QUIET（默认 1 = 深夜 owner 来件照常回复——对话延续
   不是打扰；**主动行为永不豁免静默**）。
 
@@ -152,11 +152,11 @@ _PROCESS_LIVE_AUTO = False
 def _env_risk_prefs() -> ProactivePrefs:
     """风控策略（issue #13 统一口径）：被动回复与主动行为是两套预算。
 
-    - 主动：DAILY_LIMIT 默认 10/天 + QUIET 22–7（与 docs/research §6.5 一致）；
+    - 主动：DAILY_LIMIT 默认 10/天（**0=不限**）+ QUIET 22–7；
       双开关（--live-auto-send + QQ_LIVE_AUTOSEND=1）已启用时 auto_send=True，
       主动私信按该授权自动派发（issue #59），不再逐条人审；
     - 被动回复（仅回应已配对 owner 入站）：PASSIVE_DAILY_LIMIT 默认 200/天为
-      防跑飞保险丝（自激循环/风暴），PASSIVE_REPLY_IN_QUIET 默认开——深夜
+      防跑飞保险丝（**0=不限**），PASSIVE_REPLY_IN_QUIET 默认开——深夜
       owner 来件照常回复（对话延续不是打扰）；豁免**只**作用于被动回复。
     - env 覆盖默认值；生效策略由 cmd_run 启动打印（不打印任何密钥值）。
     发送结果 unknown 不自动重试（账本既有语义），风控信号出现即人工停机。
@@ -181,10 +181,17 @@ def policy_summary(prefs: ProactivePrefs) -> str:
                 if prefs.auto_send else
                 "人工逐条（--auto-approve 仅 dry-run 演示；无人值守真实发送需 "
                 "--live-auto-send + QQ_LIVE_AUTOSEND=1 双开关）")
+    active_cap = "不限" if prefs.daily_limit == 0 else f"{prefs.daily_limit}/日"
+    if prefs.passive_daily_limit is None:
+        passive_cap = "跟随主动"
+    elif prefs.passive_daily_limit == 0:
+        passive_cap = "不限"
+    else:
+        passive_cap = f"{prefs.passive_daily_limit}/日"
     return (
-        f"[策略] 主动: 上限={prefs.daily_limit}/日 静默={prefs.quiet_start.hour:02d}:00–"
+        f"[策略] 主动: 上限={active_cap} 静默={prefs.quiet_start.hour:02d}:00–"
         f"{prefs.quiet_end.hour:02d}:00 | "
-        f"被动回复: 上限={prefs.passive_daily_limit}/日 "
+        f"被动回复: 上限={passive_cap} "
         f"静默豁免={'是' if prefs.passive_reply_in_quiet else '否'} | "
         f"审批: {approval}"
     )
@@ -493,18 +500,29 @@ def cmd_run(args) -> int:
         return sent
 
     def _plan_segments(text, *, is_group, rhythm, anxious=False,
-                       familiarity="stranger"):
+                       familiarity="stranger", conversation_id=""):
         """issue #23：模型规划优先（◆ 分隔/[[沉默]]/[[稍后补充]]），
         无标记回落 split_reply。返回 (bubbles, plan)。
         issue #41：语气/长度目标由确定性信号推导（derive_plan_guidance），
-        随计划结构化返回（供 trace/宿主决策；模型不能自报目标）。"""
+        随计划结构化返回（供 trace/宿主决策；模型不能自报目标）。
+        群聊另按时间线 peer 中位推导 soft_ceiling（句界软裁，非硬砍 40 字）。"""
         from whale_core.life.response_planner import (
             derive_plan_guidance, plan_reply)
         guidance = derive_plan_guidance(
             familiarity=familiarity, anxious=anxious, is_group=is_group)
+        soft_ceiling = 0
+        if is_group and conversation_id:
+            try:
+                from whale_core.life.group_length import derive_group_length_norm
+                soft_ceiling = derive_group_length_norm(
+                    timeline.recent(str(conversation_id), limit=40)
+                ).soft_ceiling
+            except Exception:
+                soft_ceiling = 0
         plan = plan_reply(text, is_group=is_group,
                           max_segments=rhythm.effective_max_segments(
                               is_group=is_group),
+                          soft_ceiling=soft_ceiling,
                           **guidance)
         if plan.follow_up:
             # 「稍后补充」是意图声明：只有存在服务端可信的未完成任务/事件
@@ -636,7 +654,7 @@ def cmd_run(args) -> int:
             or current_epoch(store, event.conversation)
         segments, _plan = _plan_segments(
             reply, is_group=event.conversation.startswith("group:"),
-            rhythm=rhythm)
+            rhythm=rhythm, conversation_id=event.conversation)
         if _plan.silent:
             print("  [规划] 补发内容被规划为沉默，不发送")
             workflow.outbox.close(draft_id, reason="silent_planned")
@@ -874,6 +892,23 @@ def cmd_run(args) -> int:
         workflow.orchestrator.gateway = plugin_gateway
     # 两段式慢任务补发（owner 决策 2026-10-31）：ack 先回，结果后台好了再补
     workflow._completion_sender = _send_completion
+
+    # Owner「做 xxx」→ ResultDelivery（私聊结果图等）；群聊不走 do_request 短路。
+    # 仅 live_auto 注入真实投递器——人工审批模式下不抢先直发。
+    workflow._result_owner_uid = os.environ.get("OWNER_UID", "").strip()
+    if live_auto:
+        def _result_deliver(items, summary: str = "") -> dict:
+            from whale_core.life.result_delivery import (
+                ResultDelivery, summarize_receipts)
+            owner_uid = os.environ.get("OWNER_UID", "").strip()
+            delivery = ResultDelivery(send_port, owner_uid=owner_uid)
+            receipts = delivery.deliver(items, summary=summary or "")
+            result = summarize_receipts(receipts)
+            print(f"  [ResultDelivery] ok={result.get('ok')} "
+                  f"channels={result.get('channels')} "
+                  f"count={result.get('count')}")
+            return result
+        workflow._result_deliverer = _result_deliver
 
     # 2026-11-02 生产实证「视频没消息了」：generate_video 提交即 pending，
     # 外层任务带着「视频还在跑」就交付收口——视频任务无人轮询永远不来。
@@ -1377,14 +1412,34 @@ def cmd_run(args) -> int:
             return
         print(f"  [AI 草稿] {result['draft_id']} verdict={result['verdict']} ({result['reason']})")
         print(f"  {result['reply'][:300]}")
-        if result["verdict"] != "needs_approval":
-            _tfin(_tid, "silent", summary="verdict 非 needs_approval，未发送")
+        # issue #59：auto_send 启用后 inspect 对被动/授权草稿返回 ready（不再是
+        # needs_approval）。live-auto 路径对 ready 与 needs_approval 都应继续发送；
+        # over_budget / deferred / rejected 等仍静默。
+        if result["verdict"] not in ("ready", "needs_approval"):
+            _tfin(_tid, "silent",
+                  summary=f"verdict={result['verdict']}，未发送")
             return
         if result.get("safety_concern"):
             # 安全审核有顾虑：不自动发送，留人工终审
             print(f"  [安全审核] 顾虑：{result['safety_concern'][:120]} → 不自动发送，待人工 approve")
             _tspan(_tid, "workflow", "skipped", reason_code="safety_review")
             _tfin(_tid, "silent")
+            return
+        if result.get("delivered_via") == "result_delivery":
+            # 结果已由 ResultDelivery 直投（文字摘要+图）；此处只回一条短确认，
+            # 避免再把整段摘要当普通气泡重发（图已发过）。
+            print(f"  [做事] ResultDelivery 已投递 do={((result.get('do_request') or {}).get('kind'))}")
+            if live_auto and result.get("reply"):
+                # 短确认仍走网关，便于会话里看见「好了」；失败不阻断（图可能已到）。
+                draft_id = result["draft_id"]
+                owner_draft_ids.add(draft_id)
+                approved_draft_ids.add(draft_id)
+                receipt = plugin_gateway.dispatch(send_message_intent(
+                    event.conversation, result["reply"], draft_id=draft_id))
+                print(f"  [做事确认] {draft_id} → {receipt}")
+                _tfin(_tid, "delivered", summary="result_delivery")
+            else:
+                _tfin(_tid, "delivered", summary="result_delivery-pending-approve")
             return
         if live_auto:
             # 语音产物先发（同步路径的 TTS 任务产物——「语音跟我说」这类），
@@ -1407,7 +1462,7 @@ def cmd_run(args) -> int:
             segments, _plan = _plan_segments(
                 result["reply"],
                 is_group=event.conversation.startswith("group:"),
-                rhythm=rhythm)
+                rhythm=rhythm, conversation_id=event.conversation)
             if _plan.silent:
                 print("  [规划] 本轮规划为沉默，不发送")
                 # 2026-11-01 审批积压治理：沉默轮的草稿终态关闭，不占审批列表
@@ -1612,8 +1667,9 @@ def cmd_run(args) -> int:
         # G4：分段上限取会话节奏卡配置（quiet = 单气泡）。
         rhythm = RhythmStore(store).get_with_channel_default(
             rhythm_key_for("qq", incoming.conversation) or "", "qq")
-        segments, _plan = _plan_segments(reply, is_group=is_group,
-                                         rhythm=rhythm)
+        segments, _plan = _plan_segments(
+            reply, is_group=is_group, rhythm=rhythm,
+            conversation_id=incoming.conversation)
         if _plan.silent:
             print("  [规划] 本轮规划为沉默，不发送")
             if result.get("draft_id"):
@@ -1721,13 +1777,15 @@ def cmd_run(args) -> int:
     workflow.companion.planning_hint += (
         "\n对方当条消息里附带的图片你能直接看到内容并讨论；"
         "别再说自己读不了图——之前看图猜内容都是真看到了，不是瞎猜。")
-    # 2026-11-01 owner 决策：群友实测反馈「太严肃、太有原则」。放开手脚聊——
-    # 原则与安全由系统后台把关，人格层不端着、不布道。称呼用群名片/昵称。
+    # 2026-11-05 owner 明确选 B：群聊人格偏温柔体贴（非 Grok 互损）。
+    # 原则与安全仍由系统后台把关；称呼用群名片/昵称。
     workflow.companion.planning_hint += (
-        "\n群里都是熟人朋友，大家说话很随意：放开了聊——接梗、吐槽、开玩笑、"
-        "被逗了可以俏皮地怼回去，不用端着、不用说教、不用一本正经。"
+        "\n群里都是熟人朋友：语气偏温柔体贴，少攻击性；可以轻轻接梗、关心人，"
+        "但不抬杠、不阴阳、不互损怼人，也不端着说教。"
         "提到或称呼群友时直接用他们的群名片/昵称（时间线里 […|名字] 就是），"
-        "不要念 ID 或代号。")
+        "不要念 ID 或代号。"
+        "私聊可以稍亲近一点，但仍偏温柔。"
+        "别用客服腔，也别用破折号（——）串成长句那种作文腔；像平时打字一样短句。")
     # issue #57：反应图能力说明只在素材库非空时出现（每轮动态求值；
     # 模型只提语义标签，选图/频控由素材层兜底，发不出就纯文字）。
     _base_planning_hint = workflow.companion.planning_hint
@@ -1838,9 +1896,14 @@ def cmd_run(args) -> int:
             return False
         return str(ans or "").strip().startswith("是")
 
+    try:
+        _topic_prob = float(os.environ.get("WHALE_GROUP_TOPIC_JOIN_PROB", "0.18"))
+    except ValueError:
+        _topic_prob = 0.18
     group_turn_policy = GroupTurnPolicy(
         store, bot_names=bot_aliases, quiet_now=_quiet_now,
         directed_classifier=_llm_directed, chain_judge=_chain_judge,
+        topic_join_prob=_topic_prob,
     )
 
     _member_extractor = MemberMemoryExtractor(

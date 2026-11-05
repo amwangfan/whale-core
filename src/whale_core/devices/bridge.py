@@ -90,7 +90,11 @@ class SimulatedActionPort:
     - ``receipts``：``capability -> payload dict | Exception | callable``；
       缺省回 ``executed`` 终态。脚本化 ``DeviceUnavailable("expired")``
       即模拟超时；``received``/``accepted`` 可验证「接受≠已执行」。
+    - 每次下发先按幂等键 reserve ``pending``（对齐 gateway）；超时异常保留
+      pending，供 ``action_status`` 对账测试。
     """
+
+    _TERMINAL = frozenset({"executed", "failed", "unknown"})
 
     def __init__(
         self,
@@ -104,6 +108,8 @@ class SimulatedActionPort:
         self._online = online
         self._receipts = dict(receipts or {})
         self._now_ms = now_fn or now_ms
+        # (device_id, idempotency_key) → 动作记录（支持 reconcile 测试）
+        self._idem_records: dict[tuple[str, str], dict[str, Any]] = {}
 
     def _is_online(self, device_id: str) -> bool:
         if self._online is None:
@@ -111,6 +117,23 @@ class SimulatedActionPort:
         if callable(self._online):
             return bool(self._online(device_id))
         return bool(self._online.get(device_id, False))
+
+    def _reserve_pending(
+        self, device_id: str, *, capability: str,
+        idempotency_key: str, timeout_s: float,
+    ) -> dict[str, Any]:
+        """先落 pending，模拟 gateway 幂等预约（超时后仍可 action_status）。"""
+        rec = {
+            "device_id": device_id,
+            "idempotency_key": idempotency_key,
+            "capability": capability,
+            "action_id": f"sim-{uuid4().hex[:24]}",
+            "created_at": self._now_ms(),
+            "expires_at": self._now_ms() + int(float(timeout_s) * 1000),
+            "state": "pending",
+        }
+        self._idem_records[(device_id, idempotency_key)] = rec
+        return rec
 
     def send_action(self, device_id: str, *, capability: str,
                     args: Mapping[str, Any], idempotency_key: str,
@@ -124,17 +147,40 @@ class SimulatedActionPort:
             raise DeviceUnavailable("capability_unknown", f"设备不支持 {capability}")
         if not self._is_online(device_id):
             raise DeviceUnavailable("unavailable", f"设备 {device_id} 不在线")
+        rec = self._reserve_pending(
+            device_id, capability=capability,
+            idempotency_key=idempotency_key, timeout_s=timeout_s)
         scripted = self._receipts.get(capability)
         if callable(scripted):
             scripted = scripted(device_id=device_id, capability=capability,
                                 args=dict(args), idempotency_key=idempotency_key)
         if isinstance(scripted, Exception):
+            # expired/timeout：保留 pending（对齐 gateway 超时仍占幂等键）
             raise scripted
         receipt = dict(scripted or {"state": "executed"})
-        receipt.setdefault("action_id", f"sim-{uuid4().hex[:24]}")
+        receipt.setdefault("action_id", rec["action_id"])
         if receipt.get("state") in ("executed", "failed"):
             receipt.setdefault("executed_at", self._now_ms())
+        # 终态回写，供 action_status 对账
+        state = str(receipt.get("state") or "executed")
+        rec["state"] = state
+        rec["action_id"] = receipt["action_id"]
+        if state == "failed" and receipt.get("error_code"):
+            rec["error_code"] = receipt["error_code"]
+        if "result" in receipt:
+            rec["receipt"] = dict(receipt)
         return receipt
+
+    def action_status(self, device_id: str, idempotency_key: str) -> Mapping[str, Any]:
+        """查既有动作状态；不重新下发（对齐 DeviceGateway.action_status）。"""
+        rec = self._idem_records.get((device_id, idempotency_key))
+        if rec is None:
+            raise DeviceUnavailable("not_found", "unknown action idempotency key")
+        result = dict(rec)
+        if (result.get("state") not in self._TERMINAL
+                and self._now_ms() > int(result.get("expires_at") or 0)):
+            result["state"] = "unknown"
+        return result
 
 
 class GatewayActionPort:
@@ -142,6 +188,7 @@ class GatewayActionPort:
 
     GatewayError（离线/超时/scope/幂等冲突）统一转 DeviceUnavailable；
     回执 payload 原样上交，由 AutonomyController 校验终态。
+    可选 ``action_status``：超时后用原幂等键对账，禁止盲目重放。
     """
 
     def __init__(self, gateway) -> None:
@@ -155,6 +202,14 @@ class GatewayActionPort:
             return self._gateway.send_action(
                 device_id, capability=capability, args=dict(args),
                 idempotency_key=idempotency_key, timeout_s=timeout_s)
+        except GatewayError as exc:
+            raise DeviceUnavailable(exc.code, str(exc)) from exc
+
+    def action_status(self, device_id: str, idempotency_key: str) -> Mapping[str, Any]:
+        """查询既有动作状态；不重新执行。"""
+        from whale_core.devices.gateway import GatewayError
+        try:
+            return self._gateway.action_status(device_id, idempotency_key)
         except GatewayError as exc:
             raise DeviceUnavailable(exc.code, str(exc)) from exc
 

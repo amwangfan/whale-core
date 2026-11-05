@@ -167,8 +167,20 @@ class WhaleCompanion:
                     context, conversation_id=conversation_id)
                 is_group = (getattr(context.conversation, "kind", None)
                             is ConversationKind.QQ_GROUP)
+                # 群聊长度软约束：用时间线 peer 中位字数做表达参考（非硬上限）
+                peer_median = 0
+                if is_group and self.timeline is not None and conversation_id:
+                    try:
+                        from whale_core.life.group_length import (
+                            derive_group_length_norm)
+                        peer_median = derive_group_length_norm(
+                            self.timeline.recent(
+                                str(conversation_id), limit=40)).median
+                    except Exception:
+                        peer_median = 0
                 policy = derive_policy(
-                    original, is_group=is_group, self_facts=rel.self_facts)
+                    original, is_group=is_group, self_facts=rel.self_facts,
+                    peer_median=peer_median)
                 # issue #54：InnerState 进入对话上下文——风格/兴趣是全局的；
                 # 未完话题按会话作用域隔离（私聊话题不串群、群话题不串私聊）。
                 g_state = InnerStateStore(self.store).load()
@@ -193,7 +205,17 @@ class WhaleCompanion:
                 # 可自然提起；状态照实（没成/不确定不装完成），不主动汇报。
                 from whale_core.life.activity import render_activity_hint
                 activity_hint = render_activity_hint(self.store, scope) if scope else ""
+                # 群/私聊通道语气（owner 2026-11-05 选 B）：群温柔体贴少攻击；
+                # 私聊可略亲密仍偏温柔。只作表达层软提示，不堆「像真人」。
+                channel_tone = (
+                    "通道语气：群里温柔体贴、少攻击性；短句贴合群友长度；"
+                    "生病等继续关心；别客服腔、别用破折号串长句。"
+                    if is_group else
+                    "通道语气：私聊可以稍亲近一点，但仍偏温柔体贴；"
+                    "别客服腔、别用破折号串长句。"
+                )
                 hints = [h for h in (rel.render(), policy.render(),
+                                     channel_tone,
                                      "\n".join(state_lines), activity_hint,
                                      intent.hint) if h]
                 if hints:

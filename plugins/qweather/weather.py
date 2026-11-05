@@ -85,13 +85,31 @@ def parse_lon_lat(text: str) -> str | None:
     return f"{_round_coord(lon)},{_round_coord(lat)}"
 
 
+_WEATHER_QUESTIONISH = re.compile(
+    r"(天气|气温|温度|预报|穿什么|空气质量|aqi|下雨|下雪|台风|"
+    r"怎么样|如何|合适|多少度|冷不冷|热不热)",
+    re.IGNORECASE,
+)
+_AT_MENTION = re.compile(r"@\S+")
+
+
 def extract_place_name(text: str) -> str:
-    """去掉坐标片段后的地名短串，供 Geo lookup。"""
+    """去掉坐标片段后的地名短串，供 Geo lookup。
+
+    整句天气问句（无独立地名）不得当城市名——否则 Geo 必败并误回落搜索。
+    """
     if not text:
         return ""
-    cleaned = _COORDS_RE.sub(" ", text)
+    cleaned = _AT_MENTION.sub(" ", text)
+    cleaned = _COORDS_RE.sub(" ", cleaned)
     cleaned = re.sub(r"[；;]+", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" ；;，,。")
+    if not cleaned:
+        return ""
+    # 问句特征明显且没有「X市/区」类短地名时，视为无地名。
+    if _WEATHER_QUESTIONISH.search(cleaned) and not re.search(
+            r"[\u4e00-\u9fff]{2,12}(?:省|市|县|区|州|盟|旗|镇)", cleaned):
+        return ""
     return cleaned[:80]
 
 

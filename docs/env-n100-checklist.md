@@ -39,3 +39,44 @@
 
 ## QQ / WeQ / Shell
 见 `docs/qweather-env.md` 与 `.env.example`；通道类含 `OWNER_*`、`QQ_*`、`WEQ_*`、`WHALE_QQ_*`、`WHALE_SHELL_*`。
+
+
+## QQ 群接话 / 门控（脱敏）
+| 变量 | 说明 |
+|------|------|
+| `WHALE_QQ_GROUP_ALLOW` | 逗号分隔群号白名单；空=不收任何群（即使 `--accept-group`） |
+| `WHALE_BOT_NAMES` | 可选；逗号分隔点名别名。缺省用当前角色卡名（如 Enxi） |
+| `WHALE_GROUP_TOPIC_JOIN_PROB` | 话题滚动可回概率 0..1，默认 `0.18`；`0` 关闭 |
+| CLI `--accept-group` | systemd `qq-bot` 已开；关群聊则去掉此旗标并重启 |
+
+门控 reason（日志/`life:turnlast:{group}`）：`at_bot` / `reply_to_bot` / `join` / `topic_roll` / `repeat_chain` / `not_directed` / `media_only` / `already_covered` / `cooldown` / `budget_exceeded` / `quiet_*` / `dnd`。
+
+群记忆：`conversation=group:{id}` 命名空间；须 Studio/`bind:mem` 绑定 **group_space 且 can_write** 才写入。无写绑定 **绝不** 回落到主人私密库。群闲聊原文不作隐私审查过滤；与私聊记忆隔离即可。
+
+协议端：N100 现网为 **WeQ SSE**（`weq-web` + `qq-bot`），不是另起 NapCat。
+
+## 安卓自主体（core#58，脱敏）
+| 变量 | 说明 |
+|------|------|
+| `WHALE_DEVICE_AGENT_ENABLED` | `1` 启用 core 编排循环接线；默认关 |
+| `WHALE_DEVICE_AGENT_MAX_STEPS` | 单任务最大步数，默认 `8` |
+| `WHALE_DEVICE_AGENT_TIMEOUT_S` | 单步 action/query 超时秒，默认 `15` |
+| `DEEPSEEK_*` | 决策模型（`DeepSeekDecisionPort`）；勿把 key 写入仓库 |
+| `QQ_INTENT_*` | 可选：意图/审操仍走 AgentScope 端点 |
+
+设备 scope：`device.agent.control` / `observe` / `shell` / `output.read`（后者独立，旧配对不自动扩大）。停止：端侧 estop，或 core `revoke` / `POST .../scopes` 收窄。
+
+## 主动问候 / Outbox 日额度（脱敏）
+| 变量 / 键 | 说明 |
+|------|------|
+| `WHALE_PROACTIVE_GREETING` | `1` 启用主动问候循环；缺省关 |
+| `WHALE_PROACTIVE_GREETING_DRY_RUN` | 缺省/`1`=只记草稿；`0`=真发 |
+| `WHALE_PROACTIVE_GREETING_INTERVAL_S` | 判断间隔秒，默认 180，最小 30 |
+| `WHALE_PROACTIVE_GREETING_COOLDOWN_S` | 真发后冷却秒，默认 3600 |
+| `WHALE_PROACTIVE_GREETING_DAILY_QUOTA` | **`0`=不限**；正整数=上海日上限；默认库内 2 |
+| `DAILY_LIMIT` | ProactiveOutbox 主动日上限；**`0`=不限**；可被 kv `life:proactive:prefs.daily_limit` 覆盖 |
+| `PASSIVE_DAILY_LIMIT` | 被动回复保险丝；**`0`=不限**；生产常用大数或 0 |
+| kv `life:proactive:prefs` | `daily_limit` / `passive_daily_limit` / quiet_*；**0=不限** |
+
+Owner 2026-11-05：主动问候/主动发言**不设每日条数上限** → 生产将上述日限置 `0`；冷却、quiet hours、dry-run 可保留。
+

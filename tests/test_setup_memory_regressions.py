@@ -98,3 +98,23 @@ def test_fork_batch_failure_rolls_back_all_records_and_space(store):
     assert set(store.keys()) == original
     assert all(not r.key.startswith("sp:sp-")
                for r in store.list_by_kind(MemoryKind.PREFERENCE))
+
+
+def test_group_without_writable_never_uses_owner_space_id(store):
+    """群无写绑定时 default_write_space 为空；不得回落到主人工作副本 id。"""
+    owner = ensure_owner_working_copy(store)
+    spaces = SpaceStore(store)
+    group_space = spaces.create(MemorySpaceType.GROUP_SPACE, name="g-iso")
+    bindings = BindingStore(store, spaces)
+    # 只读绑定群空间
+    bindings.bind_memory("qq:qq_group:group:99", group_space.space_id,
+                         can_read=True, can_write=False, granted_by="owner")
+    refs = bindings.memory_spaces_for("qq:qq_group:group:99")
+    assert default_write_space(refs) == ""
+    assert owner.space_id not in {r.space_id for r in refs if r.can_write}
+    # 显式可写绑定后只落到群空间，不进 vault/owner-working
+    bindings.bind_memory("qq:qq_group:group:99", group_space.space_id,
+                         can_read=True, can_write=True, granted_by="owner")
+    refs2 = bindings.memory_spaces_for("qq:qq_group:group:99")
+    assert default_write_space(refs2) == group_space.space_id
+    assert default_write_space(refs2) != owner.space_id

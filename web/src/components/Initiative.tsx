@@ -20,8 +20,8 @@ const FIELD_DEFS: {
   label: string;
   kind: "int" | "time";
 }[] = [
-  { key: "daily_limit", label: "主动消息每日上限", kind: "int" },
-  { key: "passive_daily_limit", label: "被动回复每日保险丝", kind: "int" },
+  { key: "daily_limit", label: "主动消息每日上限（0=不限）", kind: "int" },
+  { key: "passive_daily_limit", label: "被动回复每日保险丝（0=不限）", kind: "int" },
   { key: "quiet_start", label: "静默开始时间", kind: "time" },
   { key: "quiet_end", label: "静默结束时间", kind: "time" },
 ];

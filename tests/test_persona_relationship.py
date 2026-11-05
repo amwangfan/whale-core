@@ -343,7 +343,8 @@ def test_persona_card_render_never_grants_permissions(env):
     assert text.startswith("你是「鲸鱼」。")  # 极简渲染：纯文本
     # 渲染一张卡之后，群成员 ctx 的能力与记忆空间完全不受卡片文本影响
     ctx = _resolve(env, B_UIN, GROUP)
-    assert ctx.capability_scopes == ("chat.basic", "tool.web.search")
+    assert ctx.capability_scopes == ("chat.basic", "tool.web.search",
+                                     "tool.weather.now")  # 群上限 2026-11-05 起含天气
     assert all(s.type.value != "member_private"
                for s in ctx.allowed_memory_spaces)
 

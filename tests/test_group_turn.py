@@ -19,9 +19,11 @@ GROUP = "group:g1"
 T0 = datetime(2026, 11, 1, 12, 0, tzinfo=timezone.utc)
 
 
-def _policy(store, *, quiet=False, now=T0):
+def _policy(store, *, quiet=False, now=T0, topic_join_prob=0.0):
+    # 默认关闭话题滚动概率，避免既有测例被随机插话干扰；专题测例显式打开。
     return GroupTurnPolicy(store, bot_names=("鲸鱼",), now_fn=lambda: now,
-                           quiet_now=lambda: False if not quiet else True)
+                           quiet_now=lambda: False if not quiet else True,
+                           topic_join_prob=topic_join_prob)
 
 
 def test_same_scene_three_modes_differ():
@@ -62,29 +64,28 @@ def test_same_scene_three_modes_differ():
         ).action == "observe"
 
 
-def test_cooldown_and_daily_budget():
+def test_no_cooldown_but_daily_budget():
+    """2026-11-05 owner 决策：插话冷却关闭（0=不拦）；日配额仍是保险丝。"""
     store = InMemoryStore()
     p = _policy(store)
     named = "鲸鱼帮看下"
     assert p.maybe_join(conversation=GROUP, text=named,
                         activity="balanced").action == "join"
-    # 冷却期内 → observe
+    # 无冷却：紧跟着第二条仍放行（冷却已是 0）
     d = p.maybe_join(conversation=GROUP, text=named, activity="balanced")
-    assert (d.action, d.reason_code) == ("observe", "cooldown")
-    # 过冷却后再参与直到配额尽
-    now = T0 + timedelta(minutes=25)
-    joins = 0
+    assert (d.action, d.reason_code) == ("join", "join")
+    # 配额耗尽仍拦（保险丝保留）
+    joins = 2
     for i in range(10):
-        p2 = GroupTurnPolicy(store, bot_names=("鲸鱼",), now_fn=lambda: now,
+        p2 = GroupTurnPolicy(store, bot_names=("鲸鱼",), now_fn=lambda: T0,
                              quiet_now=lambda: False)
         d = p2.maybe_join(conversation=GROUP, text=named, activity="balanced")
-        now += timedelta(minutes=25)
         if d.action == "join":
             joins += 1
         else:
             assert d.reason_code == "budget_exceeded"
             break
-    assert joins == 5  # balanced 配额 6，首次已用 1
+    assert joins == 6  # balanced 配额 6
 
 
 def test_consecutive_limit_no_double_join():
@@ -255,6 +256,25 @@ def test_repeat_chain_judge_gate():
     assert (d3.action, d3.reason_code) == ("join", "repeat_chain")
 
 
+def test_judge_vetoed_chain_not_resurrected_by_topic_roll():
+    """2026-11-05 回归：judge 否决的复读链不得被 topic_roll 概率复活——
+    rng 必中（0.0）时也必须旁观。"""
+    store = InMemoryStore()
+    p = GroupTurnPolicy(store, bot_names=("鲸鱼",), now_fn=lambda: T0,
+                        chain_judge=lambda t, e: False,
+                        rng=lambda: 0.0)  # 滚动必中
+    d = p.maybe_join(conversation=GROUP, text="有毒吧", activity="lively",
+                     timeline_entries=_chain(3))
+    assert d.action == "observe"
+    # judge 通过时正常跟风
+    store2 = InMemoryStore()
+    p2 = GroupTurnPolicy(store2, bot_names=("鲸鱼",), now_fn=lambda: T0,
+                         chain_judge=lambda t, e: True, rng=lambda: 0.0)
+    d2 = p2.maybe_join(conversation=GROUP, text="有毒吧", activity="lively",
+                       timeline_entries=_chain(3))
+    assert (d2.action, d2.reason_code) == ("join", "repeat_chain")
+
+
 def test_bare_punctuation_is_not_a_question():
     """2026-11-02 生产实证：单个「？」不触发 lively 提问接话。"""
     store = InMemoryStore()
@@ -335,3 +355,58 @@ def test_followup_requires_recent_self_and_lively():
                        activity="lively",
                        timeline_entries=[{"is_self": True, "text": "我在"}])
     assert d3.reason_code == "not_directed"
+
+
+def test_media_only_is_silent():
+    store = InMemoryStore()
+    p = _policy(store)
+    for text in ("", "[图]", "[表情]", "😀"):
+        d = p.maybe_join(conversation=GROUP, text=text, activity="lively")
+        assert (d.action, d.reason_code) == ("observe", "media_only"), text
+
+
+def test_topic_roll_joins_when_prob_hits():
+    """话题关键词 + bot 近窗未发言 + 概率命中 → topic_roll。"""
+    store = InMemoryStore()
+    p = GroupTurnPolicy(store, bot_names=("Enxi",), now_fn=lambda: T0,
+                        topic_join_prob=1.0, rng=lambda: 0.0)
+    tl = ({"is_self": False, "text": "昨天怎样"},
+          {"is_self": False, "text": "今天呢"})
+    d = p.maybe_join(conversation=GROUP, text="今晚吃啥", activity="lively",
+                     timeline_entries=tl)
+    assert (d.action, d.reason_code) == ("join", "topic_roll")
+
+
+def test_topic_roll_skips_when_bot_spoke_recently():
+    store = InMemoryStore()
+    p = GroupTurnPolicy(store, bot_names=("Enxi",), now_fn=lambda: T0,
+                        topic_join_prob=1.0, rng=lambda: 0.0)
+    tl = ({"is_self": True, "text": "我刚说过"},
+          {"is_self": False, "text": "今晚吃啥"})
+    d = p.maybe_join(conversation=GROUP, text="今晚吃啥", activity="lively",
+                     timeline_entries=tl)
+    assert d.action == "observe"
+
+
+def test_topic_roll_respects_zero_prob():
+    store = InMemoryStore()
+    p = GroupTurnPolicy(store, now_fn=lambda: T0,
+                        topic_join_prob=0.0, rng=lambda: 0.0)
+    d = p.maybe_join(conversation=GROUP, text="明天考试吗", activity="lively")
+    assert (d.action, d.reason_code) == ("observe", "not_directed")
+
+
+def test_already_covered_short_ack_silent():
+    store = InMemoryStore()
+    p = _policy(store)
+    prev = "这是一段足够完整的长回复，已经把问题说清楚了"
+    d = p.maybe_join(conversation=GROUP, text="嗯", activity="lively",
+                     timeline_entries=({"is_self": False, "text": prev},))
+    assert (d.action, d.reason_code) == ("observe", "already_covered")
+
+
+def test_named_enxi_still_joins_balanced():
+    store = InMemoryStore()
+    p = GroupTurnPolicy(store, bot_names=("Enxi",), now_fn=lambda: T0)
+    d = p.maybe_join(conversation=GROUP, text="Enxi 帮看下", activity="balanced")
+    assert d.action == "join"

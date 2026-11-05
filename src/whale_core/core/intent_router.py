@@ -83,7 +83,8 @@ def _location_hint_from_context(context: str) -> str:
 
 def _weather_search_query(text: str, *, context: str = "") -> str:
     """天气搜索词：口述城市原样；否则拼当前位置；无位置就用原话。"""
-    query = (text or "").strip()[:500]
+    query = re.sub(r"@\S+", " ", text or "")
+    query = re.sub(r"\s+", " ", query).strip()[:500]
     if _WEATHER_NAMED_PLACE.search(query) and not _WEATHER_HERE.search(query):
         return query
     loc = _location_hint_from_context(context)

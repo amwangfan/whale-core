@@ -306,10 +306,12 @@ def test_remind_rechecks_budget_and_notify_scope():
                       event_id="cal-1",
                       expires_at=NOW + timedelta(hours=1))
     outbox = ProactiveOutbox(store, now_fn=lambda: NOW)
-    # 打扰预算复核：daily_limit=0 → deferred(over_budget)，绝不直发
+    # 打扰预算复核：日额度打满 → deferred(over_budget)，绝不直发
+    # （daily_limit=0 现为「不限」，改用 limit=1 + 已用满）
     decision = controller.evaluate(sit, owner_ctx())
+    outbox.store.put("life:quota:2026-10-31", 1)
     rec = controller.execute(decision, owner_ctx(), outbox=outbox,
-                             prefs=prefs(daily_limit=0))
+                             prefs=prefs(daily_limit=1))
     assert rec.status == "deferred" and rec.reason.startswith("over_budget")
     # 通知许可复核：无 device.notify/outbox.submit → 拒
     anon_scopes = ResolvedContext(

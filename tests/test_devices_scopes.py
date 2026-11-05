@@ -41,7 +41,15 @@ def test_constants_match_protocol_names():
     assert SCOPE_PHONE_CALL_RING == "phone.call.ring"
     assert SCOPE_PHONE_CALL_AUDIO == "phone.call.audio"
     assert SCOPE_PHONE_DEVICE_SAFE_ACTION == "phone.device.safe_action"
-    assert len(DEVICE_SCOPES) == 9
+    from whale_core.life.conversation_context import (
+        SCOPE_DEVICE_AGENT_CONTROL, SCOPE_DEVICE_AGENT_OBSERVE,
+        SCOPE_DEVICE_AGENT_SHELL, SCOPE_DEVICE_AGENT_OUTPUT_READ,
+    )
+    assert SCOPE_DEVICE_AGENT_CONTROL == "device.agent.control"
+    assert SCOPE_DEVICE_AGENT_OBSERVE == "device.agent.observe"
+    assert SCOPE_DEVICE_AGENT_SHELL == "device.agent.shell"
+    assert SCOPE_DEVICE_AGENT_OUTPUT_READ == "device.agent.output.read"
+    assert len(DEVICE_SCOPES) == 13
 
 
 def test_device_scopes_in_grantable():

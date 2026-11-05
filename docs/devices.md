@@ -31,6 +31,7 @@ registry 与校验器本身纯 stdlib，缺依赖时管理端点回 503）。
 | `GET /api/v1/devices` | 列表 + 在线状态 + `ws_port`/`ws_path`（视图隐去配对码） |
 | `GET /api/v1/devices/{id}` | 单设备详情（含 session 状态） |
 | `DELETE /api/v1/devices/{id}` / `POST /api/v1/devices/{id}/revoke` | 吊销：状态即时生效 + `kick()` 在线连接（先回 `error.device_revoked` 再关闭，§3） |
+| `POST /api/v1/devices/{id}/scopes` | body `{scopes: string[]}` → 收窄/重设注册 scope（active）；编排循环据此停止自主体 |
 | `POST /api/v1/devices/{id}/query` | `{operation, filters?, max_items?, timeout?}` → 下发 `sensor.query`，deadline 内等 `sensor.result`；设备离线 409 `unavailable`，越权 403 `scope_denied`，超时 504 `expired` |
 | `POST /api/v1/devices/{id}/action` | `{capability, args?, idempotency_key?, authorized_scope?, approval_ref?, timeout?}` → `action.request`；幂等键查重（重复 409 `duplicate`），等待**终态**回执 |
 | `POST /api/v1/devices/{id}/action/status` | `{idempotency_key}` → 查询既有动作状态，不重新执行；终态 `receipt` 保留 `executed_at`、`error_code`、`provider_ref` 与 `result`（如设备提供） |
@@ -92,6 +93,54 @@ registry 与校验器本身纯 stdlib，缺依赖时管理端点回 503）。
 
 心跳/离线、challenge TTL、ack 幂等闭环、回执状态机、错误码集合与参考实现
 **完全一致**（§2/§3/§4/§6）。
+
+## 安卓自主体编排（core#58）
+
+契约：PROTOCOL V1.1 三能力 `device.agent.control` / `observe` / `shell`，
+回执可选 `result.summary` + `result.output_ref`；大输出经
+`device.agent.output.read`（独立 scope）拉取。ScreenMemo 是历史检索；
+`device.agent.observe` 是自主体**实时**观察，二者不要混用。
+
+### 编排循环
+
+实现：`devices/agent_loop.py` → `DeviceAgentLoop`。
+
+1. 下发 `action.request`（observe → 决策 → control/shell）；
+2. 读 `receipt.result.summary`；若有 `output_ref` 且设备持有
+   `device.agent.output.read`，再经 query 拉取预览；
+3. 观察摘要写入设备私有记忆空间 `device-agent:{device_id}`（与 QQ 群/
+   主人私聊命名空间隔离）；
+4. 决策端口可注入：测试用 `ScriptedDecisionPort`；生产可接
+   `DeepSeekDecisionPort`（DeepSeek / 兼容端点）。意图/审操类模型仍可
+   走既有 AgentScope（`QQ_INTENT_*`）配置，不必绑死在本循环内。
+
+开关建议（脱敏，见 `docs/env-n100-checklist.md`）：
+`WHALE_DEVICE_AGENT_ENABLED`（默认关）、`WHALE_DEVICE_AGENT_MAX_STEPS`。
+
+### 失败语义（编排层）
+
+| 编排码 | 来源（gateway / receipt.error_code） | 编排行为 |
+| --- | --- | --- |
+| `failed/timeout` | `expired` / `timeout` | 仅 `device.agent.observe`（只读）可有界重试；control/shell 须先用原幂等键 `action_status` 对账，`pending`/`unknown` 升 `unknown` 且禁止自动重放；仅 `not_found` 可安全新键重试 |
+| `failed/unavailable` | `unavailable` / `device_revoked` / estop·暂停·权限缺失等 | 停止 |
+| `failed/scope_denied` | `scope_denied` / `capability_unknown` | 停止 |
+| `unknown` | 回执 `unknown` 或畸形 | **不重放**，停止 |
+
+实现：`devices/agent_failures.py`；与 `life/autonomy.py` 的
+`DeviceUnavailable` / `validate_action_receipt` /「unknown 不自动重试」对齐。
+
+### 停止任务
+
+- **端侧**：UI / 桥紧急停止（estop）保留；表现为设备回
+  `failed/unavailable`（或 offline）。
+- **core 侧等价**：
+  - `DELETE|POST /api/v1/devices/{id}/revoke` 吊销并踢线；
+  - `POST /api/v1/devices/{id}/scopes` 收窄注册 scope（去掉
+    `device.agent.*`）。编排循环每步 `_preflight` 复查状态/scope，命中即
+    中止且不重放待执行动作。
+
+真机 E2E：须已配对设备持有 agent scopes，且端侧模块开关允许；未配对前
+以模拟 `SimulatedActionPort` 验收闭环。
 
 ## 留给后续（D4+ / 阶段二）
 

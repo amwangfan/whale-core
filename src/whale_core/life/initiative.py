@@ -92,6 +92,8 @@ class ProactivePrefs:
     allowed_channels: frozenset[str] = frozenset()
     auto_send: bool = False
     allow_calls: bool = False
+    # 日额度语义（owner 2026-11-05）：**0 = 不限**；正整数 = 上海日历日上限；
+    # 负数非法。冷却 / quiet hours / dry-run 不受此影响。
     daily_limit: int = 2
     quiet_start: time = time(22)
     quiet_end: time = time(7)
@@ -103,7 +105,8 @@ class ProactivePrefs:
     # - passive_reply_in_quiet：**已废弃**（保留字段仅为配置兼容，
     #   不再参与判定；误留 False 不再压制被动回复）。
     # - passive_daily_limit：被动回复的独立额度（防跑飞循环的保险丝），
-    #   None = 回落 daily_limit；配额计数也与主动分开（life:quota:passive:*）。
+    #   None = 回落 daily_limit；**0 = 不限**；配额计数也与主动分开
+    #   （life:quota:passive:*）。
     passive_reply_in_quiet: bool = False  # deprecated, 见上
     passive_daily_limit: int | None = None
 
@@ -297,7 +300,8 @@ class ProactiveOutbox:
             return DispatchVerdict("deferred", "quiet hours or busy context", draft_id)
         date = local.date().isoformat()
         limit, count = self._quota_view(prefs, date, passive_reply=reactive)
-        if count >= limit:
+        # 0 = 不限（跳过日额度门；冷却/静默仍生效）
+        if limit > 0 and count >= limit:
             return DispatchVerdict("over_budget", "daily delivery cap", draft_id)
         # issue #59：direct_message 跟随 auto_send——双开关、渠道范围与每日
         # 额度明确启用后，主动私信按该授权运行，不再逐条人审；call 始终单独

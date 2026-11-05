@@ -16,6 +16,8 @@
 问题或步骤、不机械复读安慰、危及数据的操作先确认风险。「表白不认领」
 只在群聊生效（issue #59）：群里的「我爱你」没有 @/引用证据时不冒认；
 私聊是一对一场景，亲密表达就是发给鲸鱼的，不套用群聊防误认规则。
+群侧基调（owner 2026-11-05 选 B）：温柔体贴、少攻击性；生病等继续关心；
+去客服腔与破折号 AI 腔；私聊可略亲密但仍偏温柔。
 """
 
 from __future__ import annotations
@@ -28,6 +30,12 @@ from typing import Tuple
 _ANXIETY_WORDS = (
     "怎么办", "完蛋", "救命", "急死", "焦虑", "害怕", "来不及", "崩溃",
     "哭了", "难受", "担心", "慌了", "糟了", "惨了",
+)
+
+#: 身体不适（单独关心；不强制焦虑节奏）。
+_HEALTH_WORDS = (
+    "生病", "感冒", "发烧", "不舒服", "住院", "咳嗽", "头疼", "头痛",
+    "嗓子疼", "拉肚子", "恶心", "乏力", "体温",
 )
 
 #: 自述技能水平（只匹配本人自述句式，不匹配对他人的描述）。
@@ -74,7 +82,9 @@ class ExpressionPolicy:
     one_step_at_a_time: bool = False       # 一次只给一个问题/步骤
     confirm_data_safety: bool = False      # 危及数据的操作前先确认
     confession_unclaimed: bool = False     # 表白类话语无归属证据
+    care_health: bool = False              # 对方提到身体不适 → 轻轻关心
     is_group: bool = False
+    peer_median: int = 0                   # 群友近期发言中位字数；0=未知
     reasons: Tuple[str, ...] = field(default_factory=tuple)
 
     def render(self) -> str:
@@ -99,8 +109,32 @@ class ExpressionPolicy:
             lines.append(
                 "群聊里收到「我爱你」类话语但没有明确发给你的证据（@或引用）时，"
                 "不要认领成对自己的表白，不制造亲昵。")
-        if self.length == "short" and not self.anxious and not self.one_step_at_a_time:
+        if self.care_health:
+            lines.append(
+                "对方提到身体不适：先轻轻关心一两句，别急着塞一堆建议或追问。")
+        # 群侧基调（owner 2026-11-05 选 B）：温柔体贴、少攻击性；
+        # 长度仍贴合 peer 中位；去客服腔与破折号作文腔。
+        if self.is_group:
+            lines.append(
+                "群里语气偏温柔体贴：少攻击性，不抬杠、不阴阳、不互损；"
+                "接话自然关心就好。")
+            lines.append(
+                "别用客服腔，也别用破折号（——）串成长句；像平时打字一样短句。")
+            if not self.anxious and not self.one_step_at_a_time:
+                if self.peer_median > 0:
+                    lines.append(
+                        f"这群近期群友发言中位大约 {self.peer_median} 字："
+                        "接话贴近这个长度与语气，别写长段落或列表，也别故意碎成一两字。")
+                elif self.length == "short":
+                    lines.append(
+                        "群里接话贴近大家平时的长度：一两句即可，别写长文，也别刻意碎句。")
+        elif self.length == "short" and not self.anxious and not self.one_step_at_a_time:
             lines.append("回复保持简短。")
+        # 私聊：可略亲密，但仍偏温柔（不客服、不作文腔）。
+        if (not self.is_group) and (
+                self.anxious or self.care_health or self.one_step_at_a_time):
+            lines.append(
+                "私聊可以稍亲近一点，但仍偏温柔体贴；别客服腔，也别用破折号串长句。")
         if not lines:
             return ""
         return "表达提示：\n" + "\n".join(lines)
@@ -111,8 +145,13 @@ def derive_policy(
     *,
     is_group: bool = False,
     self_facts: Tuple[str, ...] = (),
+    peer_median: int = 0,
 ) -> ExpressionPolicy:
-    """从当前消息信号 + 已授权自述推导表达策略（纯函数，便于单测）。"""
+    """从当前消息信号 + 已授权自述推导表达策略（纯函数，便于单测）。
+
+    ``peer_median``：群时间线统计的近期群友发言中位字数（0=未知/私聊不用）。
+    只影响表达层长度提示，不做硬截断（硬裁在 group_length.soft_trim_*）。
+    """
     text = text or ""
     reasons: list[str] = []
 
@@ -138,6 +177,10 @@ def derive_policy(
     if confession:
         reasons.append("confession_like_text")
 
+    care_health = any(w in text for w in _HEALTH_WORDS)
+    if care_health:
+        reasons.append("health_care")
+
     # 深度：专家放开；新手或焦虑者从简。
     if skill == "expert":
         depth = "deep"
@@ -151,16 +194,22 @@ def derive_policy(
     if one_step:
         reasons.append("one_step")
 
-    # 长度：焦虑 / 新手 / 群聊从简。
+    # 长度：焦虑 / 新手 / 群聊从简（群聊另用 peer_median 软参考，不硬砍）。
     if anxious or skill == "novice" or (is_group and depth != "deep"):
         length = "short"
     else:
         length = "normal"
 
+    median = max(0, int(peer_median or 0)) if is_group else 0
+    if median:
+        reasons.append(f"peer_median:{median}")
+
     return ExpressionPolicy(
         depth=depth, length=length, skill=skill, anxious=anxious,
         one_step_at_a_time=one_step,
         confirm_data_safety=confirm_data_safety,
-        confession_unclaimed=confession, is_group=is_group,
+        confession_unclaimed=confession, care_health=care_health,
+        is_group=is_group,
+        peer_median=median,
         reasons=tuple(reasons),
     )

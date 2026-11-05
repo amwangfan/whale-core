@@ -23,10 +23,11 @@
 - `WHALE_PROACTIVE_GREETING_INTERVAL_S=180`（默认 180，最小 30）
 - 判断模型：复用 `QQ_INTENT_*` / AgentScope；回复模型：复用 `DEEPSEEK_*`
 
-## 真发额度 / 冷却（2026-11-05 补齐）
+## 真发额度 / 冷却（2026-11-05 补齐；日限语义 2026-11-05 晚）
 
-- `WHALE_PROACTIVE_GREETING_COOLDOWN_S` 默认 3600（真发后冷却）
-- `WHALE_PROACTIVE_GREETING_DAILY_QUOTA` 默认 2（上海日历日）
+- `WHALE_PROACTIVE_GREETING_COOLDOWN_S` 默认 3600（真发后冷却；可保留）
+- `WHALE_PROACTIVE_GREETING_DAILY_QUOTA`：**`0` = 不限**；正整数 = 上海日历日上限；默认 `2`（库保守默认）。生产可按 owner 决策设为 `0`。
 - 计数键：`life:quota:proactive_greeting:YYYY-MM-DD`、`life:proactive_greeting:last_sent_at`
 - dry-run **不**消耗额度；眼镜服务注入 `store` + InnerState 情境
+- quiet hours / dry-run 开关与冷却仍独立生效，不受「日限=0」影响
 

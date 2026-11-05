@@ -51,6 +51,9 @@ GRANTABLE_SCOPES = frozenset({
     "screen.context.read", "screen.history.search", "screen.evidence.read",
     "screen.live.subscribe", "phone.notification.post", "phone.notification.read",
     "phone.call.ring", "phone.call.audio", "phone.device.safe_action",
+    # core#58：安卓自主体能力（租约可携带；群聊仍受 GROUP_CEILING）
+    "device.agent.control", "device.agent.observe", "device.agent.shell",
+    "device.agent.output.read",
 })
 
 MAX_ACTIVE_CODES = 64
