@@ -768,15 +768,34 @@ def cmd_run(args) -> int:
             base_url=os.environ.get("QQ_INTENT_BASE_URL") or None,
             api_key=os.environ.get("QQ_INTENT_API_KEY") or None)
         globals()["_intent_brain_ref"] = intent_brain  # 群定向兜底判定器用
+        fallback_search = None
         if (os.environ.get("TAVILY_API_KEY") or os.environ.get("BRAVE_API_KEY")
                 or os.environ.get("WHALE_SEARCH_PROVIDER")):
             from search_web.web_fetch import register_web_fetch
             from search_web.web_search import register_web_search, select_provider
-            register_web_search(plugin_registry, tools, provider=select_provider(os.environ))
+            provider = select_provider(os.environ)
+            register_web_search(plugin_registry, tools, provider=provider)
             register_web_fetch(plugin_registry, tools)
+
+            def fallback_search(query: str, _provider=provider) -> str:
+                results = _provider.search(str(query or ""), limit=5)
+                if not results:
+                    return "没有找到结果"
+                return "\n".join(
+                    f"{r.title} — {r.snippet}（{r.url}）" for r in results[:5])
+
             tool_note = "搜索/抓取已挂载"
         else:
             tool_note = "搜索未挂载（无 TAVILY/BRAVE key，搜索意图会诚实报不可用）"
+        if ((os.environ.get("QWEATHER_API_KEY") or "").strip()
+                and (os.environ.get("QWEATHER_API_HOST") or "").strip()):
+            from qweather.weather import register_qweather
+            register_qweather(
+                plugin_registry, tools, env=os.environ,
+                fallback_search=fallback_search)
+            tool_note += "；和风天气已挂载"
+        else:
+            tool_note += "；和风未挂载（缺 QWEATHER_API_KEY/HOST，天气回落搜索）"
         workflow.orchestrator = ConversationOrchestrator(
             store, workflow.companion,
             intent_model=SearchIntentRouter(model=intent_brain, enable_llm=True, tools=tools),

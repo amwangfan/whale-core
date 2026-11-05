@@ -1,0 +1,12 @@
+{
+  "plugin_id": "qweather",
+  "name": "和风天气（weather.now）",
+  "version": "1.0.0",
+  "api_version": "1",
+  "kind": "output",
+  "actions": ["lookup"],
+  "action_risk": {"lookup": "read_only"},
+  "entrypoint": "main.py",
+  "description": "QWeather GeoAPI + 实时/3日预报；缺 host/key 时不注册，意图回落 web.search",
+  "homepage": "https://github.com/amwangfan/whale-core"
+}

@@ -255,8 +255,11 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
             env.get("TAVILY_API_KEY") or env.get("BRAVE_API_KEY")
             or env.get("WHALE_SEARCH_PROVIDER")
             or env.get("WHALE_DEEPSEEK_SEARCH_API_KEY"))
+        has_weather = bool(
+            (env.get("QWEATHER_API_KEY") or "").strip()
+            and (env.get("QWEATHER_API_HOST") or "").strip())
         shell_on = env.get("WHALE_SHELL_ENABLED", "").strip() == "1"
-        if not has_search and not shell_on:
+        if not has_search and not has_weather and not shell_on:
             return None
         from whale_core.core.intent_router import SearchIntentRouter
         from whale_core.core.runtime import (
@@ -267,12 +270,26 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
 
         plugin_registry = PluginRegistry()
         tools = ToolRegistry()
+        fallback_search = None
         if has_search:
             from search_web.web_fetch import register_web_fetch
             from search_web.web_search import register_web_search, select_provider
-            register_web_search(
-                plugin_registry, tools, provider=select_provider(env))
+            provider = select_provider(env)
+            register_web_search(plugin_registry, tools, provider=provider)
             register_web_fetch(plugin_registry, tools)
+
+            def fallback_search(query: str, _provider=provider) -> str:
+                results = _provider.search(str(query or ""), limit=5)
+                if not results:
+                    return "没有找到结果"
+                return "\n".join(
+                    f"{r.title} — {r.snippet}（{r.url}）" for r in results[:5])
+
+        if has_weather:
+            from qweather.weather import register_qweather
+            register_qweather(
+                plugin_registry, tools, env=env,
+                fallback_search=fallback_search)
 
         shell_auto_actions: frozenset[str] = frozenset()
         if shell_on:

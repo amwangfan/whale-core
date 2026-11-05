@@ -32,13 +32,14 @@ from whale_core.life.conversation_context import (
     SCOPE_TASK_READ_SELF,
     SCOPE_TOOL_SHELL_SAFE,
     SCOPE_TOOL_WEB_SEARCH,
+    SCOPE_TOOL_WEATHER_NOW,
     principal_matches_private_conversation,
 )
 
 # ---- 能力上限（§6.2 权限矩阵的首版落地） ------------------------------
 
 #: 群会话上限：任何成员（含主人本人）在群里都不超过这个集合。
-GROUP_CEILING: Tuple[str, ...] = (SCOPE_CHAT_BASIC, SCOPE_TOOL_WEB_SEARCH)
+GROUP_CEILING: Tuple[str, ...] = (SCOPE_CHAT_BASIC, SCOPE_TOOL_WEB_SEARCH, SCOPE_TOOL_WEATHER_NOW)
 
 #: 未配对私聊：仅对话。
 PRIVATE_ANON: Tuple[str, ...] = (SCOPE_CHAT_BASIC,)
@@ -65,6 +66,7 @@ def _media_open_test() -> bool:
 PRIVATE_OWNER: Tuple[str, ...] = (
     SCOPE_CHAT_BASIC,
     SCOPE_TOOL_WEB_SEARCH,
+    SCOPE_TOOL_WEATHER_NOW,
     "tool.web.fetch",
     "tool.media.image.generate",
     "tool.media.video.generate",

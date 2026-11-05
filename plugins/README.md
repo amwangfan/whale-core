@@ -8,7 +8,7 @@
 | | 本目录（`plugins/`） | `src/whale_core/plugins/` |
 | --- | --- | --- |
 | 角色 | bundled official plugins：具体业务能力 | 插件框架契约 + 内置 provider 实现 |
-| 内容 | `weq_channel`（QQ/WeQ 渠道）、`search_web`（网页搜索/抓取） | manifest / registry / loader / manager / gateway / policy / events 等框架 + 媒体/语音等内置 provider |
+| 内容 | `weq_channel`（QQ/WeQ 渠道）、`search_web`（网页搜索/抓取）、`qweather`（和风天气） | manifest / registry / loader / manager / gateway / policy / events 等框架 + 媒体/语音等内置 provider |
 | 加载方式 | 宿主经 `whale_core.plugins.loader` 按目录**显式加载**（plugin.json 校验 + api_version 检查），或按包名直接导入 | 随核心包常驻，宿主组装代码显式 `register()` |
 | 依赖方向 | 单向依赖框架契约（manifest/registry）；**核心不 import 本目录业务代码** | 框架模块不得 import 本目录（见下「已知例外」） |
 
@@ -17,7 +17,7 @@
 `pyproject.toml` 的 `[tool.hatch.build.targets.wheel]`：
 
 ```toml
-packages = ["src/whale_core", "plugins/search_web", "plugins/weq_channel"]
+packages = ["src/whale_core", "plugins/search_web", "plugins/qweather", "plugins/weq_channel"]
 ```
 
 即两个插件包**随同一 wheel 打包发行**（frozen / Docker 亦同口径，
@@ -30,7 +30,7 @@ packages = ["src/whale_core", "plugins/search_web", "plugins/weq_channel"]
 - 每个插件一个子目录，含 `plugin.json`（plugin_id / api_version / kind /
   actions / action_risk 等）与 `__init__.py`（暴露 `register(registry, ...)`）；
 - `__init__.py` 必须**懒加载**（不在导入时拉起依赖），保证
-  `import search_web` / `import weq_channel` 永远安全——由
+  `import search_web` / `import qweather` / `import weq_channel` 永远安全——由
   `tests/test_arch_plugins.py` 锁定；
 - 凭据与宿主依赖（发送端口、账本、策略、env key）一律由宿主注入，
   插件包不自带凭据；

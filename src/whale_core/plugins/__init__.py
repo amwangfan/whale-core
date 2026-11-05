@@ -28,7 +28,7 @@ PluginActionPolicy 是核心安全不变量。
   shell / realtime / 模型供给等能力实现——走同一框架注册，但**不是**
   框架契约，可按需替换；
 - **bundled official plugins（捆绑官方插件）**：仓库根 ``plugins/`` 下的
-  weq_channel / search_web——独立发行单元，随 wheel 打包（pyproject.toml
+  weq_channel / search_web / qweather——独立发行单元，随 wheel 打包（pyproject.toml
   ``[tool.hatch.build.targets.wheel] packages`` 显式列入），经
   ``plugins/loader.py`` 显式加载，核心不 import 其业务代码。
 """

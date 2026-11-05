@@ -83,6 +83,7 @@ class Principal:
 SCOPE_CHAT_BASIC = "chat.basic"
 SCOPE_OUTBOX_SUBMIT = "outbox.submit"
 SCOPE_TOOL_WEB_SEARCH = "tool.web.search"
+SCOPE_TOOL_WEATHER_NOW = "tool.weather.now"
 SCOPE_TOOL_SHELL_SAFE = "tool.shell.safe"
 SCOPE_TASK_READ_SELF = "task.read:self"
 SCOPE_DEVICE_NOTIFY = "device.notify"

@@ -131,3 +131,27 @@ def test_weather_without_location_still_searches_user_text():
     assert plan["kind"] == "task"
     assert plan["slots"]["query"] == "成都天气"
     assert "上海" not in plan["slots"]["query"]
+
+
+def test_weather_prefers_qweather_when_mounted():
+    class _WTools:
+        def specs(self):
+            return [
+                ToolSpec(name="weather_now", capability="weather.now",
+                         plugin_id="qweather", action="lookup",
+                         risk_class="read_only", description="w"),
+                ToolSpec(name="search_web", capability="web.search",
+                         description="s"),
+            ]
+    router = SearchIntentRouter(tools=_WTools(), enable_llm=False)
+    plan = json.loads(router.plan(
+        "我所在城市天气",
+        context="当前位置：成都郫都区电子科技大学；约 30.7497,103.9315"))
+    assert plan["capabilities"] == ["weather.now"]
+    assert "location_hint" in plan["slots"]
+    assert "成都" in plan["slots"]["location_hint"] or "郫都" in plan["slots"]["location_hint"]
+    plan2 = json.loads(router.plan(
+        "北京今天天气怎么样", context="当前位置：成都郫都区电子科技大学"))
+    assert plan2["capabilities"] == ["weather.now"]
+    assert plan2["slots"].get("place") == "北京"
+    assert "上海" not in json.dumps(plan2["slots"], ensure_ascii=False)

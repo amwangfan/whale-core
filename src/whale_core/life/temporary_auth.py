@@ -44,7 +44,7 @@ LOW_ENTROPY_SCOPES = frozenset({SCOPE_CHAT_BASIC, SCOPE_TASK_READ_SELF})
 #: 仍须 personal 档 + 执行器沙箱，且不进群上限。
 GRANTABLE_SCOPES = frozenset({
     SCOPE_CHAT_BASIC, SCOPE_TASK_READ_SELF,
-    "tool.web.search", "tool.shell.safe", "outbox.submit", "device.notify",
+    "tool.web.search", "tool.weather.now", "tool.shell.safe", "outbox.submit", "device.notify",
     # D3：设备面 scope 族（screen.* / phone.*）纳入可授予集合；
     # 实际能否生效仍由 context_resolver 矩阵裁决（screen.* 仅 owner
     # 私聊/API owner，群聊硬上限拒绝）——列入此处只是「允许租约携带」。

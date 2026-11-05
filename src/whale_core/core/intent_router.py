@@ -3,7 +3,7 @@
 路由器只建议 capabilities，不能自行授权。
 
 策略（2026-11-05 owner 确认）：
-- 规则命中（search / local-life / weather / shell.safe）→ 直接 task，零意图 LLM；
+- 规则命中（search / local-life / weather→weather.now 或 web.search / shell.safe）→ 直接 task，零意图 LLM；
 - 规则未命中且像普通闲聊（含「现在几点」等）→ kind=chat，**跳过**意图 LLM
   （闲聊回复仍走宿主 companion / DeepSeek 官模，不在此短路本地时钟）；
 - 仅当宿主 enable_llm=True **且**文本像模糊写操作/媒体生成等可能需工具时，
@@ -91,6 +91,30 @@ def _weather_search_query(text: str, *, context: str = "") -> str:
         return f"{loc} {query}"[:500]
     return query
 
+
+def _weather_named_city(text: str) -> str:
+    """口述异地城市名（排除「这里/我所在」）；无则空串。"""
+    query = (text or "").strip()
+    if not query or _WEATHER_HERE.search(query):
+        return ""
+    m = _WEATHER_NAMED_PLACE.search(query)
+    if not m:
+        return ""
+    return (m.group(1) or "").strip()[:40]
+
+
+def _weather_tool_slots(text: str, *, context: str = "") -> dict:
+    """weather.now 参数：口述城市优先；否则把当前位置 hint 交给工具解析坐标/地名。"""
+    query = _weather_search_query(text or "", context=context)
+    place = _weather_named_city(text or "")
+    loc = _location_hint_from_context(context)
+    slots = {"query": query[:500], "limit": 5}
+    if place:
+        slots["place"] = place
+    elif loc:
+        slots["location_hint"] = loc[:120]
+    return slots
+
 # 显式要跑终端/沙箱命令时走 shell.safe（仍受 ACL+沙箱；非主人无 grant 会被门控拒绝）。
 _SHELL_EXPLICIT = re.compile(
     r"(跑一下|执行一下|执行|运行).{0,12}(命令|终端|shell|bash|沙箱)"
@@ -146,7 +170,18 @@ class SearchIntentRouter:
                     "reason": "用户明确要求搜索公开信息",
                 }, ensure_ascii=False)
         if _WEATHER.search(text or ""):
-            query = _weather_search_query(text or "", context=context)
+            caps = ({s.capability for s in self.tools.specs()}
+                    if self.tools is not None else set())
+            slots = _weather_tool_slots(text or "", context=context)
+            query = str(slots.get("query") or "")
+            if "weather.now" in caps:
+                return json.dumps({
+                    "goal": "查询天气：" + query[:300],
+                    "kind": "task",
+                    "slots": slots,
+                    "capabilities": ["weather.now"],
+                    "reason": "天气类优先走和风 weather.now；缺配置/失败由工具回落 web.search",
+                }, ensure_ascii=False)
             return json.dumps({
                 "goal": "搜索并回答天气：" + query[:300],
                 "kind": "task",
@@ -190,6 +225,7 @@ class SearchIntentRouter:
                         else {"web.search"})
         hints = {
             "web.search": "query: 搜索词, limit: 结果数量",
+            "weather.now": "place: 口述城市；location_hint/coords: 无口述时用当前位置；query: 回落搜索词",
             "web.fetch": "url: 要读取的公开HTTP(S)链接",
             "media.image.generate": "prompt: 图片描述, size: 可选图片尺寸, model: 可选（用户指定才填）",
             "media.video.generate": "prompt: 视频描述, model: 可选（用户指定才填）",
