@@ -155,3 +155,34 @@ def test_weather_prefers_qweather_when_mounted():
     assert plan2["capabilities"] == ["weather.now"]
     assert plan2["slots"].get("place") == "北京"
     assert "上海" not in json.dumps(plan2["slots"], ensure_ascii=False)
+
+
+def test_find_verbs_route_to_search():
+    """2026-11-05 生产实证：「找一下/翻翻」曾落 chat，模型谎称搜过。"""
+    from whale_core.core.intent_router import SearchIntentRouter
+    from whale_core.core.runtime import ToolRegistry
+
+    class _B:
+        def plan(self, text, *, context=""):
+            return '{"kind":"chat","goal":"chat","capabilities":[]}'
+
+        def reply(self, text, **kw):
+            return "x"
+
+    r = SearchIntentRouter(model=_B(), enable_llm=False, tools=ToolRegistry())
+    for t in ("帮我找一下来自深渊最新话", "你给我找一下来自深渊最新话",
+              "翻一下来自深渊更新到第几话了", "查下明天上海天气"):
+        import json
+        plan = json.loads(r.plan(t))
+        assert plan["kind"] == "task", t
+        assert "web.search" in plan["capabilities"], t
+
+
+def test_content_tracking_phrases_reach_llm_router():
+    """「最新话什么时候更新」类无动词的追更句式 → 进模糊工具意图（LLM 兜底）。"""
+    from whale_core.core.intent_router import _FUZZY_TOOLISH
+    assert _FUZZY_TOOLISH.search("来自深渊最新话什么时候更新")
+    assert _FUZZY_TOOLISH.search("这个番更新到第几话了")
+    # 普通闲聊不触发（不进 LLM 省一轮）
+    assert not _FUZZY_TOOLISH.search("今天天气真不错")
+    assert not _FUZZY_TOOLISH.search("我吃完饭了")
