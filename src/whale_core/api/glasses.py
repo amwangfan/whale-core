@@ -9,6 +9,9 @@
 - ``POST /v1/qq/reply``：QQ 快捷回复——把用户口述的文本发给**已配置的
   绑定对端**（目标不从请求推导，防误发）；走 WeQ 发送链与既有风控
   （被动额度/静默时段豁免口径与 runner 一致：主人当面 dictation 属被动延续）。
+- ``POST /v1/result/deliver``：统一结果投递（ResultDelivery）——QQ 在线走
+  owner 私聊文字/图片；离线 stub 落盘 + 可选 ADB/MediaStore 探测 Magic8。
+  ``/v1/chat`` 请求体 ``deliverResult=true`` 时也会在回复后走同一路由。
 
 鉴权：``Authorization: Bearer <WHALE_GLASSES_TOKEN>``（phone 角色专用令牌，
 与管理面 token 分离；常量时间比较）。无/错 token → 401。
@@ -418,6 +421,39 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
         ok = port.send_c2c(cfg.owner_uid, text) if hasattr(port, "send_c2c") else False
         return bool(ok), ("accepted" if ok else "send_failed")
 
+    def deliver_result(items, *, conversation: str = "", summary: str = "",
+                       prefer_owner_dm: bool = True) -> dict:
+        """统一投递：QQ online → WeQ；offline → 手机图库 stub/ADB。"""
+        from whale_core.life.result_delivery import (
+            DeliveryItem, ResultDelivery, summarize_receipts)
+        port = send_port_factory()
+        delivery = ResultDelivery(
+            port, owner_uid=cfg.owner_uid, prefer_owner_dm=prefer_owner_dm)
+        norm = []
+        for it in items or ():
+            if isinstance(it, DeliveryItem):
+                norm.append(it)
+                continue
+            if not isinstance(it, dict):
+                continue
+            kind = str(it.get("kind") or "text").strip()
+            if kind == "image":
+                raw = it.get("image_bytes") or b""
+                if isinstance(raw, str):
+                    import base64
+                    try:
+                        raw = base64.b64decode(raw)
+                    except Exception:
+                        raw = b""
+                norm.append(DeliveryItem(
+                    kind="image", image_bytes=raw,
+                    filename=str(it.get("filename") or "result.png")[:80]))
+            else:
+                norm.append(DeliveryItem(kind="text", text=str(it.get("text") or "")))
+        receipts = delivery.deliver(
+            norm, conversation=conversation, summary=summary)
+        return summarize_receipts(receipts)
+
     def prefs() -> ProactivePrefs:
         from datetime import time as dtime
         base = ProactivePrefs(
@@ -430,7 +466,8 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
         return load_prefs(store, base)
 
     return {"companion_chat": companion_chat, "quick_chat": quick_chat,
-            "qq_send": qq_send, "prefs": prefs, "store": store}
+            "qq_send": qq_send, "deliver_result": deliver_result,
+            "prefs": prefs, "store": store}
 
 
 def make_handler(delegates):
@@ -476,7 +513,7 @@ def make_handler(delegates):
         def do_GET(self):
             if self.path == "/v1/health":
                 _json_response(self, 200, {"ok": True,
-                                           "capabilities": ["/v1/chat", "/v1/qq/reply"]})
+                                           "capabilities": ["/v1/chat", "/v1/qq/reply", "/v1/result/deliver"]})
                 return
             if self.path == "/openapi.json":
                 _json_response(self, 200, _openapi())
@@ -494,6 +531,9 @@ def make_handler(delegates):
                 return
             if self.path == "/v1/qq/reply":
                 self._qq_reply()
+                return
+            if self.path == "/v1/result/deliver":
+                self._result_deliver()
                 return
             self.close_connection = True
             _json_response(self, 404, {"error": "not found"})
@@ -540,11 +580,22 @@ def make_handler(delegates):
                 payload["intentMs"] = int(timing.get("intentMs") or 0)
                 payload["toolMs"] = int(timing.get("toolMs") or 0)
                 payload["replyMs"] = int(timing.get("replyMs") or 0)
+                # 眼镜/手机「做完再汇总投递」：deliverResult=true 时走统一路由。
+                if body.get("deliverResult") in (True, 1, "1", "true", "yes"):
+                    try:
+                        delivery = delegates["deliver_result"](
+                            [{"kind": "text", "text": reply}],
+                            summary=f"glasses:{mode}:{session_id[:8]}")
+                        payload["delivery"] = delivery
+                    except Exception as exc:
+                        payload["delivery"] = {
+                            "ok": False, "error": type(exc).__name__}
                 print(f"[glasses] mode={mode} session={session_id[:8]} "
                       f"latencyMs={latency_ms} intentMs={payload['intentMs']} "
                       f"toolMs={payload['toolMs']} replyMs={payload['replyMs']} "
                       f"loc={bool(location)} "
-                      f"chars_in={len(text)} chars_out={len(reply or '')}",
+                      f"chars_in={len(text)} chars_out={len(reply or '')}"
+                      f"{' deliver=' + str(payload.get('delivery', {}).get('ok')) if 'delivery' in payload else ''}",
                       flush=True)
                 _json_response(self, 200, payload)
             except Exception as exc:
@@ -586,6 +637,59 @@ def make_handler(delegates):
                 _json_response(self, 200, {"ok": False, "error": verdict.status,
                                            "reason": verdict.reason})
 
+        def _result_deliver(self):
+            """POST /v1/result/deliver — 文字/图片统一投递。
+
+            body: {
+              text?: str,
+              summary?: str,
+              images?: [{filename, data_base64}],
+              conversation?: "private:uid"|"group:code",  # 默认 owner 私聊
+              preferOwnerDm?: bool  # 默认 true
+            }
+            """
+            import base64
+            body = self._read_json()
+            if body is None:
+                _json_response(self, 400, {"error": "invalid json body"})
+                return
+            items = []
+            text = str(body.get("text") or "").strip()
+            if text:
+                items.append({"kind": "text", "text": text[:MAX_TEXT_CHARS]})
+            for img in body.get("images") or []:
+                if not isinstance(img, dict):
+                    continue
+                raw_b64 = str(img.get("data_base64") or "")
+                try:
+                    raw = base64.b64decode(raw_b64) if raw_b64 else b""
+                except Exception:
+                    raw = b""
+                if not raw:
+                    continue
+                items.append({
+                    "kind": "image",
+                    "image_bytes": raw,
+                    "filename": str(img.get("filename") or "result.png")[:80],
+                })
+            if not items:
+                _json_response(self, 400, {"error": "text or images required"})
+                return
+            prefer = body.get("preferOwnerDm", True)
+            if prefer in (False, 0, "0", "false", "no"):
+                prefer = False
+            else:
+                prefer = True
+            try:
+                result = delegates["deliver_result"](
+                    items,
+                    conversation=str(body.get("conversation") or ""),
+                    summary=str(body.get("summary") or "")[:200],
+                    prefer_owner_dm=prefer)
+                _json_response(self, 200, result)
+            except Exception as exc:
+                _json_response(self, 200, {"ok": False, "error": type(exc).__name__})
+
     class _DirectPort:
         def __init__(self, send):
             self._send = send
@@ -609,6 +713,10 @@ def _openapi() -> dict:
             "/v1/qq/reply": {"post": {"summary": "QQ 快捷回复（固定绑定对端）",
                                       "responses": {"200": {"description": "ok"}},
                                       "security": [{"bearerAuth": []}]}},
+            "/v1/result/deliver": {"post": {
+                "summary": "统一结果投递（QQ online / 手机图库 stub）",
+                "responses": {"200": {"description": "delivery receipts"}},
+                "security": [{"bearerAuth": []}]}},
             "/v1/health": {"get": {"summary": "存活与能力"}},
         },
         "components": {"securitySchemes": {
@@ -694,7 +802,7 @@ def main(argv=None) -> int:
         print(f"[proactive] not started: {type(exc).__name__}", flush=True)
 
     print(f"whale-glasses-api 监听 http://{args.host}:{args.port}"
-          f"（/v1/chat /v1/qq/reply /v1/health /openapi.json）")
+          f"（/v1/chat /v1/qq/reply /v1/result/deliver /v1/health /openapi.json）")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

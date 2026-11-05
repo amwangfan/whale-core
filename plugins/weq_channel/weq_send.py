@@ -104,6 +104,40 @@ class WeQSendError(RuntimeError):
     """WeQ Web 通道失败（登录、HTTP、协议、被拒）。异常文本不含 token。"""
 
 
+
+def accept_send_outcome(outcome: dict | None, *, peer_type: str) -> dict:
+    """发送回执门闩：ok 且对应 sequence>0 才算成功。
+
+    2026-11-05：坏版 nt_helper 曾出现 result=0 / ok=true 但 groupSequence=0
+    （群侧不可见的假成功）。私聊同理必须以 privateSequence>0 为准。
+    """
+    if not isinstance(outcome, dict):
+        return {"ok": False, "error": "invalid-outcome"}
+    out = dict(outcome)
+    if not out.get("ok"):
+        return out
+    pt = str(peer_type or out.get("peerType") or "").strip().lower()
+    if pt == "group":
+        if int(out.get("groupSequence") or 0) <= 0:
+            out["ok"] = False
+            out["error"] = "groupSequence-missing"
+            return out
+    elif pt in ("c2c", "private", ""):
+        # 缺 peerType 时按私聊语义兜底（本端口默认 c2c）
+        if int(out.get("privateSequence") or 0) <= 0:
+            out["ok"] = False
+            out["error"] = "privateSequence-missing"
+            return out
+    else:
+        # 未知 peerType：保守要求至少一侧 sequence>0
+        if (int(out.get("groupSequence") or 0) <= 0
+                and int(out.get("privateSequence") or 0) <= 0):
+            out["ok"] = False
+            out["error"] = "sequence-missing"
+            return out
+    return out
+
+
 class WeQWebSendPort:
     """OutboundPort 实现：经 WeQ 内置 Web tRPC 发送 c2c 文本。
 
@@ -138,6 +172,11 @@ class WeQWebSendPort:
         self.token = token
         self._cookie: str | None = None
         self.last_receipt: dict | None = None
+
+    def _accept_outcome(self, outcome: dict | None, *, peer_type: str) -> bool:
+        accepted = accept_send_outcome(outcome, peer_type=peer_type)
+        self.last_receipt = accepted
+        return bool(accepted.get("ok"))
 
     # ── 内部 HTTP ─────────────────────────────────────────────
 
@@ -218,7 +257,7 @@ class WeQWebSendPort:
         if status != 200 or not isinstance(body, dict):
             return False
         outcome = (((body.get("result") or {}).get("data") or {}).get("json"))
-        return isinstance(outcome, dict) and bool(outcome.get("ok"))
+        return self._accept_outcome(outcome, peer_type="c2c")
 
     def send_voice(self, wav_bytes: bytes, *, filename: str = "voice.wav") -> bool:
         """发语音消息（/trpc/account.sendVoice，weq-web 侧 WAV→SILK 转换发送）。"""
@@ -248,7 +287,7 @@ class WeQWebSendPort:
         if status != 200 or not isinstance(body, dict):
             return False
         outcome = (((body.get("result") or {}).get("data") or {}).get("json"))
-        return isinstance(outcome, dict) and bool(outcome.get("ok"))
+        return self._accept_outcome(outcome, peer_type="c2c")
 
     # ── 只读查询（昵称解析，2026-11-01）────────────────────────────────
 
@@ -339,10 +378,8 @@ class WeQWebSendPort:
         if status != 200 or not isinstance(body, dict):
             return False
         outcome = (((body.get("result") or {}).get("data") or {}).get("json"))
-        if not isinstance(outcome, dict):
-            return False
-        self.last_receipt = outcome
-        return bool(outcome.get("ok"))
+        peer = str((payload.get("json") or {}).get("peerType") or "c2c")
+        return self._accept_outcome(outcome, peer_type=peer)
 
     def send_image_to(self, peer_type: str, target: str, image_bytes: bytes, *,
                       filename: str = "image.png", width: int = 0, height: int = 0) -> bool:
@@ -440,10 +477,11 @@ class WeQWebSendPort:
         if status != 200 or not isinstance(body, dict):
             return False
         outcome = (((body.get("result") or {}).get("data") or {}).get("json"))
-        if not isinstance(outcome, dict):
-            return False
-        self.last_receipt = outcome
-        return bool(outcome.get("ok") or outcome.get("sent"))
+        if isinstance(outcome, dict) and outcome.get("sent") and not outcome.get("ok"):
+            outcome = dict(outcome)
+            outcome["ok"] = True
+        peer = str((payload.get("json") or {}).get("peerType") or "c2c")
+        return self._accept_outcome(outcome, peer_type=peer)
 
     # ── OutboundPort ─────────────────────────────────────────
 
@@ -483,10 +521,7 @@ class WeQWebSendPort:
         if status != 200 or not isinstance(body, dict):
             return False
         outcome = (((body.get("result") or {}).get("data") or {}).get("json"))
-        if not isinstance(outcome, dict):
-            return False
-        self.last_receipt = outcome
-        return bool(outcome.get("ok"))
+        return self._accept_outcome(outcome, peer_type="c2c")
 
     def send_group_text(self, group_code: str, text: str) -> bool:
         """发群文本消息（S7 灰度）。
@@ -524,10 +559,7 @@ class WeQWebSendPort:
         if status != 200 or not isinstance(body, dict):
             return False
         outcome = (((body.get("result") or {}).get("data") or {}).get("json"))
-        if not isinstance(outcome, dict):
-            return False
-        self.last_receipt = outcome
-        return bool(outcome.get("ok"))
+        return self._accept_outcome(outcome, peer_type="group")
 
     def send(self, draft: ProactiveDraft) -> bool:
         if draft.channel != "direct_message":
@@ -567,10 +599,7 @@ class WeQWebSendPort:
             return False
         # tRPC + superjson: {"result":{"data":{"json":<SendMessageOutcome>}}}
         outcome = (((body.get("result") or {}).get("data") or {}).get("json"))
-        if not isinstance(outcome, dict):
-            return False
-        self.last_receipt = outcome
-        return bool(outcome.get("ok"))
+        return self._accept_outcome(outcome, peer_type="c2c")
 
 
 # markdown 图片；模型有时写成不带 ! 的链接形态——也认（生产实证）

@@ -55,7 +55,8 @@ def login_ok():
 
 
 def send_result(ok=True, extra=None):
-    outcome = {"ok": ok, "peerType": "c2c", "targetId": UID, **(extra or {})}
+    outcome = {"ok": ok, "peerType": "c2c", "targetId": UID,
+               "privateSequence": 42 if ok else 0, **(extra or {})}
     return FakeResponse(200, {"result": {"data": {"json": outcome}}})
 
 
@@ -288,7 +289,14 @@ def _port_with_recorder(**kw):
         headers = {"Set-Cookie": "weq_session=s1"}
 
         def read(self):
-            return json.dumps({"result": {"data": {"json": {"ok": True}}}}).encode()
+            # 根据最近一次请求 peerType 填非 0 sequence，模拟真回执
+            peer = "c2c"
+            if sent:
+                peer = str((sent[-1].get("json") or {}).get("peerType") or "c2c")
+            outcome = {"ok": True, "peerType": peer,
+                       "groupSequence": 7 if peer == "group" else 0,
+                       "privateSequence": 9 if peer != "group" else 0}
+            return json.dumps({"result": {"data": {"json": outcome}}}).encode()
 
         def __enter__(self):
             return self
@@ -332,3 +340,29 @@ def test_send_c2c_validates_uid_shape():
     assert port.send_c2c("not-a-uid", "hi") is False
     assert port.send_c2c("", "hi") is False
     assert len(sent) == n
+
+
+def test_group_sequence_missing_is_false():
+    """假成功：ok=true 但 groupSequence=0 → False。"""
+    opener = FakeOpener([login_ok(), send_result(
+        True, {"peerType": "group", "groupSequence": 0, "privateSequence": 0})])
+    port = WeQWebSendPort(BASE, TOKEN, target_uid=UID, opener=opener,
+                          allowed_groups=("1124744261",))
+    assert port.send_group_text("1124744261", "hi") is False
+    assert port.last_receipt["error"] == "groupSequence-missing"
+
+
+def test_private_sequence_missing_is_false():
+    opener = FakeOpener([login_ok(), send_result(
+        True, {"privateSequence": 0})])
+    port = WeQWebSendPort(BASE, TOKEN, target_uid=UID, opener=opener)
+    assert port.send(draft()) is False
+    assert port.last_receipt["error"] == "privateSequence-missing"
+
+
+def test_accept_send_outcome_helper():
+    from weq_channel.weq_send import accept_send_outcome
+    assert accept_send_outcome({"ok": True, "groupSequence": 3}, peer_type="group")["ok"]
+    assert accept_send_outcome({"ok": True, "groupSequence": 0}, peer_type="group")["ok"] is False
+    assert accept_send_outcome({"ok": True, "privateSequence": 5}, peer_type="c2c")["ok"]
+    assert accept_send_outcome({"ok": True, "privateSequence": 0}, peer_type="c2c")["ok"] is False
