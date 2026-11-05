@@ -165,3 +165,32 @@ def test_normal_text_still_flows_through_brain_and_draft():
     assert result["reply"] == "好的呀"
     assert result["draft_id"] == "qq-reply:m1"
     assert len(brain.calls) == 1
+
+
+
+def test_time_query_not_written_as_episode(tmp_path, monkeypatch):
+    """问「现在几点」不落情节记忆；时间注入每轮现算。"""
+    monkeypatch.setenv("WHALE_INNER_STATE_WRITEBACK", "1")
+    from whale_core.memory.sqlite_store import SqliteMemoryStore
+    from whale_core.memory.store import MemoryKind
+    from whale_core.core.companion import WhaleCompanion
+    from whale_core.core.prompt_composer import compose_companion_system
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    class _Brain:
+        def reply(self, text, **kwargs):
+            return "凌晨一点多啦，这么晚还没睡呀"
+
+    store = SqliteMemoryStore(str(tmp_path / "m.sqlite3"))
+    WhaleCompanion(store, _Brain()).chat("现在几点？", conversation_id="c1")
+    episodes = store.list_by_kind(MemoryKind.EPISODE)
+    for rec in episodes:
+        summary = str(rec.content.get("summary", ""))
+        assert "现在几点" not in summary
+        assert "一点" not in summary
+    t0 = compose_companion_system(
+        now=datetime(2026, 11, 5, 1, 0, tzinfo=ZoneInfo("Asia/Shanghai")))
+    t1 = compose_companion_system(
+        now=datetime(2026, 11, 5, 9, 51, tzinfo=ZoneInfo("Asia/Shanghai")))
+    assert "01:00" in t0 and "09:51" in t1 and "01:00" not in t1

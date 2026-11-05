@@ -29,3 +29,11 @@ result = executor.run("ls -la", is_owner=True, cwd="/srv/whale/workspace")
 ## 在标准运行入口启用
 
 同时设置 `WHALE_SHELL_ENABLED=1` 和 `WHALE_SHELL_TIER=personal` 才允许 owner 提议自由命令；默认 managed 不执行自由命令。可在控制台设置这些明确开关，也可由部署环境注入。personal 档下主人已明确授权个人沙箱，命令由宿主策略配置为免逐次审批（`PluginActionPolicy.auto_approve_actions`），实际运行还要求非 root 的 Linux 与可用 bwrap/prlimit。工作目录仅为配置目录下的 workspace；不会把密钥、数据库或主目录挂进沙箱。macOS 上该 Linux 执行器诚实报告不可用，可连接独立 Linux 执行宿主，不能静默退到宿主 shell。
+
+
+## 身份与临时授权（Shell ACL）
+
+- **主人（owner）**：`WHALE_SHELL_ENABLED=1` 且 `WHALE_SHELL_TIER=personal` 时，私聊/控制台可跑沙箱内自由命令（`tool.shell.safe` 在主人私聊能力集中）。
+- **QQ 非主人**：即使宿主把档位设为 personal，默认也**不能**触发 shell / 自由命令。
+- **例外**：对方在私聊发送 `sudo <口令>`，经 `temporary_auth` 核销后获得含 `tool.shell.safe` 的临时租约，才在 TTL/次数内放行；到期或用尽自动收回。群聊不开放 sudo。
+- 入站事件必须经服务端 `ResolvedContext`（`is_owner` / 租约 scope）裁决；模型或消息正文不能自抬权。

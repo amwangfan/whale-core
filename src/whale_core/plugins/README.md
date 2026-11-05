@@ -10,7 +10,7 @@
 | --- | --- | --- | --- |
 | **framework（插件框架契约）** | 本目录（下表） | 插件与核心之间的稳定契约面：清单、注册、加载、生命周期、门控、执行网关、事件/意图契约 | 随 `whale-core` wheel（`src/whale_core`） |
 | **builtin providers（内置 provider 实现）** | 本目录（下表） | 媒体 / 语音 / shell / realtime / 模型供给等能力的官方实现——注册为普通插件走同一框架，但**不是框架契约**，可按需替换 | 随 `whale-core` wheel（`src/whale_core`） |
-| **bundled official plugins（捆绑官方插件）** | 仓库根 `plugins/`（`weq_channel`、`search_web`） | 从核心拆出的官方插件，独立发行单元；经 `plugins/loader.py` 显式加载，**核心不 import 其业务代码** | 随同一 wheel 打包（`pyproject.toml` `[tool.hatch.build.targets.wheel] packages` 显式列入），见根 `plugins/README.md` |
+| **bundled official plugins（捆绑官方插件）** | 仓库根 `plugins/`（`weq_channel`、`search_web`、`qweather`） | 从核心拆出的官方插件，独立发行单元；经 `plugins/loader.py` 显式加载，**核心不 import 其业务代码** | 随同一 wheel 打包（`pyproject.toml` `[tool.hatch.build.targets.wheel] packages` 显式列入），见根 `plugins/README.md` |
 
 ## 本目录模块分类
 
@@ -60,7 +60,7 @@
    （当前全部满足，测试逐对断言）。
 2. `whale_core.plugins.loader` 不得 import `whale_core.life`
    （当前无此依赖，测试锁定）。
-3. 根 `plugins/` 下 `search_web` / `weq_channel` 的 `__init__` 必须可导入
+3. 根 `plugins/` 下 `search_web` / `qweather` / `weq_channel` 的 `__init__` 必须可导入
    （懒加载设计，导入即安全）。
 4. 本目录新增模块必须在 README 本表中归类，否则架构测试失败。
 

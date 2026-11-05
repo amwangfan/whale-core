@@ -338,7 +338,8 @@ class ProactiveOutbox:
                         "at": now.isoformat()})
         local = now.astimezone(ZoneInfo(prefs.tz))
         date = local.date().isoformat()
-        quota_key = (f"life:quota:passive:{date}" if passive_reply else f"life:quota:{date}")
+        reactive = _resolve_origin(response_origin, passive_reply) in REACTIVE_ORIGINS
+        quota_key = (f"life:quota:passive:{date}" if reactive else f"life:quota:{date}")
         self.store.put(quota_key, (self.store.get(quota_key) or 0) + 1)
         try:
             accepted = port.send(draft)

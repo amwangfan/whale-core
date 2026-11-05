@@ -8,7 +8,7 @@
   嵌套作用域；当前零违规，逐对锁定）。
 - ``whale_core.plugins.loader`` 不得 import ``whale_core.life``
   （当前无此依赖，锁定）。
-- 根 ``plugins/`` 下 ``search_web`` / ``weq_channel`` 的 ``__init__``
+- 根 ``plugins/`` 下 ``search_web`` / ``qweather`` / ``weq_channel`` 的 ``__init__``
   必须可导入（懒加载设计，import 不起依赖）。
 - 覆盖守卫：``src/whale_core/plugins/`` 下每个模块必须在本文件的
   分层清单中归类（与 ``src/whale_core/plugins/README.md`` 一致），
@@ -66,7 +66,7 @@ BUILTIN_SUPPORT_MODULES = {
 
 # framework 模块禁止 import 的目标：内置实现 + 支撑 + bundled 插件包根。
 FRAMEWORK_FORBIDDEN_PLUGINS_SUBMODULES = BUILTIN_PROVIDER_MODULES | BUILTIN_SUPPORT_MODULES
-BUNDLED_PLUGIN_PACKAGES = {"search_web", "weq_channel"}
+BUNDLED_PLUGIN_PACKAGES = {"search_web", "qweather", "weq_channel"}
 
 
 def _imported_names(path: Path) -> "list[tuple[int, str]]":

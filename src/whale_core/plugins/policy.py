@@ -112,6 +112,7 @@ class PluginActionPolicy:
         *,
         is_owner: bool = False,
         explicitly_approved: bool = False,
+        grant_authorized: bool = False,
         args: Mapping[str, Any] | None = None,
         reserve_transaction: bool = False,
     ) -> PluginVerdict:
@@ -127,10 +128,10 @@ class PluginActionPolicy:
             return PluginVerdict(
                 "denied", "action has no declared risk class", plugin_id=plugin_id, action=action
             )
-        if not is_owner:
+        if not is_owner and not grant_authorized:
             return PluginVerdict(
                 "denied",
-                "plugin actions require authenticated owner",
+                "plugin actions require authenticated owner or matching sudo grant",
                 risk=risk.value,
                 plugin_id=plugin_id,
                 action=action,
@@ -152,7 +153,12 @@ class PluginActionPolicy:
         if risk is RiskClass.COMMUNICATE:
             if explicitly_approved:
                 return PluginVerdict("ready", "approved outbound", risk.value, plugin_id, action)
-            if f"{plugin_id}.{action}" in self.auto_approve_actions:
+            if grant_authorized and f"{plugin_id}.{action}" in self.auto_approve_actions:
+                return PluginVerdict(
+                    "ready", "sudo grant + host auto-approve (shell ACL)",
+                    risk.value, plugin_id, action,
+                )
+            if f"{plugin_id}.{action}" in self.auto_approve_actions and is_owner:
                 return PluginVerdict(
                     "ready", "action auto-approved by host policy (issue #59)",
                     risk.value, plugin_id, action,

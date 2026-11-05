@@ -29,6 +29,10 @@ class TurnResult:
     plan: IntentPlan | None = None
     receipts: tuple[str, ...] = ()
     task_id: str = ""
+    # 分阶段耗时（毫秒；宿主可观测。规则闲聊时 intent 通常 <5ms）
+    intent_ms: int = 0
+    tool_ms: int = 0
+    reply_ms: int = 0
 
 
 @dataclass(frozen=True)

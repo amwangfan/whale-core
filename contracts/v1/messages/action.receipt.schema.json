@@ -92,7 +92,8 @@
             "permission_missing",
             "invalid_message",
             "background_restricted",
-            "internal"
+            "internal",
+            "timeout"
           ],
           "description": "失败时的错误码（state=failed 时携带）"
         },
@@ -100,6 +101,23 @@
           "type": "string",
           "maxLength": 128,
           "description": "可选：执行侧参考标记（如 foreground_verified/unverified、桥侧句柄）；诚实性注解，不构成执行证据"
+        },
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "summary": {
+              "type": "string",
+              "maxLength": 2000,
+              "description": "执行结果摘要（有界，脱敏后）"
+            },
+            "output_ref": {
+              "type": "string",
+              "maxLength": 96,
+              "description": "大输出的不透明引用（agent:out:<action_id>），经 device.agent.output.read 拉取"
+            }
+          },
+          "description": "V1.1（core#58）：执行结果摘要/大输出引用；shell 输出/界面观察经此返回"
         }
       },
       "description": "动作回执"

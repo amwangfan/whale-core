@@ -709,6 +709,18 @@ def cmd_run(args) -> int:
         artifact_dir=Path(args.store).parent / "artifacts")
     for note in cap.notes:
         print(f"[能力] {note}")
+    # Shell ACL：主人 personal 沙箱；QQ 非主人默认拒，sudo 租约可短暂放行
+    shell_auto_actions: frozenset[str] = frozenset()
+    if os.environ.get("WHALE_SHELL_ENABLED", "").strip() == "1":
+        from whale_core.plugins.shell_tool import register_shell, SHELL_AUTO_PAIR
+        from whale_core.cloud.shell_policy import ShellPolicy, ShellTier
+        ws = Path(args.store).parent / "workspace"
+        register_shell(plugin_registry, tools, ws, env=os.environ)
+        if ShellPolicy.from_env(os.environ).tier is ShellTier.PERSONAL:
+            shell_auto_actions = frozenset({SHELL_AUTO_PAIR})
+            print("[能力] 受控终端已挂载（personal：主人沙箱免逐次审批；非主人需 sudo 租约）")
+        else:
+            print("[能力] 受控终端已挂载（非 personal 档：自由命令仍拒绝）")
     # 图片产物本地字节直发（不经过网络/代理）：端口拿到 artifact 引用时
     # 直接从 ArtifactStore 读字节（穿透 WindowedSendPort 取内层）。
     if cap.artifacts is not None:
@@ -737,10 +749,16 @@ def cmd_run(args) -> int:
         return str(store.get("persona:active_card") or "")
 
     # 意图模型（可选，默认关）：QQ_INTENT_MODEL=<模型 id> 开启；规则优先（显式
-    # 搜索指令本地识别零额外调用），LLM 规划用于其余消息。实测选型见 gap-analysis。
+    # 搜索/本地生活/shell.safe 本地识别零额外调用）。enable_llm=True 时路由器仍会
+    # 对普通闲聊跳过意图 LLM（kind=chat），仅模糊写/媒体等 toolish 才打 kimi；
+    # 闲聊回复走 companion/DeepSeek 官模。实测选型见 gap-analysis。
     # 2026-11-01 owner 决策「不走代理」：QQ_INTENT_BASE_URL/QQ_INTENT_API_KEY
     # 可独立于主聊天端点（不同供应商/不同 key 时必备）；缺省回落 DEEPSEEK_*。
-    intent_model_id = os.environ.get("QQ_INTENT_MODEL", "").strip()
+    # Shell 审操模型：WHALE_SHELL_MODEL 优先（AgentScope 上的 kimi-k3 等），
+    # 未设时回落 QQ_INTENT_MODEL；端点/Key 仍用 QQ_INTENT_*。
+    intent_model_id = (
+        os.environ.get("WHALE_SHELL_MODEL", "").strip()
+        or os.environ.get("QQ_INTENT_MODEL", "").strip())
     if intent_model_id:
         from whale_core.core.deepseek import DeepSeekCompanion  # build_brain 同款局部导入
         from whale_core.core.intent_router import SearchIntentRouter
@@ -750,21 +768,40 @@ def cmd_run(args) -> int:
             base_url=os.environ.get("QQ_INTENT_BASE_URL") or None,
             api_key=os.environ.get("QQ_INTENT_API_KEY") or None)
         globals()["_intent_brain_ref"] = intent_brain  # 群定向兜底判定器用
+        fallback_search = None
         if (os.environ.get("TAVILY_API_KEY") or os.environ.get("BRAVE_API_KEY")
                 or os.environ.get("WHALE_SEARCH_PROVIDER")):
             from search_web.web_fetch import register_web_fetch
             from search_web.web_search import register_web_search, select_provider
-            register_web_search(plugin_registry, tools, provider=select_provider(os.environ))
+            provider = select_provider(os.environ)
+            register_web_search(plugin_registry, tools, provider=provider)
             register_web_fetch(plugin_registry, tools)
+
+            def fallback_search(query: str, _provider=provider) -> str:
+                results = _provider.search(str(query or ""), limit=5)
+                if not results:
+                    return "没有找到结果"
+                return "\n".join(
+                    f"{r.title} — {r.snippet}（{r.url}）" for r in results[:5])
+
             tool_note = "搜索/抓取已挂载"
         else:
             tool_note = "搜索未挂载（无 TAVILY/BRAVE key，搜索意图会诚实报不可用）"
+        if ((os.environ.get("QWEATHER_API_KEY") or "").strip()
+                and (os.environ.get("QWEATHER_API_HOST") or "").strip()):
+            from qweather.weather import register_qweather
+            register_qweather(
+                plugin_registry, tools, env=os.environ,
+                fallback_search=fallback_search)
+            tool_note += "；和风天气已挂载"
+        else:
+            tool_note += "；和风未挂载（缺 QWEATHER_API_KEY/HOST，天气回落搜索）"
         workflow.orchestrator = ConversationOrchestrator(
             store, workflow.companion,
             intent_model=SearchIntentRouter(model=intent_brain, enable_llm=True, tools=tools),
             tools=tools, context_resolver=context_resolver,
             grant_gate=_grant_gate)
-        print(f"[意图] 模型={intent_model_id}（规则优先+LLM 规划；{tool_note}）")
+        print(f"[意图] 模型={intent_model_id}（规则优先；闲聊跳过 LLM；模糊写可 LLM；{tool_note}）")
 
     # 安全审核模型（可选，默认关）：QQ_SAFETY_MODEL=<模型 id> 开启——
     # 回复发送前由该模型复核；有顾虑的草稿强制转人工审批（不自动发）。
@@ -797,10 +834,40 @@ def cmd_run(args) -> int:
         print(f"[审核] 安全审核模型={safety_model_id}（发送前复核；顾虑转人工）")
     owner_draft_ids: set[str] = set()
     approved_draft_ids: set[str] = set()
-    plugin_gateway = build_qq_weq_gateway(
-        plugin_registry, owner_draft_ids=owner_draft_ids,
-        approved_draft_ids=approved_draft_ids)
+    from weq_channel.qq_weq_plugin import _draft_id_of
+    from whale_core.core.runtime import (
+        runtime_approval_verifier, runtime_owner_verifier, runtime_shell_grant_verifier)
+    from whale_core.plugins import PluginActionPolicy, PluginGateway
+    _rt_owner = runtime_owner_verifier(store)
+    _rt_approval = runtime_approval_verifier(store)
+    _rt_grant = runtime_shell_grant_verifier(store)
+
+    def _combined_owner(intent):
+        try:
+            if _draft_id_of(intent) in owner_draft_ids:
+                return True
+        except Exception:
+            pass
+        return bool(_rt_owner(intent))
+
+    def _combined_approval(intent):
+        try:
+            if _draft_id_of(intent) in approved_draft_ids:
+                return True
+        except Exception:
+            pass
+        return bool(_rt_approval(intent))
+
+    plugin_gateway = PluginGateway(
+        plugin_registry,
+        PluginActionPolicy(plugin_registry, auto_approve_actions=shell_auto_actions),
+        owner_verifier=_combined_owner,
+        approval_verifier=_combined_approval,
+        grant_verifier=_rt_grant,
+    )
     print(f"[插件] {QQ_WEQ_PLUGIN_ID} channel 已注册（send_message=communicate，网关门控+共享账本）")
+    if shell_auto_actions:
+        print("[插件] shell_sandbox.run_command 已纳入 personal 免审 + sudo grant 路径")
     # 编排器接上真实网关——否则 read_only 工具因 manifest 风险无法核验被拒
     # （unverified-plugin-risk，生产实证：fetch_url 被拒）
     if workflow.orchestrator is not None:
@@ -1820,7 +1887,6 @@ def cmd_run(args) -> int:
               f"succeeded={counts['succeeded']}；启动收回过期租约={listener.recovered}")
     print(f"[监听] http://{listener.host}:{listener.port}/（等 WeQ SSE 推送；Ctrl+C 退出）")
     try:
-        import time
         while True:
             time.sleep(1)
     except KeyboardInterrupt:

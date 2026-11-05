@@ -82,8 +82,9 @@ class ShellExecutor:
         self.max_output_bytes, self.memory_bytes = max_output_bytes, memory_bytes
         self.file_bytes, self.max_processes = file_bytes, max_processes
 
-    def verdict(self, command: str, *, is_owner: bool) -> ShellVerdict:
-        return self.policy.command_verdict(command, is_owner=is_owner)
+    def verdict(self, command: str, *, is_owner: bool, has_shell_grant: bool = False) -> ShellVerdict:
+        return self.policy.command_verdict(
+            command, is_owner=is_owner, has_shell_grant=has_shell_grant)
 
     def _sandbox_argv(self, command: str, cwd: str) -> list[str]:
         bwrap = shutil.which("bwrap")
@@ -130,9 +131,10 @@ class ShellExecutor:
                     "--nofile=64:64", "--", *argv]
         return argv
 
-    def run(self, command: str, *, is_owner: bool, cwd: str | None = None) -> ExecutionResult:
+    def run(self, command: str, *, is_owner: bool, cwd: str | None = None,
+            has_shell_grant: bool = False) -> ExecutionResult:
         started = time.monotonic()
-        verdict = self.verdict(command, is_owner=is_owner)
+        verdict = self.verdict(command, is_owner=is_owner, has_shell_grant=has_shell_grant)
         if not verdict.allowed:
             return ExecutionResult("denied", None, "", "", time.monotonic() - started, verdict.reason)
         resolved = self._resolve_cwd(cwd)

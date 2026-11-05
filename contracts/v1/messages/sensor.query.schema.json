@@ -74,7 +74,11 @@
             "phone.notification.read",
             "phone.call.ring",
             "phone.call.audio",
-            "phone.device.safe_action"
+            "phone.device.safe_action",
+            "device.agent.control",
+            "device.agent.observe",
+            "device.agent.shell",
+            "device.agent.output.read"
           ],
           "description": "查询操作对应的能力名（§5），core 先做权限检查，手机再按本地授权判断（§4）"
         },

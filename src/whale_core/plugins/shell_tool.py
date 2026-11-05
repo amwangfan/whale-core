@@ -22,17 +22,25 @@ SHELL_AUTO_PAIR = f"{SHELL_PLUGIN_ID}.{SHELL_RUN_ACTION}"
 
 def register_shell(registry, tools, workspace: Path, *, env=None):
     workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
-    executor = ShellExecutor(ShellPolicy.from_env(env), allowed_cwds=(str(workspace),), sandbox='bubblewrap')
+    import os as _os
+    _drop = 'nobody' if _os.geteuid() == 0 else None
+    executor = ShellExecutor(ShellPolicy.from_env(env), allowed_cwds=(str(workspace),),
+                             sandbox='bubblewrap', drop_to_user=_drop)
     class Adapter:
         def execute(self, action, target, args):
             command = args.get('command')
             if not isinstance(command, str) or not command.strip():
                 return False, 'command required'
-            result = executor.run(command, cwd=str(workspace), is_owner=True)
+            # 身份只能来自网关注入的宿主标志，绝不可信模型/用户槽位自抬权。
+            is_owner = bool(args.get('_whale_is_owner'))
+            has_grant = bool(args.get('_whale_shell_grant'))
+            result = executor.run(
+                command, cwd=str(workspace), is_owner=is_owner, has_shell_grant=has_grant)
             return result.status == 'success', (result.stdout + '\n' + result.stderr + '\n' + result.verdict_reason)[:4000]
     registry.register(PluginManifest(plugin_id=SHELL_PLUGIN_ID, name='受控终端', version='1.0.0', kind='output',
                       actions=(SHELL_RUN_ACTION,), action_risk={SHELL_RUN_ACTION: 'communicate'},
                       description='在Linux bubblewrap隔离工作目录执行；沙箱不可用时拒绝。personal档可由宿主配置免逐次审批'), executor=Adapter())
-    tools.register(ToolSpec(name='run_shell', capability='shell.execute', plugin_id=SHELL_PLUGIN_ID,
+    # capability=shell.safe → 执行端 required scope = tool.shell.safe（与 SCOPE_TOOL_SHELL_SAFE 对齐）
+    tools.register(ToolSpec(name='run_shell', capability='shell.safe', plugin_id=SHELL_PLUGIN_ID,
                            action=SHELL_RUN_ACTION, risk_class='communicate',
                            description='在专用工作目录内执行command；系统沙箱隔离，personal档可免逐次审批'))

@@ -27,10 +27,11 @@ def _action_fingerprint(intent: ActionIntent) -> str:
 
 
 def runtime_owner_verifier(store: MemoryStore) -> Callable[[ActionIntent], bool]:
-    """Recognize actions originating in the authenticated local host runtime.
+    """Recognize owner-authorized runtime actions.
 
-    source is supplied by host code, never read from user/model slots. External
-    channel adapters must perform their own binding before calling this runtime.
+    Trusted local sources (api/cli/runtime) remain accepted. Channel tasks
+    (e.g. QQ) may also pass when the server authz snapshot records
+    ``is_owner=True`` — never from model/user payload flags.
     """
     def verify(intent: ActionIntent) -> bool:
         parts = intent.reason.split(":")
@@ -38,11 +39,45 @@ def runtime_owner_verifier(store: MemoryStore) -> Callable[[ActionIntent], bool]
             return False
         record = store.get(f"task:{parts[1]}")
         journal = store.get(f"runtime:task:{parts[1]}")
-        return (isinstance(record, dict) and isinstance(journal, dict)
-                and journal.get("source") in {"api", "cli", "runtime"}
+        if not (isinstance(record, dict) and isinstance(journal, dict)
                 and record.get("status") == "running" and not record.get("cancel_requested")
                 and record.get("approval_token") == intent.reason
-                and record.get("pending_fingerprint") == _action_fingerprint(intent))
+                and record.get("pending_fingerprint") == _action_fingerprint(intent)):
+            return False
+        if journal.get("source") in {"api", "cli", "runtime"}:
+            return True
+        authz = journal.get("authz") or {}
+        return bool(isinstance(authz, dict) and authz.get("is_owner"))
+    return verify
+
+
+def runtime_shell_grant_verifier(store: MemoryStore) -> Callable[[ActionIntent], bool]:
+    """QQ 非主人：仅当授权快照含 ``tool.shell.safe`` 租约 scope 时，放行 shell 插件动作。
+
+    与 ``runtime_owner_verifier`` 并列；调用方（PluginGateway）在非 owner 时查询。
+    租约次数消耗仍由编排器 ``grant_gate`` 在派发前完成。
+    """
+    def verify(intent: ActionIntent) -> bool:
+        parts = intent.reason.split(":")
+        if len(parts) != 3 or parts[0] != "runtime-task":
+            return False
+        record = store.get(f"task:{parts[1]}")
+        journal = store.get(f"runtime:task:{parts[1]}")
+        if not (isinstance(record, dict) and isinstance(journal, dict)
+                and record.get("status") == "running" and not record.get("cancel_requested")
+                and record.get("approval_token") == intent.reason
+                and record.get("pending_fingerprint") == _action_fingerprint(intent)):
+            return False
+        payload = intent.payload if isinstance(intent.payload, dict) else {}
+        if str(payload.get("plugin_id") or "") != "shell_sandbox":
+            return False
+        if str(payload.get("action") or "") != "run_command":
+            return False
+        authz = journal.get("authz") or {}
+        if not isinstance(authz, dict):
+            return False
+        grant_scopes = set(authz.get("grant_scopes") or ())
+        return "tool.shell.safe" in grant_scopes
     return verify
 
 

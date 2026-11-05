@@ -332,6 +332,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         help="top-p（元数据登记）")
     parser.add_argument("--scenario", action="append", default=None,
                         help="只跑指定场景 id（可重复；缺省跑全部）")
+    parser.add_argument("--preset", default=None,
+                        help="抽检预设 companion|glasses|all（issue #53）")
     args = parser.parse_args(argv)
 
     env = dict(os.environ)
@@ -349,13 +351,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"配置错误：{exc}", file=sys.stderr)
         return 2
 
+    from evals.live.presets import PRESETS, resolve_preset
+    selected_ids = None
+    if args.preset:
+        resolved = resolve_preset(args.preset)
+        if resolved is None:
+            print(f"未知 preset：{args.preset}（可选：{', '.join(sorted(PRESETS))}）",
+                  file=sys.stderr)
+            return 2
+        selected_ids = list(resolved) if resolved else None
     if args.scenario:
-        unknown = [sid for sid in args.scenario
-                   if sid not in LIVE_SCENARIOS_BY_ID]
+        selected_ids = list(args.scenario) if selected_ids is None else [
+            s for s in selected_ids if s in set(args.scenario)] or list(args.scenario)
+    if selected_ids is not None:
+        unknown = [sid for sid in selected_ids if sid not in LIVE_SCENARIOS_BY_ID]
         if unknown:
             print(f"未知场景 id：{', '.join(unknown)}", file=sys.stderr)
             return 2
-        scenarios = tuple(LIVE_SCENARIOS_BY_ID[sid] for sid in args.scenario)
+        scenarios = tuple(LIVE_SCENARIOS_BY_ID[sid] for sid in selected_ids)
     else:
         scenarios = LIVE_SCENARIOS
 

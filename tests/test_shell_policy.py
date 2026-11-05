@@ -262,6 +262,57 @@ def test_existing_allowlist_behavior_unchanged_under_policy() -> None:
     assert {"show_card", "shell_whitelist"} <= kinds
 
 
+
+def test_personal_allows_sudo_grant_without_owner() -> None:
+    """非 owner + 有效 shell 租约：personal 档放行（QQ sudo 例外）。"""
+    verdict = ShellPolicy(tier=ShellTier.PERSONAL).command_verdict(
+        "ls", is_owner=False, has_shell_grant=True)
+    assert verdict.allowed
+    assert "sudo-grant" in verdict.reason or "grant" in verdict.reason
+
+
+def test_personal_denies_non_owner_even_when_tier_personal() -> None:
+    verdict = ShellPolicy(tier=ShellTier.PERSONAL).command_verdict(
+        "ls", is_owner=False, has_shell_grant=False)
+    assert not verdict.allowed
+    assert "owner" in verdict.reason or "grant" in verdict.reason
+
+
+def test_loop_personal_tier_allows_shell_grant_meta() -> None:
+    mock = MockHttpActionGateway()
+    loop = CloudActionLoop(
+        gateway=CompositeActionGateway(mock_http=mock),
+        selector=RuleActionSelector(shell_policy=ShellPolicy(tier=ShellTier.PERSONAL)),
+    )
+    receipts = loop.handle(
+        InboundEvent(
+            kind="message",
+            text="cmd:echo grant-ok",
+            source="qq",
+            meta={"has_shell_grant": True, "grant_scopes": ["tool.shell.safe"]},
+        )
+    )
+    assert any(i.kind == "shell_command" for i in loop.last_intents)
+    assert loop.last_verdicts[0].allowed
+    assert any("/v1/actions/shell_command" in r for r in receipts)
+
+
+def test_loop_personal_tier_blocks_qq_stranger_without_grant() -> None:
+    loop = CloudActionLoop(
+        selector=RuleActionSelector(shell_policy=ShellPolicy(tier=ShellTier.PERSONAL))
+    )
+    loop.handle(
+        InboundEvent(
+            kind="message",
+            text="cmd:ls",
+            source="qq",
+            meta={"owner_authenticated": False, "is_owner": False},
+        )
+    )
+    assert all(i.kind != "shell_command" for i in loop.last_intents)
+    assert not loop.last_verdicts[0].allowed
+
+
 def test_shell_command_intent_helper() -> None:
     intent = ShellCommand(command="ls -la", tier="personal").to_intent()
     assert intent.kind == "shell_command"

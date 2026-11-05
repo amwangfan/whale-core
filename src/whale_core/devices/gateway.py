@@ -479,7 +479,9 @@ class DeviceGateway:
                         record.update(state=state, updated_at=now_ms())
                         if state in TERMINAL_RECEIPT_STATES:
                             record["receipt"] = {
-                                k: p[k] for k in ("state", "executed_at", "error_code")
+                                k: p[k] for k in (
+                                    "state", "executed_at", "error_code",
+                                    "provider_ref", "result")
                                 if k in p
                             }
                         self.store.put(action_key, record)
@@ -633,6 +635,9 @@ class DeviceGateway:
         return st
 
     def _check_scope(self, device_id: str, capability: str) -> None:
+        meta = self.registry.get(device_id)
+        if not meta or meta.get("status") != "active":
+            raise GatewayError("scope_denied", "设备未激活或已撤销")
         if capability not in self.registry.scopes_of(device_id):
             raise GatewayError("scope_denied", f"设备未授予 {capability}")
 

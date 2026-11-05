@@ -46,6 +46,7 @@ def _authz_snapshot(context) -> dict | None:
         return {
             "principal_id": principal.principal_id,
             "paired": bool(principal.paired),
+            "is_owner": bool(getattr(principal, "is_owner", False)),
             "conversation_key": conversation.as_key(),
             "scopes": sorted(
                 set(context.capability_scopes)

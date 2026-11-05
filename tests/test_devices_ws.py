@@ -531,13 +531,15 @@ def test_action_receipt_state_machine(api):
             time.sleep(0.2)
             assert thread.is_alive(), f"{state} 不应 resolve"
         # 终态 executed：resolve
-        sim.send(sim.frame("action.receipt", {
+        terminal = {
             "action_id": action_id, "state": "executed",
-            "executed_at": now_ms()}))
+            "executed_at": now_ms(), "provider_ref": "degraded:notification:test",
+            "result": {"summary": "posted", "output_ref": "opaque-output-1"}}
+        sim.send(sim.frame("action.receipt", terminal))
         thread.join(timeout=15)
         status, body = box["result"]
         assert status == 200
-        assert body["result"]["receipt"]["state"] == "executed"
+        assert body["result"]["receipt"] == terminal
         # 回执状态机全程落库
         receipts = gateway.store.get(
             f"device:receipts:{sim.device_id}:{action_id}")
@@ -548,7 +550,8 @@ def test_action_receipt_state_machine(api):
             body={"idempotency_key": "idem-test-0001"})
         assert status == 200
         assert body["result"]["state"] == "executed"
-        assert body["result"]["receipt"]["state"] == "executed"
+        assert body["result"]["receipt"] == {
+            key: value for key, value in terminal.items() if key != "action_id"}
     finally:
         sim.close()
 

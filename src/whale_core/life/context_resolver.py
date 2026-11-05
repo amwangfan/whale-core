@@ -30,14 +30,16 @@ from whale_core.life.conversation_context import (
     SCOPE_DEVICE_NOTIFY,
     SCOPE_OUTBOX_SUBMIT,
     SCOPE_TASK_READ_SELF,
+    SCOPE_TOOL_SHELL_SAFE,
     SCOPE_TOOL_WEB_SEARCH,
+    SCOPE_TOOL_WEATHER_NOW,
     principal_matches_private_conversation,
 )
 
 # ---- 能力上限（§6.2 权限矩阵的首版落地） ------------------------------
 
 #: 群会话上限：任何成员（含主人本人）在群里都不超过这个集合。
-GROUP_CEILING: Tuple[str, ...] = (SCOPE_CHAT_BASIC, SCOPE_TOOL_WEB_SEARCH)
+GROUP_CEILING: Tuple[str, ...] = (SCOPE_CHAT_BASIC, SCOPE_TOOL_WEB_SEARCH, SCOPE_TOOL_WEATHER_NOW)
 
 #: 未配对私聊：仅对话。
 PRIVATE_ANON: Tuple[str, ...] = (SCOPE_CHAT_BASIC,)
@@ -58,18 +60,19 @@ def _media_open_test() -> bool:
     import os
     return os.environ.get("WHALE_MEDIA_OPEN_TEST", "").strip() == "1"
 
-#: 已配对主人私聊：对话 + 常规工具 + 提交出站 + 查看本人任务 + 设备通知。
-#: F-01 红队修复：capability scope 在执行端真校验后，主人私聊必须显式
-#: 保留其既有工具能力，否则生图/语音等回归。高风险动作（shell、支付、
-#: 记忆写 vault）不在此列，仍需既有审批链（policy.py）。
+#: 已配对主人私聊：对话 + 常规工具 + 提交出站 + 查看本人任务 + 设备通知
+#: + 受控 shell（tool.shell.safe）。实际执行仍受 WHALE_SHELL_* 与沙箱约束；
+#: 支付/删库等不在此列。非主人默认无 shell，只能经 temporary_auth sudo 租约。
 PRIVATE_OWNER: Tuple[str, ...] = (
     SCOPE_CHAT_BASIC,
     SCOPE_TOOL_WEB_SEARCH,
+    SCOPE_TOOL_WEATHER_NOW,
     "tool.web.fetch",
     "tool.media.image.generate",
     "tool.media.video.generate",
     "tool.tts.synthesize",
     "tool.asr.transcribe",
+    SCOPE_TOOL_SHELL_SAFE,
     SCOPE_OUTBOX_SUBMIT,
     SCOPE_TASK_READ_SELF,
     SCOPE_DEVICE_NOTIFY,

@@ -203,6 +203,8 @@ class _Handler(BaseHTTPRequestHandler):
             routes.system.settings(self, method)
         elif head == 'diagnostics' and method == 'GET' and len(parts) == 1:
             routes.system.diagnostics(self)
+        elif parts == ["security", "defaults"] and method == "GET":
+            routes.system.security_defaults(self)
         elif head == 'providers' and parts == ['providers', 'test'] and method == 'POST':
             routes.system.provider_test(self)
         elif head == 'capabilities' and len(parts) == 2 and method == 'POST':

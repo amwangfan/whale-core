@@ -86,7 +86,11 @@
               "phone.device.safe_action",
               "glasses.card.show",
               "glasses.card.update",
-              "glasses.card.dismiss"
+              "glasses.card.dismiss",
+              "device.agent.control",
+              "device.agent.observe",
+              "device.agent.shell",
+              "device.agent.output.read"
             ],
             "description": "能力名（§5）"
           },

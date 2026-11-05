@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import replace
 from uuid import uuid4
 
@@ -34,7 +35,23 @@ class TurnOrchestrationMixin:
         """同步入口：一次请求至多一次规划，Decision 直接消费。"""
         env = self._ensure_context(env)
         with conversation_lock(self.store, env.conversation_id):
-            return self._finish_decision(env, self._decide(env))
+            t0 = time.perf_counter()
+            decision = self._decide(env)
+            intent_ms = int((time.perf_counter() - t0) * 1000)
+            t1 = time.perf_counter()
+            result = self._finish_decision(env, decision)
+            after_ms = int((time.perf_counter() - t1) * 1000)
+            # chat/clarify/memory：after = 回复模型；task：after 含工具+组装（粗粒度 tool_ms）。
+            if decision.route == "task":
+                tool_ms, reply_ms = after_ms, 0
+            else:
+                tool_ms, reply_ms = 0, after_ms
+            return replace(
+                result,
+                intent_ms=intent_ms,
+                tool_ms=tool_ms,
+                reply_ms=reply_ms,
+            )
 
     def handle_message_async(
         self, conversation_id: str, text: str, *, source: str = "runtime",

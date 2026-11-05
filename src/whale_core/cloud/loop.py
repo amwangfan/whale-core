@@ -10,7 +10,7 @@ shell 分档（裁决在 ``whale_core.cloud.shell_policy``，本模块只产意�
 
 - ``tool:name`` / ``shell:name`` / 关键词 → 白名单工具意图（``tool_verdict`` 按档放行）；
 - safe 档关键词（网页搜索类）→ ``web_search`` 等只读工具，managed 档不放行；
-- ``cmd:命令`` → 自由命令：仅 personal 档 + ``meta.owner_authenticated`` 才产生
+- ``cmd:命令`` → 自由命令：仅 personal 档 +（``meta.owner_authenticated`` / ``is_owner`` 或有效 shell 租约）才产生
   ``shell_command`` 意图，被拒时回一张 ``shell_denied`` 卡保证闭环可观测；
 - 裁决记录在 ``CloudActionLoop.last_verdicts``，审计入口 ``ShellPolicy.audit``。
 """
@@ -106,9 +106,19 @@ class RuleActionSelector:
 
         command = _explicit_command(text)
         if command is not None:
+            meta = event.meta or {}
+            has_grant = bool(
+                meta.get("has_shell_grant")
+                or meta.get("shell_grant")
+                or (
+                    "tool.shell.safe"
+                    in set(meta.get("grant_scopes") or meta.get("scopes") or ())
+                )
+            )
             verdict = self.policy.command_verdict(
                 command,
-                is_owner=bool((event.meta or {}).get("owner_authenticated")),
+                is_owner=bool(meta.get("owner_authenticated") or meta.get("is_owner")),
+                has_shell_grant=has_grant,
             )
             verdicts.append(verdict)
             if verdict.allowed:

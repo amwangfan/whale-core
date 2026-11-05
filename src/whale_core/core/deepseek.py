@@ -97,12 +97,15 @@ class DeepSeekCompanion:
     def reply(self, text: str, *, persona: str = "", memories: Sequence[str] = (),
               history: Sequence[Mapping[str, str]] = (),
               images: Sequence = (),
+              location: str | None = None,
               on_delta=None, should_stop=None, metrics: dict | None = None) -> str:
         if not self.api_key and not _is_local_or_private_http(self.base_url):
             # 回环/私网 http 端点（如本地 Ollama）允许无 key；云端端点必须配置
             raise ModelError("config", "DEEPSEEK_API_KEY not configured")
         from whale_core.core.prompt_composer import compose_companion_system
-        system = compose_companion_system(persona=persona, memories=memories)
+        loc = location if location is not None else getattr(self, "default_location", None)
+        system = compose_companion_system(
+            persona=persona, memories=memories, location=loc)
         clean_history = [{"role": m["role"], "content": m["content"][:2000]}
                          for m in list(history)[-12:] if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)]
         # 附带图片时用户消息转多模态 parts（OpenAI image_url data URI 形态）。
