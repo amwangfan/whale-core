@@ -111,3 +111,24 @@ def test_expression_group_without_median_still_soft():
 
 def test_expression_private_unchanged_default_empty():
     assert derive_policy("你好").render() == ""
+
+
+def test_expression_group_gentle_tone_and_no_ai_dash():
+    """owner 选 B：群侧温柔体贴，去客服/破折号腔；不堆「像真人」。"""
+    policy = derive_policy("今晚吃啥", is_group=True, peer_median=18)
+    rendered = policy.render()
+    assert "温柔体贴" in rendered
+    assert "少攻击" in rendered or "不互损" in rendered
+    assert "客服" in rendered
+    assert "破折号" in rendered
+    assert "像真人" not in rendered
+
+
+def test_expression_health_care_hint():
+    policy = derive_policy("我感冒了好难受", is_group=True)
+    assert policy.care_health is True
+    assert "身体不适" in policy.render() or "关心" in policy.render()
+    # 私聊生病也关心，并可略亲密
+    priv = derive_policy("我发烧了", is_group=False)
+    assert priv.care_health is True
+    assert "温柔" in priv.render()

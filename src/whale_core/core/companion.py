@@ -205,7 +205,17 @@ class WhaleCompanion:
                 # 可自然提起；状态照实（没成/不确定不装完成），不主动汇报。
                 from whale_core.life.activity import render_activity_hint
                 activity_hint = render_activity_hint(self.store, scope) if scope else ""
+                # 群/私聊通道语气（owner 2026-11-05 选 B）：群温柔体贴少攻击；
+                # 私聊可略亲密仍偏温柔。只作表达层软提示，不堆「像真人」。
+                channel_tone = (
+                    "通道语气：群里温柔体贴、少攻击性；短句贴合群友长度；"
+                    "生病等继续关心；别客服腔、别用破折号串长句。"
+                    if is_group else
+                    "通道语气：私聊可以稍亲近一点，但仍偏温柔体贴；"
+                    "别客服腔、别用破折号串长句。"
+                )
                 hints = [h for h in (rel.render(), policy.render(),
+                                     channel_tone,
                                      "\n".join(state_lines), activity_hint,
                                      intent.hint) if h]
                 if hints:

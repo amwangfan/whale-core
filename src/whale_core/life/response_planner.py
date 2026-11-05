@@ -33,6 +33,7 @@ PLANNING_HINT = (
     "不要每轮都提问、撒娇、称呼对方名字或总结对方的话——有需要才做，"
     "没有就自然结束（issue #41 反模板纪律）。"
     "群聊接话贴近群友平时的长度与语气：别写长段落/列表，也别故意碎句。"
+    "别用客服腔，也别用破折号（——）串长句。"
 )
 
 SILENCE_MARK = "[[沉默]]"
@@ -289,8 +290,13 @@ def derive_pragmatic_intent(
                 "不自然就别硬提。")
     if any(w in t for w in _PLAY_WORDS):
         if familiarity != "stranger":
-            return PragmaticIntent(
-                "play", "这轮气氛轻松：接得住梗就顺着玩，别一本正经、别说教。")
+            # 群侧选 B：轻松可接，但不鼓励互损/怼人。
+            hint = (
+                "这轮气氛轻松：可以轻轻接一下，温柔一点就好，别抬杠别怼人。"
+                if is_group else
+                "这轮气氛轻松：接得住梗就顺着玩，别一本正经、别说教。"
+            )
+            return PragmaticIntent("play", hint)
         return PragmaticIntent()
     has_question = ("?" in t or "？" in t) and len(t) >= 6
     if has_question or any(w in t for w in _ASK_WORDS) and len(t) >= 8:
