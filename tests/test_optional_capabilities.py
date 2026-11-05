@@ -108,9 +108,9 @@ def test_media_style_default_anime_and_explicit_style_wins(tmp_path, monkeypatch
              'WHALE_IMAGE_PROVIDER':'openai', 'WHALE_MEDIA_STYLE':''}, artifact_dir=tmp_path)
 
 
-def test_minimax_image_default_when_key_present(tmp_path, monkeypatch):
-    """MiniMax key 就位：图像默认模型切成 minimax-image-01（owner 决策），
-    qwen 仍列可选；key 缺席则保持 qwen 默认。"""
+def test_qwen_image_default_when_both_keys_present(tmp_path, monkeypatch):
+    """2026-11-05 owner 决策：默认生图模型 qwen-image-3.0（带参考图还原度
+    实测完胜 MiniMax）；MiniMax 保留可选，显式 WHALE_IMAGE_MODEL 可覆盖。"""
     registry, tools = PluginRegistry(), ToolRegistry()
     configure_optional_capabilities(registry, tools, InMemoryStore(),
         env={'WHALE_IMAGE_BASE_URL':'http://localhost:1234/v1',
@@ -119,17 +119,27 @@ def test_minimax_image_default_when_key_present(tmp_path, monkeypatch):
     spec = tools.for_capability('media.image.generate')[0]
     assert 'minimax-image-01' in spec.description
     assert 'qwen-image-3.0' in spec.description
-    # 默认模型路由到 MiniMax provider（HTTP 协议层在 test_minimax_media 覆盖）
+    # 默认模型路由到 qwen provider（HTTP 协议层在 test_dashscope_media 覆盖）
     from whale_core.plugins.media_image import ImageTaskResult
-    from whale_core.plugins import minimax_media as _mm
+    from whale_core.plugins import dashscope_media as _ds
     calls = []
-    def _fake_generate(self, prompt, *, size='1328*1328', n=1):
+    def _fake_generate(self, prompt, *, size='1328*1328', n=1, references=()):
         calls.append(prompt)
         return ImageTaskResult(task_id='t', status='succeeded',
             images=('data:image/png;base64,'+base64.b64encode(b'img').decode(),))
-    monkeypatch.setattr(_mm.MiniMaxImageProvider, 'generate', _fake_generate)
+    monkeypatch.setattr(_ds.DashScopeImageProvider, 'generate', _fake_generate)
     result = json.loads(spec.handler({'prompt':'鲸鱼'}))
-    assert result['model'] == 'minimax-image-01' and calls
+    assert result['model'] == 'qwen-image-3.0' and calls
+    # 显式指定 minimax 仍可选路
+    from whale_core.plugins import minimax_media as _mm
+    mm_calls = []
+    def _fake_mm(self, prompt, *, size='1328*1328', n=1, references=()):
+        mm_calls.append(prompt)
+        return ImageTaskResult(task_id='t', status='succeeded',
+            images=('data:image/png;base64,'+base64.b64encode(b'img').decode(),))
+    monkeypatch.setattr(_mm.MiniMaxImageProvider, 'generate', _fake_mm)
+    result = json.loads(spec.handler({'prompt':'鲸鱼', 'model':'minimax-image-01'}))
+    assert result['model'] == 'minimax-image-01' and mm_calls
     # key 缺席：minimax 模型不出现
     registry3, tools3 = PluginRegistry(), ToolRegistry()
     configure_optional_capabilities(registry3, tools3, InMemoryStore(),
@@ -137,6 +147,16 @@ def test_minimax_image_default_when_key_present(tmp_path, monkeypatch):
              'WHALE_IMAGE_PROVIDER':'dashscope'}, artifact_dir=tmp_path)
     spec3 = tools3.for_capability('media.image.generate')[0]
     assert 'minimax' not in spec3.description
+    # 显式覆盖：WHALE_IMAGE_MODEL=minimax-image-01 → 默认切回 minimax
+    registry4, tools4 = PluginRegistry(), ToolRegistry()
+    configure_optional_capabilities(registry4, tools4, InMemoryStore(),
+        env={'WHALE_IMAGE_BASE_URL':'http://localhost:1234/v1',
+             'WHALE_IMAGE_PROVIDER':'dashscope',
+             'WHALE_MINIMAX_API_KEY':'k',
+             'WHALE_IMAGE_MODEL':'minimax-image-01'}, artifact_dir=tmp_path)
+    result = json.loads(
+        tools4.for_capability('media.image.generate')[0].handler({'prompt':'鲸鱼'}))
+    assert result['model'] == 'minimax-image-01'
 
 
 def test_minimax_only_full_media_stack_no_proxy(tmp_path, monkeypatch):

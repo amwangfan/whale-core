@@ -237,7 +237,7 @@ class SearchIntentRouter:
             "web.search": "query: 搜索词, limit: 结果数量",
             "weather.now": "place: 口述城市；location_hint/coords: 无口述时用当前位置；query: 回落搜索词",
             "web.fetch": "url: 要读取的公开HTTP(S)链接",
-            "media.image.generate": "prompt: 图片描述, size/model: 可选, reference_query: 仅当主体是已知角色/人物/IP 形象时填参考图搜索词（系统会先搜参考图再带图生成）；泛化主体不要填",
+            "media.image.generate": "prompt: 图片描述, size/model: 可选（model 默认 qwen-image-3.0）, reference_query: 仅当主体是已知角色/人物/IP 形象时填参考图搜索词（系统会搜最多3张参考图带图生成）；若 web 搜索已拿到图片链接可用 reference_urls 直接传入；泛化主体不要填",
             "media.video.generate": "prompt: 视频描述, model: 可选（用户指定才填）",
             "tts.synthesize": "text: 要朗读的文字, model/voice: 可选（用户指定才填）",
             "asr.transcribe": "audio: 已提供的音频数据或资源引用；缺音频时澄清",

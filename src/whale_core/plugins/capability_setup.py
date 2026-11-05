@@ -74,41 +74,16 @@ class OptionalCapabilities:
     notes: list[str] = field(default_factory=list)
 
 
-def _fetch_reference_image(url: str, *, max_bytes: int = 10 * 1024 * 1024,
-                           timeout: float = 20.0):
-    """下载参考图（2026-11-05 参考图生图）：仅 https、大小封顶、魔数嗅探
-    必须是光栅图；失败 → None（调用方回落纯文生图）。"""
-    import urllib.request
-    if not str(url or "").startswith("https://"):
-        return None
+def _tavily_image_search(env: Mapping[str, str]):
+    """Tavily 图片搜索通道（参考图采集）；未配置/不可用 → None。"""
+    import os
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "whale-core/1.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = resp.read(max_bytes + 1)
-        if not data or len(data) > max_bytes:
-            return None
-        mime = "image/png" if data[:4] == b"\x89PNG" else \
-            "image/jpeg" if data[:2] == b"\xff\xd8" else \
-            "image/gif" if data[:3] == b"GIF" else \
-            "image/webp" if data[8:12] == b"WEBP" else ""
-        return (data, mime) if mime else None
+        from search_web.web_search import TavilyProvider
     except Exception:
         return None
-
-
-def _find_reference_image(query: str, *, env=None):
-    """按检索词搜一张可用参考图（Tavily 图片通道）；找不到 → None。"""
-    import os
-    from search_web.web_search import TavilyProvider
     provider = TavilyProvider(env=os.environ if env is None else env)
     search_images = getattr(provider, "search_images", None)
-    if not callable(search_images):
-        return None
-    for url in (search_images(query, limit=5) or [])[:5]:
-        got = _fetch_reference_image(url)
-        if got is not None:
-            return got
-    return None
+    return search_images if callable(search_images) else None
 
 
 def configure_optional_capabilities(registry, tools, store, *, env: Mapping[str,str],
@@ -156,11 +131,12 @@ def configure_optional_capabilities(registry, tools, store, *, env: Mapping[str,
     image_base, image_key, image_kind = _resolve_capability_env(env, "IMAGE")
     if image_base or minimax is not None:
         mm_image_name = "minimax-" + (env.get("WHALE_MINIMAX_IMAGE_MODEL") or "image-01").strip()
-        # 默认模型：显式 WHALE_IMAGE_MODEL 优先；其次 MiniMax（owner 决策：
-        # 画图模型切成 minimax）；再回退供应商默认。
+        # 默认模型：显式 WHALE_IMAGE_MODEL 优先；其次 qwen（2026-11-05 owner
+        # 决策：带参考图实测还原度完胜 MiniMax，默认切 qwen-image-3.0，
+        # MiniMax 保留为可选）；dashscope 基座缺席才退到 MiniMax 默认。
         vendor_default = "qwen-image-3.0" if image_kind == "dashscope" else "dall-e-3"
         image_default = (env.get("WHALE_IMAGE_MODEL") or "").strip() \
-            or (mm_image_name if minimax is not None else vendor_default)
+            or (vendor_default if image_base else mm_image_name)
         # 候选清单：默认 + 显式列表 + 供应商默认（默认被切去 MiniMax 时
         # qwen 等仍保留为可选项，不悄悄消失）
         seen_models: set[str] = set()
@@ -195,58 +171,52 @@ def configure_optional_capabilities(registry, tools, store, *, env: Mapping[str,
                                  + sorted(image_providers)[0])
                 image_default = sorted(image_providers)[0]
         if image_default:
-            image_provider = image_providers[image_default]
-            register_image_gen(registry, provider=image_provider)
+            register_image_gen(registry, provider=image_providers[image_default])
             default_size = "1328*1328" if image_kind == "dashscope" else "1024x1024"
+            # 2026-11-05 owner 定版流程：生图收口进 ImageGenGateway
+            # （plugins/image_gen.py 单文件）——提示词 + 参考图（链接直传或
+            # reference_query 搜图，最多 3 张）+ 模型选择（默认 qwen）。
+            from whale_core.plugins import image_gen as _image_gen
+            gateway = _image_gen.ImageGenGateway(
+                image_providers, default_model=image_default,
+                default_size=default_size,
+                image_search=_tavily_image_search(env),
+                fetcher=_image_gen.fetch_reference_image)  # 显式注入（测试可截）
             def generate(args):
                 require("media_image")  # 注册被撤销即拒绝（保 disable 语义）
-                # 2026-11-01：允许指定生图模型（owner 决策）；未知模型诚实报错并列可用
-                model = str(args.get("model") or "").strip()
-                provider = image_provider
-                if model:
-                    provider = image_providers.get(model)
-                    if provider is None:
-                        raise ValueError(
-                            f"未知生图模型 {model!r}（可用：{', '.join(sorted(image_providers))}）")
                 prompt = _with_media_style(
                     str(args.get("prompt") or args.get("query") or args.get("goal") or ""))
-                ref_query = str(args.get("reference_query") or "").strip()
-                reference = None
-                reference_mime = "image/jpeg"
-                ref_note = ""
-                if ref_query:
-                    try:
-                        got = _find_reference_image(ref_query[:200])
-                    except Exception:
-                        got = None
-                    if got is not None:
-                        reference, reference_mime = got
-                        ref_note = "（已按搜到的参考图生成）"
-                    else:
-                        ref_note = "（没搜到可用参考图，按纯描述生成）"
-                gen_kw = dict(size=str(args.get("size") or default_size),
-                              n=int(args.get("n") or 1))
-                try:
-                    result = provider.generate(prompt, reference=reference,
-                                               reference_mime=reference_mime,
-                                               **gen_kw)
-                except TypeError:
-                    result = provider.generate(prompt, **gen_kw)  # provider 无参考图参数时回落
+                ref_urls = args.get("reference_urls") or ()
+                if isinstance(ref_urls, str):
+                    ref_urls = (ref_urls,)
+                result = gateway.generate(
+                    prompt,
+                    model=str(args.get("model") or ""),
+                    reference_query=str(args.get("reference_query") or "").strip(),
+                    reference_urls=[str(u) for u in ref_urls],
+                    size=str(args.get("size") or ""),
+                    n=int(args.get("n") or 1))
                 # 只回本地工件引用（2026-11-01「恶意链接」事件：裸签名 URL 被
                 # 模型贴进 QQ 正文触发安全警告且外部打不开）。图片由系统作为
                 # 真实图片消息发出，模型不应在正文里贴任何链接/路径。
+                ref_note = ""
+                if result.reference_used:
+                    ref_note = f"（已带 {result.reference_count} 张参考图生成）"
+                elif result.note:
+                    ref_note = f"（{result.note}）"
                 return json.dumps({"task_id":result.task_id, "status":result.status,
-                                   "model": model or image_default,
+                                   "model": result.model,
                                    "images":[save(r) for r in result.images],
-                                   "reference_used": bool(reference),
+                                   "reference_used": result.reference_used,
+                                   "reference_count": result.reference_count,
                                    "note":"图片会由系统自动发送给对方；回复正文里"
                                           "不要包含任何图片链接或文件路径。" + ref_note},
                                   ensure_ascii=False)
             # 2026-11-02 owner 决策：允许意图模型按需求选供应商——选型指南
             # 进工具描述（意图规划器可见的唯一渠道）。
             _IMAGE_GUIDE = {
-                "minimax-image-01": "二次元/人像审美强、自带提示词优化、出图快（默认首选）",
-                "qwen-image-3.0": "写实风/复杂构图/图内带文字的渲染更强",
+                "qwen-image-3.0": "默认首选：带参考图还原度高、写实/复杂构图/图内带文字的渲染强",
+                "minimax-image-01": "二次元/人像审美强、自带提示词优化、出图快（备选）",
             }
             _img_guide = "；".join(
                 f"{m}（{_IMAGE_GUIDE[m]}）" if m in _IMAGE_GUIDE else m
@@ -254,10 +224,12 @@ def configure_optional_capabilities(registry, tools, store, *, env: Mapping[str,
             tools.register(ToolSpec(name="generate_image", capability="media.image.generate", plugin_id="media_image",
                                     description="按提示生成图片（默认二次元动漫画风，对方要求别的风格时以其为准）；"
                                     "主体是已知角色/人物/IP 形象时填 reference_query（参考图搜索词，"
-                                    "如「来自深渊 娜娜奇 官方图」），系统会先搜参考图再带图生成；"
+                                    "如「来自深渊 娜娜奇 官方图」），系统会搜最多 3 张参考图带图生成；"
+                                    "若已通过 web 搜索拿到图片链接，也可以用 reference_urls 直接传入（多张更佳）；"
                                     "泛化主体（一只猫/一片海）不要填。"
                                     "可用 model 参数指定模型：" + _img_guide, handler=generate))
-            out.notes.append("图像生成已配置（可选模型：" + "、".join(sorted(image_providers)) + "）")
+            out.notes.append("图像生成已配置（默认 " + image_default + "；可选模型："
+                             + "、".join(sorted(image_providers)) + "）")
 
     speech_base, speech_key, speech_kind = _resolve_capability_env(env, "SPEECH")
     tts_providers: dict = {}

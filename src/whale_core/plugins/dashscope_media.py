@@ -28,9 +28,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 
-from whale_core.plugins.media_image import ImageTaskResult
+from whale_core.plugins.media_image import ImageTaskResult, ReferenceImage
 from whale_core.plugins.speech import _is_local_or_private_http
 
 DASHSCOPE_BASE = "https://dashscope.aliyuncs.com/api/v1"
@@ -168,9 +168,12 @@ class DashScopeImageProvider(_DashScopeBase):
         self.poll_interval = poll_interval
         self.poll_timeout = poll_timeout
 
+    #: 收 ``references=[ReferenceImage, ...]``（image_gen 网关据此喂多参考图；
+    #: qwen-image-3.0 输入模态 Image+Text，多张 image 件全部前置）
+    supports_references = True
+
     def generate(self, prompt: str, *, size: str = "1328*1328", n: int = 1,
-                 reference: bytes | None = None,
-                 reference_mime: str = "image/jpeg") -> ImageTaskResult:
+                 references: Sequence[ReferenceImage] = ()) -> ImageTaskResult:
         prompt = (prompt or "").strip()[:2000]
         if not prompt:
             raise ValueError("prompt must be non-empty")
@@ -178,10 +181,10 @@ class DashScopeImageProvider(_DashScopeBase):
         n = max(1, min(int(n), 4))
         # 参考图（qwen-image-3.0 输入模态 Image+Text）：content 前置 image 件
         content = []
-        if reference:
+        for ref in references or ():
             import base64 as _b64
-            mime = reference_mime if reference_mime.startswith("image/") else "image/jpeg"
-            content.append({"image": f"data:{mime};base64,{_b64.b64encode(reference).decode()}"})
+            mime = ref.mime if ref.mime.startswith("image/") else "image/jpeg"
+            content.append({"image": f"data:{mime};base64,{_b64.b64encode(ref.data).decode()}"})
         content.append({"text": prompt})
         body = {
             "model": self.model,

@@ -40,6 +40,17 @@ _ALLOWED_SIZE_SET = frozenset(ALLOWED_SIZES)
 
 
 @dataclass(frozen=True)
+class ReferenceImage:
+    """一张参考图的本机字节（2026-11-05 参考图生图 / 多参考图网关）。
+
+    字节已由采集方校验过魔数（光栅图）；``mime`` 为 image/png|jpeg|gif|webp。
+    """
+
+    data: bytes
+    mime: str
+
+
+@dataclass(frozen=True)
 class ImageTaskResult:
     """一次图像生成任务的结果。
 

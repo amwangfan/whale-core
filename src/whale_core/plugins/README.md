@@ -28,11 +28,12 @@
 | `intents.py` | PluginAction：插件输出动作意图契约 |
 | `processing.py` | processor 类插件框架：ProcessorRouter + DelegatingIntentProcessor |
 
-### builtin providers —— 内置 provider 实现（13）
+### builtin providers —— 内置 provider 实现（14）
 
 | 模块 | 能力 |
 | --- | --- |
 | `media_image.py` | `media.image.generate` 契约 + OpenAI 兼容生图 |
+| `image_gen.py` | 生图网关：多参考图采集 + 模型分派（默认 qwen，可选 minimax） |
 | `media_video.py` | `media.video.generate` 异步任务契约 + DashScope Wan |
 | `dashscope_media.py` | DashScope 兼容协议媒体 provider（生图/ASR/TTS） |
 | `minimax_media.py` | MiniMax 媒体 provider（视频生成 / t2a_v2 TTS） |

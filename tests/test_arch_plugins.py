@@ -44,6 +44,7 @@ FRAMEWORK_MODULES = {
 }
 BUILTIN_PROVIDER_MODULES = {
     "media_image",
+    "image_gen",
     "media_video",
     "dashscope_media",
     "minimax_media",
