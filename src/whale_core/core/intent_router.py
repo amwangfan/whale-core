@@ -2,12 +2,14 @@
 
 路由器只建议 capabilities，不能自行授权。
 
-策略（2026-11-05 owner 确认）：
-- 规则命中（search / local-life / weather→weather.now 或 web.search / shell.safe）→ 直接 task，零意图 LLM；
-- 规则未命中且像普通闲聊（含「现在几点」等）→ kind=chat，**跳过**意图 LLM
-  （闲聊回复仍走宿主 companion / DeepSeek 官模，不在此短路本地时钟）；
-- 仅当宿主 enable_llm=True **且**文本像模糊写操作/媒体生成等可能需工具时，
-  才调用意图 LLM（通常为 AgentScope 上的 kimi）做 task/clarify；
+策略（2026-11-05 owner 确认，同日修订）：
+- 规则命中（search / local-life / weather→weather.now 或 web.search / shell.safe）
+  → 直接 task，零意图 LLM；
+- 规则未命中 → **一律交意图 LLM（kimi）判 chat/task/clarify**——「要不要
+  生成媒体/用工具」不用硬性词表当闸门（三起生产实证全是词表没覆盖的口语：
+  「找一下」「同人」「给我一个…图」，词表永远追不齐）；
+- 意图 LLM 未启用或返回非法计划 → 回落 kind=chat（闲聊回复仍走宿主
+  companion / DeepSeek 官模，不在此短路本地时钟）；
 - 授权仍走 context_resolver → authz → PluginGateway → ShellPolicy，与意图模型无关。
 """
 from __future__ import annotations
@@ -126,31 +128,10 @@ _SHELL_EXPLICIT = re.compile(
     re.IGNORECASE,
 )
 
-# 模糊写操作 / 媒体生成等：规则未覆盖、但可能真要动工具时才打意图 LLM。
-# 故意不含「现在几点」「聊聊天」等纯陪伴问句。
-_FUZZY_TOOLISH = re.compile(
-    r"(画一?[张幅个]|画个|生成一?[张幅个]|做一?[张幅个图]|做个图)"
-    r"|(画|生成).{0,16}(图|图片|插画|海报|视频|短片|动画)"
-    r"|(文生图|文生视频|image\s*gen|text-to-image|text-to-video)"
-    r"|(朗读|念一下|转成语音|语音合成|tts\b|听写|转写|asr\b)"
-    # 2026-11-05 生产实证：「我想看X最新话，你给我找一下」落在规则与模糊
-    # 词表之外 → 被当闲聊，模型谎称「我去翻翻」但无任何搜索任务。补：
-    r"|(找|查|搜|翻).{0,10}(一下|下|一找|看)"
-    # 同日实证2：「我要看娜娜奇和米蒂的同人」——「要看/同人」是画图意图，
-    # 无 画/生成 动词也进 LLM 兜底（模型才能选 media.image.generate）。
-    r"|(我要看|我想看|想看|要看).{0,16}(同人|图|插画|海报)"
-    r"|同人(图|画)"
-    # 同日实证3：「给我一个千早爱音抱着奶龙的图」——请求动词+媒体名词，
-    # 无 画/生成 动词也进 LLM 兜底（图/视频/语音三条媒体链路同型覆盖）。
-    r"|(给我|帮我|为我|发一?[张幅个段条首]|来一?[张幅个段条首]|整一?[张幅个段条])"
-    r".{0,20}(图|图片|照片|插画|壁纸|头像|同人|视频|短片|语音|歌|曲)"
-    r"|(最新|什么时候更新|更新到|更到).{0,12}(话|集|期|版|消息|进度|情况|动态|章|卷)"
-    r"|(删(除|掉)?|移除|覆盖|写入|保存到|下载到|改写|重命名|移动到).{0,24}"
-    r"|(发(一?[封条])?邮件|发短信|推送到|下单|支付|转账|汇款)"
-    r"|(安装|卸载|sudo\b|chmod\b|chown\b|rm\s+-|kubectl\b|docker\s+(rm|kill|exec))"
-    r"|(帮我|请|麻烦).{0,16}(改(一下|掉|成)|操作一下|处理一下|写进|写到)",
-    re.IGNORECASE,
-)
+# 2026-11-05 owner 决策：「要不要生成媒体/用工具」不再用硬性词表当闸门
+# （三起生产实证——「找一下」「同人」「给我一个…图」全是词表没覆盖的口语，
+# 词表永远追不齐）。非显式指令一律交给意图 LLM（kimi）判 chat/task/clarify；
+# 显式指令（搜索/天气/本地生活/shell）仍规则直达，零 LLM。
 
 
 class ReplyModel(Protocol):
@@ -231,14 +212,16 @@ class SearchIntentRouter:
                 "capabilities": ["shell.safe"],
                 "reason": "用户明确要求终端/沙箱执行",
             }, ensure_ascii=False)
-        # 闲聊 / 时间问答等：默认 chat，不打意图 LLM（省 kimi 一轮）。
-        if not (self.enable_llm and _FUZZY_TOOLISH.search(text or "")):
+        # 2026-11-05 owner 决策：媒体/工具意图由意图 LLM（kimi）全权判断，
+        # 不用硬性词表当闸门。LLM 未启用 → 诚实回落 chat。
+        if not self.enable_llm:
             return _chat_plan(text)
         specs = self.tools.specs() if self.tools is not None else []
         capabilities = ({s.capability for s in specs} if self.tools is not None
                         else {"web.search"})
         hints = {
-            "web.search": "query: 搜索词, limit: 结果数量",
+            "web.search": "query: 搜索词, limit: 结果数量。追更（最新话/第几集/什么时候更新）、"
+                          "最新动态、事实疑问、自己不知道的知识都走它——不要凭记忆回答",
             "weather.now": "place: 口述城市；location_hint/coords: 无口述时用当前位置；query: 回落搜索词",
             "web.fetch": "url: 要读取的公开HTTP(S)链接",
             "media.image.generate": "prompt: 图片描述, size/model: 可选（model 默认 qwen-image-3.0）, reference_query: 仅当主体是已知角色/人物/IP 形象时填参考图搜索词（系统会搜最多3张参考图带图生成）；若 web 搜索已拿到图片链接可用 reference_urls 直接传入；泛化主体不要填",

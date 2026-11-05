@@ -1,4 +1,8 @@
-"""Explicit shell routing + chat skips intent LLM; fuzzy toolish may call it."""
+"""Explicit fast paths skip intent LLM; everything else is judged by it.
+
+2026-11-05 owner 决策：媒体/工具意图不用硬性词表当闸门，非显式指令
+一律交意图 LLM（kimi）判 chat/task/clarify。
+"""
 from __future__ import annotations
 import json
 from whale_core.core.intent_router import SearchIntentRouter
@@ -15,6 +19,20 @@ class _Tools:
 class _Boom:
     def reply(self, text: str, *, persona: str = "", memories=(), history=()) -> str:
         raise AssertionError("intent LLM must not be called for this utterance")
+
+
+class _EchoChat:
+    """记录调用并返回 chat 计划（模拟意图 LLM 判闲聊）。"""
+
+    def __init__(self):
+        self.calls = 0
+        self.prompts = []
+
+    def reply(self, text: str, *, persona: str = "", memories=(), history=()) -> str:
+        self.calls += 1
+        self.prompts.append(text)
+        return json.dumps({"goal": "对话", "kind": "chat", "slots": {},
+                           "capabilities": []}, ensure_ascii=False)
 
 
 class _Echo:
@@ -46,11 +64,28 @@ def test_no_shell_capability_stays_chat():
     assert plan["kind"] == "chat"
 
 
-def test_chat_and_time_skip_intent_llm_even_when_enabled():
-    router = SearchIntentRouter(model=_Boom(), enable_llm=True, tools=_Tools())
+def test_plain_chat_also_consults_intent_llm():
+    """2026-11-05 owner 决策：媒体/工具意图由 kimi 全权判断，不用硬性词表
+    当闸门——纯闲聊也过一遍意图 LLM（LLM 自会判 chat）。"""
+    chat_echo = _EchoChat()
+    router = SearchIntentRouter(model=chat_echo, enable_llm=True, tools=_Tools())
     for text in ("你好啊", "现在几点", "今天心情怎么样", "聊聊天"):
         plan = json.loads(router.plan(text))
         assert plan["kind"] == "chat", text
+    assert chat_echo.calls == 4  # 每句都咨询了意图 LLM
+
+
+def test_llm_disabled_or_bad_plan_falls_back_chat():
+    """LLM 未启用 → 不打模型直接 chat；LLM 返回非法计划 → 回落 chat。"""
+    router = SearchIntentRouter(model=_Boom(), enable_llm=False, tools=_Tools())
+    assert json.loads(router.plan("你好啊"))["kind"] == "chat"
+
+    class _Garbage:
+        def reply(self, text, *, persona="", memories=(), history=()):
+            return "not a json plan"
+
+    router = SearchIntentRouter(model=_Garbage(), enable_llm=True, tools=_Tools())
+    assert json.loads(router.plan("你好啊"))["kind"] == "chat"
 
 
 def test_explicit_search_skips_intent_llm():
@@ -178,42 +213,27 @@ def test_find_verbs_route_to_search():
         assert "web.search" in plan["capabilities"], t
 
 
-def test_content_tracking_phrases_reach_llm_router():
-    """「最新话什么时候更新」类无动词的追更句式 → 进模糊工具意图（LLM 兜底）。"""
-    from whale_core.core.intent_router import _FUZZY_TOOLISH
-    assert _FUZZY_TOOLISH.search("来自深渊最新话什么时候更新")
-    assert _FUZZY_TOOLISH.search("这个番更新到第几话了")
-    # 普通闲聊不触发（不进 LLM 省一轮）
-    assert not _FUZZY_TOOLISH.search("今天天气真不错")
-    assert not _FUZZY_TOOLISH.search("我吃完饭了")
-
-
-def test_fanart_request_reaches_llm_router():
-    """2026-11-05 生产实证2：「我要看娜娜奇和米蒂的同人」无 画/生成 动词，
-    曾走闲聊→模型空许诺画图。现在必须进模糊工具意图。"""
-    from whale_core.core.intent_router import _FUZZY_TOOLISH
-    assert _FUZZY_TOOLISH.search("同人也行，我要看娜娜奇和米蒂的同人")
-    assert _FUZZY_TOOLISH.search("我想看她们俩的同人图")
-    assert _FUZZY_TOOLISH.search("有她们的同人画吗")
-    # 纯闲聊/阅读语境不触发画图路由
-    assert not _FUZZY_TOOLISH.search("我在看漫画")
-    assert not _FUZZY_TOOLISH.search("今天天气真不错")
-
-
-def test_request_verb_media_phrases_reach_llm_router():
-    """2026-11-05 生产实证3：「给我一个千早爱音抱着奶龙的图」落 chat，
-    模型谎称「这就安排一张」但无任何工具调用。请求动词+媒体名词必须进
-    LLM 兜底——图/视频/语音三条媒体链路同型覆盖。"""
-    from whale_core.core.intent_router import _FUZZY_TOOLISH
-    assert _FUZZY_TOOLISH.search("给我一个千早爱音抱着奶龙的图")
-    assert _FUZZY_TOOLISH.search("发个奶龙的视频看看")
-    assert _FUZZY_TOOLISH.search("给我唱首歌")
-    assert _FUZZY_TOOLISH.search("来一张鲸鱼的壁纸")
-    assert _FUZZY_TOOLISH.search("帮我整一个她们的同人")
-    # 误伤面：围绕图片的元讨论/质问不进工具路由
-    assert not _FUZZY_TOOLISH.search("你发了吗\n你没发啊")
-    assert not _FUZZY_TOOLISH.search("这表情包还是刚从别的群偷来的")
-    assert not _FUZZY_TOOLISH.search("今天天气真不错")
+def test_media_and_toolish_phrases_all_reach_intent_llm():
+    """2026-11-05 owner 决策：词表闸门废除——追更/同人/请求动词+媒体名词
+    这些曾三度漏网的口语句式，现在一律直达意图 LLM（kimi）判断。"""
+    echo = _EchoChat()
+    router = SearchIntentRouter(model=echo, enable_llm=True, tools=_Tools())
+    phrases = (
+        "来自深渊最新话什么时候更新",       # 生产实证1：追更
+        "同人也行，我要看娜娜奇和米蒂的同人",  # 生产实证2：同人
+        "给我一个千早爱音抱着奶龙的图",      # 生产实证3：请求动词+媒体名词
+        "发个奶龙的视频看看",
+        "给我唱首歌",
+        "来一张鲸鱼的壁纸",
+        "你发了吗\n你没发啊",               # 元讨论也过 LLM（由它判 chat）
+        "这表情包还是刚从别的群偷来的",
+    )
+    for text in phrases:
+        plan = json.loads(router.plan(text))
+        assert plan["kind"] in ("chat", "task", "clarify"), text
+    assert echo.calls == len(phrases)  # 全部咨询了意图 LLM
+    # 用户原话确实进了 LLM prompt（判断依据可见）
+    assert "给我一个千早爱音抱着奶龙的图" in echo.prompts[2]
 
 
 def test_honesty_red_line_covers_media_claims():
