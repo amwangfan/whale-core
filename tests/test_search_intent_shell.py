@@ -186,3 +186,15 @@ def test_content_tracking_phrases_reach_llm_router():
     # 普通闲聊不触发（不进 LLM 省一轮）
     assert not _FUZZY_TOOLISH.search("今天天气真不错")
     assert not _FUZZY_TOOLISH.search("我吃完饭了")
+
+
+def test_fanart_request_reaches_llm_router():
+    """2026-11-05 生产实证2：「我要看娜娜奇和米蒂的同人」无 画/生成 动词，
+    曾走闲聊→模型空许诺画图。现在必须进模糊工具意图。"""
+    from whale_core.core.intent_router import _FUZZY_TOOLISH
+    assert _FUZZY_TOOLISH.search("同人也行，我要看娜娜奇和米蒂的同人")
+    assert _FUZZY_TOOLISH.search("我想看她们俩的同人图")
+    assert _FUZZY_TOOLISH.search("有她们的同人画吗")
+    # 纯闲聊/阅读语境不触发画图路由
+    assert not _FUZZY_TOOLISH.search("我在看漫画")
+    assert not _FUZZY_TOOLISH.search("今天天气真不错")
