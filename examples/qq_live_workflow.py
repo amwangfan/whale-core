@@ -468,7 +468,8 @@ def cmd_run(args) -> int:
 
     inbox = build_inbox(args.inbox)
     # 陌生人/成员被动回复日额度可用 env 覆盖（默认 20；测试期可调大）
-    _stranger_limit = int(os.environ.get("WHALE_QQ_STRANGER_DAILY_LIMIT", "20"))
+    # 2026-11-05 owner 决策：默认不限（0）；显式设正整数才启用上限
+    _stranger_limit = int(os.environ.get("WHALE_QQ_STRANGER_DAILY_LIMIT", "0"))
     workflow = QqInboundWorkflow(store, build_brain(), prefs=prefs,
                                  auth_service=auth_service,
                                  context_resolver=context_resolver,

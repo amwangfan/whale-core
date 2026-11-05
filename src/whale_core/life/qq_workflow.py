@@ -91,8 +91,8 @@ class QqInboundWorkflow:
         self._on_member_provisioned = on_member_provisioned
         # 陌生人/成员被动回复的日额度（防滥用保险丝）；
         # None = 类缺省 20。
-        if stranger_daily_limit is not None and int(stranger_daily_limit) < 1:
-            raise ValueError("stranger_daily_limit 须为正整数")
+        if stranger_daily_limit is not None and int(stranger_daily_limit) < 0:
+            raise ValueError("stranger_daily_limit 须为非负整数（0=不限，2026-11-05）")
         self._stranger_daily_limit = (int(stranger_daily_limit)
                                       if stranger_daily_limit is not None
                                       else self.STRANGER_DAILY_LIMIT)
@@ -461,7 +461,7 @@ class QqInboundWorkflow:
         key = f"rl:stranger:{day}:{conversation}:{sender}"
         count = self.store.get(key)
         count = int(count) if isinstance(count, (int, float)) else 0
-        if count >= self._stranger_daily_limit:
+        if self._stranger_daily_limit > 0 and count >= self._stranger_daily_limit:
             return "stranger_budget"
         self.store.put(key, count + 1)
         return None
