@@ -257,6 +257,25 @@ def test_repeat_chain_judge_gate():
     assert (d3.action, d3.reason_code) == ("join", "repeat_chain")
 
 
+def test_judge_vetoed_chain_not_resurrected_by_topic_roll():
+    """2026-11-05 回归：judge 否决的复读链不得被 topic_roll 概率复活——
+    rng 必中（0.0）时也必须旁观。"""
+    store = InMemoryStore()
+    p = GroupTurnPolicy(store, bot_names=("鲸鱼",), now_fn=lambda: T0,
+                        chain_judge=lambda t, e: False,
+                        rng=lambda: 0.0)  # 滚动必中
+    d = p.maybe_join(conversation=GROUP, text="有毒吧", activity="lively",
+                     timeline_entries=_chain(3))
+    assert d.action == "observe"
+    # judge 通过时正常跟风
+    store2 = InMemoryStore()
+    p2 = GroupTurnPolicy(store2, bot_names=("鲸鱼",), now_fn=lambda: T0,
+                         chain_judge=lambda t, e: True, rng=lambda: 0.0)
+    d2 = p2.maybe_join(conversation=GROUP, text="有毒吧", activity="lively",
+                       timeline_entries=_chain(3))
+    assert (d2.action, d2.reason_code) == ("join", "repeat_chain")
+
+
 def test_bare_punctuation_is_not_a_question():
     """2026-11-02 生产实证：单个「？」不触发 lively 提问接话。"""
     store = InMemoryStore()

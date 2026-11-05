@@ -260,14 +260,17 @@ class GroupTurnPolicy:
         # 复读文本由调用方原文直发（不过模型）；冷却/日配额与普通插话同一保险丝。
         # 命中后过 chain_judge 判断该不该跟（2026-11-02 owner 决策）。
         repeat_text: "str | None" = None
+        chain_rejected = False
         if activity == "lively" and not self._quiet_now():
             repeat_text = _repeat_chain(timeline_entries)
             if repeat_text is not None and self._chain_judge is not None:
                 try:
                     if not self._chain_judge(repeat_text, timeline_entries):
                         repeat_text = None
+                        chain_rejected = True
                 except Exception:
                     repeat_text = None  # 判定器故障 = 不跟（宁可少跟）
+                    chain_rejected = True
 
         text = str(text or "")
         named = bool(self._name_re.search(text)) if self._name_re else False
@@ -310,8 +313,11 @@ class GroupTurnPolicy:
                 return self._record(group, JoinDecision("observe", REASON_QUIET_MODE))
         else:
             # 话题滚动可回：关键词或近窗连续闲聊 + bot 近窗未发言 + 小概率
+            # 判定器否决/故障的复读链不得经话题滚动复活（同一句话、同一轮）——
+            # 否则「该不该跟」的门会被 18% 概率旁路（2026-11-05 回归修复）。
             topic_hit = (
                 activity in ("balanced", "lively")
+                and not chain_rejected
                 and not self._quiet_now()
                 and _bot_silent_recently(timeline_entries)
                 and _topic_roll_eligible(text, timeline_entries)
