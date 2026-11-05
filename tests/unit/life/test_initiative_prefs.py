@@ -145,3 +145,24 @@ class TestChannelDefaultRhythm:
         rs.set_channel_default("qq", activity="lively")
         rs.set_channel_default("qq", activity="")
         assert rs.channel_default("qq") is None
+
+
+def test_daily_limit_zero_means_unlimited():
+    """owner 2026-11-05：daily_limit=0 / passive_daily_limit=0 → 不限。"""
+    from zoneinfo import ZoneInfo
+
+    store = InMemoryStore()
+    outbox = ProactiveOutbox(store)
+    prefs = ProactivePrefs(
+        enabled=True, auto_send=True,
+        allowed_channels=frozenset({"direct_message"}),
+        daily_limit=0, passive_daily_limit=0)
+    outbox.propose(ProactiveDraft("u1", "hi", "r", ("e",), channel="direct_message"))
+    day = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat()
+    store.put(f"life:quota:{day}", 9999)
+    store.put(f"life:quota:passive:{day}", 9999)
+    now = datetime.now(timezone.utc)
+    assert outbox.inspect(
+        "u1", prefs, now=now, response_origin="unsolicited").status == "ready"
+    assert outbox.inspect(
+        "u1", prefs, now=now, response_origin="reactive_inbound").status == "ready"

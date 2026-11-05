@@ -268,8 +268,11 @@ def test_workflow_empty_text_and_daily_cap():
     wf, brain, _ = make_workflow()
     assert wf.handle_owner_event(owner_event(msg_id="m0", text="   ")) == {"skipped": "empty_text"}
     prefs = ProactivePrefs(enabled=True, allowed_channels=frozenset({"direct_message"}),
-                           daily_limit=0)
+                           daily_limit=1, passive_daily_limit=1)
     wf.prefs = prefs
+    # owner 入站走被动额度键；make_workflow 固定 now=2026-10-29 上海
+    # （daily_limit=0 现为不限，改用打满）
+    wf.outbox.store.put("life:quota:passive:2026-10-29", 1)
     result = wf.handle_owner_event(owner_event(msg_id="mcap"))
     assert result["verdict"] == "over_budget"  # AI 已跑但草稿被额度闸门拦下
 

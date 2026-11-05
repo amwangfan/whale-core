@@ -24,8 +24,8 @@ flock）；本文件同时保留为可运行示例，生产 systemd 当前仍直
   stub（如实记 unknown，不冒充受理，不触网）。
 
 风控策略（issue #13，env 覆盖默认值，run 启动打印生效策略、不打印密钥）：
-- 主动行为：DAILY_LIMIT（默认 **10**/天）+ QUIET_START/QUIET_END（默认 **22–7** 点）；
-- 被动回复（仅回应已配对 owner 入站）：PASSIVE_DAILY_LIMIT（默认 200/天，防跑飞
+- 主动行为：DAILY_LIMIT（默认 **10**/天，**0=不限**）+ QUIET_START/QUIET_END（默认 **22–7** 点）；
+- 被动回复（仅回应已配对 owner 入站）：PASSIVE_DAILY_LIMIT（默认 200/天，**0=不限**，防跑飞
   保险丝）+ PASSIVE_REPLY_IN_QUIET（默认 1 = 深夜 owner 来件照常回复——对话延续
   不是打扰；**主动行为永不豁免静默**）。
 
@@ -152,11 +152,11 @@ _PROCESS_LIVE_AUTO = False
 def _env_risk_prefs() -> ProactivePrefs:
     """风控策略（issue #13 统一口径）：被动回复与主动行为是两套预算。
 
-    - 主动：DAILY_LIMIT 默认 10/天 + QUIET 22–7（与 docs/research §6.5 一致）；
+    - 主动：DAILY_LIMIT 默认 10/天（**0=不限**）+ QUIET 22–7；
       双开关（--live-auto-send + QQ_LIVE_AUTOSEND=1）已启用时 auto_send=True，
       主动私信按该授权自动派发（issue #59），不再逐条人审；
     - 被动回复（仅回应已配对 owner 入站）：PASSIVE_DAILY_LIMIT 默认 200/天为
-      防跑飞保险丝（自激循环/风暴），PASSIVE_REPLY_IN_QUIET 默认开——深夜
+      防跑飞保险丝（**0=不限**），PASSIVE_REPLY_IN_QUIET 默认开——深夜
       owner 来件照常回复（对话延续不是打扰）；豁免**只**作用于被动回复。
     - env 覆盖默认值；生效策略由 cmd_run 启动打印（不打印任何密钥值）。
     发送结果 unknown 不自动重试（账本既有语义），风控信号出现即人工停机。
@@ -181,10 +181,17 @@ def policy_summary(prefs: ProactivePrefs) -> str:
                 if prefs.auto_send else
                 "人工逐条（--auto-approve 仅 dry-run 演示；无人值守真实发送需 "
                 "--live-auto-send + QQ_LIVE_AUTOSEND=1 双开关）")
+    active_cap = "不限" if prefs.daily_limit == 0 else f"{prefs.daily_limit}/日"
+    if prefs.passive_daily_limit is None:
+        passive_cap = "跟随主动"
+    elif prefs.passive_daily_limit == 0:
+        passive_cap = "不限"
+    else:
+        passive_cap = f"{prefs.passive_daily_limit}/日"
     return (
-        f"[策略] 主动: 上限={prefs.daily_limit}/日 静默={prefs.quiet_start.hour:02d}:00–"
+        f"[策略] 主动: 上限={active_cap} 静默={prefs.quiet_start.hour:02d}:00–"
         f"{prefs.quiet_end.hour:02d}:00 | "
-        f"被动回复: 上限={prefs.passive_daily_limit}/日 "
+        f"被动回复: 上限={passive_cap} "
         f"静默豁免={'是' if prefs.passive_reply_in_quiet else '否'} | "
         f"审批: {approval}"
     )
@@ -1377,8 +1384,12 @@ def cmd_run(args) -> int:
             return
         print(f"  [AI 草稿] {result['draft_id']} verdict={result['verdict']} ({result['reason']})")
         print(f"  {result['reply'][:300]}")
-        if result["verdict"] != "needs_approval":
-            _tfin(_tid, "silent", summary="verdict 非 needs_approval，未发送")
+        # issue #59：auto_send 启用后 inspect 对被动/授权草稿返回 ready（不再是
+        # needs_approval）。live-auto 路径对 ready 与 needs_approval 都应继续发送；
+        # over_budget / deferred / rejected 等仍静默。
+        if result["verdict"] not in ("ready", "needs_approval"):
+            _tfin(_tid, "silent",
+                  summary=f"verdict={result['verdict']}，未发送")
             return
         if result.get("safety_concern"):
             # 安全审核有顾虑：不自动发送，留人工终审

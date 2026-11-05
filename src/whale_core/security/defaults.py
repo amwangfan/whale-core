@@ -34,7 +34,8 @@ def security_defaults_snapshot() -> dict[str, Any]:
         },
         "switches": {
             "WHALE_PROACTIVE_GREETING": "default off; 1 enables loop",
-            "WHALE_PROACTIVE_GREETING_DRY_RUN": "default dry-run when enabled; 0 = real send (still quota/cooldown)",
+            "WHALE_PROACTIVE_GREETING_DRY_RUN": "default dry-run when enabled; 0 = real send (still cooldown; daily quota 0=unlimited)",
+            "WHALE_PROACTIVE_GREETING_DAILY_QUOTA": "0 = unlimited; positive = Shanghai-day cap; default 2",
             "WHALE_INNER_STATE_WRITEBACK": "default on; 0 disables companion→InnerState topic write-back",
         },
         "docs": "docs/security-defaults.md",

@@ -6,7 +6,7 @@ Owner 2026-11-05 确认的分工：
 - **真正闲聊/问候文案**：仍走 DeepSeek 官方 API（更快），不要用 AgentScope 做回复。
 - 默认 ``WHALE_PROACTIVE_GREETING`` 未设 → 完全关闭；
   设为 1 且未显式 ``WHALE_PROACTIVE_GREETING_DRY_RUN=0`` → 跑循环但只记日志不发送。
-- 真发时仍需过冷却与日额度（与 ProactiveOutbox 主动额度对齐的保守默认）。
+- 真发时仍需过冷却与日额度；``WHALE_PROACTIVE_GREETING_DAILY_QUOTA``：**0=不限**，正整数=上海日历日上限（默认 2）。
 
 权限与工具越权无关：问候是陪伴通道，不得借此挂 shell / 写操作。
 """
@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo
 AGENTSCOPE_BASE_URL = "https://platform.agentscope.io/v1"
 DEFAULT_INTERVAL_S = 180  # 3 min
 DEFAULT_COOLDOWN_S = 3600  # 真发后至少 1h
-DEFAULT_DAILY_QUOTA = 2
+DEFAULT_DAILY_QUOTA = 2  # 默认保守；0=不限
 QUOTA_KEY_PREFIX = "life:quota:proactive_greeting:"
 LAST_SENT_KEY = "life:proactive_greeting:last_sent_at"
 TZ = ZoneInfo("Asia/Shanghai")
@@ -123,9 +123,11 @@ def check_send_budget(
     *,
     now: float | None = None,
 ) -> tuple[bool, str]:
-    """真发前的额度/冷却门；dry-run 不调用。store=None 时仅检查配置额度>0。"""
-    if cfg.daily_quota <= 0:
-        return False, "quota_zero"
+    """真发前的额度/冷却门；dry-run 不调用。
+
+    日额度语义：``daily_quota == 0`` → **不限**（仍受冷却约束）；
+    正整数 → 上海日历日上限。负数在 from_env 已钳为 0（不限）。
+    """
     if store is None:
         return True, "ok_no_store"
     now_ts = time.time() if now is None else float(now)
@@ -136,6 +138,8 @@ def check_send_budget(
         last_ts = 0.0
     if last_ts and (now_ts - last_ts) < cfg.cooldown_s:
         return False, "cooldown"
+    if cfg.daily_quota <= 0:
+        return True, "ok_unlimited"
     day = _shanghai_day(datetime.fromtimestamp(now_ts, tz=timezone.utc))
     key = QUOTA_KEY_PREFIX + day
     try:

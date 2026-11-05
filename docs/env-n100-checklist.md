@@ -65,3 +65,18 @@
 | `QQ_INTENT_*` | 可选：意图/审操仍走 AgentScope 端点 |
 
 设备 scope：`device.agent.control` / `observe` / `shell` / `output.read`（后者独立，旧配对不自动扩大）。停止：端侧 estop，或 core `revoke` / `POST .../scopes` 收窄。
+
+## 主动问候 / Outbox 日额度（脱敏）
+| 变量 / 键 | 说明 |
+|------|------|
+| `WHALE_PROACTIVE_GREETING` | `1` 启用主动问候循环；缺省关 |
+| `WHALE_PROACTIVE_GREETING_DRY_RUN` | 缺省/`1`=只记草稿；`0`=真发 |
+| `WHALE_PROACTIVE_GREETING_INTERVAL_S` | 判断间隔秒，默认 180，最小 30 |
+| `WHALE_PROACTIVE_GREETING_COOLDOWN_S` | 真发后冷却秒，默认 3600 |
+| `WHALE_PROACTIVE_GREETING_DAILY_QUOTA` | **`0`=不限**；正整数=上海日上限；默认库内 2 |
+| `DAILY_LIMIT` | ProactiveOutbox 主动日上限；**`0`=不限**；可被 kv `life:proactive:prefs.daily_limit` 覆盖 |
+| `PASSIVE_DAILY_LIMIT` | 被动回复保险丝；**`0`=不限**；生产常用大数或 0 |
+| kv `life:proactive:prefs` | `daily_limit` / `passive_daily_limit` / quiet_*；**0=不限** |
+
+Owner 2026-11-05：主动问候/主动发言**不设每日条数上限** → 生产将上述日限置 `0`；冷却、quiet hours、dry-run 可保留。
+

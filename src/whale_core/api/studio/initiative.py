@@ -41,8 +41,8 @@ _EDITABLE = PREFS_KV_FIELDS
 
 #: 字段影响预览（静态说明，配合当前生效值展示）。
 _FIELD_NOTES = {
-    "daily_limit": "主动消息（提醒/主动搭话）每日上限；被动回复不受影响",
-    "passive_daily_limit": "被动回复每日保险丝（防跑飞）；0 需谨慎",
+    "daily_limit": "主动消息每日上限；**0=不限**；被动回复不受影响",
+    "passive_daily_limit": "被动回复每日保险丝（防跑飞）；**0=不限**",
     "quiet_start": "静默开始（本地时）；静默期内不主动打扰",
     "quiet_end": "静默结束（本地时）",
 }
