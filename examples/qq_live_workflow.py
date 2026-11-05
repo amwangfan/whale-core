@@ -1838,9 +1838,14 @@ def cmd_run(args) -> int:
             return False
         return str(ans or "").strip().startswith("是")
 
+    try:
+        _topic_prob = float(os.environ.get("WHALE_GROUP_TOPIC_JOIN_PROB", "0.18"))
+    except ValueError:
+        _topic_prob = 0.18
     group_turn_policy = GroupTurnPolicy(
         store, bot_names=bot_aliases, quiet_now=_quiet_now,
         directed_classifier=_llm_directed, chain_judge=_chain_judge,
+        topic_join_prob=_topic_prob,
     )
 
     _member_extractor = MemberMemoryExtractor(

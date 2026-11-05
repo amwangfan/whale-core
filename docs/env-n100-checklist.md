@@ -39,3 +39,18 @@
 
 ## QQ / WeQ / Shell
 见 `docs/qweather-env.md` 与 `.env.example`；通道类含 `OWNER_*`、`QQ_*`、`WEQ_*`、`WHALE_QQ_*`、`WHALE_SHELL_*`。
+
+
+## QQ 群接话 / 门控（脱敏）
+| 变量 | 说明 |
+|------|------|
+| `WHALE_QQ_GROUP_ALLOW` | 逗号分隔群号白名单；空=不收任何群（即使 `--accept-group`） |
+| `WHALE_BOT_NAMES` | 可选；逗号分隔点名别名。缺省用当前角色卡名（如 Enxi） |
+| `WHALE_GROUP_TOPIC_JOIN_PROB` | 话题滚动可回概率 0..1，默认 `0.18`；`0` 关闭 |
+| CLI `--accept-group` | systemd `qq-bot` 已开；关群聊则去掉此旗标并重启 |
+
+门控 reason（日志/`life:turnlast:{group}`）：`at_bot` / `reply_to_bot` / `join` / `topic_roll` / `repeat_chain` / `not_directed` / `media_only` / `already_covered` / `cooldown` / `budget_exceeded` / `quiet_*` / `dnd`。
+
+群记忆：`conversation=group:{id}` 命名空间；须 Studio/`bind:mem` 绑定 **group_space 且 can_write** 才写入。无写绑定 **绝不** 回落到主人私密库。群闲聊原文不作隐私审查过滤；与私聊记忆隔离即可。
+
+协议端：N100 现网为 **WeQ SSE**（`weq-web` + `qq-bot`），不是另起 NapCat。
