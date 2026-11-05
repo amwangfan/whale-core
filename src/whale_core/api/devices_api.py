@@ -8,6 +8,7 @@
 - ``GET    /devices/{id}``           单设备详情
 - ``DELETE /devices/{id}``           吊销（即时生效 + 踢在线连接，§3）
 - ``POST   /devices/{id}/revoke``    同上（不便发 DELETE 的控制台）
+- ``POST   /devices/{id}/scopes``    收窄/重设注册 scope（停止自主体等价手段）
 - ``POST   /devices/{id}/query``     下发 sensor.query，deadline 内等 result
 - ``POST   /devices/{id}/action``    下发 action.request，等终态回执
 - ``POST   /devices/{id}/action/status``  按幂等键查状态（只读，不重发）
@@ -190,6 +191,29 @@ def dispatch_devices(handler, method: str, parts: list[str]) -> None:
             send(200, _json_bytes({"result": {
                 "device_id": device_id, "status": meta["status"],
                 "kicked": kicked}}))
+            return
+
+        if len(parts) == 3 and parts[2] == "scopes" and method == "POST":
+            # core 侧停止自主体：收窄 scope（去掉 device.agent.*）后编排循环中止
+            body = handler._body_json()
+            if body is None:
+                send(400, _error("bad_request", "JSON body required"))
+                return
+            scopes = body.get("scopes")
+            if not isinstance(scopes, list) or not all(isinstance(s, str) for s in scopes):
+                send(400, _error("bad_request", "scopes must be a list of strings"))
+                return
+            try:
+                meta = registry.set_scopes(device_id, scopes)
+            except DeviceRegistryError as exc:
+                send(_REGISTRY_STATUS.get(exc.code, 400), _error(exc.code, str(exc)))
+                return
+            ctx.log_event("device:scopes", device_id)
+            send(200, _json_bytes({"result": {
+                "device_id": device_id,
+                "status": meta.get("status"),
+                "scopes": list(meta.get("scopes") or []),
+            }}))
             return
 
         if len(parts) == 3 and parts[2] == "purge" and method == "POST":

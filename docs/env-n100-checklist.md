@@ -54,3 +54,14 @@
 群记忆：`conversation=group:{id}` 命名空间；须 Studio/`bind:mem` 绑定 **group_space 且 can_write** 才写入。无写绑定 **绝不** 回落到主人私密库。群闲聊原文不作隐私审查过滤；与私聊记忆隔离即可。
 
 协议端：N100 现网为 **WeQ SSE**（`weq-web` + `qq-bot`），不是另起 NapCat。
+
+## 安卓自主体（core#58，脱敏）
+| 变量 | 说明 |
+|------|------|
+| `WHALE_DEVICE_AGENT_ENABLED` | `1` 启用 core 编排循环接线；默认关 |
+| `WHALE_DEVICE_AGENT_MAX_STEPS` | 单任务最大步数，默认 `8` |
+| `WHALE_DEVICE_AGENT_TIMEOUT_S` | 单步 action/query 超时秒，默认 `15` |
+| `DEEPSEEK_*` | 决策模型（`DeepSeekDecisionPort`）；勿把 key 写入仓库 |
+| `QQ_INTENT_*` | 可选：意图/审操仍走 AgentScope 端点 |
+
+设备 scope：`device.agent.control` / `observe` / `shell` / `output.read`（后者独立，旧配对不自动扩大）。停止：端侧 estop，或 core `revoke` / `POST .../scopes` 收窄。

@@ -18,7 +18,7 @@
 | MoonCheck | 保持停 |
 | 迁国内为延迟第一优先 | 否 |
 | #60 边缘拓扑大图 | 降级：先把现有眼镜/QQ 打磨稳 |
-| #58 安卓自主 Shell 全开 | 降级：契约已有，真机自主另开回合 |
+| #58 安卓自主 Shell 全开 | **本回合开**：core 编排循环+失败语义+revoke/scopes 停止；真机 E2E 待配对 |
 | #54/#55 角色兴趣深度 | 降级：先可观测与主动问候干跑 |
 | Studio 多人版 | 不进单 owner 生产路径 |
 | DeepSeek urllib 连接池大改 | 降级：nginx keepalive + orch 复用先吃肉 |

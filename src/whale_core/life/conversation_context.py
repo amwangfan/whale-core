@@ -101,7 +101,14 @@ SCOPE_PHONE_CALL_RING = "phone.call.ring"
 SCOPE_PHONE_CALL_AUDIO = "phone.call.audio"
 SCOPE_PHONE_DEVICE_SAFE_ACTION = "phone.device.safe_action"
 
-#: 设备面 scope 全集（screen.* + phone.*）。
+# ---- 安卓自主体（core#58 / PROTOCOL V1.1）-------------------------------
+# 设备注册 scope；编排循环经 ResolvedContext 复核时亦用同名常量。
+SCOPE_DEVICE_AGENT_CONTROL = "device.agent.control"
+SCOPE_DEVICE_AGENT_OBSERVE = "device.agent.observe"
+SCOPE_DEVICE_AGENT_SHELL = "device.agent.shell"
+SCOPE_DEVICE_AGENT_OUTPUT_READ = "device.agent.output.read"
+
+#: 设备面 scope 全集（screen.* + phone.* + device.agent.*）。
 DEVICE_SCOPES: Tuple[str, ...] = (
     SCOPE_SCREEN_CONTEXT_READ,
     SCOPE_SCREEN_HISTORY_SEARCH,
@@ -112,6 +119,10 @@ DEVICE_SCOPES: Tuple[str, ...] = (
     SCOPE_PHONE_CALL_RING,
     SCOPE_PHONE_CALL_AUDIO,
     SCOPE_PHONE_DEVICE_SAFE_ACTION,
+    SCOPE_DEVICE_AGENT_CONTROL,
+    SCOPE_DEVICE_AGENT_OBSERVE,
+    SCOPE_DEVICE_AGENT_SHELL,
+    SCOPE_DEVICE_AGENT_OUTPUT_READ,
 )
 
 

@@ -246,6 +246,36 @@ class DeviceRegistry:
             return ()
         return tuple(str(s) for s in meta.get("scopes") or ())
 
+    def set_scopes(self, device_id: str, scopes: Iterable[str]) -> dict[str, Any]:
+        """收窄/重设设备注册 scope（active 设备）。
+
+        用于 core 侧「停止自主体」等价手段：去掉 ``device.agent.*`` 后编排循环
+        下一步 ``_preflight`` 得 ``failed/scope_denied`` 并中止、不重放。
+        只允许 ``DEVICE_CAPABILITIES`` 内的名字；空列表表示撤掉全部能力上限。
+        """
+        meta = self.get(device_id)
+        if meta is None:
+            raise DeviceRegistryError("not_found", f"未知设备 {device_id}")
+        if meta.get("status") != "active":
+            raise DeviceRegistryError(
+                "conflict", f"设备 {device_id} 非 active，无法改 scope")
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for raw in scopes:
+            s = str(raw).strip()
+            if not s or s in seen:
+                continue
+            if s not in DEVICE_CAPABILITIES:
+                raise DeviceRegistryError("bad_request", f"未知能力 {s}")
+            seen.add(s)
+            cleaned.append(s)
+        meta["scopes"] = cleaned
+        meta["updated_at"] = now_ms()
+        self.store.put(self._key(device_id), meta)
+        self.audit("device.scopes.set", device_id=device_id,
+                   outcome="ok", detail=f"n={len(cleaned)}")
+        return dict(meta)
+
     # json 序列化助手（列表端点用）
     @staticmethod
     def dumps_scopes(meta: dict[str, Any]) -> str:
