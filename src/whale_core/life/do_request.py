@@ -3,7 +3,7 @@
 设计（2026-11-05）：
 - 只认明确做事请求（规则/轻意图），不用强软提示堆「像真人」；
 - 仅 owner 私聊与眼镜路径启用；群聊不走本短路（防刷群）；
-- 首批落地：做一张简单结果图 → 本地真彩 PNG + 文字摘要 → ResultDelivery；
+- 首批落地：做一张简单结果图 → 本地可读 PNG（白底+标题+摘要+时间）+ 文字摘要 → ResultDelivery；
 - 复杂任务仍回落既有 companion / 工具编排；本模块不替代全量编排器。
 """
 from __future__ import annotations
@@ -81,19 +81,104 @@ def is_owner_private_conversation(conversation: str) -> bool:
     return str(conversation or "").startswith("private:")
 
 
-def make_simple_result_png(w: int = 320, h: int = 180, *,
-                           rgb=(32, 128, 220), label_rows: int = 8) -> bytes:
-    """无第三方依赖的最小真彩 PNG（纯色 + 顶部深色条）。"""
+_TZ_NAME = "Asia/Shanghai"
+_FONT_CANDIDATES = (
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+)
+
+
+def _now_shanghai():
+    from datetime import datetime, timedelta, timezone
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo(_TZ_NAME))
+    except Exception:  # noqa: BLE001
+        return datetime.now(timezone(timedelta(hours=8)))
+
+
+def _load_font(size: int):
+    from PIL import ImageFont
+    for path in _FONT_CANDIDATES:
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:  # noqa: BLE001
+            continue
+    return ImageFont.load_default()
+
+
+def _wrap(draw, text: str, font, max_w: int, max_lines: int = 3) -> list[str]:
+    lines, cur = [], ""
+    for ch in (text or "").replace("\n", " "):
+        if draw.textlength(cur + ch, font=font) > max_w and cur:
+            lines.append(cur)
+            cur = ch
+            if len(lines) >= max_lines:
+                break
+        else:
+            cur += ch
+    if cur and len(lines) < max_lines:
+        lines.append(cur)
+    elif len(lines) >= max_lines and lines:
+        lines[-1] = lines[-1][:-1] + "…"
+    return lines
+
+
+def make_simple_result_png(w: int = 720, h: int = 420, *, title: str = "结果图",
+                           summary: str = "", request: str = "",
+                           stamp: str = "", info: Sequence[tuple[str, str]] = ()) -> bytes:
+    """可读结果图：白底卡片 + 标题 + 摘要 + 时间(Asia/Shanghai) + 少量信息。"""
+    import io
+    try:
+        from PIL import Image, ImageDraw
+    except Exception:  # noqa: BLE001
+        return _fallback_png(w, h)
+    stamp = stamp or _now_shanghai().strftime("%Y-%m-%d %H:%M:%S") + " (Asia/Shanghai)"
+    img = Image.new("RGB", (w, h), (255, 255, 255))
+    d = ImageDraw.Draw(img)
+    pad = 36
+    d.rectangle([0, 0, w, 8], fill=(46, 125, 214))  # 细强调条
+    f_title, f_body, f_small = _load_font(34), _load_font(22), _load_font(18)
+    y = 32
+    d.text((pad, y), title, fill=(20, 24, 31), font=f_title)
+    y += 52
+    d.text((pad, y), stamp, fill=(110, 117, 128), font=f_small)
+    y += 34
+    d.line([pad, y, w - pad, y], fill=(225, 228, 233), width=2)
+    y += 18
+    for line in _wrap(d, summary or "已完成", f_body, w - 2 * pad, 3):
+        d.text((pad, y), line, fill=(40, 44, 52), font=f_body)
+        y += 32
+    y += 8
+    rows = list(info)
+    if request:
+        rows.insert(0, ("请求", request))
+    for k, v in rows[:4]:
+        d.text((pad, y), f"{k}", fill=(110, 117, 128), font=f_small)
+        vv = _wrap(d, str(v), f_small, w - 2 * pad - 90, 1)
+        d.text((pad + 90, y), vv[0] if vv else "", fill=(40, 44, 52), font=f_small)
+        y += 30
+    d.text((pad, h - 34), "whale-core · do_request", fill=(170, 175, 183), font=f_small)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
+def _fallback_png(w: int, h: int) -> bytes:
+    """无 PIL 时兜底：白底 + 灰色分隔线（非纯色块）。"""
     rows = []
     for y in range(h):
-        row = bytearray([0])  # filter none
-        for _x in range(w):
-            if y < label_rows:
-                row.extend((20, 20, 20))
-            else:
-                row.extend(rgb)
+        row = bytearray([0])
+        if y < 8:
+            px = (46, 125, 214)
+        elif y % 40 == 0:
+            px = (225, 228, 233)
+        else:
+            px = (255, 255, 255)
+        row.extend(bytes(px) * w)
         rows.append(bytes(row))
-    raw = b"".join(rows)
 
     def chunk(tag: bytes, data: bytes) -> bytes:
         return (struct.pack(">I", len(data)) + tag + data
@@ -101,16 +186,21 @@ def make_simple_result_png(w: int = 320, h: int = 180, *,
 
     ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
     return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
-            + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
+            + chunk(b"IDAT", zlib.compress(b"".join(rows), 9)) + chunk(b"IEND", b""))
 
 
 def build_result_image_items(text: str = "") -> tuple[str, list[DeliveryItem]]:
-    """产出文字摘要 + 简单结果图。"""
-    stamp = time.strftime("%Y-%m-%d %H:%M:%S Asia/Shanghai")
+    """产出文字摘要 + 可读结果图。"""
+    now = _now_shanghai()
+    stamp = now.strftime("%Y-%m-%d %H:%M:%S") + " (Asia/Shanghai)"
     summary = f"好了，简单结果图已生成（{stamp}）"
     if text:
         summary = f"{summary}\n请求：{(text or '')[:80]}"
-    png = make_simple_result_png()
+    png = make_simple_result_png(
+        title="结果图已生成",
+        summary="已按你的请求在本地生成并通过结果投递发送。",
+        request=(text or "")[:80], stamp=stamp,
+        info=(("状态", "完成"), ("通道", "QQ 私聊 · ResultDelivery")))
     items = [
         DeliveryItem(kind="text", text=summary),
         DeliveryItem(kind="image", image_bytes=png,
