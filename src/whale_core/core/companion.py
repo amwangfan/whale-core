@@ -66,6 +66,13 @@ def _maybe_writeback_inner_state(store: MemoryStore, *, conversation_id: str,
     if not _writeback_enabled() or not conversation_id or not (user_text or "").strip():
         return
     text = (user_text or "").strip()
+    # 瞬时报时/问时间不进 InnerState（owner 2026-11-05：避免记忆被时间挤满）。
+    try:
+        from whale_core.memory.transient import is_time_query, is_transient_time_only
+        if is_time_query(text) or is_transient_time_only(text):
+            return
+    except Exception:
+        pass
     # 过短或纯寒暄不写；问句/计划类才开话题。
     if len(text) < 8:
         return
@@ -203,10 +210,28 @@ class WhaleCompanion:
             _hint = _hint()
         if _hint:
             persona_text = (persona_text or "") + "\n\n" + _hint
+        from whale_core.memory.transient import (
+            is_transient_time_only, scrub_episode_summary, scrub_transient_time)
+
+        def _injectable_memory(raw: str) -> str:
+            """背景记忆：整段报时丢弃；否则剥报时句，只留有意义事实。"""
+            text_m = str(raw or "").strip()
+            if not text_m or is_transient_time_only(text_m):
+                return ""
+            cleaned = scrub_episode_summary(text_m)
+            if cleaned:
+                return cleaned
+            # 非「用户：/Enxi：」结构的摘要：按句剥报时
+            return scrub_transient_time(text_m)
+
         if self.curator is not None:
-            memories = [str(hit.record.content.get("summary", ""))
-                        for hit in _recall(self.curator, original, spaces,
-                                           include_protected=_spaces_include_vault(spaces))]
+            memories = []
+            for hit in _recall(self.curator, original, spaces,
+                               include_protected=_spaces_include_vault(spaces)):
+                piece = _injectable_memory(
+                    str(hit.record.content.get("summary", "")))
+                if piece:
+                    memories.append(piece)
             # 近期对话情节补充注入的纪律（owner 反馈 2026-10-31「总重复图片的事」）：
             # 1. **只取本会话**的情节——别会话的旧情节会把话题带偏；
             # 2. 规范化去重（同主题多条情节只留最新一条）；
@@ -218,7 +243,8 @@ class WhaleCompanion:
                     continue
                 if str(record.content.get("conversation_id") or "") != conversation_id:
                     continue  # 跨会话旧情节不注入（改由 curator 语义召回负责）
-                summary = str(record.content.get("summary", ""))
+                summary = _injectable_memory(
+                    str(record.content.get("summary", "")))
                 norm = _normalize_summary(summary)
                 if not summary or not norm or norm in seen_norm:
                     continue
@@ -231,7 +257,11 @@ class WhaleCompanion:
         else:
             # Legacy chat-only behavior kept for backwards compatibility; opt in
             # to curated retrieval to avoid injecting raw transcripts by default.
-            memories = [str(r.content.get("summary", "")) for r in ctx.recent_episodes]
+            memories = [
+                m for m in (
+                    _injectable_memory(str(r.content.get("summary", "")))
+                    for r in ctx.recent_episodes)
+                if m]
         # 多轮历史：显式传 conversation_id 才启用（默认保持单轮行为，兼容旧调用方）。
         # G1：群会话改用时间线渲染——每条发言带「消息ID|发送者」归属标签，
         # 成员不坍缩成同一个 user（ID-01）；私聊保持既有历史。
@@ -306,13 +336,17 @@ class WhaleCompanion:
 
                 paused = is_recording_paused(self.store, target)
             if (spaces is None or target) and not paused and clean_response:
-                ep_key = (f"ep:chat:{conversation_id}:{turn_key}" if turn_key
-                          else f"ep:chat:{uuid4().hex}")
-                remember_episode(self.store, summary=f"用户：{original[:500]}\nEnxi：{clean_response[:500]}",
-                                 key=ep_key, tags=("chat",),
-                                 extra={"conversation_id": conversation_id[:160],
-                                        "layer": "episode"},
-                                 space_id=target)
+                from whale_core.memory.transient import scrub_episode_summary
+                ep_summary = scrub_episode_summary(
+                    f"用户：{original[:500]}\nEnxi：{clean_response[:500]}")
+                if ep_summary:
+                    ep_key = (f"ep:chat:{conversation_id}:{turn_key}" if turn_key
+                              else f"ep:chat:{uuid4().hex}")
+                    remember_episode(self.store, summary=ep_summary,
+                                     key=ep_key, tags=("chat",),
+                                     extra={"conversation_id": conversation_id[:160],
+                                            "layer": "episode"},
+                                     space_id=target)
         if conversation_id and clean_response:
             append_turn(self.store, conversation_id, original, clean_response)
             # 记忆/主动性闭环：轻量写回未完话题（默认开；WHALE_INNER_STATE_WRITEBACK=0 关）

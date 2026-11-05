@@ -75,3 +75,46 @@ def test_baidu_google_shortcuts_route_search():
         plan = json.loads(router.plan(text))
         assert plan["kind"] == "task", text
         assert "web.search" in plan["capabilities"]
+
+
+def test_weather_routes_web_search_without_search_verb():
+    router = SearchIntentRouter(model=_Boom(), enable_llm=True, tools=None)
+    for text in ("今天天气怎么样", "北京天气", "大阪明天气温", "会下雨吗"):
+        plan = json.loads(router.plan(text, context="当前位置：上海杨浦"))
+        assert plan["kind"] == "task", text
+        assert "web.search" in plan["capabilities"]
+
+
+def test_named_city_weather_not_overridden_by_default_location():
+    router = SearchIntentRouter(tools=None, enable_llm=False)
+    plan = json.loads(router.plan(
+        "北京今天天气怎么样", context="当前位置：上海杨浦"))
+    assert plan["kind"] == "task"
+    q = plan["slots"]["query"]
+    assert "北京" in q
+    assert "上海" not in q  # 口述城市优先，不被默认位置盖掉
+
+
+def test_bare_weather_uses_cached_location():
+    router = SearchIntentRouter(tools=None, enable_llm=False)
+    plan = json.loads(router.plan(
+        "今天天气怎么样", context="当前位置：上海杨浦"))
+    assert "上海杨浦" in plan["slots"]["query"]
+    assert "天气" in plan["slots"]["query"]
+
+
+def test_here_weather_uses_location_when_known():
+    router = SearchIntentRouter(tools=None, enable_llm=False)
+    plan = json.loads(router.plan(
+        "我所在城市天气", context="当前位置：大阪·难波"))
+    assert "大阪" in plan["slots"]["query"]
+
+
+def test_weather_without_location_still_searches_user_text():
+    """无位置时仍走搜索（允许口述城市）；不硬编码上海。"""
+    router = SearchIntentRouter(tools=None, enable_llm=False)
+    plan = json.loads(router.plan(
+        "成都天气", context="当前位置：未知（未提供城市或坐标）"))
+    assert plan["kind"] == "task"
+    assert plan["slots"]["query"] == "成都天气"
+    assert "上海" not in plan["slots"]["query"]

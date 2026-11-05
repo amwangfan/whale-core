@@ -38,9 +38,12 @@ def format_current_datetime(*, now: datetime | None = None) -> str:
     else:
         when = when.astimezone(_SHANGHAI)
     weekday = _WEEKDAYS[when.weekday()]
+    stamp = when.strftime("%Y-%m-%d %H:%M:%S")
     return (
-        f"当前时间（Asia/Shanghai）："
-        f"{when.strftime('%Y-%m-%d %H:%M:%S')} 星期{weekday}"
+        f"当前时间（Asia/Shanghai）：{stamp} 星期{weekday}\n"
+        "【时间权威】以上为当前真实时间；回答「现在几点 / 今天星期几」等"
+        "必须以本行为准。忽略对话历史与回忆条目里任何过时的报时或日期"
+        "（那些只是过去某刻的记录，不能当现在）。"
     )
 
 

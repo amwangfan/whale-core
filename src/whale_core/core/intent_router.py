@@ -3,7 +3,7 @@
 路由器只建议 capabilities，不能自行授权。
 
 策略（2026-11-05 owner 确认）：
-- 规则命中（search / local-life / shell.safe）→ 直接 task，零意图 LLM；
+- 规则命中（search / local-life / weather / shell.safe）→ 直接 task，零意图 LLM；
 - 规则未命中且像普通闲聊（含「现在几点」等）→ kind=chat，**跳过**意图 LLM
   （闲聊回复仍走宿主 companion / DeepSeek 官模，不在此短路本地时钟）；
 - 仅当宿主 enable_llm=True **且**文本像模糊写操作/媒体生成等可能需工具时，
@@ -39,6 +39,57 @@ _LOCAL_LIFE = re.compile(
     r"|((有什么|哪有|哪里有|推荐).{0,12}(外卖|吃的|餐馆|饭店))",
     re.IGNORECASE,
 )
+
+# 天气/气温/预报：无「搜索」动词也走 web.search。
+# 用户口述城市优先，不得被默认位置（如缓存的「上海杨浦」）盖掉。
+_WEATHER = re.compile(
+    r"(天气|气温|温度|天气预报|空气质量|aqi|紫外线|穿什么)"
+    r"|(会不会|会|要不要).{0,6}(下雨|下雪|刮风|打雷|降温|高温)"
+    r"|(下雨|下雪|台风|暴雨|高温|降温).{0,6}(吗|嘛|么|不)"
+    r"|\b(weather|forecast|temperature)\b",
+    re.IGNORECASE,
+)
+
+# 口述异地城市/地名 + 天气：有则不要再拼默认位置。
+_WEATHER_NAMED_PLACE = re.compile(
+    r"(北京|上海|天津|重庆|广州|深圳|杭州|南京|武汉|成都|西安|苏州|青岛|"
+    r"厦门|长沙|郑州|沈阳|大连|哈尔滨|福州|济南|合肥|昆明|南宁|南昌|"
+    r"贵阳|太原|石家庄|乌鲁木齐|拉萨|银川|西宁|海口|三亚|香港|澳门|台北|"
+    r"东京|大阪|京都|首尔|纽约|伦敦|巴黎|新加坡|洛杉矶|旧金山|"
+    r"[\u4e00-\u9fff]{2,12}(?:省|市|县|区|州|盟|旗|镇))"
+    r".{0,8}(天气|气温|温度|预报|空气质量|aqi|"
+    r"下雨|下雪|台风|穿什么)",
+    re.IGNORECASE,
+)
+
+# 「这里 / 我所在城市」→ 应用当前位置，不算口述异地。
+_WEATHER_HERE = re.compile(
+    r"(这里|这儿|本地|所在地|我所在|我这|当前位置).{0,8}"
+    r"(天气|气温|温度|预报|空气质量)",
+    re.IGNORECASE,
+)
+
+
+def _location_hint_from_context(context: str) -> str:
+    """从意图上下文抽出「当前位置：」行；未知则空串。"""
+    for line in (context or "").splitlines():
+        if line.startswith("当前位置：") or line.startswith("位置："):
+            hint = line.split("：", 1)[-1].strip()
+            if hint and hint not in ("未知",) and "未知" not in hint:
+                return hint[:80]
+            return ""
+    return ""
+
+
+def _weather_search_query(text: str, *, context: str = "") -> str:
+    """天气搜索词：口述城市原样；否则拼当前位置；无位置就用原话。"""
+    query = (text or "").strip()[:500]
+    if _WEATHER_NAMED_PLACE.search(query) and not _WEATHER_HERE.search(query):
+        return query
+    loc = _location_hint_from_context(context)
+    if loc and loc not in query:
+        return f"{loc} {query}"[:500]
+    return query
 
 # 显式要跑终端/沙箱命令时走 shell.safe（仍受 ACL+沙箱；非主人无 grant 会被门控拒绝）。
 _SHELL_EXPLICIT = re.compile(
@@ -94,15 +145,20 @@ class SearchIntentRouter:
                     "capabilities": ["web.search"],
                     "reason": "用户明确要求搜索公开信息",
                 }, ensure_ascii=False)
+        if _WEATHER.search(text or ""):
+            query = _weather_search_query(text or "", context=context)
+            return json.dumps({
+                "goal": "搜索并回答天气：" + query[:300],
+                "kind": "task",
+                "slots": {"query": query[:500], "limit": 5},
+                "capabilities": ["web.search"],
+                "reason": "天气/气温类问题走只读网页搜索；口述城市优先于默认位置",
+            }, ensure_ascii=False)
         if _LOCAL_LIFE.search(text or ""):
             query = (text or "").strip()[:500]
             # 把意图上下文里的位置线索拼进 query，便于「附近外卖」命中本地结果。
-            loc_hint = ""
-            for line in (context or "").splitlines():
-                if line.startswith("当前位置：") or line.startswith("位置："):
-                    loc_hint = line.split("：", 1)[-1].strip()
-                    break
-            if loc_hint and loc_hint not in ("未知",) and "未知" not in loc_hint:
+            loc_hint = _location_hint_from_context(context)
+            if loc_hint and loc_hint not in query:
                 query = f"{loc_hint} {query}"
             return json.dumps({
                 "goal": "搜索并回答本地生活／附近信息：" + query[:300],
