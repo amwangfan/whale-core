@@ -820,7 +820,7 @@ def cmd_run(args) -> int:
             intent_model=SearchIntentRouter(model=intent_brain, enable_llm=True, tools=tools),
             tools=tools, context_resolver=context_resolver,
             grant_gate=_grant_gate)
-        print(f"[意图] 模型={intent_model_id}（规则优先；闲聊跳过 LLM；模糊写可 LLM；{tool_note}）")
+        print(f"[意图] 模型={intent_model_id}（显式指令规则直达零LLM；其余一律由意图模型判断 chat/task；{tool_note}）")
 
     # 安全审核模型（可选，默认关）：QQ_SAFETY_MODEL=<模型 id> 开启——
     # 回复发送前由该模型复核；有顾虑的草稿强制转人工审批（不自动发）。
