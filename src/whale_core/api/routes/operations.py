@@ -86,21 +86,22 @@ def _approvals_locked(handler, method: str, parts: list[str]) -> None:
                 pending.append({'kind': 'task', 'task_id': task['task_id'],
                                 'draft_id': task['task_id'], 'text': task.get('goal', ''),
                                 'status': task.get('status', ''), 'execution_status': 'not_dispatched'})
+        from whale_core.life.initiative import (
+            DECISION_KEY_PREFIX, DRAFT_KEY_PREFIX, LEDGER_KEY_PREFIX,
+            draft_is_pending)
         for key in store.keys():
-            if not key.startswith("life:draft:"):
+            if not key.startswith(DRAFT_KEY_PREFIX):
                 continue
             draft_id = key.split(":", 2)[2]
             draft = store.get(key)
-            ledger = store.get("life:ledger:" + draft_id) or {}
-            decision = store.get("life:decision:" + draft_id) or {}
-            if not isinstance(draft, dict):
+            ledger = store.get(LEDGER_KEY_PREFIX + draft_id) or {}
+            decision = store.get(DECISION_KEY_PREFIX + draft_id) or {}
+            # 审批口径共享（initiative.draft_is_pending）：closed/superseded =
+            # 永不派发/已被分段取代的终态（2026-11-01 审批积压治理：沉默轮、
+            # 多气泡主草稿、直发已送达不再占位）
+            if not draft_is_pending(draft, ledger):
                 continue
             status = ledger.get("status", "draft")
-            # closed/superseded = 永不派发/已被分段取代的终态（2026-11-01
-            # 审批积压治理：沉默轮、多气泡主草稿、直发已送达不再占位）
-            if ledger.get("attempts", 0) > 0 or status in (
-                    "accepted", "unknown", "closed", "superseded"):
-                continue
             pending.append({
                 "kind": "draft",
                 "draft_id": draft.get("draft_id", draft_id),
