@@ -246,18 +246,29 @@ class MiniMaxImageProvider(_MiniMaxBase):
         self.model = model
 
     def generate(self, prompt: str, *, size: str = "1328*1328",
-                 n: int = 1) -> ImageTaskResult:
+                 n: int = 1, reference: bytes | None = None,
+                 reference_mime: str = "image/jpeg") -> ImageTaskResult:
         prompt = (prompt or "").strip()[:1500]
         if not prompt:
             raise ValueError("prompt must be non-empty")
-        data = self._request("/v1/image_generation", {
+        body = {
             "model": self.model,
             "prompt": prompt,
             "aspect_ratio": _aspect_for(size),
             "response_format": "url",
             "n": max(1, min(int(n or 1), 4)),
             "prompt_optimizer": True,
-        })
+        }
+        # 参考图（角色/人物一致性）：官方 subject_reference，character 型，
+        # image_file 收公网 URL 或 base64 data URL——本机字节走 data URL。
+        if reference:
+            import base64 as _b64
+            mime = reference_mime if reference_mime.startswith("image/") else "image/jpeg"
+            body["subject_reference"] = [{
+                "type": "character",
+                "image_file": f"data:{mime};base64,{_b64.b64encode(reference).decode()}",
+            }]
+        data = self._request("/v1/image_generation", body)
         images: list[str] = []
         d = data.get("data")
         if isinstance(d, dict) and isinstance(d.get("image_urls"), list):

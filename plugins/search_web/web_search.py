@@ -144,6 +144,37 @@ class TavilyProvider:
             ))
         return out
 
+    def search_images(self, query: str, *, limit: int = 5) -> list[str]:
+        """图片搜索：Tavily ``include_images`` 通道，返回图片 URL 列表。
+
+        供生图参考图检索（2026-11-05 owner 需求：kimi 判定需要参考图时
+        先搜图再带图生成）。无 key/异常 → 空列表（调用方回落纯文本生图）。
+        """
+        if not self.api_key:
+            return []
+        q, n = _clamp(query, limit)
+        body = json.dumps({"query": q, "max_results": 3,
+                           "include_images": True}).encode()
+        req = urllib.request.Request(
+            TAVILY_URL, data=body, method="POST",
+            headers={"Authorization": f"Bearer {self.api_key}",
+                     "Content-Type": "application/json", "User-Agent": USER_AGENT})
+        try:
+            data = _http_json(req, timeout=self.timeout)
+        except Exception:
+            return []
+        out: list[str] = []
+        images = data.get("images") if isinstance(data, dict) else None
+        if isinstance(images, list):
+            for item in images:
+                if isinstance(item, dict):
+                    u = str(item.get("url") or "")
+                else:
+                    u = str(item or "")
+                if u.startswith("https://"):
+                    out.append(u[:2000])
+        return out[:n]
+
 
 class BraveProvider:
     """Brave 搜索。key: 构造或 BRAVE_API_KEY。"""

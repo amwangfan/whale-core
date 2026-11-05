@@ -168,15 +168,24 @@ class DashScopeImageProvider(_DashScopeBase):
         self.poll_interval = poll_interval
         self.poll_timeout = poll_timeout
 
-    def generate(self, prompt: str, *, size: str = "1328*1328", n: int = 1) -> ImageTaskResult:
+    def generate(self, prompt: str, *, size: str = "1328*1328", n: int = 1,
+                 reference: bytes | None = None,
+                 reference_mime: str = "image/jpeg") -> ImageTaskResult:
         prompt = (prompt or "").strip()[:2000]
         if not prompt:
             raise ValueError("prompt must be non-empty")
         size = normalize_image_size(size)  # 各种写法归一到手册合法值，不再硬失败
         n = max(1, min(int(n), 4))
+        # 参考图（qwen-image-3.0 输入模态 Image+Text）：content 前置 image 件
+        content = []
+        if reference:
+            import base64 as _b64
+            mime = reference_mime if reference_mime.startswith("image/") else "image/jpeg"
+            content.append({"image": f"data:{mime};base64,{_b64.b64encode(reference).decode()}"})
+        content.append({"text": prompt})
         body = {
             "model": self.model,
-            "input": {"messages": [{"role": "user", "content": [{"text": prompt}]}]},
+            "input": {"messages": [{"role": "user", "content": content}]},
             "parameters": {"size": size, "watermark": False},
         }
         data = self._post("/services/aigc/multimodal-generation/generation", body)

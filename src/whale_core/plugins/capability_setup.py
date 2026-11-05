@@ -74,6 +74,43 @@ class OptionalCapabilities:
     notes: list[str] = field(default_factory=list)
 
 
+def _fetch_reference_image(url: str, *, max_bytes: int = 10 * 1024 * 1024,
+                           timeout: float = 20.0):
+    """下载参考图（2026-11-05 参考图生图）：仅 https、大小封顶、魔数嗅探
+    必须是光栅图；失败 → None（调用方回落纯文生图）。"""
+    import urllib.request
+    if not str(url or "").startswith("https://"):
+        return None
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "whale-core/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = resp.read(max_bytes + 1)
+        if not data or len(data) > max_bytes:
+            return None
+        mime = "image/png" if data[:4] == b"\x89PNG" else \
+            "image/jpeg" if data[:2] == b"\xff\xd8" else \
+            "image/gif" if data[:3] == b"GIF" else \
+            "image/webp" if data[8:12] == b"WEBP" else ""
+        return (data, mime) if mime else None
+    except Exception:
+        return None
+
+
+def _find_reference_image(query: str, *, env=None):
+    """按检索词搜一张可用参考图（Tavily 图片通道）；找不到 → None。"""
+    import os
+    from search_web.web_search import TavilyProvider
+    provider = TavilyProvider(env=os.environ if env is None else env)
+    search_images = getattr(provider, "search_images", None)
+    if not callable(search_images):
+        return None
+    for url in (search_images(query, limit=5) or [])[:5]:
+        got = _fetch_reference_image(url)
+        if got is not None:
+            return got
+    return None
+
+
 def configure_optional_capabilities(registry, tools, store, *, env: Mapping[str,str],
                                     artifact_dir: str | Path | None = None) -> OptionalCapabilities:
     out = OptionalCapabilities(artifacts=ArtifactStore(artifact_dir, store) if artifact_dir else None)
@@ -114,6 +151,7 @@ def configure_optional_capabilities(registry, tools, store, *, env: Mapping[str,
         if not p or not media_style or _STYLE_CUES_RE.search(p):
             return p
         return p + "，" + media_style
+
 
     image_base, image_key, image_kind = _resolve_capability_env(env, "IMAGE")
     if image_base or minimax is not None:
@@ -170,17 +208,39 @@ def configure_optional_capabilities(registry, tools, store, *, env: Mapping[str,
                     if provider is None:
                         raise ValueError(
                             f"未知生图模型 {model!r}（可用：{', '.join(sorted(image_providers))}）")
-                result = provider.generate(
-                    _with_media_style(str(args.get("prompt") or args.get("query") or args.get("goal") or "")),
-                    size=str(args.get("size") or default_size), n=int(args.get("n") or 1))
+                prompt = _with_media_style(
+                    str(args.get("prompt") or args.get("query") or args.get("goal") or ""))
+                ref_query = str(args.get("reference_query") or "").strip()
+                reference = None
+                reference_mime = "image/jpeg"
+                ref_note = ""
+                if ref_query:
+                    try:
+                        got = _find_reference_image(ref_query[:200])
+                    except Exception:
+                        got = None
+                    if got is not None:
+                        reference, reference_mime = got
+                        ref_note = "（已按搜到的参考图生成）"
+                    else:
+                        ref_note = "（没搜到可用参考图，按纯描述生成）"
+                gen_kw = dict(size=str(args.get("size") or default_size),
+                              n=int(args.get("n") or 1))
+                try:
+                    result = provider.generate(prompt, reference=reference,
+                                               reference_mime=reference_mime,
+                                               **gen_kw)
+                except TypeError:
+                    result = provider.generate(prompt, **gen_kw)  # provider 无参考图参数时回落
                 # 只回本地工件引用（2026-11-01「恶意链接」事件：裸签名 URL 被
                 # 模型贴进 QQ 正文触发安全警告且外部打不开）。图片由系统作为
                 # 真实图片消息发出，模型不应在正文里贴任何链接/路径。
                 return json.dumps({"task_id":result.task_id, "status":result.status,
                                    "model": model or image_default,
                                    "images":[save(r) for r in result.images],
+                                   "reference_used": bool(reference),
                                    "note":"图片会由系统自动发送给对方；回复正文里"
-                                          "不要包含任何图片链接或文件路径。"},
+                                          "不要包含任何图片链接或文件路径。" + ref_note},
                                   ensure_ascii=False)
             # 2026-11-02 owner 决策：允许意图模型按需求选供应商——选型指南
             # 进工具描述（意图规划器可见的唯一渠道）。
@@ -193,6 +253,9 @@ def configure_optional_capabilities(registry, tools, store, *, env: Mapping[str,
                 for m in sorted(image_providers))
             tools.register(ToolSpec(name="generate_image", capability="media.image.generate", plugin_id="media_image",
                                     description="按提示生成图片（默认二次元动漫画风，对方要求别的风格时以其为准）；"
+                                    "主体是已知角色/人物/IP 形象时填 reference_query（参考图搜索词，"
+                                    "如「来自深渊 娜娜奇 官方图」），系统会先搜参考图再带图生成；"
+                                    "泛化主体（一只猫/一片海）不要填。"
                                     "可用 model 参数指定模型：" + _img_guide, handler=generate))
             out.notes.append("图像生成已配置（可选模型：" + "、".join(sorted(image_providers)) + "）")
 
