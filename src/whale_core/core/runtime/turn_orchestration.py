@@ -246,6 +246,27 @@ class TurnOrchestrationMixin:
                                 source=env.source, channel=env.channel,
                                 owner_id=env.owner_id, context=env.context)
 
+    def _default_location_summary(self) -> str:
+        """QQ/编排器缺省位置：眼镜最近上报 → WHALE_DEFAULT_CITY 等 env。
+
+        眼镜路径另有请求体包装覆盖本行；QQ 群/私聊此前未注入，导致天气
+        无口述城市时 slots 无 location_hint，和风把整句问句当城市名失败。
+        """
+        import os
+        try:
+            cached = self.store.get("glasses:last_location")
+        except Exception:
+            cached = None
+        if isinstance(cached, dict):
+            summary = str(cached.get("summary") or "").strip()
+            if summary and "未知" not in summary:
+                return summary[:200]
+        for key in ("WHALE_DEFAULT_CITY", "WHALE_HOME_CITY", "WHALE_LOCATION"):
+            val = (os.environ.get(key) or "").strip()
+            if val:
+                return val[:200]
+        return ""
+
     def _intent_context(self, conversation_id: str, text: str,
                         *, allowed_spaces=None) -> str:
         """给意图模型的上下文摘要：近期会话历史 + 相关记忆（截断；不含人格禁忌全文）。
@@ -254,7 +275,12 @@ class TurnOrchestrationMixin:
         S2：记忆召回按授权空间限域；意图模型只是提议者，不因此获得权限。
         """
         from whale_core.memory.history import load_history
+        from whale_core.core.prompt_composer import format_location_context
         parts: list[str] = []
+        # 位置行必须在前：SearchIntentRouter 天气/附近规则读「当前位置：」。
+        # 眼镜 wrapper 会再前置请求体位置并覆盖本缺省。
+        parts.append(format_location_context(
+            location=self._default_location_summary() or None))
         # 群会话：意图上下文并入群时间线（2026-11-01 生产实证：observe 的群消息
         # 不进会话历史，规划者只看历史等于半盲——「说你呢」这类承接丢了目标）。
         if conversation_id.startswith("group:"):
