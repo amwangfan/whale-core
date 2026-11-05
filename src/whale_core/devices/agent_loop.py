@@ -315,8 +315,8 @@ class DeviceAgentLoop:
 
             if record.outcome == "executed":
                 continue
-            if should_auto_retry(record.outcome):
-                # 有界超时重试：同一步再发一次（新幂等键，非重放原键）
+            if should_auto_retry(record.outcome, capability=capability):
+                # 仅 observe（只读）超时：有界重试，可用新幂等键
                 retried = False
                 for _ in range(self.timeout_retries):
                     gate = self._preflight(device_id, required=(capability,))
@@ -332,11 +332,79 @@ class DeviceAgentLoop:
                     retried = True
                     if record.outcome == "executed":
                         break
-                    if not should_auto_retry(record.outcome):
+                    if not should_auto_retry(record.outcome, capability=capability):
                         break
                 if record.outcome == "executed":
                     continue
                 if should_abort_loop(record.outcome) or not retried:
+                    return AgentLoopResult(
+                        status="failed", reason=record.outcome, steps=steps,
+                        last_summary=last_summary)
+            elif record.outcome == FAILED_TIMEOUT:
+                # control/shell：超时后先用原幂等键 reconcile，禁止盲目重放
+                reconciled, detail = self._reconcile_after_timeout(
+                    device_id, idempotency_key=record.idempotency_key,
+                    capability=capability)
+                if reconciled == "retry_safe":
+                    # 仅 not_found：证明未落地，才允许有界新键重试
+                    retried = False
+                    for _ in range(self.timeout_retries):
+                        gate = self._preflight(device_id, required=(capability,))
+                        if gate is not None:
+                            return AgentLoopResult(
+                                status="stopped", reason=gate, steps=steps,
+                                last_summary=last_summary)
+                        record, observation, last_summary = self._dispatch_action(
+                            device_id, capability=capability,
+                            args=dict(decision.args), step=step_i,
+                            observation=observation, last_summary=last_summary)
+                        steps.append(record)
+                        retried = True
+                        if record.outcome == "executed":
+                            break
+                        if record.outcome != FAILED_TIMEOUT:
+                            break
+                        # 再次超时仍须 reconcile；非 not_found 则升 unknown
+                        again, detail = self._reconcile_after_timeout(
+                            device_id, idempotency_key=record.idempotency_key,
+                            capability=capability)
+                        if again != "retry_safe":
+                            record = AgentStepRecord(
+                                step=record.step, capability=record.capability,
+                                outcome=UNKNOWN, detail=detail or again,
+                                summary=record.summary,
+                                output_ref=record.output_ref,
+                                idempotency_key=record.idempotency_key)
+                            steps[-1] = record
+                            break
+                    if record.outcome == "executed":
+                        continue
+                    if should_abort_loop(record.outcome) or not retried:
+                        return AgentLoopResult(
+                            status="failed", reason=record.outcome, steps=steps,
+                            last_summary=last_summary)
+                elif reconciled == "executed":
+                    # 对账发现已执行：记为成功，不再下发
+                    record = AgentStepRecord(
+                        step=record.step, capability=record.capability,
+                        outcome="executed", detail=detail or "timeout-reconcile:executed",
+                        summary=record.summary, output_ref=record.output_ref,
+                        idempotency_key=record.idempotency_key)
+                    steps[-1] = record
+                    continue
+                else:
+                    # pending / unknown / 终态 failed / 无 status API：
+                    # 升编排码（默认 unknown），禁止自动重放
+                    final = reconciled if reconciled in {
+                        FAILED_UNAVAILABLE, FAILED_SCOPE_DENIED, UNKNOWN,
+                        FAILED_TIMEOUT,
+                    } or str(reconciled).startswith("failed/") else UNKNOWN
+                    record = AgentStepRecord(
+                        step=record.step, capability=record.capability,
+                        outcome=final, detail=detail or reconciled,
+                        summary=record.summary, output_ref=record.output_ref,
+                        idempotency_key=record.idempotency_key)
+                    steps[-1] = record
                     return AgentLoopResult(
                         status="failed", reason=record.outcome, steps=steps,
                         last_summary=last_summary)
@@ -354,6 +422,53 @@ class DeviceAgentLoop:
             last_summary=last_summary)
 
     # ---- internals -------------------------------------------------------
+
+    def _reconcile_after_timeout(
+        self,
+        device_id: str,
+        *,
+        idempotency_key: str,
+        capability: str,
+    ) -> tuple[str, str]:
+        """超时后用原幂等键查 action_status，决定能否安全重试。
+
+        返回 ``(decision, detail)``：
+        - ``retry_safe``：status ``not_found``（未在设备侧落地）
+        - ``executed`` / ``failed/...`` / ``unknown``：终态或不明，禁止新键重放
+        - 无 ``action_status``：对有副作用能力一律 ``unknown``
+        """
+        status_fn = getattr(self.device_port, "action_status", None)
+        if not callable(status_fn):
+            return UNKNOWN, "timeout-reconcile:no-status-api"
+        try:
+            status = status_fn(device_id, idempotency_key)
+        except DeviceUnavailable as exc:
+            if exc.code == "not_found":
+                return "retry_safe", "timeout-reconcile:not_found"
+            # 查状态本身超时/不可用：结果不明，禁止重放
+            return UNKNOWN, f"timeout-reconcile:status-error:{exc.code}"
+        except Exception as exc:  # noqa: BLE001
+            return UNKNOWN, f"timeout-reconcile:status-error:{type(exc).__name__}"
+
+        if not isinstance(status, Mapping):
+            return UNKNOWN, "timeout-reconcile:invalid-status"
+        state = str(status.get("state") or "")
+        if state in ("pending", "received", "accepted"):
+            # 仍可能在设备侧执行中：升 unknown，禁止自动重放
+            return UNKNOWN, f"timeout-reconcile:{state}"
+        if state == "unknown":
+            return UNKNOWN, "timeout-reconcile:unknown"
+        if state == "executed":
+            return "executed", "timeout-reconcile:executed"
+        if state == "failed":
+            # 保守：终态 failed 仍可能已有部分副作用，不自动重试
+            err = str(status.get("error_code") or "internal")
+            orch = classify_exception(DeviceUnavailable(err, err))
+            if orch == FAILED_TIMEOUT:
+                orch = FAILED_UNAVAILABLE
+            return orch, f"timeout-reconcile:failed:{err}"
+        # 未识别状态：不明
+        return UNKNOWN, f"timeout-reconcile:unrecognized:{state or 'empty'}"
 
     def _preflight(self, device_id: str, *, required: Sequence[str]) -> str | None:
         status = self.registry.status_of(device_id)

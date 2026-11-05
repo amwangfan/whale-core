@@ -68,7 +68,12 @@ class DeviceUnavailable(Exception):
 
 
 class DeviceActionPort(Protocol):
-    """Core→设备动作通道（生产=GatewayActionPort，模拟=SimulatedActionPort）。"""
+    """Core→设备动作通道（生产=GatewayActionPort，模拟=SimulatedActionPort）。
+
+    可选 ``action_status(device_id, idempotency_key)``：超时后用原幂等键对账，
+    不重新下发。编排层以 ``getattr`` 探测；无此方法时，对有副作用能力
+    超时后不自动重试（升 ``unknown``）。
+    """
 
     def send_action(self, device_id: str, *, capability: str,
                     args: Mapping[str, Any], idempotency_key: str,

@@ -121,7 +121,7 @@ registry 与校验器本身纯 stdlib，缺依赖时管理端点回 503）。
 
 | 编排码 | 来源（gateway / receipt.error_code） | 编排行为 |
 | --- | --- | --- |
-| `failed/timeout` | `expired` / `timeout` | 可有界重试（新幂等键，非重放） |
+| `failed/timeout` | `expired` / `timeout` | 仅 `device.agent.observe`（只读）可有界重试；control/shell 须先用原幂等键 `action_status` 对账，`pending`/`unknown` 升 `unknown` 且禁止自动重放；仅 `not_found` 可安全新键重试 |
 | `failed/unavailable` | `unavailable` / `device_revoked` / estop·暂停·权限缺失等 | 停止 |
 | `failed/scope_denied` | `scope_denied` / `capability_unknown` | 停止 |
 | `unknown` | 回执 `unknown` 或畸形 | **不重放**，停止 |
