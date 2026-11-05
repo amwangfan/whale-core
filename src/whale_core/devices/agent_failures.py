@@ -26,6 +26,9 @@ ORCH_FAILURE_CODES = frozenset({
     FAILED_TIMEOUT, FAILED_UNAVAILABLE, FAILED_SCOPE_DENIED, UNKNOWN,
 })
 
+#: 仅只读能力在 timeout 后允许有界自动重试（可用新幂等键）
+SAFE_TIMEOUT_RETRY_CAPABILITIES = frozenset({"device.agent.observe"})
+
 #: gateway / DeviceUnavailable / receipt.error_code → 编排码
 _UNAVAILABLE_CODES = frozenset({
     "unavailable", "device_revoked", "auth_failed", "permission_missing",
@@ -87,9 +90,15 @@ def classify_exception(exc: BaseException) -> str:
     return UNKNOWN
 
 
-def should_auto_retry(orch_code: str) -> bool:
-    """仅 ``failed/timeout`` 允许编排层有界重试；其余一律不重放。"""
-    return orch_code == FAILED_TIMEOUT
+def should_auto_retry(orch_code: str, *, capability: str = "") -> bool:
+    """仅只读 ``device.agent.observe`` 的 ``failed/timeout`` 允许有界自动重试。
+
+    control / shell 等有副作用能力必须先 reconcile，禁止盲目用新幂等键重放；
+    ``unknown`` 永不自动重试。
+    """
+    if orch_code != FAILED_TIMEOUT:
+        return False
+    return (capability or "") in SAFE_TIMEOUT_RETRY_CAPABILITIES
 
 
 def should_abort_loop(orch_code: str) -> bool:

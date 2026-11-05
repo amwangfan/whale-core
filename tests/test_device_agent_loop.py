@@ -96,8 +96,13 @@ def test_classify_receipt_failed_variants():
 
 def test_unknown_never_auto_retries_and_aborts():
     assert not should_auto_retry(UNKNOWN)
+    assert not should_auto_retry(UNKNOWN, capability=CAP_OBSERVE)
     assert should_abort_loop(UNKNOWN)
-    assert should_auto_retry(FAILED_TIMEOUT)
+    # 仅只读 observe 的 timeout 可自动重试；control/shell/缺省一律否
+    assert should_auto_retry(FAILED_TIMEOUT, capability=CAP_OBSERVE)
+    assert not should_auto_retry(FAILED_TIMEOUT, capability=CAP_CONTROL)
+    assert not should_auto_retry(FAILED_TIMEOUT, capability=CAP_SHELL)
+    assert not should_auto_retry(FAILED_TIMEOUT)
     assert should_abort_loop(FAILED_SCOPE_DENIED)
     assert should_abort_loop(FAILED_UNAVAILABLE)
     assert classify_exception(DeviceUnavailable("expired", "t")) == FAILED_TIMEOUT
@@ -272,6 +277,159 @@ def test_timeout_may_retry_then_succeed():
     assert any(s.outcome == FAILED_TIMEOUT for s in result.steps)
     assert any(s.capability == CAP_CONTROL and s.outcome == "executed"
                for s in result.steps)
+
+
+
+def test_control_timeout_pending_no_redispatch():
+    """control 超时且 status=pending：升 unknown，send_action 只调用 1 次。"""
+    store, registry, device_id = _active()
+    calls = {"n": 0}
+
+    def control_once(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise DeviceUnavailable("expired", "wait timeout")
+        raise AssertionError("control 超时 pending 时禁止用新幂等键再次下发")
+
+    port = SimulatedActionPort(
+        registry, online={device_id: True},
+        receipts={
+            CAP_OBSERVE: _observe_receipt(),
+            CAP_CONTROL: control_once,
+        },
+    )
+    loop = DeviceAgentLoop(
+        registry, port,
+        decision=ScriptedDecisionPort([
+            AgentDecision(kind="observe", args={}, reason="look"),
+            AgentDecision(kind="control", args={"action": "tap", "x": 1, "y": 2},
+                          reason="buy"),
+            AgentDecision(kind="stop", done=True, reason="should-not"),
+        ]),
+        store=store, max_steps=6, timeout_retries=2,
+    )
+    result = loop.run(device_id, goal="x")
+    assert result.status == "failed"
+    assert result.reason == UNKNOWN
+    assert calls["n"] == 1
+    control_steps = [s for s in result.steps if s.capability == CAP_CONTROL]
+    assert len(control_steps) == 1
+    assert control_steps[0].outcome == UNKNOWN
+    assert "pending" in control_steps[0].detail or "reconcile" in control_steps[0].detail
+
+
+def test_shell_timeout_unknown_no_redispatch():
+    """shell 超时且 status 合成 unknown：失败且不再下发。"""
+    store, registry, device_id = _active()
+    clock = {"t": 1_000_000}
+
+    def now():
+        return clock["t"]
+
+    calls = {"n": 0}
+
+    def shell_once(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise DeviceUnavailable("expired", "wait timeout")
+        raise AssertionError("shell 超时 unknown 时禁止再次下发")
+
+    port = SimulatedActionPort(
+        registry, online={device_id: True},
+        receipts={
+            CAP_OBSERVE: _observe_receipt(),
+            CAP_SHELL: shell_once,
+        },
+        now_fn=now,
+    )
+    loop = DeviceAgentLoop(
+        registry, port,
+        decision=ScriptedDecisionPort([
+            AgentDecision(kind="observe", args={}, reason="look"),
+            AgentDecision(kind="shell", args={"cmd": "id"}, reason="probe"),
+            AgentDecision(kind="stop", done=True, reason="should-not"),
+        ]),
+        store=store, max_steps=6, timeout_retries=2, timeout_s=1.0,
+    )
+    # 下发时 expires_at = 1_000_000 + 1000；对账前把时钟推过期 → 合成 unknown
+    def _run():
+        # 在第一次 shell 超时后、reconcile 前推进时钟：
+        # DeviceAgentLoop 同步调用，故在 send 抛出前无法插入钩子；
+        # 改为：超时脚本抛出前把时钟推过 expires（保留 pending 预约，status 合成 unknown）。
+        return loop.run(device_id, goal="x")
+
+    # 包装：第一次 shell 调用时先 reserve（port 内部），我们让 expires 立即过期
+    orig_send = port.send_action
+
+    def send_and_expire(device_id, **kwargs):
+        # 先把 now 设在起点；send 内部 reserve 后 expires_at=now+1000
+        out = None
+        err = None
+        try:
+            out = orig_send(device_id, **kwargs)
+        except Exception as exc:  # noqa: BLE001
+            err = exc
+        if kwargs.get("capability") == CAP_SHELL:
+            clock["t"] = clock["t"] + 10_000  # 过期 → action_status 合成 unknown
+        if err is not None:
+            raise err
+        return out
+
+    port.send_action = send_and_expire  # type: ignore[method-assign]
+    result = _run()
+    assert result.status == "failed"
+    assert result.reason == UNKNOWN
+    assert calls["n"] == 1
+    shell_steps = [s for s in result.steps if s.capability == CAP_SHELL]
+    assert len(shell_steps) == 1
+    assert shell_steps[0].outcome == UNKNOWN
+
+
+def test_control_timeout_not_found_may_retry():
+    """control 超时且 status=not_found：证明未落地，允许有界新键重试。"""
+    store, registry, device_id = _active()
+    calls = {"n": 0}
+
+    def control_flaky(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise DeviceUnavailable("expired", "wait timeout")
+        return _control_receipt(action_id=f"ctl-{calls['n']}")
+
+    port = SimulatedActionPort(
+        registry, online={device_id: True},
+        receipts={
+            CAP_OBSERVE: _observe_receipt(),
+            CAP_CONTROL: control_flaky,
+        },
+    )
+    # 第一次超时后清掉幂等记录 → action_status 报 not_found
+    orig_send = port.send_action
+
+    def send_clear_on_timeout(device_id, **kwargs):
+        try:
+            return orig_send(device_id, **kwargs)
+        except DeviceUnavailable as exc:
+            if exc.code == "expired":
+                port._idem_records.pop((device_id, kwargs["idempotency_key"]), None)
+            raise
+
+    port.send_action = send_clear_on_timeout  # type: ignore[method-assign]
+    loop = DeviceAgentLoop(
+        registry, port,
+        decision=ScriptedDecisionPort([
+            AgentDecision(kind="observe", args={}, reason="look"),
+            AgentDecision(kind="control", args={"action": "tap"}, reason="go"),
+            AgentDecision(kind="stop", done=True, reason="ok"),
+        ]),
+        store=store, max_steps=6, timeout_retries=1,
+    )
+    result = loop.run(device_id, goal="x")
+    assert result.status == "succeeded"
+    assert calls["n"] == 2
+    assert any(s.capability == CAP_CONTROL and s.outcome == "executed"
+               for s in result.steps)
+
 
 
 def test_set_scopes_rejects_unknown_and_inactive():
