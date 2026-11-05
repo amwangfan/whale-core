@@ -75,6 +75,7 @@ class ExpressionPolicy:
     confirm_data_safety: bool = False      # 危及数据的操作前先确认
     confession_unclaimed: bool = False     # 表白类话语无归属证据
     is_group: bool = False
+    peer_median: int = 0                   # 群友近期发言中位字数；0=未知
     reasons: Tuple[str, ...] = field(default_factory=tuple)
 
     def render(self) -> str:
@@ -99,7 +100,17 @@ class ExpressionPolicy:
             lines.append(
                 "群聊里收到「我爱你」类话语但没有明确发给你的证据（@或引用）时，"
                 "不要认领成对自己的表白，不制造亲昵。")
-        if self.length == "short" and not self.anxious and not self.one_step_at_a_time:
+        # 群聊：用近期中位做软长度参考（贴合常态，不为了短而短）；
+        # 私聊仍用原来的「保持简短」弱提示。
+        if self.is_group and not self.anxious and not self.one_step_at_a_time:
+            if self.peer_median > 0:
+                lines.append(
+                    f"这群近期群友发言中位大约 {self.peer_median} 字："
+                    "接话贴近这个长度与语气，别写长段落或列表，也别故意碎成一两字。")
+            elif self.length == "short":
+                lines.append(
+                    "群里接话贴近大家平时的长度：一两句即可，别写长文，也别刻意碎句。")
+        elif self.length == "short" and not self.anxious and not self.one_step_at_a_time:
             lines.append("回复保持简短。")
         if not lines:
             return ""
@@ -111,8 +122,13 @@ def derive_policy(
     *,
     is_group: bool = False,
     self_facts: Tuple[str, ...] = (),
+    peer_median: int = 0,
 ) -> ExpressionPolicy:
-    """从当前消息信号 + 已授权自述推导表达策略（纯函数，便于单测）。"""
+    """从当前消息信号 + 已授权自述推导表达策略（纯函数，便于单测）。
+
+    ``peer_median``：群时间线统计的近期群友发言中位字数（0=未知/私聊不用）。
+    只影响表达层长度提示，不做硬截断（硬裁在 group_length.soft_trim_*）。
+    """
     text = text or ""
     reasons: list[str] = []
 
@@ -151,16 +167,21 @@ def derive_policy(
     if one_step:
         reasons.append("one_step")
 
-    # 长度：焦虑 / 新手 / 群聊从简。
+    # 长度：焦虑 / 新手 / 群聊从简（群聊另用 peer_median 软参考，不硬砍）。
     if anxious or skill == "novice" or (is_group and depth != "deep"):
         length = "short"
     else:
         length = "normal"
+
+    median = max(0, int(peer_median or 0)) if is_group else 0
+    if median:
+        reasons.append(f"peer_median:{median}")
 
     return ExpressionPolicy(
         depth=depth, length=length, skill=skill, anxious=anxious,
         one_step_at_a_time=one_step,
         confirm_data_safety=confirm_data_safety,
         confession_unclaimed=confession, is_group=is_group,
+        peer_median=median,
         reasons=tuple(reasons),
     )

@@ -167,8 +167,20 @@ class WhaleCompanion:
                     context, conversation_id=conversation_id)
                 is_group = (getattr(context.conversation, "kind", None)
                             is ConversationKind.QQ_GROUP)
+                # 群聊长度软约束：用时间线 peer 中位字数做表达参考（非硬上限）
+                peer_median = 0
+                if is_group and self.timeline is not None and conversation_id:
+                    try:
+                        from whale_core.life.group_length import (
+                            derive_group_length_norm)
+                        peer_median = derive_group_length_norm(
+                            self.timeline.recent(
+                                str(conversation_id), limit=40)).median
+                    except Exception:
+                        peer_median = 0
                 policy = derive_policy(
-                    original, is_group=is_group, self_facts=rel.self_facts)
+                    original, is_group=is_group, self_facts=rel.self_facts,
+                    peer_median=peer_median)
                 # issue #54：InnerState 进入对话上下文——风格/兴趣是全局的；
                 # 未完话题按会话作用域隔离（私聊话题不串群、群话题不串私聊）。
                 g_state = InnerStateStore(self.store).load()

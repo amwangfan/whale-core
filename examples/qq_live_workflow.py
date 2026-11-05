@@ -500,18 +500,29 @@ def cmd_run(args) -> int:
         return sent
 
     def _plan_segments(text, *, is_group, rhythm, anxious=False,
-                       familiarity="stranger"):
+                       familiarity="stranger", conversation_id=""):
         """issue #23：模型规划优先（◆ 分隔/[[沉默]]/[[稍后补充]]），
         无标记回落 split_reply。返回 (bubbles, plan)。
         issue #41：语气/长度目标由确定性信号推导（derive_plan_guidance），
-        随计划结构化返回（供 trace/宿主决策；模型不能自报目标）。"""
+        随计划结构化返回（供 trace/宿主决策；模型不能自报目标）。
+        群聊另按时间线 peer 中位推导 soft_ceiling（句界软裁，非硬砍 40 字）。"""
         from whale_core.life.response_planner import (
             derive_plan_guidance, plan_reply)
         guidance = derive_plan_guidance(
             familiarity=familiarity, anxious=anxious, is_group=is_group)
+        soft_ceiling = 0
+        if is_group and conversation_id:
+            try:
+                from whale_core.life.group_length import derive_group_length_norm
+                soft_ceiling = derive_group_length_norm(
+                    timeline.recent(str(conversation_id), limit=40)
+                ).soft_ceiling
+            except Exception:
+                soft_ceiling = 0
         plan = plan_reply(text, is_group=is_group,
                           max_segments=rhythm.effective_max_segments(
                               is_group=is_group),
+                          soft_ceiling=soft_ceiling,
                           **guidance)
         if plan.follow_up:
             # 「稍后补充」是意图声明：只有存在服务端可信的未完成任务/事件
@@ -643,7 +654,7 @@ def cmd_run(args) -> int:
             or current_epoch(store, event.conversation)
         segments, _plan = _plan_segments(
             reply, is_group=event.conversation.startswith("group:"),
-            rhythm=rhythm)
+            rhythm=rhythm, conversation_id=event.conversation)
         if _plan.silent:
             print("  [规划] 补发内容被规划为沉默，不发送")
             workflow.outbox.close(draft_id, reason="silent_planned")
@@ -1451,7 +1462,7 @@ def cmd_run(args) -> int:
             segments, _plan = _plan_segments(
                 result["reply"],
                 is_group=event.conversation.startswith("group:"),
-                rhythm=rhythm)
+                rhythm=rhythm, conversation_id=event.conversation)
             if _plan.silent:
                 print("  [规划] 本轮规划为沉默，不发送")
                 # 2026-11-01 审批积压治理：沉默轮的草稿终态关闭，不占审批列表
@@ -1656,8 +1667,9 @@ def cmd_run(args) -> int:
         # G4：分段上限取会话节奏卡配置（quiet = 单气泡）。
         rhythm = RhythmStore(store).get_with_channel_default(
             rhythm_key_for("qq", incoming.conversation) or "", "qq")
-        segments, _plan = _plan_segments(reply, is_group=is_group,
-                                         rhythm=rhythm)
+        segments, _plan = _plan_segments(
+            reply, is_group=is_group, rhythm=rhythm,
+            conversation_id=incoming.conversation)
         if _plan.silent:
             print("  [规划] 本轮规划为沉默，不发送")
             if result.get("draft_id"):

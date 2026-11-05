@@ -32,6 +32,7 @@ PLANNING_HINT = (
     "需要晚点再补一句时，在结尾写 [[稍后补充:原因]]。"
     "不要每轮都提问、撒娇、称呼对方名字或总结对方的话——有需要才做，"
     "没有就自然结束（issue #41 反模板纪律）。"
+    "群聊接话贴近群友平时的长度与语气：别写长段落/列表，也别故意碎句。"
 )
 
 SILENCE_MARK = "[[沉默]]"
@@ -145,13 +146,25 @@ def derive_plan_guidance(*, familiarity: str = "stranger", anxious: bool = False
 
 
 def plan_reply(text: str, *, is_group: bool, max_segments: int,
-               tone_target: str = "", length_target: str = "") -> ReplyPlan:
-    """把模型原始输出解析为发言计划（确定性；无标记走既有规则拆分）。"""
+               tone_target: str = "", length_target: str = "",
+               soft_ceiling: int = 0) -> ReplyPlan:
+    """把模型原始输出解析为发言计划（确定性；无标记走既有规则拆分）。
+
+    ``soft_ceiling``：群聊长度软裁上限（字符；0=不裁）。来自
+    ``group_length.derive_group_length_norm(...).soft_ceiling``——只在远超
+    群友中位时句界裁切，不为了短而短。
+    """
     def _mk(bubbles, *, silent=False, follow_up="", planner, delay_ms=0,
             reaction_tag=""):
         action = "observe" if silent else ("follow_up" if follow_up else "reply")
+        cleaned = tuple(b for b in (_tidy_bubble(t) for t in bubbles) if b)
+        if soft_ceiling > 0 and cleaned and not silent:
+            from whale_core.life.group_length import soft_trim_bubbles
+            cleaned = soft_trim_bubbles(
+                cleaned, soft_ceiling=soft_ceiling,
+                max_segments=max_segments)
         return ReplyPlan(
-            tuple(b for b in (_tidy_bubble(t) for t in bubbles) if b),
+            cleaned,
             silent=silent, follow_up=follow_up, planner=planner,
             action=action, tone_target=tone_target,
             length_target=length_target, delay_ms=delay_ms,
