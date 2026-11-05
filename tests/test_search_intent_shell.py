@@ -198,3 +198,27 @@ def test_fanart_request_reaches_llm_router():
     # 纯闲聊/阅读语境不触发画图路由
     assert not _FUZZY_TOOLISH.search("我在看漫画")
     assert not _FUZZY_TOOLISH.search("今天天气真不错")
+
+
+def test_request_verb_media_phrases_reach_llm_router():
+    """2026-11-05 生产实证3：「给我一个千早爱音抱着奶龙的图」落 chat，
+    模型谎称「这就安排一张」但无任何工具调用。请求动词+媒体名词必须进
+    LLM 兜底——图/视频/语音三条媒体链路同型覆盖。"""
+    from whale_core.core.intent_router import _FUZZY_TOOLISH
+    assert _FUZZY_TOOLISH.search("给我一个千早爱音抱着奶龙的图")
+    assert _FUZZY_TOOLISH.search("发个奶龙的视频看看")
+    assert _FUZZY_TOOLISH.search("给我唱首歌")
+    assert _FUZZY_TOOLISH.search("来一张鲸鱼的壁纸")
+    assert _FUZZY_TOOLISH.search("帮我整一个她们的同人")
+    # 误伤面：围绕图片的元讨论/质问不进工具路由
+    assert not _FUZZY_TOOLISH.search("你发了吗\n你没发啊")
+    assert not _FUZZY_TOOLISH.search("这表情包还是刚从别的群偷来的")
+    assert not _FUZZY_TOOLISH.search("今天天气真不错")
+
+
+def test_honesty_red_line_covers_media_claims():
+    """诚实红线必须明文覆盖媒体产物虚称（画好了/发你了/这就安排）。"""
+    from whale_core.core.prompt_composer import HOST_CONTRACT
+    assert "我搜过了" in HOST_CONTRACT
+    assert "发你了" in HOST_CONTRACT
+    assert "这就安排" in HOST_CONTRACT
