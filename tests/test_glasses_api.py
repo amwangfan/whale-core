@@ -471,3 +471,27 @@ def test_intent_location_wrapper_nested_bug_would_keep_old_city():
 
     nested = orch._intent_context("c", "x")
     assert "东京" in nested and "大阪" in nested
+
+
+def test_resolve_request_location_env_default_chengdu_pidu(tmp_path):
+    """无请求体/无缓存时回落 WHALE_DEFAULT_CITY（成都郫都电子科大）。"""
+    from whale_core.api.glasses import resolve_request_location, LOCATION_STORE_KEY
+
+    class Store:
+        def __init__(self):
+            self.data = {}
+        def get(self, key):
+            return self.data.get(key)
+        def put(self, key, value):
+            self.data[key] = value
+
+    store = Store()
+    env = {"WHALE_DEFAULT_CITY": "成都郫都区电子科技大学"}
+    loc = resolve_request_location(env, store, {})
+    assert "成都郫都" in loc
+    assert "杨浦" not in loc
+    # 请求体仍优先；并写缓存
+    loc2 = resolve_request_location(env, store, {"city": "北京海淀"})
+    assert "北京海淀" in loc2
+    assert store.get(LOCATION_STORE_KEY)["city"] == "北京海淀"
+

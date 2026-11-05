@@ -110,6 +110,19 @@ def test_here_weather_uses_location_when_known():
     assert "大阪" in plan["slots"]["query"]
 
 
+
+
+def test_here_weather_uses_chengdu_pidu_home_location():
+    """「我所在城市天气」应拼入缓存/默认位置（成都郫都），不是口述异地。"""
+    router = SearchIntentRouter(tools=None, enable_llm=False)
+    plan = json.loads(router.plan(
+        "我所在城市天气",
+        context="当前位置：成都郫都区电子科技大学；约 30.7497,103.9315"))
+    q = plan["slots"]["query"]
+    assert "成都" in q or "郫都" in q
+    assert "上海" not in q
+    assert "杨浦" not in q
+
 def test_weather_without_location_still_searches_user_text():
     """无位置时仍走搜索（允许口述城市）；不硬编码上海。"""
     router = SearchIntentRouter(tools=None, enable_llm=False)
