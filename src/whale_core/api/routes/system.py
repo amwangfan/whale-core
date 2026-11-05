@@ -22,7 +22,10 @@ def status(handler) -> None:
         plugin_status = ctx.manager.status()
         plugins["loaded"] = len(plugin_status)
         plugins["enabled"] = sum(1 for p in plugin_status if p.get("enabled"))
-    drafts = sum(1 for k in store.keys() if k.startswith("life:draft:"))
+    # 审批口径计数（与 approvals 列表同一过滤条件，见 initiative.py；
+    # 2026-11-05 实证：全量计数把已终结草稿也算成「等待确认」）
+    from whale_core.life.initiative import pending_draft_count
+    drafts = pending_draft_count(store)
     result = {
         "ok": True,
         "version": ctx.version,

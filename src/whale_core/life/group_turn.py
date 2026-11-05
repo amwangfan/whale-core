@@ -36,7 +36,9 @@ from whale_core.memory.store import MemoryStore
 #: 主动参与的日配额（按活跃度）。quiet 档只允许「直呼其名」的参与，
 #: 配额仍小；lively 最宽松。定向回复（@/引用）在 resolver 层处理，
 #: 不消耗本配额。
-DAILY_QUOTA = {"quiet": 3, "balanced": 6, "lively": 12}
+#: 群插话日配额（按档位）。**0 = 不限**（2026-11-05 owner 决策：不设上限，
+#: 计数仍写账供观测；冷却已同日归零——连续发言限制仍在，不连发）。
+DAILY_QUOTA = {"quiet": 0, "balanced": 0, "lively": 0}
 
 #: 两次主动参与之间的最小间隔（分钟）。
 #: 2026-11-05 owner 决策：关闭插话冷却（连续发言限制与日配额仍作保险丝）。
@@ -348,11 +350,12 @@ class GroupTurnPolicy:
                     self._now() - last_join < timedelta(minutes=cooldown):
                 return self._record(group, JoinDecision("observe", REASON_COOLDOWN))
 
-        # 日配额
+        # 日配额（0=不限，仍计数供观测）
         budget_key = f"life:turnbudget:{self._now().date().isoformat()}:{group}"
         used = self.store.get(budget_key)
         used = int(used) if isinstance(used, (int, float)) else 0
-        if used >= DAILY_QUOTA[activity]:
+        quota = DAILY_QUOTA[activity]
+        if quota > 0 and used >= quota:
             return self._record(group, JoinDecision("observe", REASON_BUDGET))
 
         # 通过：记账 + 冷却 + 诊断

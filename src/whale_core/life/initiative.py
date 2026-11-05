@@ -192,6 +192,43 @@ class OutboundPort(Protocol):
         ...
 
 
+# 草稿键前缀（审批口径共享：api status 计数与 approvals 列表必须一致——
+# 2026-11-05 生产实证：概览卡「等待你确认」曾按全量草稿计数显示 130，
+# 实际按审批口径只有 6 条真待确认）。
+DRAFT_KEY_PREFIX = "life:draft:"
+LEDGER_KEY_PREFIX = "life:ledger:"
+DECISION_KEY_PREFIX = "life:decision:"
+
+#: 已终结、不再需要主人决定的 ledger 状态
+DRAFT_TERMINAL_STATUSES = ("accepted", "unknown", "closed", "superseded")
+
+
+def draft_is_pending(draft: object, ledger: object) -> bool:
+    """审批口径：这条草稿是否真正等待主人决定。
+
+    已派发过（attempts>0）或已到终态的不算——它们不需要任何确认。
+    """
+    if not isinstance(draft, dict):
+        return False
+    if not isinstance(ledger, dict):
+        ledger = {}
+    if ledger.get("attempts", 0) > 0:
+        return False
+    return ledger.get("status", "draft") not in DRAFT_TERMINAL_STATUSES
+
+
+def pending_draft_count(store) -> int:
+    """按审批口径统计待确认草稿数（概览卡/状态端点用）。"""
+    n = 0
+    for key in store.keys():
+        if not str(key).startswith(DRAFT_KEY_PREFIX):
+            continue
+        draft_id = str(key).split(":", 2)[2]
+        if draft_is_pending(store.get(key), store.get(LEDGER_KEY_PREFIX + draft_id)):
+            n += 1
+    return n
+
+
 class ProactiveOutbox:
     def __init__(self, store: MemoryStore, *, topic_dedup_hours: float = 24.0,
                  now_fn=None):

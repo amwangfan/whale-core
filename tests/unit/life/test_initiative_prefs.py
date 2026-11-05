@@ -156,7 +156,10 @@ def test_daily_limit_zero_means_unlimited():
     prefs = ProactivePrefs(
         enabled=True, auto_send=True,
         allowed_channels=frozenset({"direct_message"}),
-        daily_limit=0, passive_daily_limit=0)
+        daily_limit=0, passive_daily_limit=0,
+        # 本测试断言配额语义，与静默时段无关：显式关闭（start==end 即关），
+        # 否则 22:00–07:00 跑测试套件必挂（时段性 flaky）
+        quiet_start=time(0), quiet_end=time(0))
     outbox.propose(ProactiveDraft("u1", "hi", "r", ("e",), channel="direct_message"))
     day = datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat()
     store.put(f"life:quota:{day}", 9999)

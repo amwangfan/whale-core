@@ -2,12 +2,14 @@
 
 路由器只建议 capabilities，不能自行授权。
 
-策略（2026-11-05 owner 确认）：
-- 规则命中（search / local-life / weather→weather.now 或 web.search / shell.safe）→ 直接 task，零意图 LLM；
-- 规则未命中且像普通闲聊（含「现在几点」等）→ kind=chat，**跳过**意图 LLM
-  （闲聊回复仍走宿主 companion / DeepSeek 官模，不在此短路本地时钟）；
-- 仅当宿主 enable_llm=True **且**文本像模糊写操作/媒体生成等可能需工具时，
-  才调用意图 LLM（通常为 AgentScope 上的 kimi）做 task/clarify；
+策略（2026-11-05 owner 确认，同日修订）：
+- 规则命中（search / local-life / weather→weather.now 或 web.search / shell.safe）
+  → 直接 task，零意图 LLM；
+- 规则未命中 → **一律交意图 LLM（kimi）判 chat/task/clarify**——「要不要
+  生成媒体/用工具」不用硬性词表当闸门（三起生产实证全是词表没覆盖的口语：
+  「找一下」「同人」「给我一个…图」，词表永远追不齐）；
+- 意图 LLM 未启用或返回非法计划 → 回落 kind=chat（闲聊回复仍走宿主
+  companion / DeepSeek 官模，不在此短路本地时钟）；
 - 授权仍走 context_resolver → authz → PluginGateway → ShellPolicy，与意图模型无关。
 """
 from __future__ import annotations
@@ -22,8 +24,9 @@ if TYPE_CHECKING:
 from whale_core.core.intent_plan import plan_from_model_text, IntentPlanError
 
 _SEARCH = re.compile(
-    r"^\s*(?:请|麻烦|能不能|可以|帮我|帮忙|给我|你能|能否|请你|请帮我|帮我查一下|麻烦你)?\s*"
-    r"(?:搜索|搜一下|搜搜|查一下|查查|查找|检索|上网搜|上网查|"
+    r"^\s*(?:请|麻烦|能不能|可以|帮我|帮忙|给我|你能|能否|请你|请帮我|帮我查一下|麻烦你|你给我|你帮我)?\s*"
+    r"(?:搜索|搜一下|搜搜|搜下|查一下|查查|查下|查找|检索|上网搜|上网查|"
+    r"找一下|找一找|找找|找下|翻一下|翻翻|翻一翻|"
     r"百度一下|谷歌一下|google\s*(?:一下|下)?|bing\s*(?:一下|下)?|"
     r"search|look\s+up)\s*"
     r"(?:一下|一下子|关于|有关|下|：|:|，|,|\s)*",
@@ -125,19 +128,10 @@ _SHELL_EXPLICIT = re.compile(
     re.IGNORECASE,
 )
 
-# 模糊写操作 / 媒体生成等：规则未覆盖、但可能真要动工具时才打意图 LLM。
-# 故意不含「现在几点」「聊聊天」等纯陪伴问句。
-_FUZZY_TOOLISH = re.compile(
-    r"(画一?[张幅个]|画个|生成一?[张幅个]|做一?[张幅个图]|做个图)"
-    r"|(画|生成).{0,16}(图|图片|插画|海报|视频|短片|动画)"
-    r"|(文生图|文生视频|image\s*gen|text-to-image|text-to-video)"
-    r"|(朗读|念一下|转成语音|语音合成|tts\b|听写|转写|asr\b)"
-    r"|(删(除|掉)?|移除|覆盖|写入|保存到|下载到|改写|重命名|移动到).{0,24}"
-    r"|(发(一?[封条])?邮件|发短信|推送到|下单|支付|转账|汇款)"
-    r"|(安装|卸载|sudo\b|chmod\b|chown\b|rm\s+-|kubectl\b|docker\s+(rm|kill|exec))"
-    r"|(帮我|请|麻烦).{0,16}(改(一下|掉|成)|操作一下|处理一下|写进|写到)",
-    re.IGNORECASE,
-)
+# 2026-11-05 owner 决策：「要不要生成媒体/用工具」不再用硬性词表当闸门
+# （三起生产实证——「找一下」「同人」「给我一个…图」全是词表没覆盖的口语，
+# 词表永远追不齐）。非显式指令一律交给意图 LLM（kimi）判 chat/task/clarify；
+# 显式指令（搜索/天气/本地生活/shell）仍规则直达，零 LLM。
 
 
 class ReplyModel(Protocol):
@@ -218,17 +212,19 @@ class SearchIntentRouter:
                 "capabilities": ["shell.safe"],
                 "reason": "用户明确要求终端/沙箱执行",
             }, ensure_ascii=False)
-        # 闲聊 / 时间问答等：默认 chat，不打意图 LLM（省 kimi 一轮）。
-        if not (self.enable_llm and _FUZZY_TOOLISH.search(text or "")):
+        # 2026-11-05 owner 决策：媒体/工具意图由意图 LLM（kimi）全权判断，
+        # 不用硬性词表当闸门。LLM 未启用 → 诚实回落 chat。
+        if not self.enable_llm:
             return _chat_plan(text)
         specs = self.tools.specs() if self.tools is not None else []
         capabilities = ({s.capability for s in specs} if self.tools is not None
                         else {"web.search"})
         hints = {
-            "web.search": "query: 搜索词, limit: 结果数量",
+            "web.search": "query: 搜索词, limit: 结果数量。追更（最新话/第几集/什么时候更新）、"
+                          "最新动态、事实疑问、自己不知道的知识都走它——不要凭记忆回答",
             "weather.now": "place: 口述城市；location_hint/coords: 无口述时用当前位置；query: 回落搜索词",
             "web.fetch": "url: 要读取的公开HTTP(S)链接",
-            "media.image.generate": "prompt: 图片描述, size: 可选图片尺寸, model: 可选（用户指定才填）",
+            "media.image.generate": "prompt: 图片描述, size/model: 可选（model 默认 qwen-image-3.0）, reference_query: 仅当主体是已知角色/人物/IP 形象时填参考图搜索词（系统会搜最多3张参考图带图生成）；若 web 搜索已拿到图片链接可用 reference_urls 直接传入；泛化主体不要填",
             "media.video.generate": "prompt: 视频描述, model: 可选（用户指定才填）",
             "tts.synthesize": "text: 要朗读的文字, model/voice: 可选（用户指定才填）",
             "asr.transcribe": "audio: 已提供的音频数据或资源引用；缺音频时澄清",

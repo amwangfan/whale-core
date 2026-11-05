@@ -24,8 +24,9 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
+from typing import Sequence
 
-from whale_core.plugins.media_image import ImageTaskResult
+from whale_core.plugins.media_image import ImageTaskResult, ReferenceImage
 from whale_core.plugins.media_video import (
     STATUS_FAILED,
     STATUS_RUNNING,
@@ -245,19 +246,36 @@ class MiniMaxImageProvider(_MiniMaxBase):
             raise ValueError(f"unknown minimax image model {model!r}")
         self.model = model
 
+    #: 收 ``references=[ReferenceImage, ...]``（image_gen 网关多参考图入参）；
+    #: 官方 subject_reference 只认一张 character 参考 → 取首张。
+    supports_references = True
+
     def generate(self, prompt: str, *, size: str = "1328*1328",
-                 n: int = 1) -> ImageTaskResult:
+                 n: int = 1, references: Sequence[ReferenceImage] = ()) -> ImageTaskResult:
         prompt = (prompt or "").strip()[:1500]
         if not prompt:
             raise ValueError("prompt must be non-empty")
-        data = self._request("/v1/image_generation", {
+        body = {
             "model": self.model,
             "prompt": prompt,
             "aspect_ratio": _aspect_for(size),
             "response_format": "url",
             "n": max(1, min(int(n or 1), 4)),
             "prompt_optimizer": True,
-        })
+        }
+        # 参考图（角色/人物一致性）：官方 subject_reference，character 型，
+        # image_file 收公网 URL 或 base64 data URL——本机字节走 data URL。
+        # 注意：API 只接受单张 character 参考，多图取首张（网关层已知悉）。
+        refs = list(references or ())
+        if refs:
+            import base64 as _b64
+            ref = refs[0]
+            mime = ref.mime if ref.mime.startswith("image/") else "image/jpeg"
+            body["subject_reference"] = [{
+                "type": "character",
+                "image_file": f"data:{mime};base64,{_b64.b64encode(ref.data).decode()}",
+            }]
+        data = self._request("/v1/image_generation", body)
         images: list[str] = []
         d = data.get("data")
         if isinstance(d, dict) and isinstance(d.get("image_urls"), list):

@@ -74,18 +74,30 @@ def test_no_cooldown_but_daily_budget():
     # 无冷却：紧跟着第二条仍放行（冷却已是 0）
     d = p.maybe_join(conversation=GROUP, text=named, activity="balanced")
     assert (d.action, d.reason_code) == ("join", "join")
-    # 配额耗尽仍拦（保险丝保留）
-    joins = 2
-    for i in range(10):
-        p2 = GroupTurnPolicy(store, bot_names=("鲸鱼",), now_fn=lambda: T0,
-                             quiet_now=lambda: False)
-        d = p2.maybe_join(conversation=GROUP, text=named, activity="balanced")
-        if d.action == "join":
-            joins += 1
+    # 2026-11-05 owner 决策：日配额 0=不限——连发 20 条也不拦（计数仍写账）
+    for i in range(20):
+        d = GroupTurnPolicy(store, bot_names=("鲸鱼",), now_fn=lambda: T0,
+                            quiet_now=lambda: False).maybe_join(
+            conversation=GROUP, text=named, activity="balanced")
+        assert d.action == "join"
+    # 配额语义未删：配额定 >0 时仍拦（保险丝语义保留，仅默认放开）
+    from whale_core.life import group_turn as _gt
+    orig = _gt.DAILY_QUOTA["balanced"]
+    _gt.DAILY_QUOTA["balanced"] = 3
+    try:
+        store2 = InMemoryStore()
+        for i in range(5):
+            d = GroupTurnPolicy(store2, bot_names=("鲸鱼",), now_fn=lambda: T0,
+                                quiet_now=lambda: False).maybe_join(
+                conversation=GROUP, text=named, activity="balanced")
+            if d.action != "join":
+                assert d.reason_code == "budget_exceeded"
+                assert i == 3
+                break
         else:
-            assert d.reason_code == "budget_exceeded"
-            break
-    assert joins == 6  # balanced 配额 6
+            assert False, "配额 3 应在第 4 条拦住"
+    finally:
+        _gt.DAILY_QUOTA["balanced"] = orig
 
 
 def test_consecutive_limit_no_double_join():

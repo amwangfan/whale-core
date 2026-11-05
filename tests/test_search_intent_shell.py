@@ -1,4 +1,8 @@
-"""Explicit shell routing + chat skips intent LLM; fuzzy toolish may call it."""
+"""Explicit fast paths skip intent LLM; everything else is judged by it.
+
+2026-11-05 owner 决策：媒体/工具意图不用硬性词表当闸门，非显式指令
+一律交意图 LLM（kimi）判 chat/task/clarify。
+"""
 from __future__ import annotations
 import json
 from whale_core.core.intent_router import SearchIntentRouter
@@ -15,6 +19,20 @@ class _Tools:
 class _Boom:
     def reply(self, text: str, *, persona: str = "", memories=(), history=()) -> str:
         raise AssertionError("intent LLM must not be called for this utterance")
+
+
+class _EchoChat:
+    """记录调用并返回 chat 计划（模拟意图 LLM 判闲聊）。"""
+
+    def __init__(self):
+        self.calls = 0
+        self.prompts = []
+
+    def reply(self, text: str, *, persona: str = "", memories=(), history=()) -> str:
+        self.calls += 1
+        self.prompts.append(text)
+        return json.dumps({"goal": "对话", "kind": "chat", "slots": {},
+                           "capabilities": []}, ensure_ascii=False)
 
 
 class _Echo:
@@ -46,11 +64,28 @@ def test_no_shell_capability_stays_chat():
     assert plan["kind"] == "chat"
 
 
-def test_chat_and_time_skip_intent_llm_even_when_enabled():
-    router = SearchIntentRouter(model=_Boom(), enable_llm=True, tools=_Tools())
+def test_plain_chat_also_consults_intent_llm():
+    """2026-11-05 owner 决策：媒体/工具意图由 kimi 全权判断，不用硬性词表
+    当闸门——纯闲聊也过一遍意图 LLM（LLM 自会判 chat）。"""
+    chat_echo = _EchoChat()
+    router = SearchIntentRouter(model=chat_echo, enable_llm=True, tools=_Tools())
     for text in ("你好啊", "现在几点", "今天心情怎么样", "聊聊天"):
         plan = json.loads(router.plan(text))
         assert plan["kind"] == "chat", text
+    assert chat_echo.calls == 4  # 每句都咨询了意图 LLM
+
+
+def test_llm_disabled_or_bad_plan_falls_back_chat():
+    """LLM 未启用 → 不打模型直接 chat；LLM 返回非法计划 → 回落 chat。"""
+    router = SearchIntentRouter(model=_Boom(), enable_llm=False, tools=_Tools())
+    assert json.loads(router.plan("你好啊"))["kind"] == "chat"
+
+    class _Garbage:
+        def reply(self, text, *, persona="", memories=(), history=()):
+            return "not a json plan"
+
+    router = SearchIntentRouter(model=_Garbage(), enable_llm=True, tools=_Tools())
+    assert json.loads(router.plan("你好啊"))["kind"] == "chat"
 
 
 def test_explicit_search_skips_intent_llm():
@@ -155,3 +190,55 @@ def test_weather_prefers_qweather_when_mounted():
     assert plan2["capabilities"] == ["weather.now"]
     assert plan2["slots"].get("place") == "北京"
     assert "上海" not in json.dumps(plan2["slots"], ensure_ascii=False)
+
+
+def test_find_verbs_route_to_search():
+    """2026-11-05 生产实证：「找一下/翻翻」曾落 chat，模型谎称搜过。"""
+    from whale_core.core.intent_router import SearchIntentRouter
+    from whale_core.core.runtime import ToolRegistry
+
+    class _B:
+        def plan(self, text, *, context=""):
+            return '{"kind":"chat","goal":"chat","capabilities":[]}'
+
+        def reply(self, text, **kw):
+            return "x"
+
+    r = SearchIntentRouter(model=_B(), enable_llm=False, tools=ToolRegistry())
+    for t in ("帮我找一下来自深渊最新话", "你给我找一下来自深渊最新话",
+              "翻一下来自深渊更新到第几话了", "查下明天上海天气"):
+        import json
+        plan = json.loads(r.plan(t))
+        assert plan["kind"] == "task", t
+        assert "web.search" in plan["capabilities"], t
+
+
+def test_media_and_toolish_phrases_all_reach_intent_llm():
+    """2026-11-05 owner 决策：词表闸门废除——追更/同人/请求动词+媒体名词
+    这些曾三度漏网的口语句式，现在一律直达意图 LLM（kimi）判断。"""
+    echo = _EchoChat()
+    router = SearchIntentRouter(model=echo, enable_llm=True, tools=_Tools())
+    phrases = (
+        "来自深渊最新话什么时候更新",       # 生产实证1：追更
+        "同人也行，我要看娜娜奇和米蒂的同人",  # 生产实证2：同人
+        "给我一个千早爱音抱着奶龙的图",      # 生产实证3：请求动词+媒体名词
+        "发个奶龙的视频看看",
+        "给我唱首歌",
+        "来一张鲸鱼的壁纸",
+        "你发了吗\n你没发啊",               # 元讨论也过 LLM（由它判 chat）
+        "这表情包还是刚从别的群偷来的",
+    )
+    for text in phrases:
+        plan = json.loads(router.plan(text))
+        assert plan["kind"] in ("chat", "task", "clarify"), text
+    assert echo.calls == len(phrases)  # 全部咨询了意图 LLM
+    # 用户原话确实进了 LLM prompt（判断依据可见）
+    assert "给我一个千早爱音抱着奶龙的图" in echo.prompts[2]
+
+
+def test_honesty_red_line_covers_media_claims():
+    """诚实红线必须明文覆盖媒体产物虚称（画好了/发你了/这就安排）。"""
+    from whale_core.core.prompt_composer import HOST_CONTRACT
+    assert "我搜过了" in HOST_CONTRACT
+    assert "发你了" in HOST_CONTRACT
+    assert "这就安排" in HOST_CONTRACT

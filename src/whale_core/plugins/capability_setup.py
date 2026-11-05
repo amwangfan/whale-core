@@ -14,7 +14,7 @@ import json
 from whale_core.core.runtime import ToolSpec
 from whale_core.plugins.artifacts import ArtifactStore
 from whale_core.plugins.media_image import OpenAIImagesProvider, register_image_gen
-from whale_core.plugins.media_video import DashScopeWanVideoProvider, VideoTaskManager, register_video_gen
+from whale_core.plugins.media_video import DashScopeWanVideoProvider, VideoTaskManager, register_video_gen  # noqa: F401  (VideoTaskManager 经 video_gen 网关持有)
 from whale_core.plugins.speech import OpenAICompatibleASR, OpenAICompatibleTTS, register_speech
 from whale_core.plugins.realtime_voice import OpenAICompatibleRealtime, register_realtime_voice
 
@@ -74,6 +74,18 @@ class OptionalCapabilities:
     notes: list[str] = field(default_factory=list)
 
 
+def _tavily_image_search(env: Mapping[str, str]):
+    """Tavily 图片搜索通道（参考图采集）；未配置/不可用 → None。"""
+    import os
+    try:
+        from search_web.web_search import TavilyProvider
+    except Exception:
+        return None
+    provider = TavilyProvider(env=os.environ if env is None else env)
+    search_images = getattr(provider, "search_images", None)
+    return search_images if callable(search_images) else None
+
+
 def configure_optional_capabilities(registry, tools, store, *, env: Mapping[str,str],
                                     artifact_dir: str | Path | None = None) -> OptionalCapabilities:
     out = OptionalCapabilities(artifacts=ArtifactStore(artifact_dir, store) if artifact_dir else None)
@@ -115,14 +127,16 @@ def configure_optional_capabilities(registry, tools, store, *, env: Mapping[str,
             return p
         return p + "，" + media_style
 
+
     image_base, image_key, image_kind = _resolve_capability_env(env, "IMAGE")
     if image_base or minimax is not None:
         mm_image_name = "minimax-" + (env.get("WHALE_MINIMAX_IMAGE_MODEL") or "image-01").strip()
-        # 默认模型：显式 WHALE_IMAGE_MODEL 优先；其次 MiniMax（owner 决策：
-        # 画图模型切成 minimax）；再回退供应商默认。
+        # 默认模型：显式 WHALE_IMAGE_MODEL 优先；其次 qwen（2026-11-05 owner
+        # 决策：带参考图实测还原度完胜 MiniMax，默认切 qwen-image-3.0，
+        # MiniMax 保留为可选）；dashscope 基座缺席才退到 MiniMax 默认。
         vendor_default = "qwen-image-3.0" if image_kind == "dashscope" else "dall-e-3"
         image_default = (env.get("WHALE_IMAGE_MODEL") or "").strip() \
-            or (mm_image_name if minimax is not None else vendor_default)
+            or (vendor_default if image_base else mm_image_name)
         # 候选清单：默认 + 显式列表 + 供应商默认（默认被切去 MiniMax 时
         # qwen 等仍保留为可选项，不悄悄消失）
         seen_models: set[str] = set()
@@ -157,44 +171,65 @@ def configure_optional_capabilities(registry, tools, store, *, env: Mapping[str,
                                  + sorted(image_providers)[0])
                 image_default = sorted(image_providers)[0]
         if image_default:
-            image_provider = image_providers[image_default]
-            register_image_gen(registry, provider=image_provider)
+            register_image_gen(registry, provider=image_providers[image_default])
             default_size = "1328*1328" if image_kind == "dashscope" else "1024x1024"
+            # 2026-11-05 owner 定版流程：生图收口进 ImageGenGateway
+            # （plugins/image_gen.py 单文件）——提示词 + 参考图（链接直传或
+            # reference_query 搜图，最多 3 张）+ 模型选择（默认 qwen）。
+            from whale_core.plugins import image_gen as _image_gen
+            gateway = _image_gen.ImageGenGateway(
+                image_providers, default_model=image_default,
+                default_size=default_size,
+                image_search=_tavily_image_search(env),
+                fetcher=_image_gen.fetch_reference_image)  # 显式注入（测试可截）
             def generate(args):
                 require("media_image")  # 注册被撤销即拒绝（保 disable 语义）
-                # 2026-11-01：允许指定生图模型（owner 决策）；未知模型诚实报错并列可用
-                model = str(args.get("model") or "").strip()
-                provider = image_provider
-                if model:
-                    provider = image_providers.get(model)
-                    if provider is None:
-                        raise ValueError(
-                            f"未知生图模型 {model!r}（可用：{', '.join(sorted(image_providers))}）")
-                result = provider.generate(
-                    _with_media_style(str(args.get("prompt") or args.get("query") or args.get("goal") or "")),
-                    size=str(args.get("size") or default_size), n=int(args.get("n") or 1))
+                prompt = _with_media_style(
+                    str(args.get("prompt") or args.get("query") or args.get("goal") or ""))
+                ref_urls = args.get("reference_urls") or ()
+                if isinstance(ref_urls, str):
+                    ref_urls = (ref_urls,)
+                result = gateway.generate(
+                    prompt,
+                    model=str(args.get("model") or ""),
+                    reference_query=str(args.get("reference_query") or "").strip(),
+                    reference_urls=[str(u) for u in ref_urls],
+                    size=str(args.get("size") or ""),
+                    n=int(args.get("n") or 1))
                 # 只回本地工件引用（2026-11-01「恶意链接」事件：裸签名 URL 被
                 # 模型贴进 QQ 正文触发安全警告且外部打不开）。图片由系统作为
                 # 真实图片消息发出，模型不应在正文里贴任何链接/路径。
+                ref_note = ""
+                if result.reference_used:
+                    ref_note = f"（已带 {result.reference_count} 张参考图生成）"
+                elif result.note:
+                    ref_note = f"（{result.note}）"
                 return json.dumps({"task_id":result.task_id, "status":result.status,
-                                   "model": model or image_default,
+                                   "model": result.model,
                                    "images":[save(r) for r in result.images],
+                                   "reference_used": result.reference_used,
+                                   "reference_count": result.reference_count,
                                    "note":"图片会由系统自动发送给对方；回复正文里"
-                                          "不要包含任何图片链接或文件路径。"},
+                                          "不要包含任何图片链接或文件路径。" + ref_note},
                                   ensure_ascii=False)
             # 2026-11-02 owner 决策：允许意图模型按需求选供应商——选型指南
             # 进工具描述（意图规划器可见的唯一渠道）。
             _IMAGE_GUIDE = {
-                "minimax-image-01": "二次元/人像审美强、自带提示词优化、出图快（默认首选）",
-                "qwen-image-3.0": "写实风/复杂构图/图内带文字的渲染更强",
+                "qwen-image-3.0": "默认首选：带参考图还原度高、写实/复杂构图/图内带文字的渲染强",
+                "minimax-image-01": "二次元/人像审美强、自带提示词优化、出图快（备选）",
             }
             _img_guide = "；".join(
                 f"{m}（{_IMAGE_GUIDE[m]}）" if m in _IMAGE_GUIDE else m
                 for m in sorted(image_providers))
             tools.register(ToolSpec(name="generate_image", capability="media.image.generate", plugin_id="media_image",
                                     description="按提示生成图片（默认二次元动漫画风，对方要求别的风格时以其为准）；"
+                                    "主体是已知角色/人物/IP 形象时填 reference_query（参考图搜索词，"
+                                    "如「来自深渊 娜娜奇 官方图」），系统会搜最多 3 张参考图带图生成；"
+                                    "若已通过 web 搜索拿到图片链接，也可以用 reference_urls 直接传入（多张更佳）；"
+                                    "泛化主体（一只猫/一片海）不要填。"
                                     "可用 model 参数指定模型：" + _img_guide, handler=generate))
-            out.notes.append("图像生成已配置（可选模型：" + "、".join(sorted(image_providers)) + "）")
+            out.notes.append("图像生成已配置（默认 " + image_default + "；可选模型："
+                             + "、".join(sorted(image_providers)) + "）")
 
     speech_base, speech_key, speech_kind = _resolve_capability_env(env, "SPEECH")
     tts_providers: dict = {}
@@ -266,21 +301,23 @@ def configure_optional_capabilities(registry, tools, store, *, env: Mapping[str,
                 ),
                 provider=tts_providers[tts_default])
         if tts_default:
+            # 2026-11-05 owner 定版流程：语音收口进 SpeechGenGateway
+            # （plugins/speech_gen.py 单文件）——文本 + 模型/音色/语速选择。
+            from whale_core.plugins.speech_gen import SpeechGenGateway
+            speech_gateway = SpeechGenGateway(tts_providers, default_model=tts_default)
             def speak(args):
-                # 2026-11-01：允许指定语音模型/音色（owner 决策）；未知模型诚实报错
-                model = str(args.get("model") or "").strip()
-                provider = tts_providers[tts_default]
-                if model:
-                    provider = tts_providers.get(model)
-                    if provider is None:
-                        raise ValueError(
-                            f"未知语音模型 {model!r}（可用：{', '.join(sorted(tts_providers))}）")
-                audio = provider.synthesize(str(args.get("text") or ""), voice=str(args.get("voice") or ""), rate=float(args.get("rate") or 1))
+                result = speech_gateway.synthesize(
+                    str(args.get("text") or ""),
+                    model=str(args.get("model") or ""),
+                    voice=str(args.get("voice") or ""),
+                    rate=float(args.get("rate") or 1))
                 if out.artifacts is None:
                     raise ValueError("artifact storage required for speech output")
                 # 2026-11-01：同生图——只回工件引用 + 勿贴链接提示（模型曾把
                 # /api/v1/artifacts/ 写成 [语音](url) 发进群，URL 外部打不开）。
-                _r = out.artifacts.save_bytes(audio, "audio/mpeg").as_dict()
+                _r = out.artifacts.save_bytes(result.audio, "audio/mpeg").as_dict()
+                _r["model"] = result.model
+                _r["voice"] = result.voice
                 _r["note"] = ("语音会由系统自动作为语音消息发送给对方；"
                               "回复正文里不要包含任何链接或文件路径。")
                 return json.dumps(_r, ensure_ascii=False)
@@ -325,21 +362,24 @@ def configure_optional_capabilities(registry, tools, store, *, env: Mapping[str,
             out.notes.append(f"视频默认模型 {video_model} 不可用，回退 "
                              + sorted(video_providers)[0])
             video_model = sorted(video_providers)[0]
-        provider = video_providers[video_model]
-        register_video_gen(registry, provider=provider)
-        out.video_manager = VideoTaskManager(store, provider, artifact_store=out.artifacts,
-                                             min_poll_interval=15,
-                                             providers=video_providers,
-                                             default_model=video_model)
+        register_video_gen(registry, provider=video_providers[video_model])
+        # 2026-11-05 owner 定版流程：视频收口进 VideoGenGateway
+        # （plugins/video_gen.py 单文件）——提示词 + 模型/时长/尺寸选择；
+        # 异步任务生命周期（轮询/取消/持久化/产物落存）由网关内嵌
+        # VideoTaskManager 托管，out.video_manager 暴露给宿主跟踪线程。
+        from whale_core.plugins.video_gen import VideoGenGateway
+        video_gateway = VideoGenGateway(
+            video_providers, default_model=video_model, store=store,
+            artifact_store=out.artifacts, min_poll_interval=15)
+        out.video_manager = video_gateway.manager
         def video(args):
             require("media_video")
-            # 2026-11-01：允许指定视频模型（owner 决策）；未知模型诚实报错并列可用
-            model = str(args.get("model") or "").strip()
-            task = out.video_manager.submit(
+            result = video_gateway.generate(
                 _with_media_style(str(args.get("prompt") or args.get("query") or "")),
-                duration_s=int(args.get("duration_s") or 5), size=str(args.get("size") or "1280x720"),
-                model=model)
-            return json.dumps(task.as_dict(), ensure_ascii=False)
+                model=str(args.get("model") or ""),
+                duration_s=int(args.get("duration_s") or 5),
+                size=str(args.get("size") or "1280x720"))
+            return json.dumps(result.as_dict(), ensure_ascii=False)
         # 2026-11-02 owner 决策：视频模型选型指南进工具描述（意图规划器据此选路）
         _VIDEO_GUIDE = {
             "happyhorse-1.1-t2v": "通用首选：时长3–15s灵活、画幅比例多、出片快",

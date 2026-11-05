@@ -44,7 +44,10 @@ FRAMEWORK_MODULES = {
 }
 BUILTIN_PROVIDER_MODULES = {
     "media_image",
+    "image_gen",
     "media_video",
+    "video_gen",
+    "speech_gen",
     "dashscope_media",
     "minimax_media",
     "speech",

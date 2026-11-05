@@ -441,8 +441,12 @@ def test_stranger_daily_limit_overridable():
     assert "skipped" not in wf.handle_stranger_event(In())
     assert "skipped" not in wf.handle_stranger_event(In())
     assert wf.handle_stranger_event(In()).get("skipped") == "stranger_budget"
-    # 非法值拒绝
+    # 2026-11-05：0 = 不限（合法）；负数拒绝
+    wf0 = QqInboundWorkflow(store, Brain(), orchestrator=orch,
+                            prefs=_prefs_no_quiet(), stranger_daily_limit=0)
+    for _ in range(30):
+        assert "skipped" not in wf0.handle_stranger_event(In())
     import pytest as _pt
     with _pt.raises(ValueError):
         QqInboundWorkflow(store, Brain(), orchestrator=orch,
-                          stranger_daily_limit=0)
+                          stranger_daily_limit=-1)

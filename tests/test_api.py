@@ -197,6 +197,31 @@ def test_approvals_list_and_decision(api):
     assert status == 400
 
 
+def test_status_drafts_pending_matches_approvals_filter(api):
+    """2026-11-05 生产实证：概览卡「等待你确认」曾按全量草稿计数（130），
+    实际审批口径只有 6。status 计数必须与 approvals 列表同一过滤口径。"""
+    from whale_core.life.initiative import (
+        LEDGER_KEY_PREFIX, ProactiveDraft, ProactiveOutbox)
+    store = api.ctx.store
+    outbox = ProactiveOutbox(store)
+    # 1 条真待确认
+    outbox.propose(ProactiveDraft("pend1", "待确认", "r", ("e",), channel="direct_message"))
+    # 终态草稿：accepted / superseded / 已派发——都不该被计入
+    outbox.propose(ProactiveDraft("done1", "已通过", "r", ("e",), channel="direct_message"))
+    store.put(LEDGER_KEY_PREFIX + "done1", {"status": "accepted", "attempts": 1})
+    outbox.propose(ProactiveDraft("done2", "被取代", "r", ("e",), channel="direct_message"))
+    store.put(LEDGER_KEY_PREFIX + "done2", {"status": "superseded", "attempts": 0})
+    outbox.propose(ProactiveDraft("done3", "已派发", "r", ("e",), channel="direct_message"))
+    store.put(LEDGER_KEY_PREFIX + "done3", {"status": "draft", "attempts": 2})
+
+    status, raw = _req(api, "GET", "/api/v1/approvals")
+    approvals = _json(raw)["result"]["approvals"]
+    draft_entries = [a for a in approvals if a["kind"] == "draft"]
+    status, raw = _req(api, "GET", "/api/v1/status")
+    assert status == 200
+    assert _json(raw)["result"]["drafts_pending"] == len(draft_entries) == 1
+
+
 # ---------- events SSE ----------
 
 def test_events_sse_replay(api):

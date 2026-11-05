@@ -329,7 +329,7 @@ def test_clarify_prompt_guides_defaults():
 
     model = CaptureModel()
     router = SearchIntentRouter(model=model, enable_llm=True)
-    # 闲聊已跳过意图 LLM；用模糊写操作触发提示词检查。
+    # 2026-11-05 起非显式指令一律过意图 LLM（词表闸门已废）；检查提示词内容。
     router.plan("请帮我改一下配置", context="记忆：用户在成都")
     prompt = model.prompts[0]
     assert "默认用户所在地" in prompt
