@@ -80,6 +80,10 @@ class QqInboundWorkflow:
         # 可选补发回调（两段式慢任务）：callable(event, reply) -> None。
         # 由宿主注入真实发送路径（草稿+审批+网关）；慢任务 ack 后的结果经此补发。
         self._completion_sender = completion_sender
+        # Owner「做 xxx」→ ResultDelivery 投递器：
+        # callable(items, summary) -> summarize_receipts dict；由 live runner 注入。
+        self._result_deliverer = None
+        self._result_owner_uid = ""
         # 宿主注入：pending 视频任务跟踪回调（event, video_task_id）
         self._video_pending_hook = None
         # issue #16：成员建档/恢复后的回调（宿主接回填管道）；
@@ -317,37 +321,41 @@ class QqInboundWorkflow:
         command_reply = self._memory_command_reply(text, event)
         if command_reply is not None:
             reply = command_reply
-        elif self.orchestrator is not None:
-            from whale_core.core.runtime import InputEnvelope
-
-            images = self._attachment_images(event) if event.attachments else ()
-            envelope = InputEnvelope(
-                conversation_id=event.conversation, text=text, source="qq:owner",
-                channel="qq", owner_id=event.owner_id, images=images,
-                sender_id=event.sender_id)
-            if self._completion_sender is not None:
-                result = self.orchestrator.handle_envelope_async(
-                    envelope,
-                    on_complete=lambda r, ev=event: self._on_async_complete(ev, r))
-                if getattr(result, "status", "") == "ack":
-                    self._topic_open_pending(event, text)
-            else:
-                result = self.orchestrator.handle_envelope(envelope)
-            reply = result.reply
-            turn_receipts = list(getattr(result, "receipts", []) or [])
         else:
-            # F-06（红队）：无编排器的回落路径同样按服务端上下文限域，
-            # 不走「全空间兼容召回」旁路。
-            fallback_ctx = None
-            resolver = getattr(self.orchestrator, "context_resolver", None) \
-                or self._context_resolver
-            if resolver is not None:
-                fallback_ctx = resolver.resolve(
-                    channel=event.channel,
-                    sender_id=event.sender_id or event.owner_id,
-                    conversation_id=event.conversation)
-            reply = self.companion.chat(text, conversation_id=event.conversation,
-                                        context=fallback_ctx)
+            do_handled = self._try_owner_do_request(event, text, eff_prefs)
+            if do_handled is not None:
+                return do_handled
+            if self.orchestrator is not None:
+                from whale_core.core.runtime import InputEnvelope
+
+                images = self._attachment_images(event) if event.attachments else ()
+                envelope = InputEnvelope(
+                    conversation_id=event.conversation, text=text, source="qq:owner",
+                    channel="qq", owner_id=event.owner_id, images=images,
+                    sender_id=event.sender_id)
+                if self._completion_sender is not None:
+                    result = self.orchestrator.handle_envelope_async(
+                        envelope,
+                        on_complete=lambda r, ev=event: self._on_async_complete(ev, r))
+                    if getattr(result, "status", "") == "ack":
+                        self._topic_open_pending(event, text)
+                else:
+                    result = self.orchestrator.handle_envelope(envelope)
+                reply = result.reply
+                turn_receipts = list(getattr(result, "receipts", []) or [])
+            else:
+                # F-06（红队）：无编排器的回落路径同样按服务端上下文限域，
+                # 不走「全空间兼容召回」旁路。
+                fallback_ctx = None
+                resolver = getattr(self.orchestrator, "context_resolver", None) \
+                    or self._context_resolver
+                if resolver is not None:
+                    fallback_ctx = resolver.resolve(
+                        channel=event.channel,
+                        sender_id=event.sender_id or event.owner_id,
+                        conversation_id=event.conversation)
+                reply = self.companion.chat(text, conversation_id=event.conversation,
+                                            context=fallback_ctx)
         if not reply or not reply.strip():
             return {"empty_reply": True, "draft_id": None}
 
@@ -384,6 +392,52 @@ class QqInboundWorkflow:
                 result["safety_concern"] = str(concern)[:200]
                 result["reason"] = f"{result['reason']}｜安全审核：{result['safety_concern']}"
         return result
+
+
+    def _try_owner_do_request(self, event: OwnerEvent, text: str,
+                              eff_prefs: ProactivePrefs) -> dict | None:
+        """Owner 私聊「做一张简单结果图发我」等规则短路 → ResultDelivery。
+
+        群聊不走；无投递器（非 live）不短路。未命中返回 None。
+        结果已由投递层发出时标记 ``delivered_via=result_delivery``，
+        供 runner 跳过二次直发正文。
+        """
+        if not str(event.conversation or "").startswith("private:"):
+            return None
+        if self._result_deliverer is None:
+            return None
+        from whale_core.life.do_request import try_owner_do
+        do_result = try_owner_do(
+            text,
+            conversation=event.conversation,
+            deliverer=self._result_deliverer,
+            owner_uid=self._result_owner_uid or event.owner_id or "",
+        )
+        if do_result is None or not do_result.get("handled"):
+            return None
+        reply = do_result.get("reply") or "好了。"
+        draft_id = f"qq-reply:{event.message_id}"
+        from whale_core.life.response_planner import clean_reply_text
+        draft = ProactiveDraft(
+            draft_id=draft_id, text=clean_reply_text(reply),
+            reason="owner 做事请求经 ResultDelivery 投递",
+            evidence=(f"qq:{event.conversation}:{event.message_id}",),
+            channel=REPLY_CHANNEL,
+            target_conversation=event.conversation,
+        )
+        proposed = self.outbox.propose(draft)
+        verdict = self.outbox.inspect(draft_id, eff_prefs, now=self._now(),
+                                      passive_reply=True)
+        return {
+            "draft_id": draft_id,
+            "reply": reply,
+            "proposed": proposed,
+            "verdict": verdict.status,
+            "reason": verdict.reason,
+            "receipts": [],
+            "do_request": do_result,
+            "delivered_via": "result_delivery",
+        }
 
     # -- S7：陌生账号私聊（受限入口） -----------------------------------------
 

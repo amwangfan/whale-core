@@ -342,6 +342,25 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
         from whale_core.core.runtime import InputEnvelope
         import time as _time
         t_all = _time.perf_counter()
+        # 眼镜侧「做一张简单结果图发我」：规则短路 → 本地图 → ResultDelivery。
+        try:
+            from whale_core.life.do_request import match_do_request, execute_do_request
+            req = match_do_request(text or "")
+            if req is not None and req.kind == "result_image":
+                out = execute_do_request(
+                    req,
+                    deliverer=lambda items, summary: deliver_result(
+                        list(items), summary=summary or ""),
+                    owner_uid=cfg.owner_uid)
+                total = int((_time.perf_counter() - t_all) * 1000)
+                reply = out.get("reply") or "好了。"
+                timing = {"intentMs": 0, "toolMs": 0, "replyMs": total,
+                          "totalMs": total, "doRequest": out.get("kind"),
+                          "delivery": out.get("delivery")}
+                return reply, timing
+        except Exception as exc:
+            print(f"[glasses] do_request short-circuit failed: {type(exc).__name__}",
+                  flush=True)
         with _orch_lock:
             if _cached["companion"] is None:
                 companion = _make_companion()

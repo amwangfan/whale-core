@@ -882,6 +882,23 @@ def cmd_run(args) -> int:
     # 两段式慢任务补发（owner 决策 2026-10-31）：ack 先回，结果后台好了再补
     workflow._completion_sender = _send_completion
 
+    # Owner「做 xxx」→ ResultDelivery（私聊结果图等）；群聊不走 do_request 短路。
+    # 仅 live_auto 注入真实投递器——人工审批模式下不抢先直发。
+    workflow._result_owner_uid = os.environ.get("OWNER_UID", "").strip()
+    if live_auto:
+        def _result_deliver(items, summary: str = "") -> dict:
+            from whale_core.life.result_delivery import (
+                ResultDelivery, summarize_receipts)
+            owner_uid = os.environ.get("OWNER_UID", "").strip()
+            delivery = ResultDelivery(send_port, owner_uid=owner_uid)
+            receipts = delivery.deliver(items, summary=summary or "")
+            result = summarize_receipts(receipts)
+            print(f"  [ResultDelivery] ok={result.get('ok')} "
+                  f"channels={result.get('channels')} "
+                  f"count={result.get('count')}")
+            return result
+        workflow._result_deliverer = _result_deliver
+
     # 2026-11-02 生产实证「视频没消息了」：generate_video 提交即 pending，
     # 外层任务带着「视频还在跑」就交付收口——视频任务无人轮询永远不来。
     # 跟踪器：pending 视频任务 → 后台轮询 → 成了发视频、砸了诚实告知。
@@ -1396,6 +1413,22 @@ def cmd_run(args) -> int:
             print(f"  [安全审核] 顾虑：{result['safety_concern'][:120]} → 不自动发送，待人工 approve")
             _tspan(_tid, "workflow", "skipped", reason_code="safety_review")
             _tfin(_tid, "silent")
+            return
+        if result.get("delivered_via") == "result_delivery":
+            # 结果已由 ResultDelivery 直投（文字摘要+图）；此处只回一条短确认，
+            # 避免再把整段摘要当普通气泡重发（图已发过）。
+            print(f"  [做事] ResultDelivery 已投递 do={((result.get('do_request') or {}).get('kind'))}")
+            if live_auto and result.get("reply"):
+                # 短确认仍走网关，便于会话里看见「好了」；失败不阻断（图可能已到）。
+                draft_id = result["draft_id"]
+                owner_draft_ids.add(draft_id)
+                approved_draft_ids.add(draft_id)
+                receipt = plugin_gateway.dispatch(send_message_intent(
+                    event.conversation, result["reply"], draft_id=draft_id))
+                print(f"  [做事确认] {draft_id} → {receipt}")
+                _tfin(_tid, "delivered", summary="result_delivery")
+            else:
+                _tfin(_tid, "delivered", summary="result_delivery-pending-approve")
             return
         if live_auto:
             # 语音产物先发（同步路径的 TTS 任务产物——「语音跟我说」这类），
