@@ -64,29 +64,28 @@ def test_same_scene_three_modes_differ():
         ).action == "observe"
 
 
-def test_cooldown_and_daily_budget():
+def test_no_cooldown_but_daily_budget():
+    """2026-11-05 owner 决策：插话冷却关闭（0=不拦）；日配额仍是保险丝。"""
     store = InMemoryStore()
     p = _policy(store)
     named = "鲸鱼帮看下"
     assert p.maybe_join(conversation=GROUP, text=named,
                         activity="balanced").action == "join"
-    # 冷却期内 → observe
+    # 无冷却：紧跟着第二条仍放行（冷却已是 0）
     d = p.maybe_join(conversation=GROUP, text=named, activity="balanced")
-    assert (d.action, d.reason_code) == ("observe", "cooldown")
-    # 过冷却后再参与直到配额尽
-    now = T0 + timedelta(minutes=25)
-    joins = 0
+    assert (d.action, d.reason_code) == ("join", "join")
+    # 配额耗尽仍拦（保险丝保留）
+    joins = 2
     for i in range(10):
-        p2 = GroupTurnPolicy(store, bot_names=("鲸鱼",), now_fn=lambda: now,
+        p2 = GroupTurnPolicy(store, bot_names=("鲸鱼",), now_fn=lambda: T0,
                              quiet_now=lambda: False)
         d = p2.maybe_join(conversation=GROUP, text=named, activity="balanced")
-        now += timedelta(minutes=25)
         if d.action == "join":
             joins += 1
         else:
             assert d.reason_code == "budget_exceeded"
             break
-    assert joins == 5  # balanced 配额 6，首次已用 1
+    assert joins == 6  # balanced 配额 6
 
 
 def test_consecutive_limit_no_double_join():

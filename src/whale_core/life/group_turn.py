@@ -39,7 +39,8 @@ from whale_core.memory.store import MemoryStore
 DAILY_QUOTA = {"quiet": 3, "balanced": 6, "lively": 12}
 
 #: 两次主动参与之间的最小间隔（分钟）。
-COOLDOWN_MIN = {"quiet": 60, "balanced": 20, "lively": 8}
+#: 2026-11-05 owner 决策：关闭插话冷却（连续发言限制与日配额仍作保险丝）。
+COOLDOWN_MIN = {"quiet": 0, "balanced": 0, "lively": 0}
 
 #: 明确指向鲸鱼的文本信号（配合元数据 @；这里是「没 @ 但直呼其名提问」）。
 
