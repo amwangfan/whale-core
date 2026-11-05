@@ -786,3 +786,129 @@ def test_backfill_bounded_by_group_cap(env):
     stats = extractor.backfill_for_principal(A_PRINCIPAL)
     from whale_core.memory.extraction import BACKFILL_MAX_GROUPS
     assert stats.scanned <= BACKFILL_MAX_GROUPS
+
+
+# ---------------------------------------------------------------------------
+# MEM-02 再修订（owner 2026-11-05）：凡在群聊/私聊出现过即自动建档+默认授权
+# ---------------------------------------------------------------------------
+
+
+def test_group_evidence_requires_explicit_flag(env):
+    """群聊 key 作为建档证据必须显式 allow_group_evidence；默认仍拒绝。"""
+    _, spaces, bindings, *_ = env
+    import pytest as _pt
+    with _pt.raises(BindingError):
+        bindings.ensure_member_space(A_PRINCIPAL, conversation_key=GROUP_KEY,
+                                     granted_by=A_PRINCIPAL)
+    ref = bindings.ensure_member_space(A_PRINCIPAL, conversation_key=GROUP_KEY,
+                                       granted_by=A_PRINCIPAL,
+                                       allow_group_evidence=True)
+    assert ref.type is MemorySpaceType.MEMBER_PRIVATE
+    # 群聊证据只是来源记录：resolver 仍不把它下发给群聊
+    resolver = _resolver(env)
+    ctx = resolver.resolve(channel="qq", sender_id=A_UIN, conversation_id=GROUP)
+    assert not [s for s in ctx.allowed_memory_spaces
+                if s.type is MemorySpaceType.MEMBER_PRIVATE]
+    # 本人私聊照常下发（结构性归属校验）
+    ctx_p = resolver.resolve(channel="qq", sender_id=A_UIN,
+                             conversation_id=f"private:{A_UIN}")
+    assert [s for s in ctx_p.allowed_memory_spaces
+            if s.type is MemorySpaceType.MEMBER_PRIVATE]
+
+
+def _workflow(store, brain, orch):
+    from whale_core.life.qq_workflow import QqInboundWorkflow
+    return QqInboundWorkflow(store, brain, orchestrator=orch)
+
+
+def test_group_appearance_provisions_space_binding_consent(env):
+    """群聊出现过 → 自动建空间+绑定+默认授权证据（有且允许，永不过期）。"""
+    store = env[0]
+    from whale_core.core.companion import WhaleCompanion
+    from whale_core.core.runtime import ConversationOrchestrator
+    from whale_core.memory.curation import MemoryCurator
+
+    class _Brain:
+        def reply(self, text, **kw):
+            return "收到"
+
+    orch = ConversationOrchestrator(store, WhaleCompanion(store, _Brain(), curator=MemoryCurator(store)))
+    wf = _workflow(store, _Brain(), orch)
+
+    class In:
+        channel = "qq"
+        account = A_UIN
+        sender_id = A_UIN
+        conversation = GROUP
+        text = "大家好"
+
+    wf.handle_stranger_event(In())
+    bindings, consents = env[2], env[3]
+    binding = bindings.member_binding_for(A_PRINCIPAL)
+    assert binding is not None
+    assert binding["conversation_key"] == GROUP_KEY  # 首次出现证据
+    assert consents.has_valid(A_PRINCIPAL)           # 默认授权证据已落
+    granted = consents.list_for(A_PRINCIPAL)
+    assert len(granted) == 1 and granted[0].ttl_s == 0  # 永不过期
+
+
+def test_optout_blocks_appearance_provisioning(env):
+    """已退出成员在群里再出现：不重建空间/授权。"""
+    store, _, bindings, consents = env[0], env[1], env[2], env[3]
+    from whale_core.core.companion import WhaleCompanion
+    from whale_core.core.runtime import ConversationOrchestrator
+    from whale_core.memory.curation import MemoryCurator
+
+    class _Brain:
+        def reply(self, text, **kw):
+            return "收到"
+
+    orch = ConversationOrchestrator(store, WhaleCompanion(store, _Brain(), curator=MemoryCurator(store)))
+    wf = _workflow(store, _Brain(), orch)
+    consents.opt_out(A_PRINCIPAL)
+
+    class In:
+        channel = "qq"
+        account = A_UIN
+        sender_id = A_UIN
+        conversation = GROUP
+        text = "我又来了"
+
+    wf.handle_stranger_event(In())
+    assert bindings.member_binding_for(A_PRINCIPAL) is None
+    assert not consents.has_valid(A_PRINCIPAL)
+
+
+def test_optin_regrants_consent_evidence(env):
+    """「别记我了」→「恢复记录我」：授权证据撤销后重新落（version 递增）。"""
+    store, _, bindings, consents = env[0], env[1], env[2], env[3]
+    from whale_core.core.companion import WhaleCompanion
+    from whale_core.core.runtime import ConversationOrchestrator
+    from whale_core.memory.curation import MemoryCurator
+
+    class _Brain:
+        def reply(self, text, **kw):
+            return "收到"
+
+    orch = ConversationOrchestrator(store, WhaleCompanion(store, _Brain(), curator=MemoryCurator(store)))
+    wf = _workflow(store, _Brain(), orch)
+
+    class In:
+        channel = "qq"
+        account = A_UIN
+        sender_id = A_UIN
+        conversation = f"private:{A_UIN}"
+        text = "你好"
+
+    wf.handle_stranger_event(In())          # 私聊出现 → 建档 + 授权证据 v1
+    assert consents.has_valid(A_PRINCIPAL)
+    In.text = "别记我了"
+    wf.handle_stranger_event(In())
+    assert consents.is_opted_out(A_PRINCIPAL)
+    assert not consents.has_valid(A_PRINCIPAL)  # 撤销即失效
+    In.text = "恢复记录我"
+    wf.handle_stranger_event(In())
+    assert not consents.is_opted_out(A_PRINCIPAL)
+    assert consents.has_valid(A_PRINCIPAL)      # 重新授权
+    versions = [c.version for c in consents.list_for(A_PRINCIPAL)]
+    assert max(versions) >= 2                   # 证据链版本递增

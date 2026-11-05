@@ -509,6 +509,11 @@ class QqInboundWorkflow:
                 bindings.ensure_member_space(
                     principal_id, conversation_key=conversation_key,
                     granted_by=principal_id)
+                # 2026-11-05：opt-out 时授权证据被 revoke_all 撤销——恢复时
+                # 重新落一条（version 递增，审计链完整）
+                consents.grant(principal_id, "*", ttl_s=0,
+                               granted_by=principal_id,
+                               granted_via=conversation_key)
                 if self._on_member_provisioned is not None:
                     try:
                         self._on_member_provisioned(principal_id, "optin")
@@ -529,10 +534,12 @@ class QqInboundWorkflow:
         if matched == "list":
             binding = bindings.member_binding_for(principal_id)
             if not binding:
-                return "还没有你的个人记忆空间——你还没授权过我记录。"
+                return ("还没有你的个人记忆空间——在群里或私聊里跟我说过话"
+                        "就会自动建立（想停随时说「别记我了」）。")
             ref = spaces.ref(str(binding["space_id"]))
             if ref is None:
-                return "还没有你的个人记忆空间——你还没授权过我记录。"
+                return ("还没有你的个人记忆空间——在群里或私聊里跟我说过话"
+                        "就会自动建立（想停随时说「别记我了」）。")
             from whale_core.memory.store import MemoryKind
             items = []
             for kind in (MemoryKind.EPISODE, MemoryKind.PREFERENCE):
@@ -614,9 +621,11 @@ class QqInboundWorkflow:
             # 群里的 sudo 尝试：不验证、不回显、不落记忆——只提示私聊（N05/N17）
             return {"reply": "验证身份请私聊我（群里不做这个）。"}
 
-        # owner 决策 2026-11-01：成员私聊即默认记录其个人记忆（自动建档；
-        # 「别记我了」持久退出）。先建档再进 resolver，当轮即可回忆。
-        if is_private and sender:
+        # owner 决策 2026-11-05（MEM-02 修订）：凡在群聊/私聊出现过的成员
+        # 一律自动建立个人记忆空间——默认即有且允许；「别记我了」随时撤销。
+        # consent 记录同步落为显式证据（永不过期，撤销即失效）；先建档再进
+        # resolver，当轮即可回忆。
+        if sender:
             try:
                 from whale_core.memory.consent import MemberConsentStore
                 consents = MemberConsentStore(self.store)
@@ -625,10 +634,21 @@ class QqInboundWorkflow:
                     from whale_core.memory.spaces import SpaceStore
                     from whale_core.memory.bindings import BindingStore
                     spaces = SpaceStore(self.store)
+                    if is_private:
+                        conv_key = f"qq:qq_private:{event.conversation}"
+                        group_evidence = False
+                    else:
+                        conv_key = f"qq:qq_group:{event.conversation}"
+                        group_evidence = True
                     BindingStore(self.store, spaces).ensure_member_space(
-                        principal_id,
-                        conversation_key=f"qq:qq_private:{event.conversation}",
-                        granted_by=principal_id)
+                        principal_id, conversation_key=conv_key,
+                        granted_by=principal_id,
+                        allow_group_evidence=group_evidence)
+                    # 证据链显式化：出现即默认授权（可撤销；ttl=0 永不过期）
+                    if not consents.list_for(principal_id):
+                        consents.grant(principal_id, "*", ttl_s=0,
+                                       granted_by=principal_id,
+                                       granted_via=conv_key)
                     if self._on_member_provisioned is not None:
                         self._on_member_provisioned(principal_id, "auto")
             except Exception:

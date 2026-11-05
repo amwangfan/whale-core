@@ -33,10 +33,16 @@ class BindingError(ValueError):
 
 
 def _assert_member_private_bindable(
-        spaces: SpaceStore, space_id: str, conversation_key: str) -> None:
-    """G2/MEM-03：member_private 只允许绑定到**本人已认证私聊**。
+        spaces: SpaceStore, space_id: str, conversation_key: str,
+        *, allow_group_evidence: bool = False) -> None:
+    """G2/MEM-03：member_private 绑定证据校验。
 
-    群聊一律拒绝；私聊必须能结构性证明属于空间 owner（principal）。
+    - 私聊 key：必须能结构性证明属于空间 owner（本人私聊入口）；
+    - 群聊 key：默认拒绝；2026-11-05 owner 决策（凡在群聊/私聊出现过
+      即自动建档）起，仅当调用方显式 ``allow_group_evidence=True`` 时
+      接受为**首次出现证据**——它只记录建档来源，永不成为访问路径
+      （resolver 只在成员本人私聊下发 member_private；群聊由 INV-03
+      过滤，纵深不变）。
     """
     ref = spaces.ref(space_id)
     if ref is None:
@@ -52,7 +58,11 @@ def _assert_member_private_bindable(
     # conversation_key 线值（ConversationKind.value，见 ConversationRef.as_key）
     # 比较。未知类型不单独报错——交由下面的归属谓词 fail closed。
     if kind_s == "qq_group":  # ConversationKind.QQ_GROUP.value
-        raise BindingError("member_private 空间永不绑定群聊（MEM-03）")
+        if allow_group_evidence:
+            return  # 群出现证据（渠道已核实 sender），仅作建档来源记录
+        raise BindingError(
+            "member_private 空间默认不绑定群聊证据（MEM-03）；"
+            "群出现建档需显式 allow_group_evidence=True")
     if not owner or not principal_matches_private_conversation(
             channel, kind_s, cid, owner, store=spaces.store):
         raise BindingError(
@@ -175,7 +185,8 @@ class BindingStore:
         return None
 
     def bind_member_space(self, principal_id: str, space_id: str, *,
-                          conversation_key: str, granted_by: str) -> dict:
+                          conversation_key: str, granted_by: str,
+                          allow_group_evidence: bool = False) -> dict:
         """建立 principal → member_private 空间绑定（校验空间类型与私聊归属）。"""
         if not principal_id or not space_id:
             raise BindingError("principal_id 与 space_id 必填")
@@ -187,7 +198,9 @@ class BindingStore:
         meta = self.spaces.get(space_id) or {}
         if str(meta.get("owner") or "") != principal_id:
             raise BindingError("member_private 空间 owner 与 principal 不一致")
-        _assert_member_private_bindable(self.spaces, space_id, conversation_key)
+        _assert_member_private_bindable(
+            self.spaces, space_id, conversation_key,
+            allow_group_evidence=allow_group_evidence)
         data = {"space_id": space_id, "principal_id": principal_id,
                 "conversation_key": conversation_key,
                 "granted_by": granted_by, "created_at": _now()}
@@ -202,10 +215,13 @@ class BindingStore:
         return True
 
     def ensure_member_space(self, principal_id: str, *,
-                            conversation_key: str, granted_by: str) -> MemorySpaceRef:
+                            conversation_key: str, granted_by: str,
+                            allow_group_evidence: bool = False) -> MemorySpaceRef:
         """确保成员的 member_private 空间与绑定存在（授权流程调用，幂等）。
 
         空间 id 由 principal 派生（确定性、可重建）；首次授权时创建。
+        ``allow_group_evidence``：conversation_key 为群聊时作为「首次
+        出现证据」接受（2026-11-05 owner 决策：凡出现即建档）。
         """
         import hashlib
 
@@ -230,5 +246,6 @@ class BindingStore:
         # 否则绑到已注销的旧 sid 抛错，该成员永远无法再授权。
         self.bind_member_space(principal_id, ref.space_id,
                                conversation_key=conversation_key,
-                               granted_by=granted_by)
+                               granted_by=granted_by,
+                               allow_group_evidence=allow_group_evidence)
         return ref
