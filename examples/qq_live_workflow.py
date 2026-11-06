@@ -784,12 +784,14 @@ def cmd_run(args) -> int:
         from whale_core.core.intent_router import SearchIntentRouter
         from whale_core.core.runtime import ConversationOrchestrator, ToolRegistry
         from whale_core.core.runtime.turn_orchestration import (
-            apply_parallel_env, intent_brain_max_tokens, intent_skip_chitchat)
+            apply_parallel_env, intent_brain_max_tokens, intent_brain_timeout,
+            intent_skip_chitchat)
         intent_brain = DeepSeekCompanion(
             model=intent_model_id,
             base_url=os.environ.get("QQ_INTENT_BASE_URL") or None,
             api_key=os.environ.get("QQ_INTENT_API_KEY") or None,
-            max_tokens=intent_brain_max_tokens(os.environ))
+            max_tokens=intent_brain_max_tokens(os.environ),
+                timeout=intent_brain_timeout(os.environ))
         globals()["_intent_brain_ref"] = intent_brain  # 群定向兜底判定器用
         fallback_search = None
         if (os.environ.get("TAVILY_API_KEY") or os.environ.get("BRAVE_API_KEY")
