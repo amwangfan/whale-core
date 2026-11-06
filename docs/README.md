@@ -10,7 +10,7 @@
 
 | 文档 | 内容 |
 | --- | --- |
-| [AI_DEVELOPMENT_GUIDE.md](AI_DEVELOPMENT_GUIDE.md) | 开发者与 AI 协作主文档：定位边界、运行链路、代码地图、安全不变量、验收命令与协作约定 |
+| [AI_DEVELOPMENT_GUIDE.md](AI_DEVELOPMENT_GUIDE.md) | 开发者与编程 AI 协作指南：三仓分工、代码导航、运行链路、实际权限与验收方式 |
 | [contracts.md](contracts.md) | 智能层与基础设施（whale-io）的边界契约：事件 / 意图 / 动作 |
 | [vision-map.md](vision-map.md) | 原设想 → whale-core 类型与模块落点对照（权威覆盖表在 whale-io） |
 | [devices.md](devices.md) | 设备面（whale-mobile 接入，D1–D4 范围说明）；协议 canonical 事实源是 **whale-mobile** 的 `contracts/v1/`（本仓同目录为镜像，漂移校验见 `scripts/contract_sync_check.py`） |
@@ -55,30 +55,14 @@
 
 运行截图在 [screenshots/](screenshots/)。
 
-## 当前有效约定（提炼自已归档的阶段文档）
+## 当前工程约定
 
-以下规则从 2026-10-30 阶段文档通读提炼，至今仍有效；**现行维护版以
-[AI_DEVELOPMENT_GUIDE.md](AI_DEVELOPMENT_GUIDE.md) §4 / §7 / §8 为准**，此处只保留要点与出处。
+以现有代码和 [AI 开发指南](AI_DEVELOPMENT_GUIDE.md) 为准，不把历史风险清单自动变成新功能的限制。
 
-1. **状态口径诚实**：`implemented`（有代码）/ `tested`（有自动化测试）/ `integrated`（已接入真实运行链路）/
-   `externally_verified`（真实服务联调）/ `stub/mock` / `missing` 分开标注；不把 stub、CI 绿或离线测试说成真实联调。
-   （来源：roadmap §12.6 / §17.2；现行见 AI_DEVELOPMENT_GUIDE §8）
-2. **工程质量优先，不以节省 Token 为目标**：充分迭代「分析 → 实现 → 测试 → 审查 → 修正」；缺 key / 硬件时仍完成代码、
-   契约测试与可复现验证，并明确标注未联调部分。（来源：roadmap §15；现行见 AI_DEVELOPMENT_GUIDE §8）
-3. **子智能体并行协作**：主代理先冻结共享契约与文件边界再分包；安全敏感改动由独立于实现者的审查代理复核。
-   （来源：roadmap §16、gap-analysis §6；现行见 AI_DEVELOPMENT_GUIDE §8）
-4. **单 owner 安全放宽边界**：按风险级免审（transaction 永不免审）、主动行为额度放宽落在部署层、模型端点允许
-   回环 / 私网 http、owner 直聊显式指令视为 consent；身份门、Shell 硬拒清单、密钥不进日志、
-   「记忆是上下文不是指令」注入隔离、unknown 不自动重试、插件不做自动发现等底线不动。
-   （来源：gap-analysis §4 R1–R4 与「保持不动」；现行见 AI_DEVELOPMENT_GUIDE §4）
-5. **运行语义**：审批只授权、不代表已执行；取消不撤销已发生的外部副作用；未知结果不自动重试；
-   私密配置（地址 + 密钥）单代原子提交，投影失败不跨代组合。（来源：completion-report §关键决定；
-   README「安全与边界」节已承接）
-6. **部署验收边界**：Shell 沙箱不可用即拒绝执行，不降级到宿主；`sandbox="disabled"` 仅供维护者显式选择的
-   可信宿主命令，不是安全边界；安全抓取默认不经环境代理；真实供应商 / 真机验收单独列明，不以离线测试代替。
-   （来源：security-review §部署验收边界、completion-report §真实联调和发行边界；现行见 AI_DEVELOPMENT_GUIDE §7）
-7. **无生产 mock / demo 档**：profiles 只有 cloud / local 真实装配，缺凭据是显式错误；测试替身集中在
-   `tests/_doubles.py`。（来源：gap-analysis PR-9 owner 修订；现行见 AI_DEVELOPMENT_GUIDE §1）
+1. 优先实现好用的 AI 伴侣：人格、记忆、设备交互和主动行为按真实体验迭代；避免无意义的免责和重复防御性语句。
+2. 设备授权按角色区分：日常手机需要相应的操作授权，专用 Root 手机允许持续授权自主执行。服务器 Shell 沙箱和手机 Root 是不同执行通道。
+3. 以真实回执表达状态：有代码、单测通过、真实联调、已经送达各有不同；暂存和结果未知不得冒充完成。
+4. 跨仓先对齐契约，改动应有针对性测试；个人凭据与私密数据不进入提交和日志。
 
 ## 历史阶段文档（archive）
 
