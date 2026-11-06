@@ -565,3 +565,50 @@ def test_parallel_poll_client_gets_followup_via_endpoint(parallel_server):
     st, other = _post(parallel_server, "/v1/chat/followup",
                       {"sessionId": "zz", "turnId": fu["turnId"]})
     assert other["status"] == "unknown"
+
+
+def test_parallel_legacy_waits_when_first_reply_promises(tmp_path, monkeypatch):
+    """规则认不出、靠 kimi 判 task 的句子（「最近有什么活动」）：第一条已先答应
+    「我去搜一下」→ 旧客户端同步等第二条合并（2026-11-06 眼镜实证永远收不到第二条）。"""
+    import time as _t
+    import search_web.web_search as ws
+    import whale_core.core.deepseek as ds
+
+    class _Prov:
+        def search(self, query, *, limit=5):
+            return [ws.SearchResult(title="成都活动", url="https://example.com/a",
+                                    snippet="家博会 11/6-11/8")]
+
+    class _Kimi:
+        def __init__(self, **kw):
+            pass
+
+        def reply(self, text, **kw):
+            _t.sleep(0.3)
+            return json.dumps({"goal": "搜成都活动", "kind": "task",
+                               "capabilities": ["web.search"],
+                               "slots": {"query": "成都 活动"}}, ensure_ascii=False)
+
+    monkeypatch.setattr(ws, "select_provider", lambda env: _Prov())
+    monkeypatch.setattr(ds, "DeepSeekCompanion", _Kimi)
+
+    class Brain:
+        def reply(self, text, *, persona="", memories=(), history=(), images=(),
+                  location=None):
+            if "不可信工具输出开始" in text:
+                return "找到了，家博会到 8 号"
+            return "我去搜一下，稍等" if "活动" in text else "嗯嗯"
+
+    env = {"WHALE_GLASSES_TOKEN": "t", "WHALE_GLASSES_STORE": str(tmp_path / "q.sqlite3"),
+           "OWNER_UID": "u", "OWNER_QQ": "1", "WHALE_SEARCH_PROVIDER": "fake",
+           "QQ_INTENT_MODEL": "kimi-fake"}
+    d = build_delegates(env, brain_factory=Brain, quick_brain_factory=Brain,
+                        send_port_factory=lambda: None)
+    reply, timing = d["companion_chat"]("最近有什么活动", conversation_id="glasses:a",
+                                        location="成都郫都")
+    assert timing["followup"]["waited"] == "promise" and timing["followup"]["merged"]
+    assert reply == "我去搜一下，稍等\n找到了，家博会到 8 号"
+    # 没先答应的闲聊：不等
+    reply, timing = d["companion_chat"]("今天累了", conversation_id="glasses:b",
+                                        location="成都郫都")
+    assert reply == "嗯嗯" and timing["followup"]["waited"] is None

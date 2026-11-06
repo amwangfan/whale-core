@@ -9,8 +9,9 @@
 - ``POST /v1/chat/followup``（2026-11-06）：并行链路第二条。``/v1/chat`` 第一条
   由回复模型立刻给出，意图模型后台判定；需要工具时第二条进会话收件板。
   请求 ``followup="poll"`` 的新客户端用本端点长轮询取；旧客户端（不带该字段）
-  对规则可识别的工具类（天气/显式搜索等）同步等待 ≤WHALE_GLASSES_FOLLOWUP_SYNC_MS
-  后合并返回（``replies`` 分列两条），其余立即返回第一条。
+  对规则可识别的工具类（天气/显式搜索等）或第一条已「先答应待会儿」时同步等待
+  ≤WHALE_GLASSES_FOLLOWUP_SYNC_MS（默认 22s）后合并返回（``replies`` 分列两条），
+  其余立即返回第一条。
 - ``POST /v1/qq/reply``：QQ 快捷回复——把用户口述的文本发给**已配置的
   绑定对端**（目标不从请求推导，防误发）；走 WeQ 发送链与既有风控
   （被动额度/静默时段豁免口径与 runner 一致：主人当面 dictation 属被动延续）。
@@ -27,6 +28,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import threading
 import json
 import os
@@ -255,6 +257,18 @@ class FollowupBoard:
         return ""
 
 
+# 第一条里「先答应待会儿」的口吻（我去搜/稍等/查到了告诉你…）。
+_PROMISE_RE = re.compile(
+    r"(稍等|等我|等一下|等下|等会|待会|稍后|马上|一会儿|我去|我看看|我查|我搜|我找|"
+    r"去看看|去查|去搜|去找|查一下|搜一下|找一下|看一下|瞅一眼|瞄一眼|翻一下|"
+    r"查到了?(再|就)?(告诉|跟你说)|找到了?(再|就)?(告诉|跟你说))")
+
+
+def first_reply_promises_followup(reply: str) -> bool:
+    """DS 第一条是否先答应「待会儿给结果」（旧客户端据此同步等第二条）。"""
+    return bool(_PROMISE_RE.search(reply or ""))
+
+
 def _rule_plan_is_task(orch, text: str, location: str) -> bool:
     """零 LLM 规则探针（天气/显式搜索/附近/显式 shell）：仅用于旧客户端是否同步等第二条。"""
     try:
@@ -410,11 +424,14 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
 
     followups = FollowupBoard()
     parallel_on = (env.get("WHALE_PARALLEL_REPLY", "1") or "1").strip() != "0"
-    legacy_policy = (env.get("WHALE_GLASSES_LEGACY_FOLLOWUP") or "rules").strip().lower()
+    # 旧客户端（不带 followup=poll）收不到异步第二条，策略：
+    # smart（默认）= 规则可识别的工具类 或 第一条已「先答应待会儿」→ 同步等第二条合并；
+    # rules = 仅规则工具类；intent = 一律等意图判定；none = 不等。
+    legacy_policy = (env.get("WHALE_GLASSES_LEGACY_FOLLOWUP") or "smart").strip().lower()
     try:
-        legacy_wait_s = max(0.0, float(env.get("WHALE_GLASSES_FOLLOWUP_SYNC_MS") or 15000) / 1000)
+        legacy_wait_s = max(0.0, float(env.get("WHALE_GLASSES_FOLLOWUP_SYNC_MS") or 22000) / 1000)
     except ValueError:
-        legacy_wait_s = 15.0
+        legacy_wait_s = 22.0
 
     def followup_poll(conversation_id: str, turn_id: str = "",
                       wait_ms: int = 0) -> dict:
@@ -509,10 +526,16 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
                     followups.settle(_tid, "none")
 
             first = orch.handle_envelope_parallel(envelope, on_settled=_settled)
-            wait = (followup_mode != "poll" and (
-                legacy_policy == "intent"
-                or (legacy_policy == "rules"
-                    and _rule_plan_is_task(orch, text, location))))
+            wait_reason = ""
+            if followup_mode != "poll" and legacy_policy != "none":
+                if legacy_policy == "intent":
+                    wait_reason = "intent"
+                elif _rule_plan_is_task(orch, text, location):
+                    wait_reason = "rule"
+                elif (legacy_policy == "smart"
+                      and first_reply_promises_followup(first.reply)):
+                    wait_reason = "promise"
+            wait = bool(wait_reason)
         # 锁外等待第二条：不阻塞下一轮请求进入。
         timing = {"intentMs": 0, "toolMs": 0,
                   "replyMs": int(first.reply_ms or 0), "followupMs": 0}
@@ -525,7 +548,8 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
             reply = ((reply or "").rstrip() + "\n" + item["reply"].strip()).strip()
             timing["replies"] = [first.reply, item["reply"]]
         timing.update(item.get("timing") or {})
-        timing["followup"] = {"turnId": turn_id, "status": status, "merged": merged}
+        timing["followup"] = {"turnId": turn_id, "status": status, "merged": merged,
+                              "waited": wait_reason or None}
         timing["totalMs"] = int((_time.perf_counter() - t_all) * 1000)
         return reply, timing
 
@@ -761,6 +785,7 @@ def make_handler(delegates):
                       f"toolMs={payload['toolMs']} replyMs={payload['replyMs']} "
                       f"followupMs={payload.get('followupMs', 0)} "
                       f"followup={(payload.get('followup') or {}).get('status', '-')} "
+                      f"wait={(payload.get('followup') or {}).get('waited') or '-'} "
                       f"loc={bool(location)} "
                       f"chars_in={len(text)} chars_out={len(reply or '')}"
                       f"{' deliver=' + str(payload.get('delivery', {}).get('ok')) if 'delivery' in payload else ''}",

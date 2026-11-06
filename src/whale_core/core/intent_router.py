@@ -74,6 +74,10 @@ _WEATHER_HERE = re.compile(
 )
 
 
+# 意图模型自己的目标/搜索词里写明是天气 → 改走和风（规则未命中的天气问法）。
+_LLM_WEATHER_GOAL = re.compile(r"(天气|气温|预报|降雨|下雨|降水|weather|forecast)", re.IGNORECASE)
+
+
 def _location_hint_from_context(context: str) -> str:
     """从意图上下文抽出「当前位置：」行；未知则空串。"""
     for line in (context or "").splitlines():
@@ -97,6 +101,20 @@ def _weather_search_query(text: str, *, context: str = "") -> str:
     return query
 
 
+# 地名正则是贪婪的 2–12 汉字 + 区/县/市：「现在郫都区下雨了吗」会抓成
+# 「现在郫都区」，和风 Geo 必败后误回落搜索（2026-11-06 眼镜实证）。剥掉前置时间/语气词。
+_PLACE_FILLER_PREFIX = re.compile(
+    r"^(?:现在|目前|此刻|这会儿|这会|今天|明天|后天|今晚|明晚|今早|明早|今日|明日|"
+    r"晚上|早上|上午|下午|中午|夜里|周末|请问|那|那么|你知道|知道|帮我|帮忙|给我|"
+    r"看看|查查|查一下|看一下|问一下|想问|我想知道|我想问)+")
+
+
+def clean_place_name(place: str) -> str:
+    """去掉地名前的时间/语气前缀；剩余不足 2 字则视为无地名。"""
+    cleaned = _PLACE_FILLER_PREFIX.sub("", (place or "").strip())
+    return cleaned if len(cleaned) >= 2 else ""
+
+
 def _weather_named_city(text: str) -> str:
     """口述异地城市名（排除「这里/我所在」）；无则空串。"""
     query = (text or "").strip()
@@ -105,7 +123,7 @@ def _weather_named_city(text: str) -> str:
     m = _WEATHER_NAMED_PLACE.search(query)
     if not m:
         return ""
-    return (m.group(1) or "").strip()[:40]
+    return clean_place_name(m.group(1) or "")[:40]
 
 
 def _weather_tool_slots(text: str, *, context: str = "") -> dict:
@@ -116,7 +134,8 @@ def _weather_tool_slots(text: str, *, context: str = "") -> dict:
     slots = {"query": query[:500], "limit": 5}
     if place:
         slots["place"] = place
-    elif loc:
+    if loc:
+        # 口述地名优先；Geo 失败时工具再用当前位置兜底（不直接回落搜索）。
         slots["location_hint"] = loc[:120]
     return slots
 
@@ -314,4 +333,17 @@ class SearchIntentRouter:
             return _chat_plan(text)
         if plan.kind == "task" and any(cap not in capabilities for cap in plan.capabilities):
             return _chat_plan(text)
+        if (plan.kind == "task" and "weather.now" in capabilities
+                and "weather.now" not in plan.capabilities
+                and set(plan.capabilities) <= {"web.search"}
+                and _LLM_WEATHER_GOAL.search(
+                    f"{plan.goal} {plan.slots.get('query', '')}")):
+            # 天气类一律优先和风（工具内失败才回落 Tavily）：意图模型挑了
+            # web.search 也改走 weather.now。
+            slots = _weather_tool_slots(text or "", context=context)
+            return json.dumps({
+                "goal": "查询天气：" + str(slots.get("query") or "")[:300],
+                "kind": "task", "slots": slots, "capabilities": ["weather.now"],
+                "reason": "天气类优先和风 weather.now（意图模型选了搜索，已改写）",
+            }, ensure_ascii=False)
         return raw

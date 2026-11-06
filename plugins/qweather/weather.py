@@ -354,7 +354,39 @@ def resolve_location_param(
     raise WeatherError("bad_response", "no place or coords")
 
 
+_PLACE_FILLER = re.compile(
+    r"^(?:现在|目前|此刻|这会儿|这会|今天|明天|后天|今晚|明晚|今早|明早|今日|明日|"
+    r"晚上|早上|上午|下午|中午|夜里|周末|请问|那|那么|你知道|知道|帮我|帮忙|给我|"
+    r"看看|查查|查一下|看一下|问一下|想问|我想知道|我想问)+")
+
+
 class QWeatherService:
+    def _lookup_with_retry(self, *, place: str, coords: str, query: str,
+                           location_hint: str) -> dict:
+        """Geo 查城市：口述地名 → 去前缀地名 → 去「区/县」后缀 → 当前位置 hint/坐标。
+
+        只有全部候选失败才抛 WeatherError（由调用方回落网页搜索）。
+        """
+        candidates: list[tuple[str, str, str, str]] = []
+        raw = (place or "").strip()
+        if raw:
+            cleaned = _PLACE_FILLER.sub("", raw)
+            for cand in (raw, cleaned, cleaned[:-1] if cleaned[-1:] in "区县" else ""):
+                if len(cand) >= 2 and (cand, "", "", "") not in candidates:
+                    candidates.append((cand, "", "", ""))
+        candidates.append(("", coords, query, location_hint))
+        if location_hint or coords:
+            candidates.append(("", coords, "", location_hint))
+        last: WeatherError | None = None
+        for p_, c_, q_, h_ in candidates:
+            try:
+                key, _mode = resolve_location_param(
+                    place=p_, coords=c_, query=q_, location_hint=h_)
+                return self.client.lookup_city(key)
+            except WeatherError as exc:
+                last = exc
+        raise last or WeatherError("bad_response", "no place or coords")
+
     def __init__(
         self,
         client: QWeatherClient,
@@ -380,10 +412,9 @@ class QWeatherService:
         if hit is not None:
             return hit
         try:
-            key, mode = resolve_location_param(
+            city = self._lookup_with_retry(
                 place=place, coords=coords, query=query,
                 location_hint=location_hint)
-            city = self.client.lookup_city(key)
             loc_id = str(city["id"])
             now = self.client.weather_now(loc_id)
             daily = self.client.weather_3d(loc_id)
