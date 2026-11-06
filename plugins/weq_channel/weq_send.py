@@ -523,11 +523,14 @@ class WeQWebSendPort:
         outcome = (((body.get("result") or {}).get("data") or {}).get("json"))
         return self._accept_outcome(outcome, peer_type="c2c")
 
-    def send_group_text(self, group_code: str, text: str) -> bool:
-        """发群文本消息（S7 灰度）。
+    def send_group_text(self, group_code: str, text: str, *,
+                        at_uid: str = "", at_uin: int | str = 0,
+                        at_name: str = "") -> bool:
+        """发群文本消息（S7 灰度）；可选前置 at 元素（被 @ 时 at 回复）。
 
         group_code 必须在构造期白名单内——群目标与 owner uid 一样属于
         宿主配置，消息内容/模型输出永远不能指定发送目标。
+        at_* 只允许宿主从来件 sender 元数据注入，不接受模型编造的目标。
         """
         group_code = str(group_code or "").strip()
         if not group_code or group_code not in self.allowed_groups:
@@ -536,11 +539,27 @@ class WeQWebSendPort:
         text = (text or "").strip()
         if not text or len(text) > MAX_TEXT_CHARS:
             return False
+        elements: list[dict] = []
+        uid = str(at_uid or "").strip()
+        try:
+            uin_i = int(str(at_uin or "0").strip() or "0")
+        except (TypeError, ValueError):
+            uin_i = 0
+        if uid or uin_i > 0:
+            at_el: dict = {"kind": "at"}
+            if uid:
+                at_el["atTargetUid"] = uid
+            if uin_i > 0:
+                at_el["atTargetUin"] = uin_i
+            label = str(at_name or "").strip() or (str(uin_i) if uin_i > 0 else uid)
+            at_el["textContent"] = f"@{label} "
+            elements.append(at_el)
+        elements.append({"kind": "text", "textContent": text})
         payload = {
             "json": {
                 "peerType": "group",
                 "targetId": group_code,
-                "elements": [{"kind": "text", "textContent": text}],
+                "elements": elements,
             }
         }
         if self.expected_account_uin:
@@ -727,16 +746,58 @@ class ConversationRoutingPort:
     - 其余（空 / owner 私聊 / 无会话信息）→ 内层 ``send``（原行为不变）。
 
     只换路由，不改配额/审批/账本语义（那些在 Outbox 层已完成）。
+
+    2026-11-05：``prime_group_at`` 让宿主在被 @ 时注入来件 sender 的 at 元数据，
+    下一次该群 ``send`` / ``send_group_text`` 会前置 at 元素（一次性消费）。
     """
 
     def __init__(self, inner, *, owner_uid: str = "") -> None:
         self._inner = inner
         self._owner_uid = str(owner_uid or "")
+        self._group_at: dict[str, dict] = {}
+
+    def prime_group_at(self, conversation: str, *, uid: str = "",
+                       uin: int | str = 0, name: str = "") -> None:
+        """宿主从来件元数据注入一次 at 目标（仅 group: 会话）。"""
+        conv = str(conversation or "")
+        if not conv.startswith("group:"):
+            return
+        uid_s = str(uid or "").strip()
+        try:
+            uin_i = int(str(uin or "0").strip() or "0")
+        except (TypeError, ValueError):
+            uin_i = 0
+        if not uid_s and uin_i <= 0:
+            return
+        self._group_at[conv] = {
+            "uid": uid_s, "uin": uin_i, "name": str(name or "").strip()[:32],
+        }
+
+    def _pop_group_at(self, conversation: str) -> dict:
+        return dict(self._group_at.pop(str(conversation or ""), None) or {})
+
+    def send_group_text(self, group_code: str, text: str, **kwargs) -> bool:
+        """透传群发；若该群有 pending at 且调用方未显式传 at_*，则合并进去。"""
+        if not hasattr(self._inner, "send_group_text"):
+            return False
+        conv = f"group:{group_code}"
+        at = self._pop_group_at(conv) if not (
+            kwargs.get("at_uid") or kwargs.get("at_uin")) else {}
+        if at:
+            kwargs.setdefault("at_uid", at.get("uid") or "")
+            kwargs.setdefault("at_uin", at.get("uin") or 0)
+            kwargs.setdefault("at_name", at.get("name") or "")
+        return bool(self._inner.send_group_text(group_code, text, **kwargs))
 
     def send(self, draft) -> bool:
         conv = str(getattr(draft, "target_conversation", "") or "")
         if conv.startswith("group:") and hasattr(self._inner, "send_group_text"):
-            return bool(self._inner.send_group_text(conv.split(":", 1)[1], draft.text))
+            at = self._pop_group_at(conv)
+            return bool(self._inner.send_group_text(
+                conv.split(":", 1)[1], draft.text,
+                at_uid=at.get("uid") or "",
+                at_uin=at.get("uin") or 0,
+                at_name=at.get("name") or ""))
         if conv.startswith("private:"):
             uid = conv.split(":", 1)[1]
             if uid and uid != self._owner_uid and hasattr(self._inner, "send_c2c"):

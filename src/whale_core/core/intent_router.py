@@ -2,14 +2,15 @@
 
 路由器只建议 capabilities，不能自行授权。
 
-策略（2026-11-05 owner 确认，同日修订）：
+策略（2026-11-05 owner 确认；2026-11-06 修订：意图改为与回复并行后台跑，
+寒暄短路默认关闭，仅 ``skip_clear_chitchat=True`` 时作为可选省调用优化）：
 - 规则命中（search / local-life / weather→weather.now 或 web.search / shell.safe）
   → 直接 task，零意图 LLM；
-- 规则未命中 → **一律交意图 LLM（kimi）判 chat/task/clarify**——「要不要
-  生成媒体/用工具」不用硬性词表当闸门（三起生产实证全是词表没覆盖的口语：
-  「找一下」「同人」「给我一个…图」，词表永远追不齐）；
-- 意图 LLM 未启用或返回非法计划 → 回落 kind=chat（闲聊回复仍走宿主
-  companion / DeepSeek 官模，不在此短路本地时钟）；
+- 规则未命中且**明显寒暄/短闲聊**：默认仍交意图 LLM（后台并行，不拖慢第一条）；
+  ``skip_clear_chitchat=True`` 时才跳过（可选省调用，WHALE_INTENT_SKIP_CHITCHAT=1）；
+- 其余模糊工具/媒体请求仍交意图 LLM（kimi）判 chat/task/clarify——不用
+  「仅 fuzzy 词表才打 LLM」旧闸门（曾漏「找一下/同人/给我一个…图」）；
+- 意图 LLM 未启用或返回非法计划 → 回落 kind=chat；
 - 授权仍走 context_resolver → authz → PluginGateway → ShellPolicy，与意图模型无关。
 """
 from __future__ import annotations
@@ -73,6 +74,10 @@ _WEATHER_HERE = re.compile(
 )
 
 
+# 意图模型自己的目标/搜索词里写明是天气 → 改走和风（规则未命中的天气问法）。
+_LLM_WEATHER_GOAL = re.compile(r"(天气|气温|预报|降雨|下雨|降水|weather|forecast)", re.IGNORECASE)
+
+
 def _location_hint_from_context(context: str) -> str:
     """从意图上下文抽出「当前位置：」行；未知则空串。"""
     for line in (context or "").splitlines():
@@ -96,6 +101,20 @@ def _weather_search_query(text: str, *, context: str = "") -> str:
     return query
 
 
+# 地名正则是贪婪的 2–12 汉字 + 区/县/市：「现在郫都区下雨了吗」会抓成
+# 「现在郫都区」，和风 Geo 必败后误回落搜索（2026-11-06 眼镜实证）。剥掉前置时间/语气词。
+_PLACE_FILLER_PREFIX = re.compile(
+    r"^(?:现在|目前|此刻|这会儿|这会|今天|明天|后天|今晚|明晚|今早|明早|今日|明日|"
+    r"晚上|早上|上午|下午|中午|夜里|周末|请问|那|那么|你知道|知道|帮我|帮忙|给我|"
+    r"看看|查查|查一下|看一下|问一下|想问|我想知道|我想问)+")
+
+
+def clean_place_name(place: str) -> str:
+    """去掉地名前的时间/语气前缀；剩余不足 2 字则视为无地名。"""
+    cleaned = _PLACE_FILLER_PREFIX.sub("", (place or "").strip())
+    return cleaned if len(cleaned) >= 2 else ""
+
+
 def _weather_named_city(text: str) -> str:
     """口述异地城市名（排除「这里/我所在」）；无则空串。"""
     query = (text or "").strip()
@@ -104,7 +123,7 @@ def _weather_named_city(text: str) -> str:
     m = _WEATHER_NAMED_PLACE.search(query)
     if not m:
         return ""
-    return (m.group(1) or "").strip()[:40]
+    return clean_place_name(m.group(1) or "")[:40]
 
 
 def _weather_tool_slots(text: str, *, context: str = "") -> dict:
@@ -115,7 +134,8 @@ def _weather_tool_slots(text: str, *, context: str = "") -> dict:
     slots = {"query": query[:500], "limit": 5}
     if place:
         slots["place"] = place
-    elif loc:
+    if loc:
+        # 口述地名优先；Geo 失败时工具再用当前位置兜底（不直接回落搜索）。
         slots["location_hint"] = loc[:120]
     return slots
 
@@ -128,10 +148,52 @@ _SHELL_EXPLICIT = re.compile(
     re.IGNORECASE,
 )
 
-# 2026-11-05 owner 决策：「要不要生成媒体/用工具」不再用硬性词表当闸门
-# （三起生产实证——「找一下」「同人」「给我一个…图」全是词表没覆盖的口语，
-# 词表永远追不齐）。非显式指令一律交给意图 LLM（kimi）判 chat/task/clarify；
-# 显式指令（搜索/天气/本地生活/shell）仍规则直达，零 LLM。
+# 显式指令（搜索/天气/本地生活/shell）规则直达，零 LLM。
+# 明显寒暄短句可跳过意图 LLM；其余模糊工具/媒体仍交 kimi（不用「仅 fuzzy
+# 才 LLM」旧闸门——曾漏「找一下/同人/给我一个…图」）。
+
+# 保守寒暄白名单：整句匹配才短路；不确定 → False → 打意图 LLM。
+_CLEAR_CHITCHAT = re.compile(
+    r"^(?:"
+    r"早|早安|早上好|早上好呀|早呀|早啊|早哦|"
+    r"晚好|晚上好|晚上好呀|晚安|晚安啦|晚安哦|"
+    r"午安|中午好|下午好|"
+    r"你好|您好|你好啊|你好呀|你好哇|您好啊|"
+    r"嗨|哈喽|嘿|哟|喂|"
+    r"在吗|在不在|在么|在嘛|有人吗|"
+    r"哈哈+|嘿嘿+|呵呵+|嗯+|哦+|噢+|喔+|啊+|唉+|唔+"
+    r"|好的|好呀|好啊|行|行吧|嗯嗯|"
+    r"拜拜|再见|回见|拜|"
+    r"谢谢|多谢|谢啦|辛苦了|"
+    r"ok|okay|hi|hello|hey|yo|sup|bye|thanks|thank\s*you"
+    r")$",
+    re.IGNORECASE,
+)
+
+# 短句里若已带工具/媒体迹象，禁止当闲聊短路（天气/搜索规则通常已先命中）。
+_CHITCHAT_VETO = re.compile(
+    r"(搜索|搜一下|搜搜|查一下|查找|找一下|翻一下|翻翻|"
+    r"天气|气温|温度|下雨|下雪|预报|空气质量|"
+    r"外卖|附近|画|生成|图片|插画|海报|视频|短片|动画|同人|壁纸|"
+    r"唱|首歌|朗读|语音|命令|终端|shell|沙箱|下载|下单|支付|转账|"
+    r"删除|安装|卸载|最新话|更新到|发个|来一张|给我一个|帮我改|执行|运行)",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_clear_chitchat(text: str) -> bool:
+    """明显寒暄/短应答才 True；不确定一律 False（交给意图 LLM）。"""
+    s = re.sub(r"@\S+", " ", text or "")
+    # 去掉空白与常见语气标点；保留汉字/字母数字。
+    s = re.sub(r"[\s\u3000]+", "", s)
+    s = re.sub(r"[。！？!?…~～，,、\.!！？：:;；'\"“”‘’（）()【】\[\]~]+", "", s)
+    # 粗滤常见 emoji / 符号（不影响「哈哈」等）
+    s = re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]+", "", s)
+    if not s or len(s) > 16:
+        return False
+    if _CHITCHAT_VETO.search(s):
+        return False
+    return bool(_CLEAR_CHITCHAT.match(s))
 
 
 class ReplyModel(Protocol):
@@ -147,8 +209,11 @@ class SearchIntentRouter:
     """规则优先；可选模型只处理模糊工具意图，不能批准动作。"""
 
     def __init__(self, *, model: ReplyModel | None = None, enable_llm: bool = False,
-                 tools: ToolRegistry | None = None):
+                 tools: ToolRegistry | None = None, skip_clear_chitchat: bool = False):
         self.tools = tools
+        # 2026-11-06：意图全量后台跑（不再由寒暄白名单决定跑不跑意图）。
+        # skip_clear_chitchat=True 仅作可选的省调用优化（不影响第一条速度）。
+        self.skip_clear_chitchat = skip_clear_chitchat
         self.model = model
         self.enable_llm = enable_llm and model is not None
 
@@ -212,8 +277,10 @@ class SearchIntentRouter:
                 "capabilities": ["shell.safe"],
                 "reason": "用户明确要求终端/沙箱执行",
             }, ensure_ascii=False)
-        # 2026-11-05 owner 决策：媒体/工具意图由意图 LLM（kimi）全权判断，
-        # 不用硬性词表当闸门。LLM 未启用 → 诚实回落 chat。
+        # 明显寒暄零意图 LLM；其余模糊工具/媒体仍交 kimi。
+        # LLM 未启用 → 诚实回落 chat。
+        if self.skip_clear_chitchat and _looks_like_clear_chitchat(text or ""):
+            return _chat_plan(text)
         if not self.enable_llm:
             return _chat_plan(text)
         specs = self.tools.specs() if self.tools is not None else []
@@ -235,7 +302,7 @@ class SearchIntentRouter:
             matching = [s for s in specs if s.capability == capability]
             detail = hints.get(capability, "参数须符合工具契约")
             if matching:
-                detail += "；" + matching[0].description[:300]
+                detail += "；" + matching[0].description[:120]
             catalog.append(f"{capability}（{detail}）")
         prompt = (
             "仅返回一个 JSON 对象，不要代码围栏。你负责建议意图，不能授予权限。"
@@ -250,13 +317,33 @@ class SearchIntentRouter:
             "确实无法推断才 clarify，且 clarification_question 只用一句口语短问。"
         )
         if context:
-            prompt += f"\n上下文（记忆与近期对话，供推断缺省值）：\n{context[:1500]}"
-        prompt += f"\n用户原话：{text[:1500]}"
+            prompt += f"\n上下文（记忆与近期对话，供推断缺省值）：\n{context[:900]}"
+        prompt += f"\n用户原话：{text[:1000]}"
         raw = self.model.reply(prompt, persona="", memories=(), history=())
+        if not (raw or "").strip():
+            # AgentScope kimi-k3 长提示偶发空 content（finish=length）：视为不需要工具。
+            print(f"[intent] empty model output → chat (prompt_chars={len(prompt)})",
+                  flush=True)
+            return _chat_plan(text)
         try:
             plan = plan_from_model_text(raw)
         except IntentPlanError:
+            print(f"[intent] unparsable model output → chat (chars={len(raw or '')})",
+                  flush=True)
             return _chat_plan(text)
         if plan.kind == "task" and any(cap not in capabilities for cap in plan.capabilities):
             return _chat_plan(text)
+        if (plan.kind == "task" and "weather.now" in capabilities
+                and "weather.now" not in plan.capabilities
+                and set(plan.capabilities) <= {"web.search"}
+                and _LLM_WEATHER_GOAL.search(
+                    f"{plan.goal} {plan.slots.get('query', '')}")):
+            # 天气类一律优先和风（工具内失败才回落 Tavily）：意图模型挑了
+            # web.search 也改走 weather.now。
+            slots = _weather_tool_slots(text or "", context=context)
+            return json.dumps({
+                "goal": "查询天气：" + str(slots.get("query") or "")[:300],
+                "kind": "task", "slots": slots, "capabilities": ["weather.now"],
+                "reason": "天气类优先和风 weather.now（意图模型选了搜索，已改写）",
+            }, ensure_ascii=False)
         return raw

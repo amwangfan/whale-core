@@ -70,6 +70,28 @@ def append_turn(
         store.put(_key(cid), history[-(MAX_HISTORY_TURNS * 2):])
 
 
+def append_assistant_followup(
+    store: MemoryStore,
+    conversation_id: str,
+    user_text: str,
+    followup_text: str,
+) -> None:
+    """并行链路第二条：并入最近一轮（同一用户原话）的助手消息；找不到则新追加一轮。"""
+    cid = (conversation_id or "").strip()
+    if not cid or not (followup_text or "").strip():
+        return
+    with conversation_lock(store, cid):
+        history = load_history(store, cid)
+        for i in range(len(history) - 1, 0, -1):
+            if (history[i]["role"] == "assistant" and history[i - 1]["role"] == "user"
+                    and history[i - 1]["content"] == (user_text or "")[:MAX_CONTENT_CHARS]):
+                merged = (history[i]["content"] + "\n" + followup_text).strip()
+                history[i] = {"role": "assistant", "content": merged[:MAX_CONTENT_CHARS]}
+                store.put(_key(cid), history[-(MAX_HISTORY_TURNS * 2):])
+                return
+    append_turn(store, cid, user_text, followup_text)
+
+
 def clear_history(store: MemoryStore, conversation_id: str) -> None:
     """清空某会话历史（用户数据删除语义的一部分）。"""
     cid = (conversation_id or "").strip()

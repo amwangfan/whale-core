@@ -184,6 +184,14 @@ class QqInboundWorkflow:
         except Exception:
             pass
 
+    def _parallel_enabled(self) -> bool:
+        """并行链路开关（默认开；WHALE_PARALLEL_REPLY=0 回到先意图后回复）。"""
+        import os
+        flag = getattr(self, "_parallel_reply", None)
+        if flag is None:
+            flag = (os.environ.get("WHALE_PARALLEL_REPLY", "1") or "1").strip() != "0"
+        return bool(flag) and hasattr(self.orchestrator, "handle_envelope_parallel")
+
     def _on_async_complete(self, event: OwnerEvent, result) -> None:
         """两段式慢任务的完成回调：审核通过后交宿主补发真实结果。
 
@@ -333,7 +341,12 @@ class QqInboundWorkflow:
                     conversation_id=event.conversation, text=text, source="qq:owner",
                     channel="qq", owner_id=event.owner_id, images=images,
                     sender_id=event.sender_id)
-                if self._completion_sender is not None:
+                if self._completion_sender is not None and self._parallel_enabled():
+                    # 2026-11-06：DS 第一条秒回；意图后台判定，需要工具时补发第二条。
+                    result = self.orchestrator.handle_envelope_parallel(
+                        envelope,
+                        on_followup=lambda r, ev=event: self._on_async_complete(ev, r))
+                elif self._completion_sender is not None:
                     result = self.orchestrator.handle_envelope_async(
                         envelope,
                         on_complete=lambda r, ev=event: self._on_async_complete(ev, r))
@@ -681,7 +694,11 @@ class QqInboundWorkflow:
             channel=channel, sender_id=sender, images=images)
         # 2026-11-01 修复：陌生人/群成员路径同样走两段式——慢任务（生图实测
         # 60-180s）先 ack 后补发；此前同步路径 60s 即 tool-timeout 全灭。
-        if self._completion_sender is not None:
+        if self._completion_sender is not None and self._parallel_enabled():
+            result = self.orchestrator.handle_envelope_parallel(
+                envelope,
+                on_followup=lambda r, ev=event: self._on_async_complete(ev, r))
+        elif self._completion_sender is not None:
             result = self.orchestrator.handle_envelope_async(
                 envelope,
                 on_complete=lambda r, ev=event: self._on_async_complete(ev, r))

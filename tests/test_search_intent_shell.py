@@ -1,7 +1,7 @@
-"""Explicit fast paths skip intent LLM; everything else is judged by it.
+"""Explicit fast paths skip intent LLM; everything else (incl. chitchat) uses it.
 
-2026-11-05 owner 决策：媒体/工具意图不用硬性词表当闸门，非显式指令
-一律交意图 LLM（kimi）判 chat/task/clarify。
+2026-11-06 修订：意图与回复并行后台跑，寒暄默认也交 kimi；寒暄短路仅作
+可选省调用（skip_clear_chitchat=True）。
 """
 from __future__ import annotations
 import json
@@ -64,15 +64,40 @@ def test_no_shell_capability_stays_chat():
     assert plan["kind"] == "chat"
 
 
-def test_plain_chat_also_consults_intent_llm():
-    """2026-11-05 owner 决策：媒体/工具意图由 kimi 全权判断，不用硬性词表
-    当闸门——纯闲聊也过一遍意图 LLM（LLM 自会判 chat）。"""
-    chat_echo = _EchoChat()
-    router = SearchIntentRouter(model=chat_echo, enable_llm=True, tools=_Tools())
-    for text in ("你好啊", "现在几点", "今天心情怎么样", "聊聊天"):
+def test_clear_chitchat_reaches_intent_llm_by_default():
+    """2026-11-06：意图全量后台跑——寒暄默认也交 kimi 判定（不再硬闸）。"""
+    echo = _EchoChat()
+    router = SearchIntentRouter(model=echo, enable_llm=True, tools=_Tools())
+    for text in ("晚上好", "你好"):
+        assert json.loads(router.plan(text))["kind"] == "chat"
+    assert echo.calls == 2
+
+
+def test_empty_intent_output_is_safe_chat():
+    """kimi-k3 长提示空 content（finish=length）→ 视为不需要工具。"""
+    class _Empty:
+        def reply(self, text, *, persona="", memories=(), history=()):
+            return ""
+    router = SearchIntentRouter(model=_Empty(), enable_llm=True, tools=_Tools())
+    assert json.loads(router.plan("帮我看看那个东西"))["kind"] == "chat"
+
+
+def test_clear_chitchat_skip_is_optional_optimization():
+    """skip_clear_chitchat=True（WHALE_INTENT_SKIP_CHITCHAT=1）：明显寒暄零意图 LLM。"""
+    router = SearchIntentRouter(model=_Boom(), enable_llm=True, tools=_Tools(),
+                                skip_clear_chitchat=True)
+    for text in ("晚上好", "早", "你好", "你好啊", "在吗", "哈哈", "嗯", "晚安",
+                 "hi", "Hello!", "早上好呀"):
         plan = json.loads(router.plan(text))
         assert plan["kind"] == "chat", text
-    assert chat_echo.calls == 4  # 每句都咨询了意图 LLM
+
+    chat_echo = _EchoChat()
+    router = SearchIntentRouter(model=chat_echo, enable_llm=True, tools=_Tools(),
+                                skip_clear_chitchat=True)
+    for text in ("现在几点", "今天心情怎么样", "聊聊天"):
+        plan = json.loads(router.plan(text))
+        assert plan["kind"] == "chat", text
+    assert chat_echo.calls == 3
 
 
 def test_llm_disabled_or_bad_plan_falls_back_chat():
@@ -85,7 +110,7 @@ def test_llm_disabled_or_bad_plan_falls_back_chat():
             return "not a json plan"
 
     router = SearchIntentRouter(model=_Garbage(), enable_llm=True, tools=_Tools())
-    assert json.loads(router.plan("你好啊"))["kind"] == "chat"
+    assert json.loads(router.plan("今天心情怎么样"))["kind"] == "chat"
 
 
 def test_explicit_search_skips_intent_llm():
@@ -242,3 +267,39 @@ def test_honesty_red_line_covers_media_claims():
     assert "我搜过了" in HOST_CONTRACT
     assert "发你了" in HOST_CONTRACT
     assert "这就安排" in HOST_CONTRACT
+
+
+class _WeatherTools:
+    def specs(self):
+        return [ToolSpec(name="weather_now", capability="weather.now", description="和风"),
+                ToolSpec(name="search_web", capability="web.search", description="搜索")]
+
+
+def test_place_filler_prefix_stripped_for_qweather():
+    """2026-11-06 眼镜实证：「现在郫都区下雨了吗」place 抓成「现在郫都区」→ 和风 Geo 失败回落搜索。"""
+    router = SearchIntentRouter(tools=_WeatherTools(), enable_llm=False)
+    plan = json.loads(router.plan("现在郫都区下雨了吗？", context="当前位置：成都郫都"))
+    assert plan["capabilities"] == ["weather.now"]
+    assert plan["slots"]["place"] == "郫都区"
+    assert plan["slots"]["location_hint"] == "成都郫都"
+
+
+def test_llm_weather_via_search_rewritten_to_qweather():
+    """规则没认出、kimi 自己判成「搜天气」时也改走和风。"""
+    class _SearchPlan:
+        def reply(self, text, *, persona="", memories=(), history=()):
+            return json.dumps({"goal": "查成都明早天气", "kind": "task",
+                               "capabilities": ["web.search"],
+                               "slots": {"query": "成都 明早 天气"}}, ensure_ascii=False)
+    router = SearchIntentRouter(model=_SearchPlan(), enable_llm=True, tools=_WeatherTools())
+    plan = json.loads(router.plan("明早出门用不用带伞", context="当前位置：成都郫都"))
+    assert plan["capabilities"] == ["weather.now"]
+    assert plan["slots"]["location_hint"] == "成都郫都"
+
+    class _News:
+        def reply(self, text, *, persona="", memories=(), history=()):
+            return json.dumps({"goal": "搜成都活动", "kind": "task",
+                               "capabilities": ["web.search"],
+                               "slots": {"query": "成都 今天 活动"}}, ensure_ascii=False)
+    router = SearchIntentRouter(model=_News(), enable_llm=True, tools=_WeatherTools())
+    assert json.loads(router.plan("今天成都有什么活动"))["capabilities"] == ["web.search"]
