@@ -770,9 +770,8 @@ def cmd_run(args) -> int:
         return str(store.get("persona:active_card") or "")
 
     # 意图模型（可选，默认关）：QQ_INTENT_MODEL=<模型 id> 开启；规则优先（显式
-    # 搜索/本地生活/shell.safe 本地识别零额外调用）。enable_llm=True 时路由器仍会
-    # 对普通闲聊跳过意图 LLM（kind=chat），仅模糊写/媒体等 toolish 才打 kimi；
-    # 闲聊回复走 companion/DeepSeek 官模。实测选型见 gap-analysis。
+    # 搜索/本地生活/shell.safe 本地识别零额外调用）。2026-11-06 起与回复并行：
+    # DeepSeek 第一条秒回，kimi 后台判 chat/task，需要工具才补发第二条。实测选型见 gap-analysis。
     # 2026-11-01 owner 决策「不走代理」：QQ_INTENT_BASE_URL/QQ_INTENT_API_KEY
     # 可独立于主聊天端点（不同供应商/不同 key 时必备）；缺省回落 DEEPSEEK_*。
     # Shell 审操模型：WHALE_SHELL_MODEL 优先（AgentScope 上的 kimi-k3 等），
@@ -784,10 +783,13 @@ def cmd_run(args) -> int:
         from whale_core.core.deepseek import DeepSeekCompanion  # build_brain 同款局部导入
         from whale_core.core.intent_router import SearchIntentRouter
         from whale_core.core.runtime import ConversationOrchestrator, ToolRegistry
+        from whale_core.core.runtime.turn_orchestration import (
+            apply_parallel_env, intent_brain_max_tokens, intent_skip_chitchat)
         intent_brain = DeepSeekCompanion(
             model=intent_model_id,
             base_url=os.environ.get("QQ_INTENT_BASE_URL") or None,
-            api_key=os.environ.get("QQ_INTENT_API_KEY") or None)
+            api_key=os.environ.get("QQ_INTENT_API_KEY") or None,
+            max_tokens=intent_brain_max_tokens(os.environ))
         globals()["_intent_brain_ref"] = intent_brain  # 群定向兜底判定器用
         fallback_search = None
         if (os.environ.get("TAVILY_API_KEY") or os.environ.get("BRAVE_API_KEY")
@@ -819,9 +821,12 @@ def cmd_run(args) -> int:
             tool_note += "；和风未挂载（缺 QWEATHER_API_KEY/HOST，天气回落搜索）"
         workflow.orchestrator = ConversationOrchestrator(
             store, workflow.companion,
-            intent_model=SearchIntentRouter(model=intent_brain, enable_llm=True, tools=tools),
+            intent_model=SearchIntentRouter(
+                model=intent_brain, enable_llm=True, tools=tools,
+                skip_clear_chitchat=intent_skip_chitchat(os.environ)),
             tools=tools, context_resolver=context_resolver,
             grant_gate=_grant_gate)
+        apply_parallel_env(workflow.orchestrator, os.environ)
         print(f"[意图] 模型={intent_model_id}（显式指令规则直达零LLM；其余一律由意图模型判断 chat/task；{tool_note}）")
 
     # 安全审核模型（可选，默认关）：QQ_SAFETY_MODEL=<模型 id> 开启——

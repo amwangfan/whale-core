@@ -1,11 +1,16 @@
 """眼镜/手机轻量 API（2026-11-03 交接单 handoff-whale-core-glasses-chat.md）。
 
-两个端点：
+端点：
 
 - ``POST /v1/chat``：眼镜/手机文字对话。``companion``（默认）走
   WhaleCompanion（人格 + 记忆召回 + 情节回写），与 QQ/电话共享同一份
   sqlite 记忆库——眼镜上聊的换个端能接上；``quick`` 走轻量模型
   （WHALE_QUICK_* / QQ_INTENT_*），**不走记忆库、不写长期记忆**。
+- ``POST /v1/chat/followup``（2026-11-06）：并行链路第二条。``/v1/chat`` 第一条
+  由回复模型立刻给出，意图模型后台判定；需要工具时第二条进会话收件板。
+  请求 ``followup="poll"`` 的新客户端用本端点长轮询取；旧客户端（不带该字段）
+  对规则可识别的工具类（天气/显式搜索等）同步等待 ≤WHALE_GLASSES_FOLLOWUP_SYNC_MS
+  后合并返回（``replies`` 分列两条），其余立即返回第一条。
 - ``POST /v1/qq/reply``：QQ 快捷回复——把用户口述的文本发给**已配置的
   绑定对端**（目标不从请求推导，防误发）；走 WeQ 发送链与既有风控
   （被动额度/静默时段豁免口径与 runner 一致：主人当面 dictation 属被动延续）。
@@ -201,6 +206,67 @@ def install_request_location_intent_wrapper(orch, request_location: dict) -> Non
     orch._glasses_loc_wrapped = True  # type: ignore[attr-defined]
 
 
+class FollowupBoard:
+    """并行链路第二条的会话级收件板（眼镜 /v1/chat 非流式，第二条靠轮询/合并取）。
+
+    每轮 open 一个 turnId；后台意图/工具/跟进结束时 settle：
+    ``ready``（有第二条）或 ``none``（不需要工具，本轮结束）。内存态、有上限。
+    """
+
+    def __init__(self, cap: int = 128):
+        self._cap = cap
+        self._lock = threading.Lock()
+        self._items: dict = {}
+
+    def open(self, session_key: str) -> str:
+        turn_id = uuid.uuid4().hex[:16]
+        with self._lock:
+            self._items[turn_id] = {"session": session_key, "status": "pending",
+                                    "reply": "", "timing": {},
+                                    "event": threading.Event()}
+            while len(self._items) > self._cap:
+                self._items.pop(next(iter(self._items)))
+        return turn_id
+
+    def settle(self, turn_id: str, status: str, reply: str = "",
+               timing: dict | None = None) -> None:
+        with self._lock:
+            item = self._items.get(turn_id)
+            if item is None:
+                return
+            item.update(status=status, reply=reply or "", timing=dict(timing or {}))
+            item["event"].set()
+
+    def wait(self, turn_id: str, timeout_s: float) -> dict | None:
+        with self._lock:
+            item = self._items.get(turn_id)
+        if item is None:
+            return None
+        if timeout_s > 0:
+            item["event"].wait(timeout_s)
+        with self._lock:
+            return {k: v for k, v in item.items() if k != "event"}
+
+    def latest(self, session_key: str) -> str:
+        with self._lock:
+            for turn_id in reversed(list(self._items)):
+                if self._items[turn_id]["session"] == session_key:
+                    return turn_id
+        return ""
+
+
+def _rule_plan_is_task(orch, text: str, location: str) -> bool:
+    """零 LLM 规则探针（天气/显式搜索/附近/显式 shell）：仅用于旧客户端是否同步等第二条。"""
+    try:
+        from whale_core.core.intent_router import SearchIntentRouter
+        tools = getattr(getattr(orch, "intent_model", None), "tools", None)
+        probe = SearchIntentRouter(model=None, enable_llm=False, tools=tools)
+        ctx = f"当前位置：{location}" if location else ""
+        return json.loads(probe.plan(text or "", context=ctx)).get("kind") == "task"
+    except Exception:
+        return False
+
+
 def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
                     send_port_factory=None):
     """装配委派对象（测试注入假件；生产用真实件）。
@@ -267,6 +333,8 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
         from whale_core.core.intent_router import SearchIntentRouter
         from whale_core.core.runtime import (
             ConversationOrchestrator, ToolRegistry, runtime_shell_grant_verifier)
+        from whale_core.core.runtime.turn_orchestration import (
+            apply_parallel_env, intent_brain_max_tokens, intent_skip_chitchat)
         from whale_core.plugins.registry import PluginRegistry
         from whale_core.plugins.gateway import PluginGateway
         from whale_core.plugins.policy import PluginActionPolicy
@@ -314,8 +382,8 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
         )
         # Shell 审操 / 模糊写意图：优先 WHALE_SHELL_MODEL，其次眼镜意图，再次 QQ 意图。
         # 端点与 Key 一律沿用 QQ_INTENT_*（AgentScope），只换模型名环境变量。
-        # SearchIntentRouter：规则未命中的闲聊默认 kind=chat 跳过意图 LLM；
-        # 仅模糊写/媒体等 toolish 才会打 kimi；显式 search/shell 规则零 LLM。
+        # SearchIntentRouter：显式 search/天气/shell 规则零 LLM；其余（含寒暄）
+        # 交 kimi 判定——并行链路下在后台跑，不拖慢第一条。
         intent_model_id = (
             (env.get("WHALE_SHELL_MODEL")
              or env.get("WHALE_GLASSES_INTENT_MODEL")
@@ -330,14 +398,39 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
                 base_url=(env.get("WHALE_GLASSES_INTENT_BASE_URL")
                           or env.get("QQ_INTENT_BASE_URL") or "").strip() or None,
                 api_key=(env.get("WHALE_GLASSES_INTENT_API_KEY")
-                         or env.get("QQ_INTENT_API_KEY") or "").strip() or None)
+                         or env.get("QQ_INTENT_API_KEY") or "").strip() or None,
+                max_tokens=intent_brain_max_tokens(env))
         intent = SearchIntentRouter(
-            model=intent_brain, enable_llm=enable_llm, tools=tools)
-        return ConversationOrchestrator(
+            model=intent_brain, enable_llm=enable_llm, tools=tools,
+            skip_clear_chitchat=intent_skip_chitchat(env))
+        orch = ConversationOrchestrator(
             store, companion, intent_model=intent, tools=tools, gateway=gateway)
+        apply_parallel_env(orch, env)
+        return orch
+
+    followups = FollowupBoard()
+    parallel_on = (env.get("WHALE_PARALLEL_REPLY", "1") or "1").strip() != "0"
+    legacy_policy = (env.get("WHALE_GLASSES_LEGACY_FOLLOWUP") or "rules").strip().lower()
+    try:
+        legacy_wait_s = max(0.0, float(env.get("WHALE_GLASSES_FOLLOWUP_SYNC_MS") or 15000) / 1000)
+    except ValueError:
+        legacy_wait_s = 15.0
+
+    def followup_poll(conversation_id: str, turn_id: str = "",
+                      wait_ms: int = 0) -> dict:
+        turn_id = turn_id or followups.latest(conversation_id)
+        item = followups.wait(turn_id, max(0, min(int(wait_ms or 0), 25000)) / 1000) \
+            if turn_id else None
+        if item is None or item.get("session") != conversation_id:
+            return {"status": "unknown", "turnId": turn_id or None}
+        out = {"status": item["status"], "turnId": turn_id}
+        if item["status"] == "ready":
+            out["reply"] = item["reply"]
+        out.update(item.get("timing") or {})
+        return out
 
     def companion_chat(text: str, conversation_id: str,
-                       location: str = "") -> tuple[str, dict]:
+                       location: str = "", followup_mode: str = "") -> tuple[str, dict]:
         """返回 (reply, timing)；timing 含 intentMs/toolMs/replyMs/totalMs。"""
         from whale_core.core.runtime import InputEnvelope
         import time as _time
@@ -361,6 +454,9 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
         except Exception as exc:
             print(f"[glasses] do_request short-circuit failed: {type(exc).__name__}",
                   flush=True)
+        first = None
+        turn_id = ""
+        wait = False
         with _orch_lock:
             if _cached["companion"] is None:
                 companion = _make_companion()
@@ -374,16 +470,24 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
                 brain.default_location = location or None
             except Exception:
                 pass
-            if orch is not None:
-                # 把位置摘要塞进意图上下文：SearchIntentRouter 本地生活规则会读
-                # 「当前位置：」行；LLM 规划也能把地点当缺省。
-                # 包装只安装一次；每轮只更新当前请求位置，避免层层嵌套。
-                _request_location["value"] = location or ""
-                install_request_location_intent_wrapper(orch, _request_location)
-                result = orch.handle_envelope(InputEnvelope(
-                    conversation_id=conversation_id, text=text,
-                    source="glasses:phone", channel="glasses",
-                    owner_id=cfg.owner_uin or cfg.owner_uid))
+            if orch is None:
+                # 无搜索 provider：退回纯陪伴（仍注入位置到 system）。
+                reply = companion.chat(
+                    text, conversation_id=conversation_id, location=location or None)
+                total = int((_time.perf_counter() - t_all) * 1000)
+                return reply, {"intentMs": 0, "toolMs": 0, "replyMs": total,
+                               "totalMs": total}
+            # 把位置摘要塞进意图上下文：SearchIntentRouter 本地生活规则会读
+            # 「当前位置：」行；LLM 规划也能把地点当缺省。
+            # 包装只安装一次；每轮只更新当前请求位置，避免层层嵌套。
+            _request_location["value"] = location or ""
+            install_request_location_intent_wrapper(orch, _request_location)
+            envelope = InputEnvelope(
+                conversation_id=conversation_id, text=text,
+                source="glasses:phone", channel="glasses",
+                owner_id=cfg.owner_uin or cfg.owner_uid)
+            if not (parallel_on and hasattr(orch, "handle_envelope_parallel")):
+                result = orch.handle_envelope(envelope)
                 timing = {
                     "intentMs": int(getattr(result, "intent_ms", 0) or 0),
                     "toolMs": int(getattr(result, "tool_ms", 0) or 0),
@@ -391,11 +495,39 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
                     "totalMs": int((_time.perf_counter() - t_all) * 1000),
                 }
                 return result.reply, timing
-            # 无搜索 provider：退回纯陪伴（仍注入位置到 system）。
-            reply = companion.chat(
-                text, conversation_id=conversation_id, location=location or None)
-            total = int((_time.perf_counter() - t_all) * 1000)
-            return reply, {"intentMs": 0, "toolMs": 0, "replyMs": total, "totalMs": total}
+            # 2026-11-06 并行链路：DS 第一条不等意图；Kimi 后台判定，
+            # 需要工具时第二条进 FollowupBoard（轮询取 / 旧客户端同步合并）。
+            turn_id = followups.open(conversation_id)
+
+            def _settled(route, out, _tid=turn_id):
+                if route == "task" and out is not None and (out.reply or "").strip():
+                    followups.settle(_tid, "ready", reply=out.reply, timing={
+                        "intentMs": int(out.intent_ms or 0),
+                        "toolMs": int(out.tool_ms or 0),
+                        "followupMs": int(out.reply_ms or 0)})
+                else:
+                    followups.settle(_tid, "none")
+
+            first = orch.handle_envelope_parallel(envelope, on_settled=_settled)
+            wait = (followup_mode != "poll" and (
+                legacy_policy == "intent"
+                or (legacy_policy == "rules"
+                    and _rule_plan_is_task(orch, text, location))))
+        # 锁外等待第二条：不阻塞下一轮请求进入。
+        timing = {"intentMs": 0, "toolMs": 0,
+                  "replyMs": int(first.reply_ms or 0), "followupMs": 0}
+        reply = first.reply
+        item = followups.wait(turn_id, legacy_wait_s if wait else 0) or {}
+        status = item.get("status", "pending")
+        merged = bool(wait and status == "ready" and (item.get("reply") or "").strip())
+        if merged:
+            # 旧客户端兼容：同步等到第二条后合并返回（replies 分开给出）。
+            reply = ((reply or "").rstrip() + "\n" + item["reply"].strip()).strip()
+            timing["replies"] = [first.reply, item["reply"]]
+        timing.update(item.get("timing") or {})
+        timing["followup"] = {"turnId": turn_id, "status": status, "merged": merged}
+        timing["totalMs"] = int((_time.perf_counter() - t_all) * 1000)
+        return reply, timing
 
     def quick_chat(text: str, location: str = "") -> tuple[str, dict]:
         import time as _time
@@ -485,6 +617,7 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
         return load_prefs(store, base)
 
     return {"companion_chat": companion_chat, "quick_chat": quick_chat,
+            "followup_poll": followup_poll,
             "qq_send": qq_send, "deliver_result": deliver_result,
             "prefs": prefs, "store": store}
 
@@ -532,7 +665,7 @@ def make_handler(delegates):
         def do_GET(self):
             if self.path == "/v1/health":
                 _json_response(self, 200, {"ok": True,
-                                           "capabilities": ["/v1/chat", "/v1/qq/reply", "/v1/result/deliver"]})
+                                           "capabilities": ["/v1/chat", "/v1/chat/followup", "/v1/qq/reply", "/v1/result/deliver"]})
                 return
             if self.path == "/openapi.json":
                 _json_response(self, 200, _openapi())
@@ -547,6 +680,9 @@ def make_handler(delegates):
                 return
             if self.path == "/v1/chat":
                 self._chat()
+                return
+            if self.path == "/v1/chat/followup":
+                self._chat_followup()
                 return
             if self.path == "/v1/qq/reply":
                 self._qq_reply()
@@ -580,9 +716,13 @@ def make_handler(delegates):
                 if mode == "quick":
                     reply, timing = delegates["quick_chat"](text, location=location)
                 else:
+                    extra = {}
+                    if body.get("followup") in ("poll", True, 1, "1", "true", "yes"):
+                        # 新客户端：第一条立即返回，第二条走 /v1/chat/followup 轮询。
+                        extra["followup_mode"] = "poll"
                     reply, timing = delegates["companion_chat"](
                         text, conversation_id=f"glasses:{session_id}",
-                        location=location)
+                        location=location, **extra)
                 latency_ms = int(timing.get("totalMs") or 0)
                 if not (reply or "").strip():
                     _json_response(self, 200, {"reply": None, "sessionId": session_id,
@@ -599,6 +739,13 @@ def make_handler(delegates):
                 payload["intentMs"] = int(timing.get("intentMs") or 0)
                 payload["toolMs"] = int(timing.get("toolMs") or 0)
                 payload["replyMs"] = int(timing.get("replyMs") or 0)
+                if "followup" in timing:
+                    # 并行链路：第二条状态（pending=后台还在判/查；none=无第二条；
+                    # ready+merged=旧客户端已合并进 reply）。
+                    payload["followup"] = timing["followup"]
+                    payload["followupMs"] = int(timing.get("followupMs") or 0)
+                    if timing.get("replies"):
+                        payload["replies"] = list(timing["replies"])
                 # 眼镜/手机「做完再汇总投递」：deliverResult=true 时走统一路由。
                 if body.get("deliverResult") in (True, 1, "1", "true", "yes"):
                     try:
@@ -612,6 +759,8 @@ def make_handler(delegates):
                 print(f"[glasses] mode={mode} session={session_id[:8]} "
                       f"latencyMs={latency_ms} intentMs={payload['intentMs']} "
                       f"toolMs={payload['toolMs']} replyMs={payload['replyMs']} "
+                      f"followupMs={payload.get('followupMs', 0)} "
+                      f"followup={(payload.get('followup') or {}).get('status', '-')} "
                       f"loc={bool(location)} "
                       f"chars_in={len(text)} chars_out={len(reply or '')}"
                       f"{' deliver=' + str(payload.get('delivery', {}).get('ok')) if 'delivery' in payload else ''}",
@@ -622,6 +771,29 @@ def make_handler(delegates):
                 _json_response(self, 200, {"reply": None, "sessionId": session_id,
                                            "mode": mode,
                                            "error": f"{type(exc).__name__}"})
+
+        def _chat_followup(self):
+            """并行链路第二条：``{sessionId, turnId?, waitMs?}`` → status/reply（长轮询≤25s）。"""
+            body = self._read_json()
+            if body is None:
+                _json_response(self, 400, {"error": "invalid json body"})
+                return
+            session_id = str(body.get("sessionId") or "").strip()[:64]
+            if not session_id:
+                _json_response(self, 400, {"error": "sessionId required"})
+                return
+            poll = delegates.get("followup_poll")
+            if poll is None:
+                _json_response(self, 200, {"status": "unsupported"})
+                return
+            try:
+                wait_ms = int(body.get("waitMs") or 0)
+            except (TypeError, ValueError):
+                wait_ms = 0
+            out = poll(f"glasses:{session_id}", str(body.get("turnId") or "")[:32],
+                       wait_ms=wait_ms)
+            out["sessionId"] = session_id
+            _json_response(self, 200, out)
 
         def _qq_reply(self):
             body = self._read_json()
@@ -725,10 +897,16 @@ def _openapi() -> dict:
         "openapi": "3.0.0",
         "info": {"title": "whale-glasses", "version": "1.0.0"},
         "paths": {
-            "/v1/chat": {"post": {"summary": "眼镜/手机文字对话",
+            "/v1/chat": {"post": {"summary": "眼镜/手机文字对话（第一条秒回；"
+                                             "body.followup=\"poll\" 时第二条走 /v1/chat/followup）",
                                   "parameters": [],
                                   "responses": {"200": {"description": "reply"}},
                                   "security": [{"bearerAuth": []}]}},
+            "/v1/chat/followup": {"post": {
+                "summary": "取并行链路第二条：{sessionId, turnId?, waitMs≤25000} → "
+                           "status pending|ready|none|unknown, reply",
+                "responses": {"200": {"description": "followup"}},
+                "security": [{"bearerAuth": []}]}},
             "/v1/qq/reply": {"post": {"summary": "QQ 快捷回复（固定绑定对端）",
                                       "responses": {"200": {"description": "ok"}},
                                       "security": [{"bearerAuth": []}]}},
@@ -821,7 +999,7 @@ def main(argv=None) -> int:
         print(f"[proactive] not started: {type(exc).__name__}", flush=True)
 
     print(f"whale-glasses-api 监听 http://{args.host}:{args.port}"
-          f"（/v1/chat /v1/qq/reply /v1/result/deliver /v1/health /openapi.json）")
+          f"（/v1/chat /v1/chat/followup /v1/qq/reply /v1/result/deliver /v1/health /openapi.json）")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

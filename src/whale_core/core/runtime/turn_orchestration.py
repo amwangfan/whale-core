@@ -17,6 +17,44 @@ from whale_core.core.runtime.envelope import InputEnvelope, TurnResult, _Decisio
 from whale_core.memory.history import append_turn, conversation_lock
 
 
+#: 第一条回复的中性知会（实时信息后台补；不编造）。2026-11-06 N100 实测对比
+#: 加/不加：不加时「天气怎么样」第一条会说「看不到实时天气、你自己看窗外」，
+#: 与随后补来的和风数据自相矛盾；加这句后第一条自然说「还没查、去看看」，
+#: 「晚上好」「今天累了」等闲聊不受影响。WHALE_FIRST_REPLY_NOTE 可覆盖（"off" 关闭）。
+DEFAULT_FIRST_REPLY_NOTE = (
+    "实时信息（天气、新闻、网页等）这一轮还没查，后台需要时会稍后补上；"
+    "如果这句确实要查，可以先自然说一声在找，别编具体数据。普通聊天照常回。")
+
+
+def apply_parallel_env(orch, env) -> None:
+    """从环境变量配置并行链路（第一条知会 / 意图后台超时）。"""
+    raw = (env.get("WHALE_FIRST_REPLY_NOTE") if env is not None else None)
+    if raw is None:
+        note = DEFAULT_FIRST_REPLY_NOTE
+    else:
+        note = "" if raw.strip().lower() in ("", "off", "0", "none") else raw.strip()
+    orch.FIRST_REPLY_NOTE = note
+    try:
+        timeout = float((env or {}).get("WHALE_INTENT_BG_TIMEOUT_S") or 30)
+        if timeout > 0:
+            orch.PARALLEL_INTENT_TIMEOUT_S = timeout
+    except (TypeError, ValueError):
+        pass
+
+
+def intent_brain_max_tokens(env) -> int | None:
+    """意图脑输出上限（AgentScope kimi-k3 推理吃预算 → 空 content）；0 = 不传。"""
+    try:
+        value = int((env or {}).get("WHALE_INTENT_MAX_TOKENS") or 4096)
+    except (TypeError, ValueError):
+        value = 4096
+    return value if value > 0 else None
+
+
+def intent_skip_chitchat(env) -> bool:
+    return str((env or {}).get("WHALE_INTENT_SKIP_CHITCHAT") or "").strip() == "1"
+
+
 class TurnOrchestrationMixin:
     """对话编排职责（编排器 mixin；状态由 ConversationOrchestrator 提供）。"""
 
@@ -149,12 +187,182 @@ class TurnOrchestrationMixin:
                              name=f"whale-task-{task_id}").start()
             return TurnResult(reply=ack, status="ack", plan=plan, task_id=task_id)
 
+    # ---- 2026-11-06：DS 先回 + 意图后台并行 + 需要时跟进第二条 ----
+
+    #: 第一条回复附带的中性系统说明（数据，非用户原话）。None/空 = 不加。
+    #: 宿主可按实测效果覆盖（WHALE_FIRST_REPLY_NOTE）。
+    FIRST_REPLY_NOTE = ""
+    #: 后台意图等待上限（秒）；超时视为不需要工具（记日志）。
+    PARALLEL_INTENT_TIMEOUT_S = 30.0
+
+    def handle_envelope_parallel(self, env: InputEnvelope, *, on_followup=None,
+                                 on_settled=None,
+                                 first_note: str | None = None) -> TurnResult:
+        """第一条回复不等意图：回复模型（DS）立刻回答，意图模型（Kimi）同时后台规划。
+
+        - 意图结果为 chat / clarify / 失败 / 空 / 超时 → 不传任何信息给回复模型，
+          本轮结束（``on_followup`` 不会被调用）；
+        - 意图为 task → 走既有任务链（台账 → ``_dispatch_step`` 的 ACL/网关/
+          Shell 策略门控，裁决与同步路径完全一致）→ 回复模型拿「第一条已说内容
+          + 工具结果 + 简短备注」生成跟进第二条，写入会话历史（并入同一轮的
+          助手消息），再经 ``on_followup(TurnResult)`` 交宿主投递。
+
+        空消息/显式记忆指令等确定性捷径仍同步处理（不调意图模型）。
+        ``on_settled(route, followup_or_None)`` 在后台判定/跟进结束时总会调用一次
+        （route ∈ chat/clarify/task/task-error/…），供宿主（眼镜轮询）收口。
+        返回第一条的 TurnResult；``reply_ms`` 为第一条耗时。
+        """
+        import concurrent.futures as _cf
+        env = self._ensure_context(env)
+        t_start = time.perf_counter()
+        shortcut = self._decide_shortcuts(env)
+        if shortcut is not None or self.intent_model is None:
+            decision = shortcut or _Decision(route="chat")
+            with conversation_lock(self.store, env.conversation_id):
+                result = self._finish_decision(env, decision)
+            if on_settled is not None:
+                try:
+                    on_settled("shortcut", None)
+                except Exception:
+                    pass
+            return replace(result, reply_ms=int((time.perf_counter() - t_start) * 1000))
+        text = (env.text or "").strip()
+        box: dict = {}
+
+        def _plan() -> _Decision:
+            t0 = time.perf_counter()
+            try:
+                return self._decide_intent(env)
+            finally:
+                box["intent_ms"] = int((time.perf_counter() - t0) * 1000)
+
+        fut: _cf.Future = _cf.Future()
+
+        def _plan_thread() -> None:
+            try:
+                fut.set_result(_plan())
+            except BaseException as exc:  # pragma: no cover - _decide_intent 已兜底
+                fut.set_exception(exc)
+
+        threading.Thread(target=_plan_thread, daemon=True,
+                         name="whale-intent-bg").start()
+        note = self.FIRST_REPLY_NOTE if first_note is None else first_note
+        t1 = time.perf_counter()
+        first = self._first_reply(env, text, note)
+        reply_ms = int((time.perf_counter() - t1) * 1000)
+        first_result = TurnResult(reply=first, status="answered", reply_ms=reply_ms)
+        timeout_s = float(self.PARALLEL_INTENT_TIMEOUT_S)
+
+        def _follow() -> None:
+            route, out = "error", None
+            try:
+                route, out = _follow_inner()
+            finally:
+                if on_settled is not None:
+                    try:
+                        on_settled(route, out)
+                    except Exception:
+                        pass
+
+        def _follow_inner():
+            try:
+                decision = fut.result(timeout=timeout_s)
+            except _cf.TimeoutError:
+                decision = _Decision(route="chat", receipt="intent:timeout→no-followup")
+                box.setdefault("intent_ms", int((time.perf_counter() - t1) * 1000))
+            except Exception:
+                decision = _Decision(route="chat", receipt="intent:error→no-followup")
+            intent_ms = int(box.get("intent_ms", 0) or 0)
+            if decision.route != "task" or decision.plan is None:
+                self._log_parallel(env, route=decision.route, reply_ms=reply_ms,
+                                   intent_ms=intent_ms, receipt=decision.receipt)
+                return decision.route, None
+            plan = decision.plan
+            if decision.slow:
+                plan = replace(plan, timeout_s=max(plan.timeout_s, 240.0))
+            t2 = time.perf_counter()
+            try:
+                task_id, plan = self._persist_task(
+                    plan, conversation_id=env.conversation_id, text=text,
+                    source=env.source, channel=env.channel, owner_id=env.owner_id,
+                    async_delivery=on_followup is not None, context=env.context)
+                self._mark_followup(task_id, first)
+                result = self._execute_task(task_id)
+            except Exception as exc:
+                self._log_parallel(env, route="task-error", reply_ms=reply_ms,
+                                   intent_ms=intent_ms, receipt=type(exc).__name__)
+                return "task-error", None
+            total_ms = int((time.perf_counter() - t2) * 1000)
+            followup_ms = int(self._followup_ms.pop(result.task_id, 0) or 0)
+            tool_ms = max(0, total_ms - followup_ms)
+            result = replace(result, intent_ms=intent_ms, tool_ms=tool_ms,
+                             reply_ms=followup_ms)
+            self._log_parallel(env, route="task", reply_ms=reply_ms,
+                               intent_ms=intent_ms, tool_ms=tool_ms,
+                               followup_ms=followup_ms, status=result.status,
+                               caps=",".join(plan.capabilities))
+            if on_followup is not None and (result.reply or "").strip():
+                try:
+                    on_followup(result)
+                except Exception:
+                    if result.task_id:
+                        self.mark_delivery_failed(result.task_id,
+                                                  error="host-callback-raised")
+            return "task", result
+
+        threading.Thread(target=_follow, daemon=True,
+                         name="whale-followup").start()
+        return first_result
+
+    def _first_reply(self, env: InputEnvelope, text: str, note: str) -> str:
+        """第一条：回复模型直接回答（不等意图）；可选附一句中性系统说明。"""
+        augmented = text
+        if note:
+            augmented = (f"{text}\n\n===== 系统提示（数据，非用户原话）=====\n"
+                         f"{note}\n===== 系统提示结束 =====")
+        return self.companion.chat(
+            augmented, conversation_id=env.conversation_id,
+            user_text=text if note else None,
+            images=env.images, context=env.context,
+            on_delta=env.on_delta, should_stop=env.should_stop,
+            metrics=env.metrics, on_phase=env.on_phase)
+
+    def _mark_followup(self, task_id: str, first: str) -> None:
+        """台账标记：本任务的结局是「第一条之后的跟进」，组装时带上第一条原文。"""
+        with self._task_lock:
+            journal = self.store.get(f"runtime:task:{task_id}")
+            if isinstance(journal, dict):
+                journal["followup_first"] = str(first or "")[:1000]
+                self.store.put(f"runtime:task:{task_id}", journal)
+
+    @property
+    def _followup_ms(self) -> dict:
+        box = self.__dict__.get("_followup_ms_box")
+        if box is None:
+            box = {}
+            self.__dict__["_followup_ms_box"] = box
+        return box
+
+    def _log_parallel(self, env: InputEnvelope, **fields) -> None:
+        parts = " ".join(f"{k}={v}" for k, v in fields.items() if v not in ("", None))
+        print(f"[parallel] conv={str(env.conversation_id)[:24]} src={env.source} {parts}",
+              flush=True)
+
     def _decide(self, env: InputEnvelope) -> _Decision:
         """G1-A 唯一规划点：一次请求至多一次意图模型调用。
 
         顺序（与 roadmap §6.2 一致）：空消息 → 记忆指令捷径（不调模型）→
         无意图模型纯对话 → 意图规划（模型提议、核心裁决，失败回落纯对话）。
         """
+        shortcut = self._decide_shortcuts(env)
+        if shortcut is not None:
+            return shortcut
+        if self.intent_model is None:
+            return _Decision(route="chat")
+        return self._decide_intent(env)
+
+    def _decide_shortcuts(self, env: InputEnvelope) -> _Decision | None:
+        """意图前的确定性捷径：空消息 / 显式记忆指令（不调模型）。None = 继续。"""
         text = (env.text or "").strip()
         if not text:
             return _Decision(route="empty")
@@ -178,8 +386,11 @@ class TurnOrchestrationMixin:
             )
             if command is not None:
                 return _Decision(route="memory", memory_reply=command)
-        if self.intent_model is None:
-            return _Decision(route="chat")
+        return None
+
+    def _decide_intent(self, env: InputEnvelope) -> _Decision:
+        """意图规划（模型提议、核心裁决；失败/空返回回落纯对话）。"""
+        text = (env.text or "").strip()
         # 意图模型需要上下文（近期历史+相关记忆）才能做合理默认；
         # 带附件时必须告知（它是文本规划看不见图，否则会误以为没图去澄清）。
         plan_text = text

@@ -495,3 +495,73 @@ def test_resolve_request_location_env_default_chengdu_pidu(tmp_path):
     assert "北京海淀" in loc2
     assert store.get(LOCATION_STORE_KEY)["city"] == "北京海淀"
 
+
+
+# ---------- 2026-11-06 并行链路：第一条秒回 + 第二条（轮询 / 旧客户端合并） ----------
+
+@pytest.fixture()
+def parallel_server(tmp_path, monkeypatch):
+    import search_web.web_search as ws
+
+    class _Prov:
+        def search(self, query, *, limit=5):
+            return [ws.SearchResult(title="郫都天气", url="https://example.com/w",
+                                    snippet="明天小雨 12-16°C")]
+
+    monkeypatch.setattr(ws, "select_provider", lambda env: _Prov())
+
+    class Brain:
+        def reply(self, text, *, persona="", memories=(), history=(), images=(),
+                  location=None):
+            if "不可信工具输出开始" in text:
+                return "找到了，明天小雨，记得带伞"
+            return "我去搜搜看" if "搜索" in text else "晚上好呀"
+
+    env = {"WHALE_GLASSES_TOKEN": "phone-token",
+           "WHALE_GLASSES_STORE": str(tmp_path / "p.sqlite3"),
+           "OWNER_UID": "u", "OWNER_QQ": "1", "WHALE_SEARCH_PROVIDER": "fake"}
+    delegates = build_delegates(env, brain_factory=Brain, quick_brain_factory=Brain,
+                                send_port_factory=lambda: None)
+    from http.server import ThreadingHTTPServer
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(delegates))
+    srv.glasses_token = "phone-token"
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield srv
+    srv.shutdown()
+    srv.server_close()
+
+
+def test_parallel_legacy_client_merges_rule_tool_followup(parallel_server):
+    status, body = _post(parallel_server, "/v1/chat",
+                         {"text": "搜索郫都明天天气", "sessionId": "s1"})
+    assert status == 200
+    assert body["replies"] == ["我去搜搜看", "找到了，明天小雨，记得带伞"]
+    assert body["reply"] == "我去搜搜看\n找到了，明天小雨，记得带伞"
+    assert body["followup"]["merged"] is True
+
+
+def test_parallel_chitchat_returns_first_only(parallel_server):
+    status, body = _post(parallel_server, "/v1/chat",
+                         {"text": "晚上好", "sessionId": "s2"})
+    assert status == 200 and body["reply"] == "晚上好呀"
+    assert "replies" not in body
+    st, fu = _post(parallel_server, "/v1/chat/followup",
+                   {"sessionId": "s2", "turnId": body["followup"]["turnId"],
+                    "waitMs": 3000})
+    assert fu["status"] == "none" and "reply" not in fu
+
+
+def test_parallel_poll_client_gets_followup_via_endpoint(parallel_server):
+    status, body = _post(parallel_server, "/v1/chat",
+                         {"text": "搜索郫都明天天气", "sessionId": "s3",
+                          "followup": "poll"})
+    assert body["reply"] == "我去搜搜看"
+    assert body["followup"]["merged"] is False
+    st, fu = _post(parallel_server, "/v1/chat/followup",
+                   {"sessionId": "s3", "waitMs": 5000})
+    assert st == 200 and fu["status"] == "ready"
+    assert fu["reply"] == "找到了，明天小雨，记得带伞"
+    # 别的会话拿不到
+    st, other = _post(parallel_server, "/v1/chat/followup",
+                      {"sessionId": "zz", "turnId": fu["turnId"]})
+    assert other["status"] == "unknown"

@@ -108,9 +108,11 @@ class WhaleCompanion:
              images: Sequence[bytes] = (), turn_key: str = "",
              episodic: bool = True, context=None, allowed_spaces=None,
              write_space: str | None = None, location: str | None = None,
-             on_delta=None, should_stop=None, metrics=None, on_phase=None) -> str:
+             on_delta=None, should_stop=None, metrics=None, on_phase=None,
+             followup: bool = False) -> str:
         with conversation_lock(self.store, conversation_id):
             return self._chat(text, conversation_id=conversation_id, user_text=user_text,
+                              followup=followup,
                               images=images, turn_key=turn_key, episodic=episodic,
                               context=context, allowed_spaces=allowed_spaces,
                               write_space=write_space, location=location,
@@ -122,7 +124,8 @@ class WhaleCompanion:
               images: Sequence[bytes] = (), turn_key: str = "",
               episodic: bool = True, context=None, allowed_spaces=None,
               write_space: str | None = None, location: str | None = None,
-              on_delta=None, should_stop=None, metrics=None, on_phase=None) -> str:
+              on_delta=None, should_stop=None, metrics=None, on_phase=None,
+              followup: bool = False) -> str:
         original = text if user_text is None else user_text
         # issue #45：真实阶段反馈（接收→上下文/记忆构建→模型请求→整理）；
         # 无回调时零开销。阶段与耗时全部实测，不伪造进度百分比。
@@ -369,7 +372,12 @@ class WhaleCompanion:
                                      extra={"conversation_id": conversation_id[:160],
                                             "layer": "episode"},
                                      space_id=target)
-        if conversation_id and clean_response:
+        if conversation_id and clean_response and followup:
+            # 并行链路第二条：并入同一轮的助手消息（不重复写用户原话）。
+            from whale_core.memory.history import append_assistant_followup
+            append_assistant_followup(self.store, conversation_id, original,
+                                      clean_response)
+        elif conversation_id and clean_response:
             append_turn(self.store, conversation_id, original, clean_response)
             # 记忆/主动性闭环：轻量写回未完话题（默认开；WHALE_INNER_STATE_WRITEBACK=0 关）
             # 只写会话作用域，不授任何权限；失败 fail-soft。
