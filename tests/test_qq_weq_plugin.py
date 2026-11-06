@@ -372,8 +372,8 @@ class _RouteProbePort:
     def send(self, draft):
         self.calls.append(("owner", draft.text))
         return True
-    def send_group_text(self, group_code, text):
-        self.calls.append(("group", group_code, text))
+    def send_group_text(self, group_code, text, **kwargs):
+        self.calls.append(("group", group_code, text, {k: kwargs[k] for k in kwargs if k.startswith("at_") and kwargs[k]}))
         return True
     def send_c2c(self, uid, text):
         self.calls.append(("c2c", uid, text))
@@ -394,11 +394,40 @@ def test_routing_port_routes_by_target_conversation():
     assert port.send(_draft("主人私聊", "private:u_owner"))
     assert port.send(_draft("无会话信息"))
     assert inner.calls == [
-        ("group", "1124744261", "群回复"),
+        ("group", "1124744261", "群回复", {}),
         ("c2c", "u_member1", "成员私聊"),
         ("owner", "主人私聊"),   # owner 私聊仍走内层定向口
         ("owner", "无会话信息"),  # 空会话回落原行为
     ]
+
+
+def test_routing_port_prime_group_at_prefixes_send():
+    """被 @ 后 prime_group_at → 下一次群 send 透传 at_*（一次性）。"""
+    from weq_channel.weq_send import ConversationRoutingPort
+    inner = _RouteProbePort()
+    port = ConversationRoutingPort(inner, owner_uid="u_owner")
+    port.prime_group_at("group:1124744261", uid="u_sender", uin=12345, name="小明")
+    assert port.send(_draft("回你了", "group:1124744261"))
+    assert inner.calls == [
+        ("group", "1124744261", "回你了",
+         {"at_uid": "u_sender", "at_uin": 12345, "at_name": "小明"}),
+    ]
+    # 一次性消费：再发不再带 at
+    assert port.send(_draft("第二条", "group:1124744261"))
+    assert inner.calls[-1] == ("group", "1124744261", "第二条", {})
+    # 非 group 会话忽略
+    port.prime_group_at("private:u_x", uid="u_sender", uin=1)
+    assert port._group_at == {}
+
+
+def test_routing_port_send_group_text_merges_pending_at():
+    from weq_channel.weq_send import ConversationRoutingPort
+    inner = _RouteProbePort()
+    port = ConversationRoutingPort(inner, owner_uid="u_owner")
+    port.prime_group_at("group:1124744261", uid="u_s", uin=9, name="N")
+    assert port.send_group_text("1124744261", "直发")
+    assert inner.calls[-1][3] == {"at_uid": "u_s", "at_uin": 9, "at_name": "N"}
+
 
 
 def test_draft_target_conversation_serde_roundtrip():

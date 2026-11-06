@@ -266,7 +266,7 @@ class _MediaInner(StubInner):
         self.calls.append(("c2c", uid, text))
         return True
 
-    def send_group_text(self, group_code, text):
+    def send_group_text(self, group_code, text, **kwargs):
         self.calls.append(("group", group_code, text))
         return True
 
