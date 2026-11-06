@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import re
 import threading
 import time
 from dataclasses import replace
@@ -32,6 +33,18 @@ DEFAULT_FIRST_REPLY_NOTE = (
     "之前对话里已经查到说过的结果照常可信。普通聊天照常回。")
 
 
+# 第一条里「先答应待会儿」的口吻（我去搜/稍等/查到了告诉你…）。
+_PROMISE_RE = re.compile(
+    r"(稍等|等我|等一下|等下|等会|待会|稍后|马上|一会儿|我去|我看看|我查|我搜|我找|"
+    r"去看看|去查|去搜|去找|查一下|搜一下|找一下|看一下|瞅一眼|瞄一眼|翻一下|"
+    r"查到了?(再|就)?(告诉|跟你说)|找到了?(再|就)?(告诉|跟你说))")
+
+
+def reply_promises_followup(reply: str) -> bool:
+    """回复模型第一条是否先答应了「待会儿给结果」。"""
+    return bool(_PROMISE_RE.search(reply or ""))
+
+
 def apply_parallel_env(orch, env) -> None:
     """从环境变量配置并行链路（第一条知会 / 意图后台超时）。"""
     raw = (env.get("WHALE_FIRST_REPLY_NOTE") if env is not None else None)
@@ -46,6 +59,11 @@ def apply_parallel_env(orch, env) -> None:
             orch.PARALLEL_INTENT_TIMEOUT_S = timeout
     except (TypeError, ValueError):
         pass
+    try:
+        grace = float((env or {}).get("WHALE_PROMISE_FALLBACK_S") or 8)
+        orch.PROMISE_FALLBACK_S = grace if grace > 0 else 0.0
+    except (TypeError, ValueError):
+        pass
 
 
 def intent_brain_max_tokens(env) -> int | None:
@@ -55,6 +73,15 @@ def intent_brain_max_tokens(env) -> int | None:
     except (TypeError, ValueError):
         value = 4096
     return value if value > 0 else None
+
+
+def intent_brain_timeout(env) -> float:
+    """意图脑单次请求超时（秒，默认 15；客户端瞬时错误会再试一次）。"""
+    try:
+        value = float((env or {}).get("WHALE_INTENT_TIMEOUT_S") or 15)
+    except (TypeError, ValueError):
+        value = 15.0
+    return value if value > 0 else 15.0
 
 
 def intent_skip_chitchat(env) -> bool:
@@ -200,6 +227,9 @@ class TurnOrchestrationMixin:
     FIRST_REPLY_NOTE = ""
     #: 后台意图等待上限（秒）；超时视为不需要工具（记日志）。
     PARALLEL_INTENT_TIMEOUT_S = 30.0
+    #: 第一条已「先答应待会儿」而意图模型迟迟不回（AgentScope kimi 实测 5–45s 抖动）：
+    #: 等这么多秒后改用只读搜索兑现承诺（意图晚到的结果丢弃）。0 = 关闭。
+    PROMISE_FALLBACK_S = 8.0
 
     def handle_envelope_parallel(self, env: InputEnvelope, *, on_followup=None,
                                  on_settled=None,
@@ -270,9 +300,22 @@ class TurnOrchestrationMixin:
                     except Exception:
                         pass
 
+        promised = reply_promises_followup(first)
+        grace = float(self.PROMISE_FALLBACK_S or 0)
+
         def _follow_inner():
             try:
-                decision = fut.result(timeout=timeout_s)
+                if promised and grace > 0 and grace < timeout_s:
+                    try:
+                        decision = fut.result(timeout=grace)
+                    except _cf.TimeoutError:
+                        decision = self._promise_fallback_decision(env, text)
+                        if decision is None:
+                            decision = fut.result(timeout=max(0.0, timeout_s - grace))
+                        else:
+                            box["intent_ms"] = int((time.perf_counter() - t1) * 1000)
+                else:
+                    decision = fut.result(timeout=timeout_s)
             except _cf.TimeoutError:
                 decision = _Decision(route="chat", receipt="intent:timeout→no-followup")
                 box.setdefault("intent_ms", int((time.perf_counter() - t1) * 1000))
@@ -305,6 +348,7 @@ class TurnOrchestrationMixin:
                              reply_ms=followup_ms)
             self._log_parallel(env, route="task", reply_ms=reply_ms,
                                intent_ms=intent_ms, tool_ms=tool_ms,
+                               receipt=decision.receipt,
                                followup_ms=followup_ms, status=result.status,
                                caps=",".join(plan.capabilities))
             if on_followup is not None and (result.reply or "").strip():
@@ -319,6 +363,32 @@ class TurnOrchestrationMixin:
         threading.Thread(target=_follow, daemon=True,
                          name="whale-followup").start()
         return first_result
+
+    def _promise_fallback_decision(self, env: InputEnvelope, text: str) -> _Decision | None:
+        """第一条已答应、意图模型超时：用只读 web.search 兑现（无搜索能力则 None）。"""
+        if self.tools is None or not self.tools.for_capability("web.search"):
+            return None
+        from whale_core.core.intent_router import _looks_like_clear_chitchat
+        if _looks_like_clear_chitchat(text):
+            return None  # 「晚上好」里顺口提了句「等下」不算要查
+        from whale_core.core.intent_plan import plan_from_model_text
+        import json as _json
+        query = re.sub(r"@\S+", " ", text or "").strip()[:400]
+        loc = ""
+        if not str(env.conversation_id or "").startswith("group:"):
+            loc = (self._default_location_summary() or "").split("；")[0].strip()
+        if loc and loc[:2] not in query:
+            query = f"{loc} {query}"[:500]
+        raw = _json.dumps({"goal": "搜索并回答：" + query[:300], "kind": "task",
+                           "slots": {"query": query, "limit": 5},
+                           "capabilities": ["web.search"],
+                           "reason": "第一条已答应去查、意图模型超时 → 只读搜索兑现"},
+                          ensure_ascii=False)
+        try:
+            plan = plan_from_model_text(raw)
+        except Exception:
+            return None
+        return _Decision(route="task", plan=plan, receipt="intent:slow→promise-search")
 
     def _first_reply(self, env: InputEnvelope, text: str, note: str) -> str:
         """第一条：回复模型直接回答（不等意图）；可选附一句中性系统说明。"""

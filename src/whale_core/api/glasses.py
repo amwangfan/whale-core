@@ -257,16 +257,8 @@ class FollowupBoard:
         return ""
 
 
-# 第一条里「先答应待会儿」的口吻（我去搜/稍等/查到了告诉你…）。
-_PROMISE_RE = re.compile(
-    r"(稍等|等我|等一下|等下|等会|待会|稍后|马上|一会儿|我去|我看看|我查|我搜|我找|"
-    r"去看看|去查|去搜|去找|查一下|搜一下|找一下|看一下|瞅一眼|瞄一眼|翻一下|"
-    r"查到了?(再|就)?(告诉|跟你说)|找到了?(再|就)?(告诉|跟你说))")
-
-
-def first_reply_promises_followup(reply: str) -> bool:
-    """DS 第一条是否先答应「待会儿给结果」（旧客户端据此同步等第二条）。"""
-    return bool(_PROMISE_RE.search(reply or ""))
+from whale_core.core.runtime.turn_orchestration import (  # noqa: E402
+    reply_promises_followup as first_reply_promises_followup)
 
 
 def _rule_plan_is_task(orch, text: str, location: str) -> bool:
@@ -348,7 +340,8 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
         from whale_core.core.runtime import (
             ConversationOrchestrator, ToolRegistry, runtime_shell_grant_verifier)
         from whale_core.core.runtime.turn_orchestration import (
-            apply_parallel_env, intent_brain_max_tokens, intent_skip_chitchat)
+            apply_parallel_env, intent_brain_max_tokens, intent_brain_timeout,
+            intent_skip_chitchat)
         from whale_core.plugins.registry import PluginRegistry
         from whale_core.plugins.gateway import PluginGateway
         from whale_core.plugins.policy import PluginActionPolicy
@@ -413,7 +406,8 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
                           or env.get("QQ_INTENT_BASE_URL") or "").strip() or None,
                 api_key=(env.get("WHALE_GLASSES_INTENT_API_KEY")
                          or env.get("QQ_INTENT_API_KEY") or "").strip() or None,
-                max_tokens=intent_brain_max_tokens(env))
+                max_tokens=intent_brain_max_tokens(env),
+                timeout=intent_brain_timeout(env))
         intent = SearchIntentRouter(
             model=intent_brain, enable_llm=enable_llm, tools=tools,
             skip_clear_chitchat=intent_skip_chitchat(env))

@@ -201,3 +201,61 @@ def test_first_reply_gets_default_location_in_private_not_group(monkeypatch):
         orch.handle_envelope_parallel(InputEnvelope(conversation_id=cid, text="嗯",
                                                     source="qq:owner", channel="qq"))
     assert seen == ["成都郫都", None]
+
+
+def test_promise_with_slow_intent_falls_back_to_search():
+    """第一条已答应「我去看看」、意图模型迟迟不回 → 只读搜索兑现，晚到的意图丢弃。"""
+    gate = threading.Event()
+    calls: list = []
+    tools = ToolRegistry()
+    tools.register(ToolSpec(name="search_web", capability="web.search",
+                            handler=lambda a: calls.append(a) or "家博会 11/6-11/8"))
+    orch, _, brain = _orch(_SlowIntent(_chat(), gate=gate), tools=tools)
+    orch.PROMISE_FALLBACK_S = 0.2
+
+    class _Promise(_Brain):
+        def reply(self, text, **kw):
+            self.calls.append(text)
+            return "找到了，家博会到 8 号" if "不可信工具输出开始" in text else "我去看看，稍等"
+    orch.companion.model = _Promise()
+    first, follow, box, done = _run(orch, "最近有什么活动")
+    assert first.reply == "我去看看，稍等"
+    assert done.wait(5)
+    gate.set()
+    assert box["route"] == "task" and calls and "活动" in calls[0]["query"]
+    assert follow[0].reply == "找到了，家博会到 8 号"
+
+
+def test_no_promise_slow_intent_does_not_fallback():
+    gate = threading.Event()
+    calls: list = []
+    tools = ToolRegistry()
+    tools.register(ToolSpec(name="search_web", capability="web.search",
+                            handler=lambda a: calls.append(a) or "x"))
+    orch, _, _ = _orch(_SlowIntent(_chat(), gate=gate), tools=tools)
+    orch.PROMISE_FALLBACK_S = 0.1
+    orch.PARALLEL_INTENT_TIMEOUT_S = 0.4
+    first, follow, box, done = _run(orch, "晚上好")
+    assert done.wait(5)
+    gate.set()
+    assert calls == [] and follow == []
+
+
+def test_promise_fallback_skips_clear_chitchat():
+    gate = threading.Event()
+    calls: list = []
+    tools = ToolRegistry()
+    tools.register(ToolSpec(name="search_web", capability="web.search",
+                            handler=lambda a: calls.append(a) or "x"))
+    orch, _, _ = _orch(_SlowIntent(_chat(), gate=gate), tools=tools)
+    orch.PROMISE_FALLBACK_S = 0.1
+    orch.PARALLEL_INTENT_TIMEOUT_S = 0.4
+
+    class _B(_Brain):
+        def reply(self, text, **kw):
+            return "晚上好呀，等下给你说"
+    orch.companion.model = _B()
+    first, follow, box, done = _run(orch, "晚上好")
+    assert done.wait(5)
+    gate.set()
+    assert calls == [] and follow == []
