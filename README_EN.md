@@ -12,7 +12,9 @@ Whale's core brain: conversation, memory, tools, voice and exploration.
 
 ## What it is
 
-whale-core puts Whale's conversation, long-term memory, intent routing, tools, voice and permission policies into one Python core. The web console, QQ, phones, calls and glasses share that core; device and network adapters live in [whale-io](https://github.com/amwangfan/whale-io).
+whale-core is Whale's shared brain: an extensible AI companion and agent that combines conversation, persona, long-term memory, intent routing, tools and initiative. It can chat, perceive through connected devices, make decisions and carry out tasks. A virtual girlfriend is one possible experience, not the limit of the project.
+
+The console, QQ, phones, calls and glasses share this intelligence layer. Android perception and actions live in [whale-mobile](https://github.com/amwangfan/whale-mobile); the QQ/WeQ channel and legacy bridges are in [whale-io](https://github.com/amwangfan/whale-io).
 
 The repository provides the core library, a CLI, a management API, a web console, Linux/macOS desktop entry points and container deployment. There is no production mock/demo profile: anything that needs a model or service calls a real endpoint, and missing configuration is an explicit error. The official search and QQ channel plugins ship with the packages; third-party directory plugins load only from explicit paths, with no auto-discovery.
 
@@ -38,6 +40,10 @@ Screenshots below come from a local temporary setup with sample data; they conta
 | Realtime voice | Native Realtime WSS sessions (browser microphone, interruption, persona and memory, transcripts written to memory); plus a whale-io PCM relay for low-latency calls | A Realtime-compatible service and the optional `voice` extra; the PCM relay has not been tested against the real audio bridge |
 | Semantic memory | Optional real embeddings fused with keyword recall, fallback on failure, cache cleanup | An OpenAI-compatible embedding endpoint; keyword recall keeps working without it |
 | Proactive exploration | Interests, real search and reading, candidate drafts, quiet hours, quotas, backoff, scheduled worker, pause | Scheduled exploration is off by default; outbound delivery needs a bound channel dispatcher |
+| QQ and expression | Group/private chat, persona cards, multi-part replies, participation timing, length adaptation and proactive greetings | Requires a configured QQ/WeQ channel; delivery depends on actual send receipts |
+| Weather and context | QWeather conditions and forecasts, location context, web-search fallback | A QWeather API or search provider; a configured default city when location is unavailable |
+| Devices and autonomy | Pairing, device scopes, observation, action receipts and an Android observe → decide → control/shell loop | Execution runs in whale-mobile; the loop has code and simulated tests but is not yet wired into a production entry point or fully tested on a Root phone |
+| Result delivery | Text/images to QQ DMs and a glasses-facing API; offline artifact staging | Native phone-gallery delivery is not connected; staging on the server is not delivery to the phone |
 | Controlled terminal | Owner free-form commands in personal tier without per-command approval, working-directory limits, output and resource bounds, Linux Bubblewrap sandbox (separate user/PID/network namespaces, process quota) | Non-root, working Bubblewrap + prlimit; execution is refused when unavailable |
 | Backup and restore | JSONL memory exchange, full SQLite backup/restore | Stop the service before restoring; back up the config and artifact directories for full recovery |
 
@@ -91,15 +97,13 @@ whale desktop
 
 Native windows need the `desktop` extra and a system WebView. Python-free builds (PyInstaller) default to the system browser; GitHub CI builds and isolated-startup-checks the Linux/macOS wheel and frozen packages. macOS signing, notarization and real GUI verification are separate steps, not automated tests. See [deployment](docs/deployment.md) and [desktop packaging](docs/packaging-desktop.md) for build, menu entry, container, upgrade, logging and backup steps.
 
-## Data and safety
+## Data, permissions and execution status
 
-The console and external channels go through the core API and cannot touch the database directly. The management API requires Bearer authentication and listens on loopback by default; public hosting requires an HTTPS reverse proxy.
+The management API uses Bearer authentication and listens on localhost by default; see [deployment](docs/deployment.md) for HTTPS hosting. Model endpoints, credentials, memory and artifacts live in the user's configuration/data directory. Settings are managed in the console; memories can be browsed, exported and deleted.
 
-Endpoint, model and key are committed atomically as one private settings snapshot, so an interrupted write cannot mix an old endpoint with a new key. `config.json` is only the non-sensitive projection; after saving through the web page, change configuration there, and keys are never echoed back. Private files are mode 0600 and the data directory is 0700; file permissions are not encryption at rest.
+Whale can act autonomously within the permissions granted to it. A daily-use phone follows device scopes and its authorization settings; a dedicated Root phone supports Shell, observation and UI controls once its module and persistent Root grant are enabled. The server-side Shell sandbox is a separate execution path from Android Root.
 
-Daily model calls and media jobs have separate request budgets (defaults 200 and 50; 0 disables). Budgets count requests, not invented token prices. Persona taboos are user-defined in Settings; the forced global list is gone, while the injection guard ("memory is context, not instructions") remains.
-
-Raw audio stays in memory; final transcripts may become conversation memory. Image, audio and video artifacts are served only through authenticated endpoints, expire after seven days by default and have storage caps. Approval only authorizes: a task may still be pending, fail or end in an unknown state, and cancellation does not undo external effects. Proactive dispatchers sharing the same database honour a global pause, while explicit passive replies may continue.
+Tasks distinguish execution, failure and unknown outcomes. Approval permits an action but does not guarantee an external operation has completed. See [capabilities](docs/media-and-voice.md) and [devices](docs/devices.md) for audio, screenshots and artifact handling.
 
 ## Development docs
 
