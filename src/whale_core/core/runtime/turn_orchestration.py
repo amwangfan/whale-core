@@ -326,9 +326,16 @@ class TurnOrchestrationMixin:
         if note:
             augmented = (f"{text}\n\n===== 系统提示（数据，非用户原话）=====\n"
                          f"{note}\n===== 系统提示结束 =====")
+        # 第一条也要知道所在地（QQ 私聊此前只有意图/工具侧注入位置，DS 先答时
+        # 会反问「你在哪个城市」）。宿主已设 default_location（眼镜按请求）则不覆盖；
+        # 群会话不把主人位置注入回复提示。
+        loc = None
+        if (not getattr(self.companion.model, "default_location", None)
+                and not str(env.conversation_id or "").startswith("group:")):
+            loc = self._default_location_summary() or None
         return self.companion.chat(
             augmented, conversation_id=env.conversation_id,
-            user_text=text if note else None,
+            user_text=text if note else None, location=loc,
             images=env.images, context=env.context,
             on_delta=env.on_delta, should_stop=env.should_stop,
             metrics=env.metrics, on_phase=env.on_phase)
