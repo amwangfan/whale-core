@@ -29,7 +29,7 @@ QQ / 网页 / 手机 / 眼镜 / 电话
 
 - **对话**：`core/companion.py`、`life/expression.py`、`life/response_planner.py`、`life/group_length.py`。群/私聊表达可不同，别为了“像真人”堆叠重复提示词。
 - **做事**：`core/runtime/` 的意图、工具调度、任务持久化与恢复；`life/do_request.py` 当前只对简单结果图等明确请求做快捷闭环，其他任务仍走既有编排。
-- **投递**：`life/result_delivery.py` 处理 QQ 图文和离线暂存；只有渠道实际成功才叫 delivered，服务器 staging 不是手机图库送达。
+- **投递**：`life/result_delivery.py` 处理 QQ 图文和离线暂存；只有实际送达才应在用户提示中称为 delivered；当前离线 staging 仍可能返回 ok，需结合 stub 详情辨别，不能当作手机图库送达。
 - **设备**：`devices/gateway.py` 下发动作并对账；`devices/agent_loop.py` 已实现 observe→decide→control/shell 及模拟测试，`DeepSeekDecisionPort` 目前尚未接入常驻生产入口。
 - **主动互动**：`life/proactive_greeting.py` 和 `initiative/` 的启停、时机、额度与回执；不要把判断模型和回复模型混成同一条固定链。
 
@@ -52,7 +52,7 @@ QQ / 网页 / 手机 / 眼镜 / 电话
 
 1. **尊重明确授予的能力**：专供鲸鱼操作的 Root 手机可以持续授权 Shell、观察和 UI 动作；日常主手机按自己的设备 scope 和确认设置处理操作，普通通知等常规能力不人为添加多余审批。不要把服务器 Bubblewrap Shell 的限制错误套到 Android Root 自主体。
 2. **实现优先于声明**：不为“免责”添加无效拒绝、过度的硬编码禁忌或多层审批；确实生效的身份、scope、密钥保护、任务幂等与停止机制按现有契约保留。
-3. **记录真实结果**：`accepted`、`executed`、`unknown`、`staged` 含义不同。超时不代表未执行；对可能产生副作用的动作，不得盲目换幂等键重发。
+3. **记录真实结果**：`accepted`、`executed`、`unknown` 含义不同；服务器 `staging` 也不等于已送达。超时不代表未执行；对可能产生副作用的动作，不得盲目换幂等键重发。
 4. **来源和命令分开**：群消息、网页、屏幕 OCR、记忆和工具输出可供模型理解，不因此获得 owner 身份或授权。具体动作仍经明确注册的执行入口。
 5. **凭据和个人数据留在指定存储**：不要把真实 token、密钥、私有语音/截图正文写进仓库、普通日志或 PR。记忆的删除、备份与导出保持真实语义。
 6. **简化而不破坏**：优先移除重复检查、过时分层和无意义限制；确实影响执行正确性和用户控制权的限制用少量可测试机制表达。
@@ -65,7 +65,7 @@ python -m pytest tests -q
 pnpm -C web install --frozen-lockfile
 pnpm -C web test
 pnpm -C web build
-python scripts/contract_sync_check.py
+python scripts/contract_sync_check.py --core . --mobile ../whale-mobile
 ```
 
 按改动范围选测，再运行相应全量/契约检查。Core CI 入口在 `.github/workflows/`；不要把离线单测当作真机、QQ 真账号或外部供应商联调。执行发行检查参考 `docs/deployment.md`。
