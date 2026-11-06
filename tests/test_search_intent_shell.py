@@ -1,7 +1,7 @@
-"""Explicit fast paths skip intent LLM; everything else is judged by it.
+"""Explicit fast paths + clear chitchat skip intent LLM; fuzzy toolish uses it.
 
-2026-11-05 owner 决策：媒体/工具意图不用硬性词表当闸门，非显式指令
-一律交意图 LLM（kimi）判 chat/task/clarify。
+2026-11-06：明显寒暄短句零意图 LLM；模糊工具/媒体仍交 kimi（不用仅 fuzzy
+词表才打 LLM 的旧闸门）。
 """
 from __future__ import annotations
 import json
@@ -64,15 +64,20 @@ def test_no_shell_capability_stays_chat():
     assert plan["kind"] == "chat"
 
 
-def test_plain_chat_also_consults_intent_llm():
-    """2026-11-05 owner 决策：媒体/工具意图由 kimi 全权判断，不用硬性词表
-    当闸门——纯闲聊也过一遍意图 LLM（LLM 自会判 chat）。"""
-    chat_echo = _EchoChat()
-    router = SearchIntentRouter(model=chat_echo, enable_llm=True, tools=_Tools())
-    for text in ("你好啊", "现在几点", "今天心情怎么样", "聊聊天"):
+def test_clear_chitchat_skips_intent_llm():
+    """明显寒暄/短应答零意图 LLM；较长陪伴问句仍可咨询 kimi。"""
+    router = SearchIntentRouter(model=_Boom(), enable_llm=True, tools=_Tools())
+    for text in ("晚上好", "早", "你好", "你好啊", "在吗", "哈哈", "嗯", "晚安",
+                 "hi", "Hello!", "早上好呀"):
         plan = json.loads(router.plan(text))
         assert plan["kind"] == "chat", text
-    assert chat_echo.calls == 4  # 每句都咨询了意图 LLM
+
+    chat_echo = _EchoChat()
+    router = SearchIntentRouter(model=chat_echo, enable_llm=True, tools=_Tools())
+    for text in ("现在几点", "今天心情怎么样", "聊聊天"):
+        plan = json.loads(router.plan(text))
+        assert plan["kind"] == "chat", text
+    assert chat_echo.calls == 3
 
 
 def test_llm_disabled_or_bad_plan_falls_back_chat():
@@ -85,7 +90,7 @@ def test_llm_disabled_or_bad_plan_falls_back_chat():
             return "not a json plan"
 
     router = SearchIntentRouter(model=_Garbage(), enable_llm=True, tools=_Tools())
-    assert json.loads(router.plan("你好啊"))["kind"] == "chat"
+    assert json.loads(router.plan("今天心情怎么样"))["kind"] == "chat"
 
 
 def test_explicit_search_skips_intent_llm():
