@@ -173,3 +173,13 @@ def test_memory_command_still_sync_and_skips_intent():
     first, follow, box, done = _run(orch, "记住：我不吃香菜")
     assert first.reply.startswith("好，我记住啦")
     assert intent.calls == 0 and box["route"] == "shortcut"
+
+
+def test_apply_parallel_env_note_default_and_off():
+    from whale_core.core.runtime.turn_orchestration import (
+        DEFAULT_FIRST_REPLY_NOTE, apply_parallel_env)
+    orch, _, _ = _orch(_SlowIntent(_chat()))
+    apply_parallel_env(orch, {})
+    assert orch.FIRST_REPLY_NOTE == DEFAULT_FIRST_REPLY_NOTE and "别编" in orch.FIRST_REPLY_NOTE
+    apply_parallel_env(orch, {"WHALE_FIRST_REPLY_NOTE": "off", "WHALE_INTENT_BG_TIMEOUT_S": "12"})
+    assert orch.FIRST_REPLY_NOTE == "" and orch.PARALLEL_INTENT_TIMEOUT_S == 12.0

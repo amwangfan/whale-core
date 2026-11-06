@@ -17,9 +17,13 @@ from whale_core.core.runtime.envelope import InputEnvelope, TurnResult, _Decisio
 from whale_core.memory.history import append_turn, conversation_lock
 
 
-#: 第一条回复的中性知会（实时信息后台补；不编造）。默认值由冒烟对比选定，
-#: WHALE_FIRST_REPLY_NOTE 可覆盖（设为 "off" 关闭）。
-DEFAULT_FIRST_REPLY_NOTE = ""
+#: 第一条回复的中性知会（实时信息后台补；不编造）。2026-11-06 N100 实测对比
+#: 加/不加：不加时「天气怎么样」第一条会说「看不到实时天气、你自己看窗外」，
+#: 与随后补来的和风数据自相矛盾；加这句后第一条自然说「还没查、去看看」，
+#: 「晚上好」「今天累了」等闲聊不受影响。WHALE_FIRST_REPLY_NOTE 可覆盖（"off" 关闭）。
+DEFAULT_FIRST_REPLY_NOTE = (
+    "实时信息（天气、新闻、网页等）这一轮还没查，后台需要时会稍后补上；"
+    "如果这句确实要查，可以先自然说一声在找，别编具体数据。普通聊天照常回。")
 
 
 def apply_parallel_env(orch, env) -> None:
