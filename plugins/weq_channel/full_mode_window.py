@@ -246,11 +246,18 @@ class WindowedSendPort:
             return False
         return self._through_window(lambda: self._inner.send_c2c(uid, text))
 
-    def send_group_text(self, group_code: str, text: str) -> bool:
-        """穿窗的群文本直发（白名单群回复）。"""
+    def send_group_text(self, group_code: str, text: str, **kwargs) -> bool:
+        """穿窗的群文本直发（白名单群回复；透传 at_* 等）。"""
         if not hasattr(self._inner, "send_group_text"):
             return False
-        return self._through_window(lambda: self._inner.send_group_text(group_code, text))
+        return self._through_window(
+            lambda: self._inner.send_group_text(group_code, text, **kwargs))
+
+    def prime_group_at(self, conversation: str, **kwargs) -> None:
+        """透传 ConversationRoutingPort.prime_group_at（被 @ → at 回复）。"""
+        inner = self._inner
+        if hasattr(inner, "prime_group_at"):
+            inner.prime_group_at(conversation, **kwargs)
 
     def send_voice(self, wav_bytes: bytes, **kw) -> bool:
         if not hasattr(self._inner, "send_voice"):

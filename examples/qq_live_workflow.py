@@ -712,6 +712,8 @@ def cmd_run(args) -> int:
     from weq_channel.weq_send import ConversationRoutingPort
     routed_send_port = ConversationRoutingPort(
         send_port, owner_uid=os.environ.get("OWNER_UID", ""))
+    # 直发路径与网关共用同一路由端口，才能消费 prime_group_at（被 @ → at 回复）
+    send_port = routed_send_port
     adapter, _executor = register_qq_weq_plugin(
         plugin_registry, port=routed_send_port, outbox=workflow.outbox, prefs=prefs)
 
@@ -832,17 +834,26 @@ def cmd_run(args) -> int:
     if safety_model_id:
         from whale_core.core.deepseek import DeepSeekCompanion as _DS
         # 审核模型与意图模型同一端点（QQ_INTENT_* 覆盖生效于两者）
+        # 2026-11-05：超时收紧 + 短句快路径，避免 kimi 审核拖高群回复尾延迟
+        _safety_timeout = float(os.environ.get("QQ_SAFETY_TIMEOUT_S", "8") or "8")
         safety_brain = _DS(model=safety_model_id,
                            base_url=os.environ.get("QQ_INTENT_BASE_URL") or None,
-                           api_key=os.environ.get("QQ_INTENT_API_KEY") or None)
+                           api_key=os.environ.get("QQ_INTENT_API_KEY") or None,
+                           timeout=max(3.0, _safety_timeout))
 
         def _review(reply: str) -> str | None:
+            body = (reply or "").strip()
+            low = body.lower()
+            if (len(body) <= 120 and "http://" not in low and "https://" not in low
+                    and "api_key" not in low and "sk-" not in body
+                    and "token=" not in low):
+                return None  # 短句无敏感形态：跳过 LLM 审核
             prompt = (
                 "你是发送前审核员。审核下面这条要发给主人的陪伴机器人回复。"
                 "只有两类问题需要拦截：泄露密钥/隐私信息、或明显伤害用户的攻击性内容。"
                 "注意：图片/文件链接里的 OSS 签名参数（Expires/OSSAccessKeyId/Signature 等）"
                 "是平台生成的临时分享参数，属正常分享链接，不算泄露密钥，不要误拦。"
-                "都没问题只回答 OK；有问题用一句话说明顾虑。\n\n待审回复：" + reply[:800])
+                "都没问题只回答 OK；有问题用一句话说明顾虑。\n\n待审回复：" + body[:800])
             try:
                 answer = safety_brain.reply(prompt).strip()
             except Exception:
@@ -850,7 +861,8 @@ def cmd_run(args) -> int:
             return None if answer.upper().startswith("OK") else answer[:200]
 
         workflow._safety_reviewer = _review
-        print(f"[审核] 安全审核模型={safety_model_id}（发送前复核；顾虑转人工）")
+        print(f"[审核] 安全审核模型={safety_model_id}（发送前复核；短句快路径；"
+              f"timeout={max(3.0, _safety_timeout):.0f}s；顾虑转人工）")
     owner_draft_ids: set[str] = set()
     approved_draft_ids: set[str] = set()
     from weq_channel.qq_weq_plugin import _draft_id_of
@@ -1319,7 +1331,33 @@ def cmd_run(args) -> int:
         print(f"  [合批] 冲刷回调失败 {key}: {type(exc).__name__}（批次未处理，"
               f"inbox 未 ack 将按策略重投）")
 
-    batcher = MessageBatcher(_flush_batch, store=store, on_error=_batch_error)
+    batcher = MessageBatcher(
+        _flush_batch, store=store, on_error=_batch_error,
+        # 2026-11-05：群合批窗口略收（1.8→0.9），被 @ 时更快进入回复
+        window_group_s=float(os.environ.get("QQ_BATCH_GROUP_S", "0.9") or "0.9"),
+        window_private_s=float(os.environ.get("QQ_BATCH_PRIVATE_S", "0.9") or "0.9"))
+
+    def _prime_at_if_mentioned(decision, *, conversation: str,
+                                 sender_id: str = "", sender_uid: str = "") -> None:
+        """被 @ 时标记下一次群发送前置 at 对方（仅 at_bot；引用回复不强制 at）。"""
+        if getattr(decision, "reason_code", "") != "at_bot":
+            return
+        if not hasattr(send_port, "prime_group_at"):
+            return
+        uin = str(sender_id or "").strip()
+        uid = str(sender_uid or "").strip()
+        name = ""
+        try:
+            # 昵称目录若已装配，尽量带群名片（展示用，非身份）
+            nd = globals().get("_name_directory_ref")
+            if nd is not None and conversation.startswith("group:") and uin.isdigit():
+                gc = conversation.split(":", 1)[1]
+                resolved = nd.resolve_group(gc, [(uin, uid)])
+                name = str((resolved or {}).get(uin) or "")
+        except Exception:
+            name = ""
+        send_port.prime_group_at(conversation, uid=uid, uin=uin if uin.isdigit() else 0,
+                                 name=name)
 
     def _dispatch_owner(event, *, epoch: int = 0):
         _note_turn_epoch(str(getattr(event, "message_id", "") or ""), epoch)
@@ -1367,6 +1405,9 @@ def cmd_run(args) -> int:
                 message_id=event.message_id, mentions=event.mentions,
                 reply_to=event.reply_to, sender_uid=event.sender_uid)
             if decision.action == "reply":
+                _prime_at_if_mentioned(
+                    decision, conversation=event.conversation,
+                    sender_id=event.sender_id, sender_uid=event.sender_uid)
                 _tspan(_tid, "decide", "ok", reason_code=decision.reason_code)
             else:
                 # issue #18：quiet/balanced/lively 主动参与裁决（规则先行）。
@@ -1568,6 +1609,11 @@ def cmd_run(args) -> int:
                 conversation=incoming.conversation, sender_id=incoming.account,
                 message_id=incoming.message_id, mentions=incoming.mentions,
                 reply_to=incoming.reply_to, sender_uid=incoming.sender_uid)
+            if decision.action == "reply":
+                _prime_at_if_mentioned(
+                    decision, conversation=incoming.conversation,
+                    sender_id=incoming.account,
+                    sender_uid=getattr(incoming, "sender_uid", "") or "")
             if decision.action != "reply":
                 from whale_core.life.rhythm import (
                     RhythmStore as _RS2, rhythm_key_for as _rkf2)
@@ -1746,7 +1792,9 @@ def cmd_run(args) -> int:
     # 昵称仅作展示标签；解析失败自动回退代号，不影响主链路。
     try:
         from weq_channel.name_directory import WeqNameDirectory
-        timeline.name_resolver = WeqNameDirectory(store, send_port).resolver()
+        _name_dir = WeqNameDirectory(store, send_port)
+        globals()["_name_directory_ref"] = _name_dir
+        timeline.name_resolver = _name_dir.resolver()
         print("[昵称] 群成员昵称目录已装配（uin→群名片/昵称，24h 缓存）")
     except Exception as exc:
         print(f"[昵称] 昵称目录装配失败，回退代号标签：{type(exc).__name__}")
@@ -1845,10 +1893,23 @@ def cmd_run(args) -> int:
     # 2026-11-02 owner 决策：规则判不出的「是不是在找鲸鱼」由意图模型兜底
     # （实证：「说出来各位的名字哦」无「你」无问号被静默压制，其实是对着
     # 鲸鱼刚发的语音说的）。仅在机器人近窗发过言时调用，调用有界。
-    def _llm_directed(text, entries) -> bool:
+    def _llm_call_bounded(prompt: str, *, default: str = "", timeout_s: float = 6.0) -> str:
+        """意图/判定脑有界调用：超时或异常返回 default，避免拖死入站线程。"""
         brain = globals().get("_intent_brain_ref")
         if brain is None:
-            return False
+            return default
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FutTimeout
+        try:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                fut = pool.submit(brain.reply, prompt)
+                return str(fut.result(timeout=max(2.0, float(timeout_s))) or "")
+        except _FutTimeout:
+            print(f"  [判定] 意图模型超时 {timeout_s:.0f}s，走默认")
+            return default
+        except Exception:
+            return default
+
+    def _llm_directed(text, entries) -> bool:
         lines = []
         for e in list(entries or ())[-6:]:
             if not isinstance(e, dict):
@@ -1864,17 +1925,15 @@ def cmd_run(args) -> int:
             "单纯陈述不算）。\n"
             + ("群聊最近消息：\n" + "\n".join(lines) + "\n" if lines else "")
             + f"最新一条：{str(text)[:200]}\n只回答一个字：是 或 否。")
-        try:
-            ans = brain.reply(prompt)
-        except Exception:
-            return False
+        ans = _llm_call_bounded(prompt, default="否", timeout_s=float(
+            os.environ.get("QQ_DIRECTED_TIMEOUT_S", "6") or "6"))
         return str(ans or "").strip().startswith("是")
 
     # 2026-11-02 owner 决策：复读链命中后由意图模型判断「该不该跟」——
     # 应景/好玩的链跟，无意义/广告/ky 的链不跟。
     def _chain_judge(chain_text, entries) -> bool:
-        brain = globals().get("_intent_brain_ref")
-        if brain is None:
+        # 无意图脑时保持旧语义：默认可跟（规则已命中复读链）
+        if globals().get("_intent_brain_ref") is None:
             return True
         lines = []
         for e in list(entries or ())[-8:]:
@@ -1891,10 +1950,8 @@ def cmd_run(args) -> int:
             + f"判断：群里名叫「{name}」的机器人跟着复读一句，是否应景、"
               "好玩、合时宜？（无意义灌水、广告、ky 泼冷水、与当前话题无关的"
               " → 否；应景好玩的 → 是）\n只回答一个字：是 或 否。")
-        try:
-            ans = brain.reply(prompt)
-        except Exception:
-            return False
+        ans = _llm_call_bounded(prompt, default="否", timeout_s=float(
+            os.environ.get("QQ_CHAIN_JUDGE_TIMEOUT_S", "6") or "6"))
         return str(ans or "").strip().startswith("是")
 
     try:

@@ -314,6 +314,22 @@ def _port_with_recorder(**kw):
     return port, sent
 
 
+def test_send_group_text_with_at_element():
+    """at_* 从来件元数据注入时，elements 前置 kind=at。"""
+    port, sent = _port_with_recorder(allowed_groups=("1124744261",))
+    assert port.send_group_text(
+        "1124744261", "你好", at_uid="u_abc", at_uin=10001, at_name="小明") is True
+    els = sent[-1]["json"]["elements"]
+    assert els[0]["kind"] == "at"
+    assert els[0]["atTargetUid"] == "u_abc"
+    assert els[0]["atTargetUin"] == 10001
+    assert els[0]["textContent"].startswith("@小明")
+    assert els[1] == {"kind": "text", "textContent": "你好"}
+    # 无 at_* 时仍是纯文本
+    assert port.send_group_text("1124744261", "普通") is True
+    assert sent[-1]["json"]["elements"] == [{"kind": "text", "textContent": "普通"}]
+
+
 def test_send_group_text_only_allowed_groups():
     port, sent = _port_with_recorder(allowed_groups=("1124744261",))
     assert port.send_group_text("1124744261", "大家好") is True
