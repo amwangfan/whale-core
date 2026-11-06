@@ -1,7 +1,7 @@
-"""Explicit fast paths + clear chitchat skip intent LLM; fuzzy toolish uses it.
+"""Explicit fast paths skip intent LLM; everything else (incl. chitchat) uses it.
 
-2026-11-06：明显寒暄短句零意图 LLM；模糊工具/媒体仍交 kimi（不用仅 fuzzy
-词表才打 LLM 的旧闸门）。
+2026-11-06 修订：意图与回复并行后台跑，寒暄默认也交 kimi；寒暄短路仅作
+可选省调用（skip_clear_chitchat=True）。
 """
 from __future__ import annotations
 import json
@@ -64,16 +64,36 @@ def test_no_shell_capability_stays_chat():
     assert plan["kind"] == "chat"
 
 
-def test_clear_chitchat_skips_intent_llm():
-    """明显寒暄/短应答零意图 LLM；较长陪伴问句仍可咨询 kimi。"""
-    router = SearchIntentRouter(model=_Boom(), enable_llm=True, tools=_Tools())
+def test_clear_chitchat_reaches_intent_llm_by_default():
+    """2026-11-06：意图全量后台跑——寒暄默认也交 kimi 判定（不再硬闸）。"""
+    echo = _EchoChat()
+    router = SearchIntentRouter(model=echo, enable_llm=True, tools=_Tools())
+    for text in ("晚上好", "你好"):
+        assert json.loads(router.plan(text))["kind"] == "chat"
+    assert echo.calls == 2
+
+
+def test_empty_intent_output_is_safe_chat():
+    """kimi-k3 长提示空 content（finish=length）→ 视为不需要工具。"""
+    class _Empty:
+        def reply(self, text, *, persona="", memories=(), history=()):
+            return ""
+    router = SearchIntentRouter(model=_Empty(), enable_llm=True, tools=_Tools())
+    assert json.loads(router.plan("帮我看看那个东西"))["kind"] == "chat"
+
+
+def test_clear_chitchat_skip_is_optional_optimization():
+    """skip_clear_chitchat=True（WHALE_INTENT_SKIP_CHITCHAT=1）：明显寒暄零意图 LLM。"""
+    router = SearchIntentRouter(model=_Boom(), enable_llm=True, tools=_Tools(),
+                                skip_clear_chitchat=True)
     for text in ("晚上好", "早", "你好", "你好啊", "在吗", "哈哈", "嗯", "晚安",
                  "hi", "Hello!", "早上好呀"):
         plan = json.loads(router.plan(text))
         assert plan["kind"] == "chat", text
 
     chat_echo = _EchoChat()
-    router = SearchIntentRouter(model=chat_echo, enable_llm=True, tools=_Tools())
+    router = SearchIntentRouter(model=chat_echo, enable_llm=True, tools=_Tools(),
+                                skip_clear_chitchat=True)
     for text in ("现在几点", "今天心情怎么样", "聊聊天"):
         plan = json.loads(router.plan(text))
         assert plan["kind"] == "chat", text

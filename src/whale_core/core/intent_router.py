@@ -2,11 +2,12 @@
 
 路由器只建议 capabilities，不能自行授权。
 
-策略（2026-11-05 owner 确认；2026-11-06 修订闲聊短路）：
+策略（2026-11-05 owner 确认；2026-11-06 修订：意图改为与回复并行后台跑，
+寒暄短路默认关闭，仅 ``skip_clear_chitchat=True`` 时作为可选省调用优化）：
 - 规则命中（search / local-life / weather→weather.now 或 web.search / shell.safe）
   → 直接 task，零意图 LLM；
-- 规则未命中且**明显寒暄/短闲聊**（晚上好/你好/在吗/哈哈 等）→ kind=chat，
-  **跳过**意图 LLM（回复仍走宿主 companion）；
+- 规则未命中且**明显寒暄/短闲聊**：默认仍交意图 LLM（后台并行，不拖慢第一条）；
+  ``skip_clear_chitchat=True`` 时才跳过（可选省调用，WHALE_INTENT_SKIP_CHITCHAT=1）；
 - 其余模糊工具/媒体请求仍交意图 LLM（kimi）判 chat/task/clarify——不用
   「仅 fuzzy 词表才打 LLM」旧闸门（曾漏「找一下/同人/给我一个…图」）；
 - 意图 LLM 未启用或返回非法计划 → 回落 kind=chat；
@@ -189,8 +190,11 @@ class SearchIntentRouter:
     """规则优先；可选模型只处理模糊工具意图，不能批准动作。"""
 
     def __init__(self, *, model: ReplyModel | None = None, enable_llm: bool = False,
-                 tools: ToolRegistry | None = None):
+                 tools: ToolRegistry | None = None, skip_clear_chitchat: bool = False):
         self.tools = tools
+        # 2026-11-06：意图全量后台跑（不再由寒暄白名单决定跑不跑意图）。
+        # skip_clear_chitchat=True 仅作可选的省调用优化（不影响第一条速度）。
+        self.skip_clear_chitchat = skip_clear_chitchat
         self.model = model
         self.enable_llm = enable_llm and model is not None
 
@@ -256,7 +260,7 @@ class SearchIntentRouter:
             }, ensure_ascii=False)
         # 明显寒暄零意图 LLM；其余模糊工具/媒体仍交 kimi。
         # LLM 未启用 → 诚实回落 chat。
-        if _looks_like_clear_chitchat(text or ""):
+        if self.skip_clear_chitchat and _looks_like_clear_chitchat(text or ""):
             return _chat_plan(text)
         if not self.enable_llm:
             return _chat_plan(text)
@@ -279,7 +283,7 @@ class SearchIntentRouter:
             matching = [s for s in specs if s.capability == capability]
             detail = hints.get(capability, "参数须符合工具契约")
             if matching:
-                detail += "；" + matching[0].description[:300]
+                detail += "；" + matching[0].description[:120]
             catalog.append(f"{capability}（{detail}）")
         prompt = (
             "仅返回一个 JSON 对象，不要代码围栏。你负责建议意图，不能授予权限。"
@@ -294,12 +298,19 @@ class SearchIntentRouter:
             "确实无法推断才 clarify，且 clarification_question 只用一句口语短问。"
         )
         if context:
-            prompt += f"\n上下文（记忆与近期对话，供推断缺省值）：\n{context[:1500]}"
-        prompt += f"\n用户原话：{text[:1500]}"
+            prompt += f"\n上下文（记忆与近期对话，供推断缺省值）：\n{context[:900]}"
+        prompt += f"\n用户原话：{text[:1000]}"
         raw = self.model.reply(prompt, persona="", memories=(), history=())
+        if not (raw or "").strip():
+            # AgentScope kimi-k3 长提示偶发空 content（finish=length）：视为不需要工具。
+            print(f"[intent] empty model output → chat (prompt_chars={len(prompt)})",
+                  flush=True)
+            return _chat_plan(text)
         try:
             plan = plan_from_model_text(raw)
         except IntentPlanError:
+            print(f"[intent] unparsable model output → chat (chars={len(raw or '')})",
+                  flush=True)
             return _chat_plan(text)
         if plan.kind == "task" and any(cap not in capabilities for cap in plan.capabilities):
             return _chat_plan(text)

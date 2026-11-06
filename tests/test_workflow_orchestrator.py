@@ -79,3 +79,43 @@ def test_memory_command_intercepts_before_orchestrator():
     assert result["reply"].startswith("好，我记住啦")
     assert brain.calls == []  # 指令路径不调模型
     assert len(store.list_by_kind(MemoryKind.PREFERENCE)) == 1
+
+
+def test_workflow_parallel_first_reply_then_followup_via_completion_sender():
+    """2026-11-06：QQ 第一条直接回；意图判 task 时第二条经补发通道发出。"""
+    import threading
+    store, brain = InMemoryStore(), FakeBrain()
+    companion = WhaleCompanion(store, brain, curator=MemoryCurator(store))
+    tools = ToolRegistry()
+    tools.register(ToolSpec(name="weather_now", capability="weather.now",
+                            handler=lambda a: "郫都 小雨"))
+    orch = ConversationOrchestrator(
+        store, companion, tools=tools,
+        intent_model=ScriptedIntent(
+            '{"goal":"查天气","kind":"task","capabilities":["weather.now"]}'))
+    sent, done = [], threading.Event()
+
+    def _sender(event, reply, *rest):
+        sent.append(reply)
+        done.set()
+
+    wf = QqInboundWorkflow(store, brain, prefs=_prefs(), orchestrator=orch,
+                           completion_sender=_sender)
+    result = wf.handle_owner_event(_event("天气怎么样"))
+    assert result["reply"] == "好嘞"
+    assert done.wait(5) and sent == ["好嘞"]
+    assert "郫都 小雨" in brain.calls[-1]
+
+
+def test_workflow_parallel_chat_intent_sends_nothing_more():
+    import time
+    store, brain = InMemoryStore(), FakeBrain()
+    orch = ConversationOrchestrator(
+        store, WhaleCompanion(store, brain, curator=MemoryCurator(store)),
+        intent_model=ScriptedIntent('{"goal":"聊","kind":"chat"}'))
+    sent = []
+    wf = QqInboundWorkflow(store, brain, prefs=_prefs(), orchestrator=orch,
+                           completion_sender=lambda ev, r, *a: sent.append(r))
+    assert wf.handle_owner_event(_event("晚上好"))["reply"] == "好嘞"
+    time.sleep(0.3)
+    assert sent == [] and len(brain.calls) == 1
