@@ -186,3 +186,30 @@ def test_format_brief_compact():
     text = format_brief(city=CITY["location"][0], now=NOW["now"], daily=DAILY["daily"])
     assert "湿度85%" in text
     assert "13-20°C" in text
+
+
+def test_lookup_retries_cleaned_place_then_location_hint():
+    from qweather.weather import QWeatherService, WeatherError
+
+    class _Cache:
+        def get(self, k): return None
+        def put(self, k, v): pass
+
+    class _Client:
+        cache = _Cache()
+        def __init__(self): self.keys = []
+        def lookup_city(self, key):
+            self.keys.append(key)
+            if key in ("成都郫都",):
+                return {"id": "1", "name": "郫都", "adm2": "成都", "adm1": "四川省"}
+            raise WeatherError("not_found", "x")
+        def weather_now(self, i): return {"text": "阴", "temp": "17"}
+        def weather_3d(self, i): return []
+
+    client = _Client()
+    searched = []
+    svc = QWeatherService(client, fallback_search=lambda q: searched.append(q) or "S")
+    out = svc.lookup_brief(place="现在郫都区", query="现在郫都区下雨了吗",
+                           location_hint="成都郫都")
+    assert "【和风】" in out and searched == []
+    assert client.keys[:3] == ["现在郫都区", "郫都区", "郫都"]

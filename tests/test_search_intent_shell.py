@@ -267,3 +267,39 @@ def test_honesty_red_line_covers_media_claims():
     assert "我搜过了" in HOST_CONTRACT
     assert "发你了" in HOST_CONTRACT
     assert "这就安排" in HOST_CONTRACT
+
+
+class _WeatherTools:
+    def specs(self):
+        return [ToolSpec(name="weather_now", capability="weather.now", description="和风"),
+                ToolSpec(name="search_web", capability="web.search", description="搜索")]
+
+
+def test_place_filler_prefix_stripped_for_qweather():
+    """2026-11-06 眼镜实证：「现在郫都区下雨了吗」place 抓成「现在郫都区」→ 和风 Geo 失败回落搜索。"""
+    router = SearchIntentRouter(tools=_WeatherTools(), enable_llm=False)
+    plan = json.loads(router.plan("现在郫都区下雨了吗？", context="当前位置：成都郫都"))
+    assert plan["capabilities"] == ["weather.now"]
+    assert plan["slots"]["place"] == "郫都区"
+    assert plan["slots"]["location_hint"] == "成都郫都"
+
+
+def test_llm_weather_via_search_rewritten_to_qweather():
+    """规则没认出、kimi 自己判成「搜天气」时也改走和风。"""
+    class _SearchPlan:
+        def reply(self, text, *, persona="", memories=(), history=()):
+            return json.dumps({"goal": "查成都明早天气", "kind": "task",
+                               "capabilities": ["web.search"],
+                               "slots": {"query": "成都 明早 天气"}}, ensure_ascii=False)
+    router = SearchIntentRouter(model=_SearchPlan(), enable_llm=True, tools=_WeatherTools())
+    plan = json.loads(router.plan("明早出门用不用带伞", context="当前位置：成都郫都"))
+    assert plan["capabilities"] == ["weather.now"]
+    assert plan["slots"]["location_hint"] == "成都郫都"
+
+    class _News:
+        def reply(self, text, *, persona="", memories=(), history=()):
+            return json.dumps({"goal": "搜成都活动", "kind": "task",
+                               "capabilities": ["web.search"],
+                               "slots": {"query": "成都 今天 活动"}}, ensure_ascii=False)
+    router = SearchIntentRouter(model=_News(), enable_llm=True, tools=_WeatherTools())
+    assert json.loads(router.plan("今天成都有什么活动"))["capabilities"] == ["web.search"]
