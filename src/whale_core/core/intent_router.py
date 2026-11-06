@@ -2,14 +2,14 @@
 
 路由器只建议 capabilities，不能自行授权。
 
-策略（2026-11-05 owner 确认，同日修订）：
+策略（2026-11-05 owner 确认；2026-11-06 修订闲聊短路）：
 - 规则命中（search / local-life / weather→weather.now 或 web.search / shell.safe）
   → 直接 task，零意图 LLM；
-- 规则未命中 → **一律交意图 LLM（kimi）判 chat/task/clarify**——「要不要
-  生成媒体/用工具」不用硬性词表当闸门（三起生产实证全是词表没覆盖的口语：
-  「找一下」「同人」「给我一个…图」，词表永远追不齐）；
-- 意图 LLM 未启用或返回非法计划 → 回落 kind=chat（闲聊回复仍走宿主
-  companion / DeepSeek 官模，不在此短路本地时钟）；
+- 规则未命中且**明显寒暄/短闲聊**（晚上好/你好/在吗/哈哈 等）→ kind=chat，
+  **跳过**意图 LLM（回复仍走宿主 companion）；
+- 其余模糊工具/媒体请求仍交意图 LLM（kimi）判 chat/task/clarify——不用
+  「仅 fuzzy 词表才打 LLM」旧闸门（曾漏「找一下/同人/给我一个…图」）；
+- 意图 LLM 未启用或返回非法计划 → 回落 kind=chat；
 - 授权仍走 context_resolver → authz → PluginGateway → ShellPolicy，与意图模型无关。
 """
 from __future__ import annotations
@@ -128,10 +128,52 @@ _SHELL_EXPLICIT = re.compile(
     re.IGNORECASE,
 )
 
-# 2026-11-05 owner 决策：「要不要生成媒体/用工具」不再用硬性词表当闸门
-# （三起生产实证——「找一下」「同人」「给我一个…图」全是词表没覆盖的口语，
-# 词表永远追不齐）。非显式指令一律交给意图 LLM（kimi）判 chat/task/clarify；
-# 显式指令（搜索/天气/本地生活/shell）仍规则直达，零 LLM。
+# 显式指令（搜索/天气/本地生活/shell）规则直达，零 LLM。
+# 明显寒暄短句可跳过意图 LLM；其余模糊工具/媒体仍交 kimi（不用「仅 fuzzy
+# 才 LLM」旧闸门——曾漏「找一下/同人/给我一个…图」）。
+
+# 保守寒暄白名单：整句匹配才短路；不确定 → False → 打意图 LLM。
+_CLEAR_CHITCHAT = re.compile(
+    r"^(?:"
+    r"早|早安|早上好|早上好呀|早呀|早啊|早哦|"
+    r"晚好|晚上好|晚上好呀|晚安|晚安啦|晚安哦|"
+    r"午安|中午好|下午好|"
+    r"你好|您好|你好啊|你好呀|你好哇|您好啊|"
+    r"嗨|哈喽|嘿|哟|喂|"
+    r"在吗|在不在|在么|在嘛|有人吗|"
+    r"哈哈+|嘿嘿+|呵呵+|嗯+|哦+|噢+|喔+|啊+|唉+|唔+"
+    r"|好的|好呀|好啊|行|行吧|嗯嗯|"
+    r"拜拜|再见|回见|拜|"
+    r"谢谢|多谢|谢啦|辛苦了|"
+    r"ok|okay|hi|hello|hey|yo|sup|bye|thanks|thank\s*you"
+    r")$",
+    re.IGNORECASE,
+)
+
+# 短句里若已带工具/媒体迹象，禁止当闲聊短路（天气/搜索规则通常已先命中）。
+_CHITCHAT_VETO = re.compile(
+    r"(搜索|搜一下|搜搜|查一下|查找|找一下|翻一下|翻翻|"
+    r"天气|气温|温度|下雨|下雪|预报|空气质量|"
+    r"外卖|附近|画|生成|图片|插画|海报|视频|短片|动画|同人|壁纸|"
+    r"唱|首歌|朗读|语音|命令|终端|shell|沙箱|下载|下单|支付|转账|"
+    r"删除|安装|卸载|最新话|更新到|发个|来一张|给我一个|帮我改|执行|运行)",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_clear_chitchat(text: str) -> bool:
+    """明显寒暄/短应答才 True；不确定一律 False（交给意图 LLM）。"""
+    s = re.sub(r"@\S+", " ", text or "")
+    # 去掉空白与常见语气标点；保留汉字/字母数字。
+    s = re.sub(r"[\s\u3000]+", "", s)
+    s = re.sub(r"[。！？!?…~～，,、\.!！？：:;；'\"“”‘’（）()【】\[\]~]+", "", s)
+    # 粗滤常见 emoji / 符号（不影响「哈哈」等）
+    s = re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]+", "", s)
+    if not s or len(s) > 16:
+        return False
+    if _CHITCHAT_VETO.search(s):
+        return False
+    return bool(_CLEAR_CHITCHAT.match(s))
 
 
 class ReplyModel(Protocol):
@@ -212,8 +254,10 @@ class SearchIntentRouter:
                 "capabilities": ["shell.safe"],
                 "reason": "用户明确要求终端/沙箱执行",
             }, ensure_ascii=False)
-        # 2026-11-05 owner 决策：媒体/工具意图由意图 LLM（kimi）全权判断，
-        # 不用硬性词表当闸门。LLM 未启用 → 诚实回落 chat。
+        # 明显寒暄零意图 LLM；其余模糊工具/媒体仍交 kimi。
+        # LLM 未启用 → 诚实回落 chat。
+        if _looks_like_clear_chitchat(text or ""):
+            return _chat_plan(text)
         if not self.enable_llm:
             return _chat_plan(text)
         specs = self.tools.specs() if self.tools is not None else []
