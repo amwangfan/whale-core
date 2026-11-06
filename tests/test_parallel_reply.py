@@ -183,3 +183,21 @@ def test_apply_parallel_env_note_default_and_off():
     assert orch.FIRST_REPLY_NOTE == DEFAULT_FIRST_REPLY_NOTE and "别编" in orch.FIRST_REPLY_NOTE
     apply_parallel_env(orch, {"WHALE_FIRST_REPLY_NOTE": "off", "WHALE_INTENT_BG_TIMEOUT_S": "12"})
     assert orch.FIRST_REPLY_NOTE == "" and orch.PARALLEL_INTENT_TIMEOUT_S == 12.0
+
+
+def test_first_reply_gets_default_location_in_private_not_group(monkeypatch):
+    monkeypatch.setenv("WHALE_DEFAULT_CITY", "成都郫都")
+    seen = []
+
+    class LocBrain(_Brain):
+        def reply(self, text, *, persona="", memories=(), history=(), location=None):
+            seen.append(location)
+            return "好"
+
+    store = InMemoryStore()
+    comp = WhaleCompanion(store, LocBrain(), curator=MemoryCurator(store))
+    orch = ConversationOrchestrator(store, comp, intent_model=_SlowIntent(_chat()))
+    for cid in ("private:1", "group:9"):
+        orch.handle_envelope_parallel(InputEnvelope(conversation_id=cid, text="嗯",
+                                                    source="qq:owner", channel="qq"))
+    assert seen == ["成都郫都", None]
