@@ -1,0 +1,23 @@
+{
+  "v": "2.0",
+  "id": "01J9XK3EM8TQ2ZP0VN6W4RA711",
+  "type": "action.receipt",
+  "ts": 1794052861200,
+  "seq": 1,
+  "dir": "uplink",
+  "payload": {
+    "action_id": "act_01J9XK3EM8TQ2ZP0VN6W4RA8CC",
+    "task_id": "task_01J9XK3EM8TQ2ZP0VN6W4RA8BB",
+    "status": "succeeded",
+    "result": {
+      "summary": "已点击搜索按钮",
+      "verification": {
+        "status": "passed",
+        "summary": "搜索页面已打开"
+      }
+    },
+    "provider_ref": "corr:evt_01J9XK3EM8TQ2ZP0VN6W4RA8EE",
+    "started_at": 1794052860100,
+    "completed_at": 1794052861200
+  }
+}

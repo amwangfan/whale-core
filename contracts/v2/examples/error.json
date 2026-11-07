@@ -1,0 +1,13 @@
+{
+  "v": "2.0",
+  "id": "01J9XK3EM8TQ2ZP0VN6W4RA721",
+  "type": "error",
+  "ts": 1794052890000,
+  "seq": 1,
+  "dir": "downlink",
+  "payload": {
+    "ref_id": "01J9XK3EM8TQ2ZP0VN6W4RA710",
+    "code": "expired",
+    "message": "动作已过有效期，未执行"
+  }
+}

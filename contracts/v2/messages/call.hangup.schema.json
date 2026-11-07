@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://whale.example.internal/contracts/v2/messages/call.hangup.schema.json",
+  "title": "call.hangup",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "id",
+    "type",
+    "ts",
+    "seq",
+    "dir",
+    "payload"
+  ],
+  "properties": {
+    "v": {
+      "type": "string",
+      "pattern": "^2\\.[0-9]+$",
+      "description": "协议版本 major.minor；未知 major 必须拒绝并回 error.protocol_version（§2）"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "消息 ID（26 字符 ULID，§3）"
+    },
+    "type": {
+      "const": "call.hangup",
+      "description": "消息类型"
+    },
+    "ts": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4102444800000,
+      "description": "发送端发送时间（Unix 毫秒）"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991,
+      "description": "每方向各自单调递增序号（§2）"
+    },
+    "dir": {
+      "type": "string",
+      "enum": [
+        "uplink",
+        "downlink"
+      ],
+      "description": "uplink=机→云 / downlink=云→机"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "session_id"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "description": "通话会话 ID",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "reason": {
+          "type": "string",
+          "description": "挂断原因",
+          "enum": [
+            "normal",
+            "timeout",
+            "rejected",
+            "error"
+          ]
+        }
+      }
+    }
+  }
+}

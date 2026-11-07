@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://whale.example.internal/contracts/v2/objects/attachment-ref.schema.json",
+  "title": "AttachmentRef",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "attachment_id",
+    "type",
+    "mime",
+    "size"
+  ],
+  "properties": {
+    "attachment_id": {
+      "type": "string",
+      "pattern": "^att_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "附件 ID（§3）"
+    },
+    "type": {
+      "type": "string",
+      "description": "附件类型",
+      "enum": [
+        "image",
+        "video",
+        "audio",
+        "file"
+      ]
+    },
+    "mime": {
+      "type": "string",
+      "description": "MIME 类型",
+      "minLength": 3,
+      "maxLength": 128
+    },
+    "size": {
+      "type": "integer",
+      "description": "字节数",
+      "minimum": 0,
+      "maximum": 536870912
+    },
+    "sha256": {
+      "type": "string",
+      "description": "内容哈希（64 hex）",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "width": {
+      "type": "integer",
+      "description": "图片/视频宽",
+      "minimum": 1,
+      "maximum": 20000
+    },
+    "height": {
+      "type": "integer",
+      "description": "图片/视频高",
+      "minimum": 1,
+      "maximum": 20000
+    },
+    "duration_ms": {
+      "type": "integer",
+      "description": "音视频时长",
+      "minimum": 1
+    }
+  }
+}

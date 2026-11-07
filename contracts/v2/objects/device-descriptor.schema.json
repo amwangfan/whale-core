@@ -1,0 +1,188 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://whale.example.internal/contracts/v2/objects/device-descriptor.schema.json",
+  "title": "DeviceDescriptor",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "device_id",
+    "capabilities",
+    "features",
+    "device",
+    "app_version",
+    "app_flavor"
+  ],
+  "properties": {
+    "device_id": {
+      "type": "string",
+      "description": "设备 ID（§3）",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "label": {
+      "type": "string",
+      "description": "人类可读名称",
+      "maxLength": 64
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "screen.context.read",
+          "screen.history.search",
+          "screen.evidence.read",
+          "screen.live.subscribe",
+          "phone.notification.post",
+          "phone.notification.read",
+          "phone.call.ring",
+          "phone.call.audio",
+          "phone.device.safe_action",
+          "glasses.card.show",
+          "glasses.card.update",
+          "glasses.card.dismiss",
+          "device.observe",
+          "device.tap",
+          "device.long_press",
+          "device.swipe",
+          "device.input_text",
+          "device.key",
+          "device.wait",
+          "device.app.launch",
+          "device.app.list",
+          "device.app.install",
+          "device.app.uninstall",
+          "device.shell",
+          "device.file.read",
+          "device.file.write",
+          "device.file.list",
+          "device.logcat",
+          "device.stop",
+          "device.output.read",
+          "device.screen.record",
+          "device.status"
+        ],
+        "description": "能力名（§5.1 全协议唯一枚举）"
+      },
+      "description": "声明能力",
+      "minItems": 1,
+      "maxItems": 64,
+      "uniqueItems": true
+    },
+    "features": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "布尔特征集；feature=false 的能力即使声明也会被 core 忽略（§5.2）",
+      "required": [
+        "root_shell",
+        "accessibility",
+        "media_projection",
+        "telecom",
+        "ocr_mlkit"
+      ],
+      "properties": {
+        "root_shell": {
+          "type": "boolean",
+          "description": "Root Shell 可用（持续授权已开）"
+        },
+        "accessibility": {
+          "type": "boolean",
+          "description": "无障碍服务可用（截屏/UI 树）"
+        },
+        "media_projection": {
+          "type": "boolean",
+          "description": "MediaProjection 录制可用"
+        },
+        "telecom": {
+          "type": "boolean",
+          "description": "电话栈可用"
+        },
+        "ocr_mlkit": {
+          "type": "boolean",
+          "description": "ML Kit OCR 可用"
+        }
+      }
+    },
+    "device": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "设备描述",
+      "required": [
+        "model",
+        "android_release",
+        "api_level"
+      ],
+      "properties": {
+        "model": {
+          "type": "string",
+          "description": "机型",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "android_release": {
+          "type": "string",
+          "description": "Android 版本",
+          "minLength": 1,
+          "maxLength": 16
+        },
+        "api_level": {
+          "type": "integer",
+          "description": "API level",
+          "minimum": 1,
+          "maximum": 100
+        }
+      }
+    },
+    "app_version": {
+      "type": "string",
+      "description": "应用版本号",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "app_flavor": {
+      "type": "string",
+      "description": "构建变体",
+      "enum": [
+        "daily",
+        "root"
+      ]
+    },
+    "transports": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "state"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "通道类型",
+            "enum": [
+              "embedded_wss",
+              "adb",
+              "ssh"
+            ]
+          },
+          "state": {
+            "type": "string",
+            "description": "通道状态",
+            "enum": [
+              "connected",
+              "disconnected",
+              "degraded"
+            ]
+          },
+          "address_hint": {
+            "type": "string",
+            "description": "地址提示（不泄露公网地址细节）",
+            "maxLength": 128
+          }
+        }
+      },
+      "description": "已注册传输通道",
+      "maxItems": 8
+    }
+  }
+}

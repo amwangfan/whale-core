@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://whale.example.internal/contracts/v2/objects/run-trace-event.schema.json",
+  "title": "RunTraceEvent",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_id",
+    "seq",
+    "timestamp_ms",
+    "kind"
+  ],
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "所属 run（与录制共用，§12）"
+    },
+    "seq": {
+      "type": "integer",
+      "description": "轨迹序号，自 1 单调递增",
+      "minimum": 1
+    },
+    "timestamp_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4102444800000,
+      "description": "步骤时间戳；与录屏时间轴对齐的基准"
+    },
+    "kind": {
+      "type": "string",
+      "description": "轨迹事件种类",
+      "enum": [
+        "task_started",
+        "observation",
+        "action_started",
+        "action_completed",
+        "action_failed",
+        "verification",
+        "approval_requested",
+        "approval_resolved",
+        "task_completed",
+        "task_failed",
+        "note"
+      ]
+    },
+    "task_summary": {
+      "type": "string",
+      "description": "任务摘要（可理解的操作说明，不含思维链）",
+      "maxLength": 200
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "description": "动作能力名",
+          "maxLength": 64
+        },
+        "label": {
+          "type": "string",
+          "description": "可理解短句（如「点击搜索按钮」）",
+          "maxLength": 200
+        },
+        "target": {
+          "type": "string",
+          "description": "动作目标（element:<id> / 坐标 / 包名）",
+          "maxLength": 200
+        }
+      }
+    },
+    "result": {
+      "type": "string",
+      "description": "步骤结果摘要",
+      "maxLength": 500
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "执行后验证（§7.3）；验证不了必须 skipped，禁止伪报 passed",
+      "required": [
+        "status",
+        "summary"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "description": "验证状态",
+          "enum": [
+            "passed",
+            "failed",
+            "skipped"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "description": "验证说明",
+          "maxLength": 500
+        }
+      }
+    },
+    "frame_ref": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*:[A-Za-z0-9._:/-]{1,128}$",
+      "description": "不透明证据引用（§10），绝不泄露本地绝对路径"
+    }
+  }
+}

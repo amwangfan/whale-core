@@ -1,0 +1,17 @@
+{
+  "v": "2.0",
+  "id": "01J9XK3EM8TQ2ZP0VN6W4RA707",
+  "type": "sensor.query",
+  "ts": 1794052850000,
+  "seq": 1,
+  "dir": "downlink",
+  "payload": {
+    "request_id": "01J9XK3EM8TQ2ZP0VN6W4RA708",
+    "operation": "screen.history.search",
+    "filters": {
+      "q": "机器人"
+    },
+    "max_items": 10,
+    "deadline": 1794052865000
+  }
+}

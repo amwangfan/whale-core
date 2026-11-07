@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://whale.example.internal/contracts/v2/messages/notification.receipt.schema.json",
+  "title": "notification.receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "id",
+    "type",
+    "ts",
+    "seq",
+    "dir",
+    "payload"
+  ],
+  "properties": {
+    "v": {
+      "type": "string",
+      "pattern": "^2\\.[0-9]+$",
+      "description": "协议版本 major.minor；未知 major 必须拒绝并回 error.protocol_version（§2）"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "消息 ID（26 字符 ULID，§3）"
+    },
+    "type": {
+      "const": "notification.receipt",
+      "description": "消息类型"
+    },
+    "ts": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4102444800000,
+      "description": "发送端发送时间（Unix 毫秒）"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991,
+      "description": "每方向各自单调递增序号（§2）"
+    },
+    "dir": {
+      "const": "uplink",
+      "description": "uplink=机→云 / downlink=云→机"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_id",
+        "notification_id",
+        "device_id",
+        "status",
+        "received_at"
+      ],
+      "properties": {
+        "event_id": {
+          "type": "string",
+          "pattern": "^evt_[0-9A-HJKMNP-TV-Z]{26}$",
+          "description": "对应 notification.event 的 event_id"
+        },
+        "notification_id": {
+          "type": "string",
+          "pattern": "^notif_[0-9A-HJKMNP-TV-Z]{26}$",
+          "description": "对应通知 ID"
+        },
+        "device_id": {
+          "type": "string",
+          "description": "设备 ID",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "status": {
+          "type": "string",
+          "description": "送达/展示状态；displayed≠用户已看到（渠道被关也算 displayed 失败场景）",
+          "enum": [
+            "received",
+            "displayed",
+            "opened",
+            "dismissed",
+            "action_submitted",
+            "expired",
+            "failed"
+          ]
+        },
+        "received_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4102444800000,
+          "description": "状态产生时间（Unix 毫秒）"
+        }
+      }
+    }
+  }
+}

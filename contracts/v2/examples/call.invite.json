@@ -1,0 +1,20 @@
+{
+  "v": "2.0",
+  "id": "01J9XK3EM8TQ2ZP0VN6W4RA717",
+  "type": "call.invite",
+  "ts": 1794052880000,
+  "seq": 1,
+  "dir": "downlink",
+  "payload": {
+    "session_id": "01J9XK3EM8TQ2ZP0VN6W4RA8GG",
+    "media_params": {
+      "codec": "pcm_s16le",
+      "sample_rate": 16000,
+      "channels": 1,
+      "frame_ms": 20
+    },
+    "expires_at": 1794052940000,
+    "number": "+8613800138000",
+    "name": "主人"
+  }
+}

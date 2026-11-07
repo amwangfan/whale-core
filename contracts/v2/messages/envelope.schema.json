@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://whale.example.internal/contracts/v2/messages/envelope.schema.json",
+  "title": "envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "id",
+    "type",
+    "ts",
+    "seq",
+    "dir",
+    "payload"
+  ],
+  "properties": {
+    "v": {
+      "type": "string",
+      "pattern": "^2\\.[0-9]+$"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "auth.challenge",
+        "device.hello",
+        "device.hello_ack",
+        "device.heartbeat",
+        "experience.event",
+        "event.ack",
+        "sensor.query",
+        "sensor.result",
+        "action.request",
+        "action.receipt",
+        "device.confirm.request",
+        "device.confirm.response",
+        "run.trace.event",
+        "recording.control",
+        "recording.state",
+        "call.invite",
+        "call.answer",
+        "call.hangup",
+        "call.state",
+        "error",
+        "notification.event",
+        "notification.receipt",
+        "notification.action",
+        "notification.sync",
+        "notification.revoke"
+      ]
+    },
+    "ts": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4102444800000
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "dir": {
+      "type": "string",
+      "enum": [
+        "uplink",
+        "downlink"
+      ]
+    },
+    "payload": {
+      "type": "object"
+    }
+  }
+}

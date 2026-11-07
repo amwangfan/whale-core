@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://whale.example.internal/contracts/v2/messages/recording.state.schema.json",
+  "title": "recording.state",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "id",
+    "type",
+    "ts",
+    "seq",
+    "dir",
+    "payload"
+  ],
+  "properties": {
+    "v": {
+      "type": "string",
+      "pattern": "^2\\.[0-9]+$",
+      "description": "协议版本 major.minor；未知 major 必须拒绝并回 error.protocol_version（§2）"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "消息 ID（26 字符 ULID，§3）"
+    },
+    "type": {
+      "const": "recording.state",
+      "description": "消息类型"
+    },
+    "ts": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4102444800000,
+      "description": "发送端发送时间（Unix 毫秒）"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991,
+      "description": "每方向各自单调递增序号（§2）"
+    },
+    "dir": {
+      "const": "uplink",
+      "description": "uplink=机→云 / downlink=云→机"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "state"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string",
+          "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$",
+          "description": "关联 run"
+        },
+        "state": {
+          "type": "string",
+          "description": "录制状态",
+          "enum": [
+            "idle",
+            "recording",
+            "paused",
+            "stopped",
+            "failed",
+            "uploaded"
+          ]
+        },
+        "file_ref": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*:[A-Za-z0-9._:/-]{1,128}$",
+          "description": "不透明证据引用（§10），绝不泄露本地绝对路径"
+        },
+        "duration_ms": {
+          "type": "integer",
+          "description": "已录制时长",
+          "minimum": 0
+        },
+        "error_code": {
+          "type": "string",
+          "enum": [
+            "protocol_version",
+            "auth_failed",
+            "device_revoked",
+            "scope_denied",
+            "capability_unknown",
+            "expired",
+            "duplicate",
+            "rate_limited",
+            "unavailable",
+            "permission_missing",
+            "invalid_message",
+            "internal",
+            "background_restricted",
+            "timeout",
+            "cancelled",
+            "stale_observation",
+            "element_not_found",
+            "approval_denied",
+            "estop_active"
+          ]
+        }
+      }
+    }
+  }
+}

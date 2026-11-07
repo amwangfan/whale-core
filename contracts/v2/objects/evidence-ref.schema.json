@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://whale.example.internal/contracts/v2/objects/evidence-ref.schema.json",
+  "title": "EvidenceRef",
+  "type": "string",
+  "pattern": "^[a-z][a-z0-9_]*:[A-Za-z0-9._:/-]{1,128}$",
+  "description": "不透明证据引用（§10）：capture:/agent:out:/agent:ui:/agent:shot:/run:/recording:/att:"
+}

@@ -34,5 +34,5 @@ jobs:
           path: mobile
           # whale-mobile 当前是 public 仓，GITHUB_TOKEN 即可读取；
           # 若将来转私有，在此补 token: ${{ secrets.CROSS_REPO_TOKEN }}
-      - name: Compare contracts/v1 file by file
+      - name: Compare contracts/v2 file by file
         run: python3 core/scripts/contract_sync_check.py --core core --mobile mobile

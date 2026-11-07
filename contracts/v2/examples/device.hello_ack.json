@@ -1,0 +1,18 @@
+{
+  "v": "2.0",
+  "id": "01J9XK3EM8TQ2ZP0VN6W4RA703",
+  "type": "device.hello_ack",
+  "ts": 1794052800200,
+  "seq": 1,
+  "dir": "downlink",
+  "payload": {
+    "session_id": "01J9XK3EM8TQ2ZP0VN6W4RA8GG",
+    "server_time": 1794052800200,
+    "heartbeat_interval": 30,
+    "accepted_capabilities": [
+      "device.observe",
+      "device.tap",
+      "device.shell"
+    ]
+  }
+}

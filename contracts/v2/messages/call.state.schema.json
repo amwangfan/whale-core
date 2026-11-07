@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://whale.example.internal/contracts/v2/messages/call.state.schema.json",
+  "title": "call.state",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "id",
+    "type",
+    "ts",
+    "seq",
+    "dir",
+    "payload"
+  ],
+  "properties": {
+    "v": {
+      "type": "string",
+      "pattern": "^2\\.[0-9]+$",
+      "description": "协议版本 major.minor；未知 major 必须拒绝并回 error.protocol_version（§2）"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "消息 ID（26 字符 ULID，§3）"
+    },
+    "type": {
+      "const": "call.state",
+      "description": "消息类型"
+    },
+    "ts": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4102444800000,
+      "description": "发送端发送时间（Unix 毫秒）"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991,
+      "description": "每方向各自单调递增序号（§2）"
+    },
+    "dir": {
+      "type": "string",
+      "enum": [
+        "uplink",
+        "downlink"
+      ],
+      "description": "uplink=机→云 / downlink=云→机"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "state"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "description": "通话会话 ID",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "state": {
+          "type": "string",
+          "description": "通话状态",
+          "enum": [
+            "ringing",
+            "active",
+            "held",
+            "ended",
+            "failed"
+          ]
+        },
+        "media_params": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "媒体参数（PCM s16le mono 16kHz）",
+          "required": [
+            "codec",
+            "sample_rate",
+            "channels"
+          ],
+          "properties": {
+            "codec": {
+              "const": "pcm_s16le"
+            },
+            "sample_rate": {
+              "const": 16000
+            },
+            "channels": {
+              "const": 1
+            },
+            "frame_ms": {
+              "type": "integer",
+              "enum": [
+                20,
+                40,
+                60
+              ]
+            }
+          }
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4102444800000
+        }
+      }
+    }
+  }
+}

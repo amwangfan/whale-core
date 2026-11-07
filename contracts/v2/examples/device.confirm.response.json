@@ -1,0 +1,14 @@
+{
+  "v": "2.0",
+  "id": "01J9XK3EM8TQ2ZP0VN6W4RA713",
+  "type": "device.confirm.response",
+  "ts": 1794052875000,
+  "seq": 1,
+  "dir": "uplink",
+  "payload": {
+    "challenge_id": "01J9XK3EM8TQ2ZP0VN6W4RA8HH",
+    "approved": true,
+    "signature": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "responded_at": 1794052875000
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "v": "2.0",
+  "id": "01J9XK3EM8TQ2ZP0VN6W4RA712",
+  "type": "device.confirm.request",
+  "ts": 1794052870000,
+  "seq": 1,
+  "dir": "downlink",
+  "payload": {
+    "challenge_id": "01J9XK3EM8TQ2ZP0VN6W4RA8HH",
+    "device_id": "ba4bb14c75917cfc0e69fb7a1caf8ba3",
+    "principal_id": "owner",
+    "channel": "im",
+    "scopes": [
+      "device.shell"
+    ],
+    "expires_at": 1794053170000,
+    "conversation_id": "im:qq:owner-private",
+    "action_fingerprint": "device.shell:pm list packages"
+  }
+}

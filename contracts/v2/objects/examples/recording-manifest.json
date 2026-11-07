@@ -1,0 +1,16 @@
+{
+  "run_id": "run_01J9XK3EM8TQ2ZP0VN6W4RA8AA",
+  "device_id": "ba4bb14c75917cfc0e69fb7a1caf8ba3",
+  "recorder": "scrcpy",
+  "started_at": 1794052855000,
+  "stopped_at": 1794052980000,
+  "video_ref": "recording:run_01J9XK3EM8TQ2ZP0VN6W4RA8AA/video",
+  "trace_ref": "recording:run_01J9XK3EM8TQ2ZP0VN6W4RA8AA/trace",
+  "resolution": {
+    "width": 720,
+    "height": 1440
+  },
+  "frame_rate": 30,
+  "profile": "demo",
+  "status": "completed"
+}

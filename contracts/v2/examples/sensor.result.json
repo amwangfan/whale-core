@@ -1,0 +1,21 @@
+{
+  "v": "2.0",
+  "id": "01J9XK3EM8TQ2ZP0VN6W4RA709",
+  "type": "sensor.result",
+  "ts": 1794052851000,
+  "seq": 1,
+  "dir": "uplink",
+  "payload": {
+    "request_id": "01J9XK3EM8TQ2ZP0VN6W4RA708",
+    "status": "ok",
+    "data": [
+      {
+        "ref": "capture:segment_01J9XK3EM8TQ2ZP0VN6W4RA8II",
+        "summary": "视频浏览片段",
+        "score": 0.86
+      }
+    ],
+    "truncated": false,
+    "source": "capture.local"
+  }
+}

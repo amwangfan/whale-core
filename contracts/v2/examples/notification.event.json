@@ -1,0 +1,31 @@
+{
+  "v": "2.0",
+  "id": "01J9XK3EM8TQ2ZP0VN6W4RA722",
+  "type": "notification.event",
+  "ts": 1794052895000,
+  "seq": 1,
+  "dir": "downlink",
+  "payload": {
+    "event_id": "evt_01J9XK3EM8TQ2ZP0VN6W4RA8KK",
+    "notification_id": "notif_01J9XK3EM8TQ2ZP0VN6W4RA8JJ",
+    "device_id": "ba4bb14c75917cfc0e69fb7a1caf8ba3",
+    "category": "task.completed",
+    "title": "任务已完成",
+    "body": "Root 手机已完成应用检查。",
+    "priority": "normal",
+    "created_at": 1794052895000,
+    "expires_at": 1794139200000,
+    "target": {
+      "type": "task",
+      "id": "task_01J9XK3EM8TQ2ZP0VN6W4RA8BB"
+    },
+    "actions": [
+      {
+        "action_id": "open",
+        "label": "查看"
+      }
+    ],
+    "group_key": "task_01J9XK3EM8TQ2ZP0VN6W4RA8BB",
+    "collapse_key": "task_01J9XK3EM8TQ2ZP0VN6W4RA8BB"
+  }
+}

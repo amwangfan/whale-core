@@ -1,0 +1,14 @@
+{
+  "v": "2.0",
+  "id": "01J9XK3EM8TQ2ZP0VN6W4RA726",
+  "type": "notification.revoke",
+  "ts": 1794052920000,
+  "seq": 1,
+  "dir": "downlink",
+  "payload": {
+    "event_id": "evt_01J9XK3EM8TQ2ZP0VN6W4RA8MM",
+    "notification_id": "notif_01J9XK3EM8TQ2ZP0VN6W4RA8JJ",
+    "device_id": "ba4bb14c75917cfc0e69fb7a1caf8ba3",
+    "reason": "任务结果已更新"
+  }
+}

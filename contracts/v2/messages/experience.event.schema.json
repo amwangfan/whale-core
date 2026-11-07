@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://whale.example.internal/contracts/v2/messages/experience.event.schema.json",
+  "title": "experience.event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "id",
+    "type",
+    "ts",
+    "seq",
+    "dir",
+    "payload"
+  ],
+  "properties": {
+    "v": {
+      "type": "string",
+      "pattern": "^2\\.[0-9]+$",
+      "description": "协议版本 major.minor；未知 major 必须拒绝并回 error.protocol_version（§2）"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "消息 ID（26 字符 ULID，§3）"
+    },
+    "type": {
+      "const": "experience.event",
+      "description": "消息类型"
+    },
+    "ts": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4102444800000,
+      "description": "发送端发送时间（Unix 毫秒）"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991,
+      "description": "每方向各自单调递增序号（§2）"
+    },
+    "dir": {
+      "const": "uplink",
+      "description": "uplink=机→云 / downlink=云→机"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_id",
+        "kind",
+        "occurred_at",
+        "device_id",
+        "source",
+        "summary",
+        "privacy_class",
+        "schema_version"
+      ],
+      "properties": {
+        "event_id": {
+          "type": "string",
+          "pattern": "^evt_[0-9A-HJKMNP-TV-Z]{26}$",
+          "description": "事件唯一 ID，即幂等键，core 按它去重（§3/§16）"
+        },
+        "kind": {
+          "type": "string",
+          "description": "事件种类，点分小写（如 screen.segment_ready）",
+          "pattern": "^[a-z0-9_.]+$",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "occurred_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4102444800000,
+          "description": "事件真实发生时间，与信封 ts 分离（Unix 毫秒）"
+        },
+        "device_id": {
+          "type": "string",
+          "description": "设备 ID（§3）",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "source": {
+          "type": "string",
+          "description": "事件来源",
+          "enum": [
+            "screen_memo",
+            "device_action",
+            "agent_experience",
+            "notification",
+            "user",
+            "system"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "description": "脱敏摘要；默认不含截图/完整 OCR（§9）",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "privacy_class": {
+          "type": "string",
+          "description": "隐私级（§17）；device_secret 永不出现在协议中",
+          "enum": [
+            "public",
+            "owner_private",
+            "owner_sensitive"
+          ]
+        },
+        "schema_version": {
+          "type": "string",
+          "description": "事件负载的数据结构版本",
+          "pattern": "^[0-9]+\\.[0-9]+$"
+        },
+        "evidence_ref": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*:[A-Za-z0-9._:/-]{1,128}$",
+          "description": "不透明证据引用（§10），绝不泄露本地绝对路径"
+        },
+        "task_id": {
+          "type": "string",
+          "pattern": "^task_[0-9A-HJKMNP-TV-Z]{26}$",
+          "description": "关联任务（AI 操作经历必填）"
+        },
+        "run_id": {
+          "type": "string",
+          "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$",
+          "description": "关联 run（AI 操作经历必填）"
+        },
+        "extras": {
+          "type": "object",
+          "maxProperties": 16,
+          "description": "结构化附加字段（如 package）；不得含隐私原文"
+        }
+      }
+    }
+  }
+}

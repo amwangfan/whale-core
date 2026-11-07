@@ -1,0 +1,14 @@
+{
+  "event_id": "evt_01J9XK3EM8TQ2ZP0VN6W4RA8EE",
+  "kind": "screen.segment_ready",
+  "occurred_at": 1794052839000,
+  "device_id": "ba4bb14c75917cfc0e69fb7a1caf8ba3",
+  "source": "screen_memo",
+  "summary": "浏览了一个关于 AI 机器人的视频",
+  "privacy_class": "owner_private",
+  "evidence_ref": "capture:segment_01J9XK3EM8TQ2ZP0VN6W4RA8II",
+  "schema_version": "2.0",
+  "extras": {
+    "package": "com.example.video"
+  }
+}

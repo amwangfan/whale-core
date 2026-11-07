@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://whale.example.internal/contracts/v2/objects/approval-request.schema.json",
+  "title": "ApprovalRequest（IM 审批对象，core ↔ IM Gateway，不走设备 WSS）",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "approval_id",
+    "task_id",
+    "device_id",
+    "action",
+    "summary",
+    "expires_at",
+    "reply_options"
+  ],
+  "properties": {
+    "approval_id": {
+      "type": "string",
+      "pattern": "^aprv_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "task_id": {
+      "type": "string",
+      "pattern": "^task_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "device_id": {
+      "type": "string",
+      "description": "目标设备",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "action": {
+      "type": "string",
+      "description": "待审批动作能力名",
+      "enum": [
+        "screen.context.read",
+        "screen.history.search",
+        "screen.evidence.read",
+        "screen.live.subscribe",
+        "phone.notification.post",
+        "phone.notification.read",
+        "phone.call.ring",
+        "phone.call.audio",
+        "phone.device.safe_action",
+        "glasses.card.show",
+        "glasses.card.update",
+        "glasses.card.dismiss",
+        "device.observe",
+        "device.tap",
+        "device.long_press",
+        "device.swipe",
+        "device.input_text",
+        "device.key",
+        "device.wait",
+        "device.app.launch",
+        "device.app.list",
+        "device.app.install",
+        "device.app.uninstall",
+        "device.shell",
+        "device.file.read",
+        "device.file.write",
+        "device.file.list",
+        "device.logcat",
+        "device.stop",
+        "device.screen.record"
+      ]
+    },
+    "summary": {
+      "type": "string",
+      "description": "审批摘要（无私人内容）",
+      "minLength": 1,
+      "maxLength": 500
+    },
+    "expires_at": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4102444800000
+    },
+    "reply_options": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "description": "可回复选项",
+        "maxLength": 32
+      },
+      "description": "主人可回复的选项",
+      "minItems": 1,
+      "maxItems": 8
+    }
+  }
+}

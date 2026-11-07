@@ -1,0 +1,18 @@
+{
+  "run_id": "run_01J9XK3EM8TQ2ZP0VN6W4RA8AA",
+  "seq": 8,
+  "timestamp_ms": 1794052861200,
+  "kind": "action_completed",
+  "task_summary": "在视频应用中搜索指定内容",
+  "action": {
+    "type": "device.tap",
+    "label": "点击搜索按钮",
+    "target": "element:23"
+  },
+  "result": "succeeded",
+  "verification": {
+    "status": "passed",
+    "summary": "搜索页面已打开"
+  },
+  "frame_ref": "recording:run_01J9XK3EM8TQ2ZP0VN6W4RA8AA/frame_000008"
+}

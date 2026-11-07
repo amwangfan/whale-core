@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """跨仓契约漂移校验（issue #46）。
 
-逐文件比较两个 checkout 的 ``contracts/v1/`` 约定范围：
+逐文件比较两个 checkout 的 ``contracts/v2/`` 约定范围：
 
 - ``PROTOCOL.md``
 - ``messages/*.schema.json``
+- ``objects/*.schema.json``
 - ``examples/*.json``
 
-canonical source 是 **whale-mobile**（``contracts/v1/README.md`` 与
-``docs/devices.md`` 已声明）；本脚本只做双向逐文件对比，不区分方向——
+canonical source 是 **whale-mobile**（``contracts/v2/README.md`` 与
+``docs/devices.md`` 已声明）；v1 已冻结下线，不再纳入比对。本脚本只做双向逐文件对比，不区分方向——
 任一侧多了文件、缺了文件或内容不同都算漂移，输出逐文件差异并以退出码 1
 失败。README.md 等仓内元文档不在校验范围内。
 
@@ -31,11 +32,11 @@ import sys
 from pathlib import Path
 
 SCOPE_FILES = ("PROTOCOL.md",)
-SCOPE_GLOBS = ("messages/*.schema.json", "examples/*.json")
+SCOPE_GLOBS = ("messages/*.schema.json", "objects/*.schema.json", "examples/*.json")
 
 
 def collect(root: Path) -> "dict[str, Path]":
-    base = root / "contracts" / "v1"
+    base = root / "contracts" / "v2"
     found: dict[str, Path] = {}
     for name in SCOPE_FILES:
         p = base / name
@@ -76,8 +77,8 @@ def main(argv: "list[str] | None" = None) -> int:
         parser.error("需要 --core/--mobile 或 --a/--b")
     a_root, b_root = Path(a), Path(b)
     for label, root in (("A", a_root), ("B", b_root)):
-        if not (root / "contracts" / "v1").is_dir():
-            print(f"error: {label} 侧 {root} 缺少 contracts/v1/", file=sys.stderr)
+        if not (root / "contracts" / "v2").is_dir():
+            print(f"error: {label} 侧 {root} 缺少 contracts/v2/", file=sys.stderr)
             return 2
 
     problems = compare(a_root, b_root)
@@ -91,7 +92,7 @@ def main(argv: "list[str] | None" = None) -> int:
         )
         return 1
     total = len(collect(a_root))
-    print(f"ok: contracts/v1 范围内 {total} 个文件两侧一致")
+    print(f"ok: contracts/v2 范围内 {total} 个文件两侧一致")
     return 0
 
 

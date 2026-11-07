@@ -1,0 +1,12 @@
+{
+  "v": "2.0",
+  "id": "01J9XK3EM8TQ2ZP0VN6W4RA720",
+  "type": "call.state",
+  "ts": 1794052881000,
+  "seq": 1,
+  "dir": "uplink",
+  "payload": {
+    "session_id": "01J9XK3EM8TQ2ZP0VN6W4RA8GG",
+    "state": "active"
+  }
+}

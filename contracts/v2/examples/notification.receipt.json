@@ -1,0 +1,15 @@
+{
+  "v": "2.0",
+  "id": "01J9XK3EM8TQ2ZP0VN6W4RA723",
+  "type": "notification.receipt",
+  "ts": 1794052896000,
+  "seq": 1,
+  "dir": "uplink",
+  "payload": {
+    "event_id": "evt_01J9XK3EM8TQ2ZP0VN6W4RA8KK",
+    "notification_id": "notif_01J9XK3EM8TQ2ZP0VN6W4RA8JJ",
+    "device_id": "ba4bb14c75917cfc0e69fb7a1caf8ba3",
+    "status": "displayed",
+    "received_at": 1794052896000
+  }
+}

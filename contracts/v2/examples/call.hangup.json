@@ -1,0 +1,12 @@
+{
+  "v": "2.0",
+  "id": "01J9XK3EM8TQ2ZP0VN6W4RA719",
+  "type": "call.hangup",
+  "ts": 1794052900000,
+  "seq": 1,
+  "dir": "uplink",
+  "payload": {
+    "session_id": "01J9XK3EM8TQ2ZP0VN6W4RA8GG",
+    "reason": "normal"
+  }
+}

@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://whale.example.internal/contracts/v2/objects/notification-event.schema.json",
+  "title": "NotificationEvent（notification.event 的 payload 合同）",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "notification_id",
+    "device_id",
+    "category",
+    "title",
+    "body",
+    "priority",
+    "created_at",
+    "expires_at"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "pattern": "^evt_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "事件 ID（幂等键，§3）"
+    },
+    "notification_id": {
+      "type": "string",
+      "pattern": "^notif_[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "通知 ID（同一通知更新/撤回复用）"
+    },
+    "device_id": {
+      "type": "string",
+      "description": "目标设备（§3）",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "category": {
+      "type": "string",
+      "description": "通知分类（修正方案 §6.3）",
+      "enum": [
+        "chat.message",
+        "task.started",
+        "task.progress",
+        "task.completed",
+        "task.failed",
+        "approval.requested",
+        "device.offline",
+        "device.online",
+        "memory.updated",
+        "reminder.triggered"
+      ]
+    },
+    "title": {
+      "type": "string",
+      "description": "通知标题（脱敏）",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "body": {
+      "type": "string",
+      "description": "通知正文（脱敏摘要）",
+      "maxLength": 2000
+    },
+    "priority": {
+      "type": "string",
+      "description": "优先级",
+      "enum": [
+        "low",
+        "normal",
+        "high"
+      ]
+    },
+    "created_at": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4102444800000,
+      "description": "通知创建时间（Unix 毫秒）"
+    },
+    "expires_at": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4102444800000,
+      "description": "过期时间；过期不再弹出，可留通知历史"
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "点击跳转目标",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "description": "目标类型",
+          "enum": [
+            "task",
+            "conversation",
+            "device",
+            "approval",
+            "chat",
+            "none"
+          ]
+        },
+        "id": {
+          "type": "string",
+          "description": "目标 ID（按类型解释，可为空）",
+          "maxLength": 128
+        }
+      }
+    },
+    "actions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "通知操作按钮",
+        "required": [
+          "action_id",
+          "label"
+        ],
+        "properties": {
+          "action_id": {
+            "type": "string",
+            "description": "操作标识（如 approve/reject/open）",
+            "pattern": "^[a-z0-9_]{1,32}$"
+          },
+          "label": {
+            "type": "string",
+            "description": "按钮文案",
+            "minLength": 1,
+            "maxLength": 32
+          }
+        }
+      },
+      "description": "操作按钮（审批类带批准/拒绝）",
+      "maxItems": 4
+    },
+    "group_key": {
+      "type": "string",
+      "description": "通知分组键（同组聚合展示）",
+      "maxLength": 128
+    },
+    "collapse_key": {
+      "type": "string",
+      "description": "折叠键（同键新通知替换旧通知）",
+      "maxLength": 128
+    }
+  }
+}

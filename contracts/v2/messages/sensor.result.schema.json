@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://whale.example.internal/contracts/v2/messages/sensor.result.schema.json",
+  "title": "sensor.result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "id",
+    "type",
+    "ts",
+    "seq",
+    "dir",
+    "payload"
+  ],
+  "properties": {
+    "v": {
+      "type": "string",
+      "pattern": "^2\\.[0-9]+$",
+      "description": "协议版本 major.minor；未知 major 必须拒绝并回 error.protocol_version（§2）"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "消息 ID（26 字符 ULID，§3）"
+    },
+    "type": {
+      "const": "sensor.result",
+      "description": "消息类型"
+    },
+    "ts": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4102444800000,
+      "description": "发送端发送时间（Unix 毫秒）"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991,
+      "description": "每方向各自单调递增序号（§2）"
+    },
+    "dir": {
+      "const": "uplink",
+      "description": "uplink=机→云 / downlink=云→机"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "status",
+        "data",
+        "truncated",
+        "source"
+      ],
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "description": "对应 sensor.query 的 request_id",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "status": {
+          "type": "string",
+          "description": "查询结果状态；paused=端侧一键暂停中，诚实不可用而非错误",
+          "enum": [
+            "ok",
+            "denied",
+            "unavailable",
+            "paused",
+            "error"
+          ]
+        },
+        "data": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "description": "结果条目；仅返回限定字段，不泄露本地路径",
+          "maxItems": 100
+        },
+        "truncated": {
+          "type": "boolean",
+          "description": "是否因 max_items 截断"
+        },
+        "source": {
+          "type": "string",
+          "description": "数据来源标识（如 capture.local）",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      }
+    }
+  }
+}

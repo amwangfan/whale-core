@@ -1,0 +1,195 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://whale.example.internal/contracts/v2/messages/action.request.schema.json",
+  "title": "action.request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "id",
+    "type",
+    "ts",
+    "seq",
+    "dir",
+    "payload"
+  ],
+  "properties": {
+    "v": {
+      "type": "string",
+      "pattern": "^2\\.[0-9]+$",
+      "description": "协议版本 major.minor；未知 major 必须拒绝并回 error.protocol_version（§2）"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "消息 ID（26 字符 ULID，§3）"
+    },
+    "type": {
+      "const": "action.request",
+      "description": "消息类型"
+    },
+    "ts": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4102444800000,
+      "description": "发送端发送时间（Unix 毫秒）"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991,
+      "description": "每方向各自单调递增序号（§2）"
+    },
+    "dir": {
+      "const": "downlink",
+      "description": "uplink=机→云 / downlink=云→机"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action_id",
+        "capability",
+        "arguments",
+        "timeout_ms",
+        "expires_at",
+        "idempotency_key",
+        "authorized_scope"
+      ],
+      "properties": {
+        "action_id": {
+          "type": "string",
+          "pattern": "^act_[0-9A-HJKMNP-TV-Z]{26}$",
+          "description": "动作唯一 ID（每次请求实例），receipt 按它关联"
+        },
+        "task_id": {
+          "type": "string",
+          "pattern": "^task_[0-9A-HJKMNP-TV-Z]{26}$",
+          "description": "所属任务；GUI Agent 序列动作必填"
+        },
+        "run_id": {
+          "type": "string",
+          "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$",
+          "description": "所属 run；与轨迹/录制对齐"
+        },
+        "capability": {
+          "type": "string",
+          "enum": [
+            "screen.context.read",
+            "screen.history.search",
+            "screen.evidence.read",
+            "screen.live.subscribe",
+            "phone.notification.post",
+            "phone.notification.read",
+            "phone.call.ring",
+            "phone.call.audio",
+            "phone.device.safe_action",
+            "glasses.card.show",
+            "glasses.card.update",
+            "glasses.card.dismiss",
+            "device.observe",
+            "device.tap",
+            "device.long_press",
+            "device.swipe",
+            "device.input_text",
+            "device.key",
+            "device.wait",
+            "device.app.launch",
+            "device.app.list",
+            "device.app.install",
+            "device.app.uninstall",
+            "device.shell",
+            "device.file.read",
+            "device.file.write",
+            "device.file.list",
+            "device.logcat",
+            "device.stop",
+            "device.screen.record"
+          ],
+          "description": "请求调用的能力（§5.3 动作子集），端侧校验白名单"
+        },
+        "arguments": {
+          "type": "object",
+          "maxProperties": 32,
+          "description": "动作参数（由 capability 语义解释）"
+        },
+        "observation_id": {
+          "type": "string",
+          "pattern": "^obs_[0-9A-HJKMNP-TV-Z]{26}$",
+          "description": "arguments 引用 element_id 时必填（§8 过期检测）"
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "description": "端侧执行超时上限（不含排队）",
+          "minimum": 100,
+          "maximum": 600000
+        },
+        "expires_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4102444800000,
+          "description": "动作过期时间；过期不补执行（Unix 毫秒）"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "description": "幂等键；同一逻辑动作重发必须复用同一键（§7.1）",
+          "pattern": "^[0-9A-Za-z:_-]{8,128}$"
+        },
+        "authorized_scope": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "screen.context.read",
+              "screen.history.search",
+              "screen.evidence.read",
+              "screen.live.subscribe",
+              "phone.notification.post",
+              "phone.notification.read",
+              "phone.call.ring",
+              "phone.call.audio",
+              "phone.device.safe_action",
+              "glasses.card.show",
+              "glasses.card.update",
+              "glasses.card.dismiss",
+              "device.observe",
+              "device.tap",
+              "device.long_press",
+              "device.swipe",
+              "device.input_text",
+              "device.key",
+              "device.wait",
+              "device.app.launch",
+              "device.app.list",
+              "device.app.install",
+              "device.app.uninstall",
+              "device.shell",
+              "device.file.read",
+              "device.file.write",
+              "device.file.list",
+              "device.logcat",
+              "device.stop",
+              "device.screen.record"
+            ]
+          },
+          "description": "本次授权的能力上限集合，端侧校验 scope",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true
+        },
+        "approval_ref": {
+          "type": "string",
+          "description": "主人审批引用（敏感动作要求，§14）",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "correlation_id": {
+          "type": "string",
+          "description": "事件→决策→动作的关联键（通常取触发事件的 event_id）",
+          "minLength": 8,
+          "maxLength": 64
+        }
+      }
+    }
+  }
+}

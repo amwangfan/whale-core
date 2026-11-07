@@ -1,0 +1,208 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://whale.example.internal/contracts/v2/messages/device.hello.schema.json",
+  "title": "device.hello",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "id",
+    "type",
+    "ts",
+    "seq",
+    "dir",
+    "payload"
+  ],
+  "properties": {
+    "v": {
+      "type": "string",
+      "pattern": "^2\\.[0-9]+$",
+      "description": "协议版本 major.minor；未知 major 必须拒绝并回 error.protocol_version（§2）"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "消息 ID（26 字符 ULID，§3）"
+    },
+    "type": {
+      "const": "device.hello",
+      "description": "消息类型"
+    },
+    "ts": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4102444800000,
+      "description": "发送端发送时间（Unix 毫秒）"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991,
+      "description": "每方向各自单调递增序号（§2）"
+    },
+    "dir": {
+      "const": "uplink",
+      "description": "uplink=机→云 / downlink=云→机"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "device_id",
+        "capabilities",
+        "features",
+        "device",
+        "app_version",
+        "app_flavor",
+        "signature",
+        "challenge"
+      ],
+      "properties": {
+        "protocol_version": {
+          "type": "string",
+          "description": "设备支持的协议版本 major.minor",
+          "pattern": "^2\\.[0-9]+$"
+        },
+        "device_id": {
+          "type": "string",
+          "description": "设备 ID = Ed25519 公钥指纹 SHA-256 前 16 字节小写 hex（§3）",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "screen.context.read",
+              "screen.history.search",
+              "screen.evidence.read",
+              "screen.live.subscribe",
+              "phone.notification.post",
+              "phone.notification.read",
+              "phone.call.ring",
+              "phone.call.audio",
+              "phone.device.safe_action",
+              "glasses.card.show",
+              "glasses.card.update",
+              "glasses.card.dismiss",
+              "device.observe",
+              "device.tap",
+              "device.long_press",
+              "device.swipe",
+              "device.input_text",
+              "device.key",
+              "device.wait",
+              "device.app.launch",
+              "device.app.list",
+              "device.app.install",
+              "device.app.uninstall",
+              "device.shell",
+              "device.file.read",
+              "device.file.write",
+              "device.file.list",
+              "device.logcat",
+              "device.stop",
+              "device.output.read",
+              "device.screen.record",
+              "device.status"
+            ],
+            "description": "能力名（§5.1 全协议唯一枚举）"
+          },
+          "description": "设备声明的能力集合，core 可在 hello_ack 中收窄",
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true
+        },
+        "features": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "布尔特征集；feature=false 的能力即使声明也会被 core 忽略（§5.2）",
+          "required": [
+            "root_shell",
+            "accessibility",
+            "media_projection",
+            "telecom",
+            "ocr_mlkit"
+          ],
+          "properties": {
+            "root_shell": {
+              "type": "boolean",
+              "description": "Root Shell 可用（持续授权已开）"
+            },
+            "accessibility": {
+              "type": "boolean",
+              "description": "无障碍服务可用（截屏/UI 树）"
+            },
+            "media_projection": {
+              "type": "boolean",
+              "description": "MediaProjection 录制可用"
+            },
+            "telecom": {
+              "type": "boolean",
+              "description": "电话栈可用"
+            },
+            "ocr_mlkit": {
+              "type": "boolean",
+              "description": "ML Kit OCR 可用"
+            }
+          }
+        },
+        "device": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "设备描述",
+          "required": [
+            "model",
+            "android_release",
+            "api_level"
+          ],
+          "properties": {
+            "model": {
+              "type": "string",
+              "description": "机型",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "android_release": {
+              "type": "string",
+              "description": "Android 版本",
+              "minLength": 1,
+              "maxLength": 16
+            },
+            "api_level": {
+              "type": "integer",
+              "description": "API level",
+              "minimum": 1,
+              "maximum": 100
+            }
+          }
+        },
+        "app_version": {
+          "type": "string",
+          "description": "应用版本号",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "app_flavor": {
+          "type": "string",
+          "description": "构建变体",
+          "enum": [
+            "daily",
+            "root"
+          ]
+        },
+        "signature": {
+          "type": "string",
+          "description": "对 challenge 的 Ed25519 签名（64 字节签名的小写 hex）",
+          "pattern": "^[0-9a-f]{128}$"
+        },
+        "challenge": {
+          "type": "string",
+          "description": "回填 auth.challenge 下发的 64-hex 挑战串",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    }
+  }
+}

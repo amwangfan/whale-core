@@ -1,0 +1,13 @@
+{
+  "v": "2.0",
+  "id": "01J9XK3EM8TQ2ZP0VN6W4RA725",
+  "type": "notification.sync",
+  "ts": 1794052910000,
+  "seq": 1,
+  "dir": "uplink",
+  "payload": {
+    "device_id": "ba4bb14c75917cfc0e69fb7a1caf8ba3",
+    "last_event_id": "evt_01J9XK3EM8TQ2ZP0VN6W4RA8KK",
+    "synced_at": 1794052910000
+  }
+}

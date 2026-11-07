@@ -1,0 +1,12 @@
+{
+  "approval_id": "aprv_01J9XK3EM8TQ2ZP0VN6W4RA800",
+  "task_id": "task_01J9XK3EM8TQ2ZP0VN6W4RA8BB",
+  "device_id": "ba4bb14c75917cfc0e69fb7a1caf8ba3",
+  "action": "device.shell",
+  "summary": "准备在 Root 手机上执行 Shell 命令",
+  "expires_at": 1794053170000,
+  "reply_options": [
+    "批准",
+    "拒绝"
+  ]
+}

@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://whale.example.internal/contracts/v2/objects/recording-manifest.schema.json",
+  "title": "RecordingManifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_id",
+    "device_id",
+    "recorder",
+    "started_at",
+    "stopped_at",
+    "video_ref",
+    "trace_ref",
+    "profile",
+    "status"
+  ],
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "pattern": "^run_[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "device_id": {
+      "type": "string",
+      "description": "设备 ID",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "recorder": {
+      "type": "string",
+      "description": "录制通道",
+      "enum": [
+        "scrcpy",
+        "media_projection",
+        "screenrecord"
+      ]
+    },
+    "started_at": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4102444800000
+    },
+    "stopped_at": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4102444800000
+    },
+    "video_ref": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*:[A-Za-z0-9._:/-]{1,128}$",
+      "description": "不透明证据引用（§10），绝不泄露本地绝对路径"
+    },
+    "trace_ref": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*:[A-Za-z0-9._:/-]{1,128}$",
+      "description": "不透明证据引用（§10），绝不泄露本地绝对路径"
+    },
+    "resolution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "width",
+        "height"
+      ],
+      "properties": {
+        "width": {
+          "type": "integer",
+          "description": "宽",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "description": "高",
+          "minimum": 1
+        }
+      }
+    },
+    "frame_rate": {
+      "type": "integer",
+      "description": "帧率",
+      "minimum": 1,
+      "maximum": 120
+    },
+    "profile": {
+      "type": "string",
+      "description": "导出模板",
+      "enum": [
+        "phone_only",
+        "demo"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "description": "录制完整性",
+      "enum": [
+        "completed",
+        "partial",
+        "failed"
+      ]
+    }
+  }
+}

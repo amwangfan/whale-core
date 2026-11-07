@@ -1,0 +1,14 @@
+{
+  "v": "2.0",
+  "id": "01J9XK3EM8TQ2ZP0VN6W4RA716",
+  "type": "recording.state",
+  "ts": 1794052855500,
+  "seq": 1,
+  "dir": "uplink",
+  "payload": {
+    "run_id": "run_01J9XK3EM8TQ2ZP0VN6W4RA8AA",
+    "state": "recording",
+    "file_ref": "recording:run_01J9XK3EM8TQ2ZP0VN6W4RA8AA/video",
+    "duration_ms": 500
+  }
+}

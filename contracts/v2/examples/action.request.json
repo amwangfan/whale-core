@@ -1,0 +1,26 @@
+{
+  "v": "2.0",
+  "id": "01J9XK3EM8TQ2ZP0VN6W4RA710",
+  "type": "action.request",
+  "ts": 1794052860000,
+  "seq": 1,
+  "dir": "downlink",
+  "payload": {
+    "action_id": "act_01J9XK3EM8TQ2ZP0VN6W4RA8CC",
+    "task_id": "task_01J9XK3EM8TQ2ZP0VN6W4RA8BB",
+    "run_id": "run_01J9XK3EM8TQ2ZP0VN6W4RA8AA",
+    "capability": "device.tap",
+    "arguments": {
+      "element_id": 23
+    },
+    "observation_id": "obs_01J9XK3EM8TQ2ZP0VN6W4RA8DD",
+    "timeout_ms": 10000,
+    "expires_at": 1794052920000,
+    "idempotency_key": "agent:run_01J9XK3EM8TQ2ZP0VN6W4RA8AA:step8",
+    "authorized_scope": [
+      "device.tap"
+    ],
+    "approval_ref": "aprv_01J9XK3EM8TQ2ZP0VN6W4RA800",
+    "correlation_id": "evt_01J9XK3EM8TQ2ZP0VN6W4RA8EE"
+  }
+}

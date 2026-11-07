@@ -1,0 +1,34 @@
+{
+  "v": "2.0",
+  "id": "01J9XK3EM8TQ2ZP0VN6W4RA702",
+  "type": "device.hello",
+  "ts": 1794052800100,
+  "seq": 1,
+  "dir": "uplink",
+  "payload": {
+    "protocol_version": "2.0",
+    "device_id": "ba4bb14c75917cfc0e69fb7a1caf8ba3",
+    "capabilities": [
+      "device.observe",
+      "device.tap",
+      "device.shell",
+      "screen.history.search"
+    ],
+    "features": {
+      "root_shell": true,
+      "accessibility": true,
+      "media_projection": false,
+      "telecom": false,
+      "ocr_mlkit": true
+    },
+    "device": {
+      "model": "Leaf5",
+      "android_release": "13",
+      "api_level": 33
+    },
+    "app_version": "2.0.0",
+    "app_flavor": "root",
+    "signature": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "challenge": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+}

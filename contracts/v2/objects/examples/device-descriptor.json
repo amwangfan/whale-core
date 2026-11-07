@@ -1,0 +1,30 @@
+{
+  "device_id": "ba4bb14c75917cfc0e69fb7a1caf8ba3",
+  "label": "leaf5",
+  "capabilities": [
+    "device.observe",
+    "device.tap",
+    "device.shell"
+  ],
+  "features": {
+    "root_shell": true,
+    "accessibility": true,
+    "media_projection": false,
+    "telecom": false,
+    "ocr_mlkit": true
+  },
+  "device": {
+    "model": "Leaf5",
+    "android_release": "13",
+    "api_level": 33
+  },
+  "app_version": "2.0.0",
+  "app_flavor": "root",
+  "transports": [
+    {
+      "kind": "adb",
+      "state": "connected",
+      "address_hint": "tailnet"
+    }
+  ]
+}

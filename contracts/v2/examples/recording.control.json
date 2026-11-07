@@ -1,0 +1,19 @@
+{
+  "v": "2.0",
+  "id": "01J9XK3EM8TQ2ZP0VN6W4RA715",
+  "type": "recording.control",
+  "ts": 1794052855000,
+  "seq": 1,
+  "dir": "downlink",
+  "payload": {
+    "run_id": "run_01J9XK3EM8TQ2ZP0VN6W4RA8AA",
+    "op": "start",
+    "options": {
+      "profile": "demo",
+      "max_duration_ms": 600000,
+      "exclude_packages": [
+        "com.example.bank"
+      ]
+    }
+  }
+}

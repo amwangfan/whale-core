@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://whale.example.internal/contracts/v2/messages/sensor.query.schema.json",
+  "title": "sensor.query",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "id",
+    "type",
+    "ts",
+    "seq",
+    "dir",
+    "payload"
+  ],
+  "properties": {
+    "v": {
+      "type": "string",
+      "pattern": "^2\\.[0-9]+$",
+      "description": "协议版本 major.minor；未知 major 必须拒绝并回 error.protocol_version（§2）"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$",
+      "description": "消息 ID（26 字符 ULID，§3）"
+    },
+    "type": {
+      "const": "sensor.query",
+      "description": "消息类型"
+    },
+    "ts": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4102444800000,
+      "description": "发送端发送时间（Unix 毫秒）"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991,
+      "description": "每方向各自单调递增序号（§2）"
+    },
+    "dir": {
+      "const": "downlink",
+      "description": "uplink=机→云 / downlink=云→机"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "operation",
+        "filters",
+        "max_items",
+        "deadline"
+      ],
+      "properties": {
+        "request_id": {
+          "type": "string",
+          "description": "请求 ID（26 字符 ULID）",
+          "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "operation": {
+          "type": "string",
+          "description": "查询操作（§5.3 查询子集）",
+          "enum": [
+            "screen.context.read",
+            "screen.history.search",
+            "screen.evidence.read",
+            "screen.live.subscribe",
+            "device.output.read",
+            "device.app.list",
+            "device.status"
+          ]
+        },
+        "filters": {
+          "type": "object",
+          "maxProperties": 16,
+          "description": "查询过滤条件"
+        },
+        "max_items": {
+          "type": "integer",
+          "description": "返回上限",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "deadline": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4102444800000,
+          "description": "查询截止时间（Unix 毫秒）"
+        }
+      }
+    }
+  }
+}
