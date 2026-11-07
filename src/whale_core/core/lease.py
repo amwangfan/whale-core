@@ -1,13 +1,26 @@
-"""Single active Whale service per data directory on Linux/macOS.
+"""Single active Whale service per data directory on Linux/macOS/Windows.
 
 Adapted from PR #4's RuntimeLease, without replacing PR #3's runtime.
 This is an advisory process lock, not an authentication or sandbox boundary.
 """
 from __future__ import annotations
 
-import fcntl
 import os
 from pathlib import Path
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
+
+
+def _lock(fd: int, *, release: bool = False) -> None:
+    if os.name == "nt":
+        # All owners lock the first byte; Windows permits locking past EOF.
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK if release else msvcrt.LK_NBLCK, 1)
+    else:
+        fcntl.flock(fd, fcntl.LOCK_UN if release else fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
 class RuntimeBusy(RuntimeError):
@@ -24,7 +37,7 @@ class RuntimeLease:
             path / ".runtime.lock", os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0), 0o600
         )
         try:
-            fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _lock(self._fd)
         except OSError as exc:
             os.close(self._fd)
             self._fd = None
@@ -35,7 +48,7 @@ class RuntimeLease:
             return
         fd, self._fd = self._fd, None
         try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            _lock(fd, release=True)
         finally:
             os.close(fd)
 

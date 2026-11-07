@@ -12,7 +12,7 @@ keywords = ["companion-ai", "agent", "memory", "plugins", "whale-io"]
 dependencies = ["tzdata>=2024.1; sys_platform == 'win32'"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "jsonschema>=4.26,<5"]
 # websockets 17 已验证兼容（PCM 中继 sync server/client 离线索引测试通过）
 voice = ["websockets>=14,<18"]
 desktop = ["pywebview>=5,<7"]
@@ -40,6 +40,9 @@ packages = ["src/whale_core", "plugins/search_web", "plugins/qweather", "plugins
 # Release builders stage the compiled console here; normal editable installs
 # can continue to use web/dist without committing generated JavaScript.
 artifacts = ["src/whale_core/static/**"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"contracts/v1" = "whale_core/contracts/v1"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

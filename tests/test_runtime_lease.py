@@ -3,14 +3,13 @@ from __future__ import annotations
 
 import io
 import os
+import subprocess
+import sys
 
 import pytest
 
 from whale_core.cli.main import main
 from whale_core.core.lease import RuntimeBusy, RuntimeLease
-
-
-pytestmark = pytest.mark.skipif(os.name != "posix", reason="fcntl advisory locks require POSIX")
 
 
 def test_second_owner_refused_then_lock_released(tmp_path):
@@ -20,7 +19,27 @@ def test_second_owner_refused_then_lock_released(tmp_path):
         assert first is not None
     with RuntimeLease(tmp_path):
         pass
-    assert (tmp_path / ".runtime.lock").stat().st_mode & 0o077 == 0
+    if os.name == "posix":
+        assert (tmp_path / ".runtime.lock").stat().st_mode & 0o077 == 0
+
+
+def test_lock_excludes_other_process_and_releases(tmp_path):
+    script = (
+        "import sys; from whale_core.core.lease import RuntimeLease, RuntimeBusy\n"
+        "try:\n"
+        "    with RuntimeLease(sys.argv[1]): pass\n"
+        "except RuntimeBusy: sys.exit(23)\n"
+    )
+    def attempt():
+        return subprocess.run(
+            [sys.executable, "-c", script, str(tmp_path)],
+            capture_output=True, text=True, timeout=15,
+        )
+    with RuntimeLease(tmp_path):
+        blocked = attempt()
+        assert blocked.returncode == 23, blocked.stderr
+    released = attempt()
+    assert released.returncode == 0, released.stderr
 
 
 def test_cli_run_refuses_another_host(tmp_path, monkeypatch, capsys):

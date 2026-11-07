@@ -29,7 +29,7 @@ from whale_core.devices.agent_failures import (
     should_auto_retry,
 )
 from whale_core.devices.registry import DeviceRegistry
-from whale_core.life.autonomy import DeviceUnavailable
+from whale_core.devices.actions import DeviceUnavailable
 from whale_core.memory.continuity import remember_episode
 
 CAP_OBSERVE = "device.agent.observe"

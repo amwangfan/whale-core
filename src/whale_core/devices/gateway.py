@@ -21,12 +21,14 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import secrets
 import threading
 import time
 import uuid
 from typing import Any
 
+from whale_core.devices.actions import TERMINAL_RECEIPT_STATES
 from whale_core.devices.perception import DevicePerceptionAdapter, DurableDevicePerceptionAdapter
 from whale_core.devices.registry import DeviceRegistry, now_ms
 from whale_core.devices.schema import (
@@ -45,10 +47,6 @@ REF_ID_FALLBACK = "0" * 16
 DEFAULT_HEARTBEAT_INTERVAL = 30   # hello_ack 告知端侧的心跳节奏（秒）
 DEFAULT_HEARTBEAT_TIMEOUT = 90    # §2：90s 无心跳判定离线
 DEFAULT_CHALLENGE_TTL = 30        # 秒；schema 限定 expires_in ∈ [1,300]
-
-#: action.receipt 终态（§4：received/accepted 只是中间态）
-TERMINAL_RECEIPT_STATES = frozenset({"executed", "failed", "unknown"})
-
 
 class GatewayError(ValueError):
     """下行通道失败（code 对齐 §4 错误码 + device_offline 管理面补充）。"""
@@ -69,6 +67,7 @@ class ConnectionState:
         self.challenge_deadline = 0.0
         self.session_id: str | None = None
         self.down_seq = 0
+        self.send_lock = threading.Lock()
         self.expected_up_seq: int | None = None
         self.last_heartbeat = time.monotonic()
         self.offline_marked = False
@@ -78,9 +77,11 @@ class ConnectionState:
 class _Pending:
     """跨线程的请求-应答对（管理 API 线程等，WS 线程 resolve）。"""
 
-    __slots__ = ("event", "result")
+    __slots__ = ("device_id", "response_type", "event", "result")
 
-    def __init__(self) -> None:
+    def __init__(self, device_id: str, response_type: str) -> None:
+        self.device_id = device_id
+        self.response_type = response_type
         self.event = threading.Event()
         self.result: dict | None = None
 
@@ -152,10 +153,28 @@ class DeviceGateway:
         return msg
 
     def send_msg(self, st: ConnectionState, msg_type: str, payload: dict) -> dict:
-        st.down_seq += 1
-        msg = self.build_message(msg_type, "downlink", payload, st.down_seq)
-        st.ws.send(json.dumps(msg, ensure_ascii=False))
-        return msg
+        with st.send_lock:
+            msg = self.build_message(msg_type, "downlink", payload, st.down_seq + 1)
+            st.down_seq += 1
+            st.ws.send(json.dumps(msg, ensure_ascii=False))
+            return msg
+
+    def _preflight(self, msg_type: str, payload: dict) -> None:
+        """Reuse the wire schema before reserving keys or registering a waiter."""
+        try:
+            self.build_message(msg_type, "downlink", payload, 0)
+        except (ValueError, TypeError) as exc:
+            raise GatewayError("invalid_message", str(exc)) from exc
+
+    @staticmethod
+    def _timeout(value: float) -> float:
+        try:
+            timeout = float(value)
+        except (TypeError, ValueError):
+            raise GatewayError("invalid_message", "timeout must be finite and positive") from None
+        if isinstance(value, bool) or not math.isfinite(timeout) or timeout <= 0:
+            raise GatewayError("invalid_message", "timeout must be finite and positive")
+        return timeout
 
     def send_error(self, st: ConnectionState, ref_id: Any, code: str, message: str):
         if not (isinstance(ref_id, str) and 16 <= len(ref_id) <= 64):
@@ -408,8 +427,10 @@ class DeviceGateway:
         超时/断线 → approved=False reason=timeout/unavailable（绝不默认批准）。
         """
         st = self._online_or_raise(device_id)
+        timeout_s = self._timeout(timeout_s)
+        self._preflight("device.confirm.request", payload)
         challenge_id = str(payload["challenge_id"])
-        pend = _Pending()
+        pend = _Pending(device_id, "device.confirm.response")
         with self.lock:
             self.pending_confirm[challenge_id] = pend
         try:
@@ -424,8 +445,7 @@ class DeviceGateway:
     def _on_device_confirm_response(self, st: ConnectionState, msg: dict) -> None:
         p = msg["payload"]
         challenge_id = str(p["challenge_id"])
-        with self.lock:
-            pend = self.pending_confirm.pop(challenge_id, None)
+        pend = self._take_pending(self.pending_confirm, challenge_id, st.device_id, "device.confirm.response")
         if pend is None:
             log.warning("收到无对应挑战的 confirm.response challenge=%s，忽略",
                         challenge_id)
@@ -439,13 +459,23 @@ class DeviceGateway:
 
     def _on_sensor_result(self, st: ConnectionState, msg: dict) -> None:
         request_id = msg["payload"]["request_id"]
-        pend = self.pending.pop(request_id, None)
+        pend = self._take_pending(self.pending, request_id, st.device_id, "sensor.result")
         if pend is not None:
             pend.result = msg["payload"]
             pend.event.set()
         else:
             log.warning("收到无对应请求的 sensor.result request_id=%s，忽略",
                         request_id)
+
+    def _take_pending(self, requests: dict[str, _Pending], ref_id: str,
+                      device_id: str | None, response_type: str) -> _Pending | None:
+        """Match ID, device and response kind before consuming the waiting request."""
+        with self.lock:
+            pending = requests.get(ref_id)
+            if (pending is None or pending.device_id != device_id
+                    or pending.response_type != response_type):
+                return None
+            return requests.pop(ref_id)
 
     def _on_action_receipt(self, st: ConnectionState, msg: dict) -> None:
         p = msg["payload"]
@@ -455,42 +485,43 @@ class DeviceGateway:
         # Ignore receipts for unknown action IDs *before* writing any data.
         # This also prevents an authenticated device from flooding unbounded
         # receipt records with arbitrary UUIDs.
-        lookup = self.store.get(f"device:action-id:{st.device_id}:{action_id}")
-        if not isinstance(lookup, str):
-            log.warning("unmapped action receipt for device=%s action=%s",
-                        st.device_id, action_id)
-            return
+        resolved = p
         with self.lock:
+            lookup = self.store.get(f"device:action-id:{st.device_id}:{action_id}")
+            if not isinstance(lookup, str):
+                log.warning("unmapped action receipt for device=%s action=%s", st.device_id, action_id)
+                return
+            action_key = f"device:action:{st.device_id}:{lookup}"
+            record = self.store.get(action_key)
+            if not isinstance(record, dict) or record.get("action_id") != action_id:
+                return
             key = f"device:receipts:{st.device_id}:{action_id}"
             receipts = self.store.get(key) or []
             if isinstance(receipts, list):
                 receipts = (receipts + [{"state": str(state), "ts": now_ms()}])[-32:]
                 self.store.put(key, receipts)
-        # Persist terminal outcome against the original idempotency key, so a
-        # late receipt or process restart can be reconciled without replay.
-        if isinstance(lookup, str):
-            action_key = f"device:action:{st.device_id}:{lookup}"
-            with self.lock:
-                record = self.store.get(action_key)
-                if isinstance(record, dict) and record.get("action_id") == action_id:
-                    # First terminal receipt wins: a conflicting delayed
-                    # terminal must not rewrite an already recorded outcome.
-                    if record.get("state") not in TERMINAL_RECEIPT_STATES:
-                        record.update(state=state, updated_at=now_ms())
-                        if state in TERMINAL_RECEIPT_STATES:
-                            record["receipt"] = {
-                                k: p[k] for k in (
-                                    "state", "executed_at", "error_code",
-                                    "provider_ref", "result")
-                                if k in p
-                            }
-                        self.store.put(action_key, record)
+            # A retention timeout is an estimate, not a device-confirmed result.
+            # The first actual terminal receipt may reconcile it, without replay.
+            estimated = record.get("state") == "unknown" and record.get("outcome_source") == "retention_timeout"
+            if (record.get("state") not in TERMINAL_RECEIPT_STATES
+                    or (estimated and state in TERMINAL_RECEIPT_STATES)):
+                record = dict(record)
+                record.update(state=state, updated_at=now_ms())
+                if state in TERMINAL_RECEIPT_STATES:
+                    record["receipt"] = {k: p[k] for k in (
+                        "state", "executed_at", "error_code", "provider_ref", "result") if k in p}
+                    record["outcome_source"] = "device_receipt"
+                self.store.put(action_key, record)
+            elif state in TERMINAL_RECEIPT_STATES and isinstance(record.get("receipt"), dict):
+                # A racing duplicate waiter sees the same authoritative outcome
+                # as durable reconciliation, never the conflicting later frame.
+                resolved = {"action_id": action_id, **record["receipt"]}
         if state in TERMINAL_RECEIPT_STATES:
-            pend = self.pending.pop(action_id, None)
+            pend = self._take_pending(self.pending, action_id, st.device_id, "action.receipt")
             if pend is not None:
-                pend.result = p
+                pend.result = resolved
                 pend.event.set()
-            self._emit("device:action_receipt", f"{st.device_id}:{action_id}:{state}")
+            self._emit("device:action_receipt", f"{st.device_id}:{action_id}:{resolved.get('state')}")
         else:
             log.info("action %s 中间态回执 %s（device=%s）", action_id, state,
                      st.device_id)
@@ -528,30 +559,30 @@ class DeviceGateway:
             if not key.startswith("device:action:"):
                 continue
             scanned += 1
-            record = self.store.get(key)
-            if not isinstance(record, dict):
-                continue
-            state = str(record.get("state") or "")
-            created = int(record.get("created_at") or 0)
-            expires = int(record.get("expires_at") or 0)
-            device_id = str(record.get("device_id") or "")
-            action_id = str(record.get("action_id") or "")
-            if state in TERMINAL_RECEIPT_STATES:
-                if created + self.ACTION_RETENTION_MS >= now:
-                    continue  # 保留窗口内：可核对、可被查重
-                if deleted >= max_deletes:
+            # Per-record critical sections coordinate with receipt writes without
+            # holding the gateway lock for the complete maintenance scan.
+            with self.lock:
+                record = self.store.get(key)
+                if not isinstance(record, dict):
                     continue
-                self.store.delete(key)
-                if device_id and action_id:
-                    self.store.delete(f"device:action-id:{device_id}:{action_id}")
-                    self.store.delete(f"device:receipts:{device_id}:{action_id}")
-                deleted += 1
-            elif now > expires + self.ACTION_PENDING_GRACE_MS:
-                # 过宽限的非终态：落 unknown 过期标记（下轮按终态清理）
-                record["state"] = "unknown"
-                record["updated_at"] = now
-                self.store.put(key, record)
-                marked += 1
+                state = str(record.get("state") or "")
+                created = int(record.get("created_at") or 0)
+                expires = int(record.get("expires_at") or 0)
+                device_id = str(record.get("device_id") or "")
+                action_id = str(record.get("action_id") or "")
+                if state in TERMINAL_RECEIPT_STATES:
+                    if created + self.ACTION_RETENTION_MS >= now or deleted >= max_deletes:
+                        continue
+                    self.store.delete(key)
+                    if device_id and action_id:
+                        self.store.delete(f"device:action-id:{device_id}:{action_id}")
+                        self.store.delete(f"device:receipts:{device_id}:{action_id}")
+                    deleted += 1
+                elif now > expires + self.ACTION_PENDING_GRACE_MS:
+                    record = dict(record)
+                    record.update(state="unknown", updated_at=now, outcome_source="retention_timeout")
+                    self.store.put(key, record)
+                    marked += 1
         # 孤儿回执流水（动作记录已不在）一并清，同受删除上限约束
         for key in list(self.store.keys()):
             if deleted >= max_deletes:
@@ -562,9 +593,10 @@ class DeviceGateway:
             if len(parts) < 4:
                 continue
             device_id, action_id = parts[2], parts[3]
-            if self.store.get(f"device:action-id:{device_id}:{action_id}") is None:
-                self.store.delete(key)
-                deleted += 1
+            with self.lock:
+                if self.store.get(f"device:action-id:{device_id}:{action_id}") is None:
+                    self.store.delete(key)
+                    deleted += 1
         return {"scanned": scanned, "deleted": deleted, "marked_unknown": marked}
 
     # ------------------------------------------------------------------
@@ -647,6 +679,7 @@ class DeviceGateway:
         """下发 sensor.query 并在 deadline 内等待 sensor.result（§2/§4）。"""
         st = self._online_or_raise(device_id)
         self._check_scope(device_id, operation)
+        timeout_s = self._timeout(timeout_s)
         if not (1 <= int(max_items) <= 100):
             raise GatewayError("invalid_message", "max_items 须在 1..100")
         request_id = uuid.uuid4().hex
@@ -657,8 +690,10 @@ class DeviceGateway:
             "max_items": int(max_items),
             "deadline": now_ms() + int(timeout_s * 1000),
         }
-        pend = _Pending()
-        self.pending[request_id] = pend
+        self._preflight("sensor.query", payload)
+        pend = _Pending(device_id, "sensor.result")
+        with self.lock:
+            self.pending[request_id] = pend
         try:
             self.send_msg(st, "sensor.query", payload)
             if not pend.event.wait(timeout_s + 5):
@@ -666,7 +701,8 @@ class DeviceGateway:
                     "expired", f"等待 sensor.result 超时（{timeout_s}s deadline）")
             return dict(pend.result or {})
         finally:
-            self.pending.pop(request_id, None)
+            with self.lock:
+                self.pending.pop(request_id, None)
 
     def send_action(self, device_id: str, *, capability: str,
                     args: dict | None = None, idempotency_key: str | None = None,
@@ -677,18 +713,34 @@ class DeviceGateway:
         """下发 action.request；幂等键查重（§6），等待终态回执。"""
         st = self._online_or_raise(device_id)
         self._check_scope(device_id, capability)
-        idem_key = idempotency_key or f"idem-{uuid.uuid4().hex}"
-        if not (8 <= len(idem_key) <= 128):
+        timeout_s = self._timeout(timeout_s)
+        idem_key = f"idem-{uuid.uuid4().hex}" if idempotency_key is None else idempotency_key
+        if not isinstance(idem_key, str) or not (8 <= len(idem_key) <= 128):
             raise GatewayError("invalid_message", "idempotency_key 长度须为 8..128")
         action_id = uuid.uuid4().hex
         idem_store_key = f"device:action:{device_id}:{idem_key}"
+        created_at = now_ms()
+        expires_at = created_at + int(timeout_s * 1000)
+        payload: dict[str, Any] = {
+            "action_id": action_id,
+            "capability": capability,
+            "args": dict(args or {}),
+            "authorized_scope": list(authorized_scope or [capability]),
+            "expires_at": expires_at,
+            "idempotency_key": idem_key,
+        }
+        if approval_ref:
+            payload["approval_ref"] = approval_ref
+        if correlation_id:
+            payload["correlation_id"] = correlation_id
+        self._preflight("action.request", payload)
         def reserve(tx):
             if tx.get(idem_store_key) is not None:
                 return False
             tx.put(idem_store_key, {
                 "device_id": device_id, "idempotency_key": idem_key,
                 "action_id": action_id, "capability": capability,
-                "created_at": now_ms(), "expires_at": now_ms() + int(timeout_s * 1000),
+                "created_at": created_at, "expires_at": expires_at,
                 "state": "pending",
             })
             tx.put(f"device:action-id:{device_id}:{action_id}", idem_key)
@@ -697,21 +749,9 @@ class DeviceGateway:
         if not self.store.transact(reserve):
             raise GatewayError(
                 "duplicate", f"幂等键 {idem_key} 已对该设备下发过")
-        payload: dict[str, Any] = {
-            "action_id": action_id,
-            "capability": capability,
-            "args": dict(args or {}),
-            "authorized_scope": list(authorized_scope or [capability]),
-            "expires_at": now_ms() + int(timeout_s * 1000),
-            "idempotency_key": idem_key,
-        }
-        if approval_ref:
-            payload["approval_ref"] = approval_ref
-        if correlation_id:
-            # EV-02：事件→决策→动作关联键（契约 v1 minor：可选字段）
-            payload["correlation_id"] = correlation_id
-        pend = _Pending()
-        self.pending[action_id] = pend
+        pend = _Pending(device_id, "action.receipt")
+        with self.lock:
+            self.pending[action_id] = pend
         try:
             self.send_msg(st, "action.request", payload)
             if not pend.event.wait(timeout_s + 5):
@@ -719,7 +759,8 @@ class DeviceGateway:
                     "expired", f"等待 action.receipt 超时（{timeout_s}s）")
             return dict(pend.result or {})
         finally:
-            self.pending.pop(action_id, None)
+            with self.lock:
+                self.pending.pop(action_id, None)
 
     def action_status(self, device_id: str, idempotency_key: str) -> dict:
         """Read existing action state; never re-dispatch on timeout/restart."""

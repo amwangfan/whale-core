@@ -28,6 +28,7 @@ def rig(scopes):
     # Avoid DeviceGateway.__init__, which would start a listening socket.
     gateway = DeviceGateway.__new__(DeviceGateway)
     gateway.registry = registry
+    gateway.contracts = ContractValidator()
     gateway.lock = threading.RLock()
     state = ConnectionState(None)
     state.device_id = device_id

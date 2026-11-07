@@ -18,6 +18,17 @@ on:
         description: "whale-mobile 候选 ref"
         required: true
         default: main
+      mobile_repository:
+        description: "Mobile repository (use dreaminutes/whale-mobile for this fork's paired batch)"
+        required: true
+        default: amwangfan/whale-mobile
+      suite:
+        description: "contracts = schema and generated tables; full = include both loopback test suites"
+        type: choice
+        default: contracts
+        options:
+          - contracts
+          - full
 
 jobs:
   drift-check:
@@ -29,10 +40,24 @@ jobs:
           ref: ${{ inputs.core_ref }}
       - uses: actions/checkout@v4
         with:
-          repository: amwangfan/whale-mobile
+          repository: ${{ inputs.mobile_repository }}
           ref: ${{ inputs.mobile_ref }}
           path: mobile
           # whale-mobile 当前是 public 仓，GITHUB_TOKEN 即可读取；
           # 若将来转私有，在此补 token: ${{ secrets.CROSS_REPO_TOKEN }}
-      - name: Compare contracts/v1 file by file
-        run: python3 core/scripts/contract_sync_check.py --core core --mobile mobile
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install joint check dependencies
+        run: python -m pip install -e 'core[dev,devices]' -r mobile/server/requirements.txt
+      - name: Contracts and generated table gate
+        if: ${{ inputs.suite != 'full' }}
+        run: python core/scripts/check_device_interop.py --mobile mobile --contracts-only --log-dir interop-results
+      - name: Full Core and Mobile loopback gate
+        if: ${{ inputs.suite == 'full' }}
+        run: python core/scripts/check_device_interop.py --mobile mobile --log-dir interop-results
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: device-interop-results
+          path: interop-results

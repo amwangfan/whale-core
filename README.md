@@ -12,6 +12,8 @@
 
 ## 这是什么
 
+> **Dreaminutes Fork 开发进度**：参见 [更新说明](FORK_UPDATES.md)，包含各批改动、验证结果和当前工作状态。
+
 whale-core 是鲸鱼的核心大脑，也是一个可扩展的 AI 伴侣与行动智能体。它把对话、人格、长期记忆、意图判断、工具与主动行为组织在一起，让鲸鱼既能聊天，也能通过设备观察环境、作出选择和完成任务。「电子女友」是其中一种体验形态，不是能力边界。
 
 网页控制台、QQ、手机、通话与眼镜共享这套智能层。Android 感知和执行在 [whale-mobile](https://github.com/amwangfan/whale-mobile)；QQ/WeQ 渠道与历史桥接见 [whale-io](https://github.com/amwangfan/whale-io)。

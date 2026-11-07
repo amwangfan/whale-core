@@ -50,6 +50,20 @@ def test_device_bridge_new_home_and_shim_identity():
     assert SimulatedDeviceBridge is bridge.SimulatedDeviceBridge
 
 
+def test_device_action_legacy_imports_preserve_identity():
+    """旧调用方捕获的异常与新设备接口抛出的异常必须是同一个类。"""
+    import whale_core.devices.actions as actions
+    import whale_core.devices.bridge as bridge
+    import whale_core.devices.gateway as gateway
+    import whale_core.life.autonomy as autonomy
+
+    for name in ("DeviceActionPort", "DeviceUnavailable", "RECEIPT_STATES",
+                 "TERMINAL_RECEIPT_STATES"):
+        assert getattr(autonomy, name) is getattr(actions, name), name
+    assert gateway.TERMINAL_RECEIPT_STATES is actions.TERMINAL_RECEIPT_STATES
+    assert bridge.SimulatedActionPort._TERMINAL is actions.TERMINAL_RECEIPT_STATES
+
+
 def test_bridge_life_dependencies_allowlisted():
     """devices/bridge.py 只允许 import 白名单内的 life 稳定接口模块。"""
     allowed = {"whale_core.life.autonomy", "whale_core.life.situation"}

@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 
 import pytest
 
 from whale_core.cloud.shell_executor import ShellExecutor, _scrub_env
 from whale_core.cloud.shell_policy import ShellPolicy
 
+# These tests exercise Linux /bin/sh, process groups, prlimit and namespaces.
+# Policy-only coverage remains portable in test_shell_policy.py.
+pytestmark = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux shell integration tests")
 PERSONAL = ShellPolicy(tier="personal")
 
 
@@ -111,7 +115,7 @@ def test_default_cwd_is_tmpdir():
 
 # ---------- 降权 ----------
 
-@pytest.mark.skipif(os.geteuid() != 0 or shutil.which("id") is None,
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() != 0 or shutil.which("id") is None,
                     reason="需要 root 演示降权")
 def test_drop_to_nobody():
     result = _executor(drop_to_user="nobody").run("id -un", is_owner=True)

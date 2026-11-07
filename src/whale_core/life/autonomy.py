@@ -18,7 +18,17 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Callable, Mapping
+
+# Re-export these names for existing callers of life.autonomy.
+from whale_core.devices.actions import (
+    ActionReceiptError,
+    DeviceActionPort,
+    DeviceUnavailable,
+    RECEIPT_STATES,
+    TERMINAL_RECEIPT_STATES,
+    validate_action_receipt as _validate_action_receipt,
+)
 
 from whale_core.life.conversation_context import (
     SCOPE_DEVICE_NOTIFY,
@@ -44,10 +54,6 @@ KIND_REFUSE = "refuse"
 _DECISION_KINDS = frozenset(
     {KIND_OBSERVE, KIND_REMIND, KIND_DRAFT, KIND_ACTION, KIND_REFUSE})
 
-#: action.receipt 终态（与 contracts/v1 §4 一致；received/accepted 为中间态）
-TERMINAL_RECEIPT_STATES = frozenset({"executed", "failed", "unknown"})
-RECEIPT_STATES = TERMINAL_RECEIPT_STATES | {"received", "accepted"}
-
 DEFAULT_ACTION_TIMEOUT_S = 15.0
 
 
@@ -57,29 +63,6 @@ class AutonomyError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
-
-
-class DeviceUnavailable(Exception):
-    """设备面明确不可用：离线/超时/吊销/不支持（携带协议错误码）。"""
-
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(message)
-        self.code = code
-
-
-class DeviceActionPort(Protocol):
-    """Core→设备动作通道（生产=GatewayActionPort，模拟=SimulatedActionPort）。
-
-    可选 ``action_status(device_id, idempotency_key)``：超时后用原幂等键对账，
-    不重新下发。编排层以 ``getattr`` 探测；无此方法时，对有副作用能力
-    超时后不自动重试（升 ``unknown``）。
-    """
-
-    def send_action(self, device_id: str, *, capability: str,
-                    args: Mapping[str, Any], idempotency_key: str,
-                    timeout_s: float) -> Mapping[str, Any]:
-        """下发 action.request 并等待回执 payload；不可用抛 DeviceUnavailable。"""
-        ...
 
 
 def action_fingerprint(capability: str, device_id: str, args: Mapping[str, Any]) -> str:
@@ -93,17 +76,10 @@ def action_fingerprint(capability: str, device_id: str, args: Mapping[str, Any])
 def validate_action_receipt(payload: Mapping[str, Any], *,
                             expect_action_id: str = "") -> str:
     """校验 action.receipt payload，返回 state；畸形回执抛 AutonomyError。"""
-    if not isinstance(payload, Mapping):
-        raise AutonomyError("invalid-receipt", "回执不是对象")
-    state = str(payload.get("state") or "")
-    if state not in RECEIPT_STATES:
-        raise AutonomyError("invalid-receipt", f"未知回执状态 {state!r}")
-    action_id = str(payload.get("action_id") or "")
-    if not action_id:
-        raise AutonomyError("invalid-receipt", "回执缺少 action_id")
-    if expect_action_id and action_id != expect_action_id:
-        raise AutonomyError("invalid-receipt", "回执 action_id 与请求不符")
-    return state
+    try:
+        return _validate_action_receipt(payload, expect_action_id=expect_action_id)
+    except ActionReceiptError as exc:
+        raise AutonomyError(exc.code, str(exc)) from exc
 
 
 class ApprovalBook:
