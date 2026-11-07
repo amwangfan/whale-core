@@ -38,6 +38,10 @@
 | `POST /api/v1/devices/{id}/action/status` | `{idempotency_key}` → 只读对账；终态 `receipt` 保留 `started_at`/`completed_at`、`error_code`、`provider_ref` 与 `result` |
 | `POST /api/v1/devices/{id}/confirm` | 设备确认挑战（§14 device.confirm.request/response；challenge_id 为 ULID，approved=true 时设备签名必填） |
 
+等待中的 sensor.result、action.receipt 和 device.confirm.response 均绑定到发起请求的
+已认证 device_id；其他设备即使提交相同 request_id / action_id / challenge_id，
+也不能消费或完成该 pending 请求。超时清理只移除原请求对应的等待项。
+
 动作首次回执、重复动作重放、Core 重启后的状态对账均保留结果摘要和不透明
 输出引用；不应为补结果自动重执行动作。大输出经 `operation="device.output.read"`
 （sensor.query 专属，§5.3）+ `filters.output_ref` 分页拉取。

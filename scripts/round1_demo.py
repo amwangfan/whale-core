@@ -5,8 +5,8 @@
     → scrcpy 录屏 + RunTrace JSONL → 导出 MP4
 
 用法：
-    WHALE_ADB=/opt/android-sdk/platform-tools/adb \
-    python3 scripts/round1_demo.py --device leaf5 \
+    WHALE_ADB=/path/to/adb WHALE_DEVICE_ID=<paired-device-id> \
+    WHALE_ADB_SERIAL=<adb-serial> python3 scripts/round1_demo.py \
         --goal "打开设置，找到电池相关页面，告诉我你看到了什么"
 
 QQ 通道为模拟模式（RecordingOneBotTransport），全程零真实发送。
@@ -62,17 +62,7 @@ class RecordingWssPort:
     async def send_notification_event(self, device_id: str, payload: dict) -> None:
         self.sent.append({"device_id": device_id, "payload": payload})
 
-DEVICES = {
-    "leaf5": {"serial": "100.92.91.85:5555",
-              "device_id": "ba4bb14c75917cfc0e69fb7a1caf8ba3"},
-    "nova": {"serial": "100.102.110.11:5555",
-             "device_id": "0d31bc640a03718e6b58f035555450f3"},
-    # v2 重配对后的正式身份（embedded WSS 在线）
-    "leaf5-root": {"serial": "100.92.91.85:5555",
-                   "device_id": "6b4d34534e37c2b34284ae6681250501"},
-    "nova-daily": {"serial": "100.102.110.11:5555",
-                   "device_id": "bdb8fd967bdecef88708df45c9d084ac"},
-}
+# 设备身份与 ADB 地址由运行环境提供，不把个人 tailnet 拓扑或设备 ID 提交到仓库。
 
 
 class RestTransport:
@@ -186,7 +176,10 @@ def make_deepseek_complete(secrets: dict[str, str]):
 
 async def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--device", choices=list(DEVICES), default="leaf5")
+    ap.add_argument("--device", default=os.environ.get("WHALE_DEVICE_NAME", "device"),
+                    help="仅用于输出标识，不用于设备寻址")
+    ap.add_argument("--device-id", default=os.environ.get("WHALE_DEVICE_ID"))
+    ap.add_argument("--serial", default=os.environ.get("WHALE_ADB_SERIAL"))
     ap.add_argument("--goal",
                     default="打开设置，找到「电池」页面，总结你看到的选项")
     ap.add_argument("--out", default="/tmp/whale-round1-demo")
@@ -195,8 +188,10 @@ async def main() -> int:
                     help="单动作超时（慢设备如 nova 需要 30s 级）")
     args = ap.parse_args()
 
-    dev = DEVICES[args.device]
-    device_id, serial = dev["device_id"], dev["serial"]
+    device_id, serial = args.device_id, args.serial
+    if not device_id or not serial:
+        print("FATAL: 请通过 WHALE_DEVICE_ID 与 WHALE_ADB_SERIAL，或 --device-id / --serial 指定设备")
+        return 2
     out_dir = os.path.join(args.out, str(now_ms()))
     os.makedirs(out_dir, exist_ok=True)
 

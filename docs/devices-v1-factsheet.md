@@ -1,3 +1,5 @@
+> **历史快照（V1，2026-11-07 前）。** 当前设备协议已切换为 V2，V1 目录和运行时已删除。此文只用于理解旧实现，不是当前代码导航；请以 [docs/devices.md](devices.md) 和 [devices-v2-design.md](devices-v2-design.md) 为准。
+
 # Devices 域事实底稿（whale-core-dev v1）—— Device Gateway v2 + ADB/SSH Transport 参考
 
 > 事实源：`src/whale_core/devices/*.py`、`src/whale_core/api/devices_api.py`、`tests/`。所有行号对应上述文件。
