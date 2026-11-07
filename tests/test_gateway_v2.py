@@ -128,7 +128,9 @@ class TestDispatchReliability:
 
     def test_ambiguous_failure_does_not_try_second_transport(self):
         class FailingEmbedded(ShellTransport):
-            kind = "embedded_wss"
+            def __init__(self):
+                super().__init__()
+                self.kind = "embedded_wss"
 
             async def execute(self, device_id, action):
                 self.operations.append({"capability": action.capability})
