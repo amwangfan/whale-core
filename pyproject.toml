@@ -1,7 +1,7 @@
 [project]
 name = "whale-core"
 version = "0.1.0"
-description = "Whale intelligence layer: companion AI core with events-in / intents-out contracts, memory, persona cards, plugin system and safety gates"
+description = "Whale AI companion and agent core: conversation, memory, persona cards, tools, events and devices"
 readme = "README.md"
 # Third-party notices only; the project-level license is still owner-pending.
 license-files = ["licenses/*"]
