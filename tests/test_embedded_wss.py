@@ -1047,3 +1047,96 @@ def test_revoke_rechecked_per_frame(rig):
             sim.recv()
     finally:
         sim.close()
+
+
+# ---------------------------------------------------------------- PR#75 移植回归
+
+def test_response_type_binding_no_cross_type_consume(api):
+    """同设备同 ID 但类型不符的回包不得 resolve（batch07 完整语义）。"""
+    sim, gateway = _api_rig(api)
+    sim.connect(gateway.port)
+    try:
+        # 手工构造：往 pending 塞一个期望 action.receipt 的等待项，action_id 与
+        # 随后 sensor.result 的 request_id 同名（攻击/错位场景）
+        from whale_core.devices.embedded_wss import _Pending
+        pend = _Pending(sim.device_id, "action.receipt")
+        gateway.pending["same-id-0001"] = pend
+        # 设备回一个 request_id=same-id-0001 的 sensor.result
+        sim.send(sim.frame("sensor.result", {
+            "request_id": "same-id-0001", "status": "ok", "data": [],
+            "truncated": False, "source": "test"}))
+        time.sleep(0.3)
+        assert not pend.event.is_set(), "action 等待方不应被 sensor.result 消费"
+        assert gateway.pending.get("same-id-0001") is pend, "等待项应回挂"
+    finally:
+        sim.close()
+
+
+def test_invalid_action_does_not_occupy_idempotency_key(api):
+    """非法动作先校验再占键（batch05）：幂等键不被非法请求消耗。"""
+    sim, gateway = _api_rig(api)
+    sim.connect(gateway.port)
+    try:
+        status, body = _req(
+            api, "POST", f"/api/v1/devices/{sim.device_id}/action",
+            body={"capability": "phone.notification.post",
+                  "arguments": {"text": "x"},
+                  "idempotency_key": "bad key with spaces!",  # 违反 pattern
+                  "timeout": 5})
+        assert status == 400
+        # 修好后同一幂等键可正常使用
+        box, thread = _http_in_thread(
+            api, "POST", f"/api/v1/devices/{sim.device_id}/action",
+            {"capability": "phone.notification.post",
+             "arguments": {"text": "x"},
+             "idempotency_key": "good-key-0001", "timeout": 5})
+        req = sim.recv()
+        sim.send(sim.frame("action.receipt",
+                           {"action_id": req["payload"]["action_id"],
+                            "status": "succeeded"}))
+        thread.join(timeout=15)
+        assert box["result"][0] == 200
+    finally:
+        sim.close()
+
+
+def test_retention_timeout_unknown_amended_by_late_receipt(api):
+    """清理推定的 unknown 是估计值：迟到的真实终态可补齐；设备确认终态不可翻案。"""
+    sim, gateway = _api_rig(api)
+    sim.connect(gateway.port)
+    try:
+        box, thread = _http_in_thread(
+            api, "POST", f"/api/v1/devices/{sim.device_id}/action",
+            {"capability": "phone.notification.post",
+             "arguments": {"text": "x"},
+             "idempotency_key": "idem-late-0001", "timeout": 5})
+        req = sim.recv()
+        action_id = req["payload"]["action_id"]
+        # 人工把记录推过宽限期并清扫 → 推定 unknown
+        key = f"device:action:{sim.device_id}:idem-late-0001"
+        record = gateway.store.get(key)
+        record["created_at"] -= 10 * 24 * 3600 * 1000
+        record["expires_at"] = now_ms() - 25 * 3600 * 1000
+        gateway.store.put(key, record)
+        stats = gateway.sweep_action_retention()
+        assert stats["marked_unknown"] >= 1
+        record = gateway.store.get(key)
+        assert record["state"] == "unknown"
+        assert record["outcome_source"] == "retention_timeout"
+        # 迟到真实终态补齐
+        sim.send(sim.frame("action.receipt",
+                           {"action_id": action_id, "status": "succeeded"}))
+        time.sleep(0.5)
+        record = gateway.store.get(key)
+        assert record["state"] == "succeeded"
+        assert "outcome_source" not in record
+        assert record["receipt"]["status"] == "succeeded"
+        # 设备确认终态后冲突终态不得翻案
+        sim.send(sim.frame("action.receipt",
+                           {"action_id": action_id, "status": "failed",
+                            "error_code": "internal"}))
+        time.sleep(0.5)
+        record = gateway.store.get(key)
+        assert record["state"] == "succeeded"
+    finally:
+        sim.close()

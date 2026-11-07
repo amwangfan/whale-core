@@ -95,17 +95,25 @@ class ConnectionState:
         self.app_flavor = ""
         # 最近一次心跳带的模块状态摘要（§6 device.heartbeat.modules）
         self.modules: dict[str, str] = {}
+        # 每连接发送锁：down_seq 分配与实际发送严格同序（PR#75 batch05 移植）
+        self.send_lock = threading.Lock()
 
 
 class _Pending:
-    """跨线程请求-应答对，并绑定发起请求的已认证设备身份。"""
+    """跨线程请求-应答对，绑定发起请求的已认证设备身份与期望回包类型。
 
-    __slots__ = ("event", "result", "device_id")
+    只有同设备且同类型的回包才 resolve（PR#75 batch07 完整语义：
+    sensor.result/action.receipt/confirm.response 之间不回包误匹配）。
+    """
 
-    def __init__(self, device_id: str | None = None) -> None:
+    __slots__ = ("event", "result", "device_id", "response_type")
+
+    def __init__(self, device_id: str | None = None,
+                 response_type: str = "") -> None:
         self.event = threading.Event()
         self.result: dict | None = None
         self.device_id = device_id
+        self.response_type = response_type
 
 
 class EmbeddedWssGateway:
@@ -179,10 +187,12 @@ class EmbeddedWssGateway:
         return msg
 
     def send_msg(self, st: ConnectionState, msg_type: str, payload: dict) -> dict:
-        st.down_seq += 1
-        msg = self.build_message(msg_type, "downlink", payload, st.down_seq)
-        st.ws.send(json.dumps(msg, ensure_ascii=False))
-        return msg
+        # 每连接串行：锁内分配 seq 并发送，保证序号与线上顺序一致
+        with st.send_lock:
+            st.down_seq += 1
+            msg = self.build_message(msg_type, "downlink", payload, st.down_seq)
+            st.ws.send(json.dumps(msg, ensure_ascii=False))
+            return msg
 
     def send_error(self, st: ConnectionState, ref_id: Any, code: str, message: str):
         if not (isinstance(ref_id, str) and len(ref_id) == 26):
@@ -454,7 +464,8 @@ class EmbeddedWssGateway:
         request_id = msg["payload"]["request_id"]
         with self.lock:
             pend = self.pending.get(request_id)
-            if pend is not None and pend.device_id != st.device_id:
+            if pend is not None and (pend.device_id != st.device_id
+                                     or pend.response_type != "sensor.result"):
                 mismatch = True
             else:
                 mismatch = False
@@ -494,8 +505,14 @@ class EmbeddedWssGateway:
             record = self.store.get(action_key)
             if isinstance(record, dict) and record.get("action_id") == action_id:
                 # First terminal wins：已落终态不被迟到/冲突终态翻案
-                if record.get("state") not in TERMINAL_RECEIPT_STATES:
+                estimated_unknown = (
+                    record.get("state") == "unknown"
+                    and record.get("outcome_source") == "retention_timeout")
+                if (record.get("state") not in TERMINAL_RECEIPT_STATES
+                        or (estimated_unknown
+                            and status in TERMINAL_RECEIPT_STATES)):
                     record.update(state=status, updated_at=now_ms())
+                    record.pop("outcome_source", None)
                     if status in TERMINAL_RECEIPT_STATES:
                         record["receipt"] = {
                             k: p[k] for k in (
@@ -507,7 +524,8 @@ class EmbeddedWssGateway:
         if status in TERMINAL_RECEIPT_STATES:
             with self.lock:
                 pend = self.pending.get(action_id)
-                if pend is not None and pend.device_id != st.device_id:
+                if pend is not None and (pend.device_id != st.device_id
+                                         or pend.response_type != "action.receipt"):
                     mismatch = True
                 else:
                     mismatch = False
@@ -600,7 +618,7 @@ class EmbeddedWssGateway:
         """
         st = self._online_or_raise(device_id)
         challenge_id = str(payload["challenge_id"])
-        pend = _Pending(device_id)
+        pend = _Pending(device_id, "device.confirm.response")
         with self.lock:
             self.pending_confirm[challenge_id] = pend
         try:
@@ -690,8 +708,11 @@ class EmbeddedWssGateway:
                     self.store.delete(f"device:receipts:{device_id}:{action_id}")
                 deleted += 1
             elif now > expires + self.ACTION_PENDING_GRACE_MS:
-                # 过宽限的非终态：落 unknown 过期标记（下轮按终态清理）
+                # 过宽限的非终态：落 unknown 过期标记（下轮按终态清理）。
+                # 这是清理任务的**推定**而非设备确认——打 outcome_source 标记，
+                # 迟到的真实终态回执仍可补齐（PR#75 batch08 移植）。
                 record["state"] = "unknown"
+                record["outcome_source"] = "retention_timeout"
                 record["updated_at"] = now
                 self.store.put(key, record)
                 marked += 1
@@ -816,7 +837,7 @@ class EmbeddedWssGateway:
             "max_items": int(max_items),
             "deadline": now_ms() + int(timeout_s * 1000),
         }
-        pend = _Pending(device_id)
+        pend = _Pending(device_id, "sensor.result")
         with self.lock:
             self.pending[request_id] = pend
         try:
@@ -878,11 +899,6 @@ class EmbeddedWssGateway:
             tx.put(f"device:action-id:{device_id}:{action_id}", idem_key)
             return True
 
-        if not self.store.transact(reserve):
-            # 并发下另一线程先占了键：同上，回已记录状态
-            result = dict(self.store.get(idem_store_key) or {})
-            result["duplicate"] = True
-            return result
         payload: dict[str, Any] = {
             "action_id": action_id,
             "capability": capability,
@@ -902,7 +918,18 @@ class EmbeddedWssGateway:
             payload["approval_ref"] = approval_ref
         if correlation_id:
             payload["correlation_id"] = correlation_id
-        pend = _Pending(device_id)
+        # 先组装完整帧做 schema 预检（非法动作不占幂等键；PR#75 batch05）
+        probe = self.build_message("action.request", "downlink", payload, 0)
+        err = self.contracts.validate("action.request", probe)
+        if err:
+            raise GatewayError("invalid_message",
+                               f"出站帧未通过 action.request schema: {err}")
+        if not self.store.transact(reserve):
+            # 并发下另一线程先占了键：同上，回已记录状态
+            result = dict(self.store.get(idem_store_key) or {})
+            result["duplicate"] = True
+            return result
+        pend = _Pending(device_id, "action.receipt")
         with self.lock:
             self.pending[action_id] = pend
         try:
