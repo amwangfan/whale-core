@@ -92,7 +92,7 @@ def _maybe_writeback_inner_state(store: MemoryStore, *, conversation_id: str,
 
 class WhaleCompanion:
     def __init__(self, store: MemoryStore, model: TextCompanion, *, curator: MemoryCurator | None = None,
-                 timeline=None, self_uid: str = ""):
+                 timeline=None, self_uid: str = "", exploration_delivery=None):
         self.store, self.model, self.curator = store, model, curator
         # G1：群时间线（GroupTimelineStore）；群会话的历史从它渲染（带归属），
         # 不再用无身份的历史回放。
@@ -102,6 +102,8 @@ class WhaleCompanion:
         # issue #23：回复规划提示（ResponsePlanner 标记约定）。宿主按需设置
         # （如 QQ 会话），空 = 不提示（纯文本单条路径，行为不变）。
         self.planning_hint = ""
+        # Optional owner-confirmed recommendation delivery callback.
+        self.exploration_delivery = exploration_delivery
 
 
     def chat(self, text: str, *, conversation_id: str = "", user_text: str | None = None,
@@ -154,6 +156,12 @@ class WhaleCompanion:
         ctx = build_continuity_context(
             self.store, allowed_space_ids=space_ids, persona_card=persona_card)
         persona_text = ctx.persona_summary
+        # Exploration diaries are owner-private context, never group-chat lore.
+        exploration_owner = (
+            not str(conversation_id or "").startswith("group:")
+            and (str(conversation_id or "").startswith("glasses:")
+                 or bool(getattr(context, "is_owner", False))))
+        exploration_candidates = ()
         # G4：context 携带时组装 RelationshipState 摘要 + ExpressionPolicy 指导，
         # 追加在 persona 文本后缀（极简渲染纪律：只有事实驱动的几行自然语言）。
         # 关系与表达只是表达层上下文——不含、也不改变任何权限语义（PER-01）；
@@ -288,6 +296,43 @@ class WhaleCompanion:
                     _injectable_memory(str(r.content.get("summary", "")))
                     for r in ctx.recent_episodes)
                 if m]
+
+        if exploration_owner and conversation_id:
+            from whale_core.life.exploration_chat import (
+                build_exploration_context, complete_recommendation,
+                resolve_pending_recommendation,
+            )
+            decision = resolve_pending_recommendation(
+                self.store, conversation_id, original)
+            if decision is not None:
+                draft = decision["draft"]
+                if decision["decision"] == "reject":
+                    complete_recommendation(
+                        self.store, conversation_id, draft, outcome="rejected")
+                    persona_text = (persona_text or "") + (
+                        "\\n主人明确拒绝了上一条内容推荐；不要继续推送同一条。")
+                else:
+                    delivery = None
+                    try:
+                        if callable(self.exploration_delivery):
+                            delivery = self.exploration_delivery(draft, conversation_id)
+                    except Exception as exc:
+                        delivery = {"ok": False, "error": type(exc).__name__}
+                    outcome = ("accepted" if isinstance(delivery, dict)
+                               and delivery.get("ok") else "unknown")
+                    complete_recommendation(
+                        self.store, conversation_id, draft, outcome=outcome)
+                    detail = ("投递已被通道或 Core 通知网关受理；这不代表设备已展示或用户已读。"
+                              if outcome == "accepted"
+                              else "投递结果不确定，未自动重试。")
+                    persona_text = (persona_text or "") + (
+                        "\\n主人明确接受了上一条内容推荐。投递状态：" + detail)
+
+            exploration_context, exploration_candidates = build_exploration_context(
+                self.store, original)
+            if exploration_context:
+                memories.append(exploration_context)
+
         # 多轮历史：显式传 conversation_id 才启用（默认保持单轮行为，兼容旧调用方）。
         # G1：群会话改用时间线渲染——每条发言带「消息ID|发送者」归属标签，
         # 成员不坍缩成同一个 user（ID-01）；私聊保持既有历史。
@@ -346,6 +391,11 @@ class WhaleCompanion:
         # 发送侧的规划解析（沉默/分段）依赖原始标记，不能提前剥离。
         from whale_core.life.response_planner import clean_reply_text
         clean_response = clean_reply_text(response)
+        if exploration_owner and conversation_id and exploration_candidates:
+            from whale_core.life.exploration_chat import maybe_remember_offer
+            maybe_remember_offer(
+                self.store, conversation_id, clean_response,
+                exploration_candidates)
         if episodic:
             # G2 情节质量：同一对话轮（turn_key，如 task_id）内的 ack/补发等
             # 多次系统中间对话**合并回写**同一条情节（后者覆盖前者，包含最终
