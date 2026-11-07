@@ -7,8 +7,8 @@ def test_bilibili_adapter_only_accepts_public_video_pages_and_fetches_them():
     def search(query, *, limit):
         calls.append(("search", query, limit))
         return (
-            "FPGA 入门 — 一些介绍（https://www.bilibili.com/video/BV1Abc123/）\\n"
-            "Not Bilibili — ignore (https://example.com/video/BV2abc456/)\\n"
+            "FPGA 入门 — 一些介绍（https://www.bilibili.com/video/BV1Abc123/）\n"
+            "Not Bilibili — ignore (https://example.com/video/BV2abc456/)\n"
             "short link — ignore (https://b23.tv/abcd)"
         )
 
