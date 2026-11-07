@@ -27,6 +27,9 @@ from urllib.parse import parse_qs, urlparse
 from whale_core.memory.store import MemoryStore
 
 API_VERSION = "v1"
+# v2：移动端聊天 REST 面（contracts/v2 §11；鉴权与 v1 同一 Bearer 机制）。
+# v2 只承载 mobile_chat 一组端点，其余路径一律 404，不向后泄漏 v1 面。
+API_VERSIONS = ("v1", "v2")
 MAX_BODY_BYTES = 64 * 1024
 SSE_REPLAY_LIMIT = 50
 
@@ -47,7 +50,8 @@ class ApiContext:
     voice_bridge: Any = None
     pcm_voice_gateway: Any = None  # api.voice.VoiceGateway（懒创建，可选 websockets）
     device_registry: Any = None    # devices.registry.DeviceRegistry（懒构建）
-    device_gateway: Any = None     # devices.gateway.DeviceGateway（懒创建，可选 websockets）
+    device_gateway: Any = None     # devices.embedded_wss.EmbeddedWssGateway（懒创建，可选 websockets）
+    device_gateway_v2: Any = None  # devices.gateway_v2.DeviceGatewayV2 编排器（懒装配）
     device_adapter: Any = None     # devices.perception.DevicePerceptionAdapter
     workflows: Any = None
     optional: Any = None       # OptionalCapabilities
@@ -55,6 +59,7 @@ class ApiContext:
     lock: Any = field(default_factory=threading.RLock)
     stopping: Any = field(default_factory=threading.Event)
     curator: Any = None        # MemoryCurator
+    attachments: Any = None    # cloud.attachments.AttachmentStore（/api/v2 懒构建）
     started_at: float = field(default_factory=time.time)
     events: list[dict] = field(default_factory=list)  # bounded, non-durable log
     event_seq: int = 0
@@ -158,7 +163,10 @@ class _Handler(BaseHTTPRequestHandler):
     def _route(self, method: str) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
-        if not path.startswith(f"/api/{API_VERSION}/"):
+        api_prefix = next(
+            (f"/api/{v}/" for v in API_VERSIONS if path.startswith(f"/api/{v}/")),
+            None)
+        if api_prefix is None:
             # 非 API 路径：静态控制台（web/dist）。静态资源不鉴权（API 全部鉴权；
             # 绑定默认回环；SPA 需先加载才能走登录流程）。
             if method == "GET" and self.server.static_dir:  # type: ignore[attr-defined]
@@ -175,11 +183,14 @@ class _Handler(BaseHTTPRequestHandler):
             if origin_parts.scheme not in ('http', 'https') or origin_parts.netloc != self.headers.get('Host'):
                 self._send(403, _error('forbidden', 'cross-origin request denied'))
                 return
-        rel = path[len(f"/api/{API_VERSION}/"): ]
+        rel = path[len(api_prefix):]
         parts = [p for p in rel.split("/") if p]
         query = parse_qs(parsed.query)
         try:
-            self._dispatch(method, parts, query)
+            if api_prefix == "/api/v2/":
+                self._dispatch_v2(method, parts, query)
+            else:
+                self._dispatch(method, parts, query)
         except Exception:
             # 500 必须可诊断（此前完全吞掉异常，定位靠猜）
             import logging, traceback
@@ -248,6 +259,29 @@ class _Handler(BaseHTTPRequestHandler):
             routes.operations.life(self, method, parts)
         elif parts == ["events"] and method == "GET":
             routes.operations.events_sse(self)
+        else:
+            self._send(404, _error("not_found", "unknown endpoint"))
+
+    def _dispatch_v2(self, method: str, parts: list[str], query: dict) -> None:
+        """/api/v2/* 移动端聊天面（contracts/v2 §11）；路由本体在 routes.mobile_chat。"""
+        from whale_core.api import routes
+        mc = routes.mobile_chat
+        if parts == ["conversations"] and method == "GET":
+            mc.conversations_list(self, query)
+        elif (len(parts) == 3 and parts[0] == "conversations"
+                and parts[2] == "messages" and method == "GET"):
+            mc.conversation_messages(self, parts[1], query)
+        elif parts == ["chat", "attachments"] and method == "POST":
+            mc.attachment_upload(self)
+        elif parts == ["chat", "stream"] and method == "POST":
+            mc.chat_stream_v2(self)
+        elif len(parts) == 2 and parts[0] == "attachments":
+            if method == "GET":
+                mc.attachment_download(self, parts[1])
+            elif method == "DELETE":
+                mc.attachment_delete(self, parts[1])
+            else:
+                self._send(405, _error("method_not_allowed", "use GET or DELETE"))
         else:
             self._send(404, _error("not_found", "unknown endpoint"))
 

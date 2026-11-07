@@ -1,4 +1,4 @@
-"""/api/v1/* 路由实现模块（issue #30 拆分）。
+"""/api/v1/* 路由实现模块（issue #30 拆分）；mobile_chat 为 /api/v2/* 移动端面。
 
 按 API surface 分面；函数风格与 ``whale_core.api.devices_api`` 一致——
 首参为请求 handler（提供 ``_send``/``_body_json``/``ctx``/``server``）。
@@ -13,6 +13,7 @@ from whale_core.api.routes import (
     artifacts,
     chat,
     media,
+    mobile_chat,
     operations,
     plugins,
     system,
@@ -24,6 +25,7 @@ __all__ = [
     "artifacts",
     "chat",
     "media",
+    "mobile_chat",
     "operations",
     "plugins",
     "system",
