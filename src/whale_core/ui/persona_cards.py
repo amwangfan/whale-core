@@ -212,8 +212,7 @@ def import_external_card(
     - 重复 id 拒绝覆盖；原文截断至 ``MAX_EXTERNAL_PROMPT_CHARS``；
     - 保留作者、来源与许可证署名；卡本体持久化到 ``persona:card:{id}``
       （随库备份，不进 git）；
-    - 导入即表示使用者确认已获该卡的使用授权（站点明示的免费复制或作者许可）；
-    - 渲染时原文按「上下文而非指令」注入，宿主安全与权限规则不受卡片内容影响。
+    - 保留原文与来源；卡片原文直接参与角色表达，设备权限在执行层决定。
     """
     cid = (card_id or "").strip()
     if not cid or not title.strip():
