@@ -610,14 +610,98 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
         ok = port.send_c2c(cfg.owner_uid, text) if hasattr(port, "send_c2c") else False
         return bool(ok), ("accepted" if ok else "send_failed")
 
+    def _whale_push(items, conversation: str, summary: str):
+        """QQ 离线时向已配对设备提交原生通知；无在线网关时先入本地补传队列。"""
+        from whale_core.devices.registry import DeviceRegistry
+        from whale_core.life.result_delivery import DeliveryReceipt
+        from whale_core.notifications.gateway import NotificationGateway
+        from whale_core.notifications.models import NotificationCategory, NotificationTarget
+
+        texts = [str(item.text or "").strip() for item in items
+                 if getattr(item, "kind", "") == "text" and str(item.text or "").strip()]
+        body = "\\n".join(texts)[:2000]
+        if not body:
+            body = str(summary or "").strip()[:2000]
+        if not body:
+            return []
+        try:
+            devices = [meta for meta in DeviceRegistry(store).list_devices()
+                       if meta.get("status") == "active" and meta.get("device_id")]
+        except Exception as exc:
+            return [DeliveryReceipt(
+                channel="whale_notification", ok=False,
+                detail=f"device_registry:{type(exc).__name__}", qq_online=False)]
+        if not devices:
+            return []
+
+        api_base = (env.get("WHALE_API") or env.get("WHALE_API_URL")
+                    or "http://127.0.0.1:8080").strip().rstrip("/")
+        api_token = (env.get("WHALE_API_TOKEN") or "").strip()
+        target = NotificationTarget("chat", str(conversation or "")[:128])
+        group_key = ("explore:" + str(conversation or "owner"))[:128]
+        gateway = NotificationGateway(store)
+        receipts = []
+        for meta in devices:
+            device_id = str(meta["device_id"])
+            accepted = False
+            detail = ""
+            if api_token:
+                try:
+                    import urllib.request
+                    from urllib.parse import quote
+
+                    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+                        def redirect_request(self, req, fp, code, msg, headers, newurl):
+                            return None
+
+                    payload = json.dumps({
+                        "category": NotificationCategory.CHAT_MESSAGE,
+                        "title": "鲸鱼有一条新发现",
+                        "body": body,
+                        "target": target.to_payload(),
+                        "group_key": group_key,
+                        "collapse_key": group_key,
+                    }, ensure_ascii=False).encode("utf-8")
+                    request = urllib.request.Request(
+                        f"{api_base}/api/v1/devices/{quote(device_id, safe='')}/notify",
+                        data=payload, method="POST",
+                        headers={"Authorization": f"Bearer {api_token}",
+                                 "Content-Type": "application/json"})
+                    opener = urllib.request.build_opener(_NoRedirect())
+                    with opener.open(request, timeout=4) as response:
+                        accepted = int(response.status) == 200
+                        detail = "core_gateway_accepted" if accepted else f"http_{response.status}"
+                except Exception as exc:
+                    detail = f"core_gateway:{type(exc).__name__}"
+            if not accepted:
+                try:
+                    import asyncio
+                    notification_id = asyncio.run(gateway.notify(
+                        device_id, NotificationCategory.CHAT_MESSAGE,
+                        "鲸鱼有一条新发现", body, target=target,
+                        group_key=group_key, collapse_key=group_key))
+                    record = gateway.queue.get_delivery(device_id, notification_id)
+                    accepted = bool(notification_id and record is not None)
+                    detail = ("queued_for_device_sync" if accepted else
+                              detail or "local_queue_failed")
+                except Exception as exc:
+                    detail = f"local_queue:{type(exc).__name__}"
+                    accepted = False
+            receipts.append(DeliveryReceipt(
+                channel="whale_notification", ok=accepted,
+                detail=detail or ("accepted" if accepted else "unavailable"),
+                qq_online=False))
+        return receipts
+
     def deliver_result(items, *, conversation: str = "", summary: str = "",
                        prefer_owner_dm: bool = True) -> dict:
-        """统一投递：QQ online → WeQ；offline → 手机图库 stub/ADB。"""
+        """统一投递：QQ online → WeQ；offline → Whale 通知/补传队列，再回落图库。"""
         from whale_core.life.result_delivery import (
             DeliveryItem, ResultDelivery, summarize_receipts)
         port = send_port_factory()
         delivery = ResultDelivery(
-            port, owner_uid=cfg.owner_uid, prefer_owner_dm=prefer_owner_dm)
+            port, owner_uid=cfg.owner_uid, prefer_owner_dm=prefer_owner_dm,
+            whale_push=_whale_push)
         norm = []
         for it in items or ():
             if isinstance(it, DeliveryItem):
@@ -950,7 +1034,7 @@ def _openapi() -> dict:
                                       "responses": {"200": {"description": "ok"}},
                                       "security": [{"bearerAuth": []}]}},
             "/v1/result/deliver": {"post": {
-                "summary": "统一结果投递（QQ online / 手机图库 stub）",
+                "summary": "统一结果投递（QQ online / Whale 原生通知 / 手机图库）",
                 "responses": {"200": {"description": "delivery receipts"}},
                 "security": [{"bearerAuth": []}]}},
             "/v1/health": {"get": {"summary": "存活与能力"}},
