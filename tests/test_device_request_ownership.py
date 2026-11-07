@@ -26,7 +26,7 @@ def connection(device_id):
 @pytest.mark.parametrize('kind', ['sensor', 'confirm'])
 def test_wrong_device_does_not_complete_or_remove_pending(kind):
     gw = gateway()
-    pending = _Pending('owner-device')
+    pending = _Pending('owner-device', 'sensor.result' if kind == 'sensor' else 'device.confirm.response')
     ref = 'request-123'
     if kind == 'sensor':
         requests = gw.pending
@@ -50,7 +50,7 @@ def test_wrong_device_does_not_complete_or_remove_pending(kind):
 
 def test_action_receipt_requires_original_device_mapping():
     gw = gateway()
-    pending = _Pending('owner-device')
+    pending = _Pending('owner-device', 'action.receipt')
     action_id, idem = 'action-123', 'idempotency-123'
     gw.pending[action_id] = pending
     gw.store.put(f'device:action-id:owner-device:{action_id}', idem)
@@ -59,6 +59,21 @@ def test_action_receipt_requires_original_device_mapping():
     gw._on_action_receipt(connection('other-device'), message)
     assert not pending.event.is_set()
     assert not gw.store.get(f'device:receipts:other-device:{action_id}')
+    # Even the correct device must send the expected response kind.
+    gw._on_sensor_result(connection('owner-device'), {'payload': {
+        'request_id': action_id, 'status': 'ok', 'data': [],
+    }})
+    assert not pending.event.is_set() and gw.pending[action_id] is pending
     gw._on_action_receipt(connection('owner-device'), message)
     assert pending.event.is_set()
     assert pending.result['state'] == 'executed'
+
+
+def test_type_mismatch_does_not_consume_query_waiter():
+    gw = gateway()
+    pending = _Pending('owner-device', 'sensor.result')
+    gw.pending['query-id'] = pending
+    assert gw._take_pending(gw.pending, 'query-id', 'owner-device', 'action.receipt') is None
+    assert gw.pending['query-id'] is pending
+    gw._on_sensor_result(connection('owner-device'), {'payload': {'request_id': 'query-id', 'status': 'ok'}})
+    assert pending.event.is_set() and not gw.pending

@@ -77,10 +77,11 @@ class ConnectionState:
 class _Pending:
     """跨线程的请求-应答对（管理 API 线程等，WS 线程 resolve）。"""
 
-    __slots__ = ("device_id", "event", "result")
+    __slots__ = ("device_id", "response_type", "event", "result")
 
-    def __init__(self, device_id: str) -> None:
+    def __init__(self, device_id: str, response_type: str) -> None:
         self.device_id = device_id
+        self.response_type = response_type
         self.event = threading.Event()
         self.result: dict | None = None
 
@@ -429,7 +430,7 @@ class DeviceGateway:
         timeout_s = self._timeout(timeout_s)
         self._preflight("device.confirm.request", payload)
         challenge_id = str(payload["challenge_id"])
-        pend = _Pending(device_id)
+        pend = _Pending(device_id, "device.confirm.response")
         with self.lock:
             self.pending_confirm[challenge_id] = pend
         try:
@@ -444,7 +445,7 @@ class DeviceGateway:
     def _on_device_confirm_response(self, st: ConnectionState, msg: dict) -> None:
         p = msg["payload"]
         challenge_id = str(p["challenge_id"])
-        pend = self._take_pending(self.pending_confirm, challenge_id, st.device_id)
+        pend = self._take_pending(self.pending_confirm, challenge_id, st.device_id, "device.confirm.response")
         if pend is None:
             log.warning("收到无对应挑战的 confirm.response challenge=%s，忽略",
                         challenge_id)
@@ -458,7 +459,7 @@ class DeviceGateway:
 
     def _on_sensor_result(self, st: ConnectionState, msg: dict) -> None:
         request_id = msg["payload"]["request_id"]
-        pend = self._take_pending(self.pending, request_id, st.device_id)
+        pend = self._take_pending(self.pending, request_id, st.device_id, "sensor.result")
         if pend is not None:
             pend.result = msg["payload"]
             pend.event.set()
@@ -467,11 +468,12 @@ class DeviceGateway:
                         request_id)
 
     def _take_pending(self, requests: dict[str, _Pending], ref_id: str,
-                      device_id: str | None) -> _Pending | None:
-        """Only the addressed device may complete a request; foreign replies leave it pending."""
+                      device_id: str | None, response_type: str) -> _Pending | None:
+        """Match ID, device and response kind before consuming the waiting request."""
         with self.lock:
             pending = requests.get(ref_id)
-            if pending is None or pending.device_id != device_id:
+            if (pending is None or pending.device_id != device_id
+                    or pending.response_type != response_type):
                 return None
             return requests.pop(ref_id)
 
@@ -514,7 +516,7 @@ class DeviceGateway:
                             }
                         self.store.put(action_key, record)
         if state in TERMINAL_RECEIPT_STATES:
-            pend = self._take_pending(self.pending, action_id, st.device_id)
+            pend = self._take_pending(self.pending, action_id, st.device_id, "action.receipt")
             if pend is not None:
                 pend.result = p
                 pend.event.set()
@@ -687,7 +689,7 @@ class DeviceGateway:
             "deadline": now_ms() + int(timeout_s * 1000),
         }
         self._preflight("sensor.query", payload)
-        pend = _Pending(device_id)
+        pend = _Pending(device_id, "sensor.result")
         with self.lock:
             self.pending[request_id] = pend
         try:
@@ -745,7 +747,7 @@ class DeviceGateway:
         if not self.store.transact(reserve):
             raise GatewayError(
                 "duplicate", f"幂等键 {idem_key} 已对该设备下发过")
-        pend = _Pending(device_id)
+        pend = _Pending(device_id, "action.receipt")
         with self.lock:
             self.pending[action_id] = pend
         try:
