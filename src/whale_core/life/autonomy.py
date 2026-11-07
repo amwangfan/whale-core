@@ -18,7 +18,15 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Callable, Mapping
+
+# Re-export these names for existing callers of life.autonomy.
+from whale_core.devices.actions import (
+    DeviceActionPort,
+    DeviceUnavailable,
+    RECEIPT_STATES,
+    TERMINAL_RECEIPT_STATES,
+)
 
 from whale_core.life.conversation_context import (
     SCOPE_DEVICE_NOTIFY,
@@ -44,10 +52,6 @@ KIND_REFUSE = "refuse"
 _DECISION_KINDS = frozenset(
     {KIND_OBSERVE, KIND_REMIND, KIND_DRAFT, KIND_ACTION, KIND_REFUSE})
 
-#: action.receipt 终态（与 contracts/v1 §4 一致；received/accepted 为中间态）
-TERMINAL_RECEIPT_STATES = frozenset({"executed", "failed", "unknown"})
-RECEIPT_STATES = TERMINAL_RECEIPT_STATES | {"received", "accepted"}
-
 DEFAULT_ACTION_TIMEOUT_S = 15.0
 
 
@@ -57,29 +61,6 @@ class AutonomyError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
-
-
-class DeviceUnavailable(Exception):
-    """设备面明确不可用：离线/超时/吊销/不支持（携带协议错误码）。"""
-
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(message)
-        self.code = code
-
-
-class DeviceActionPort(Protocol):
-    """Core→设备动作通道（生产=GatewayActionPort，模拟=SimulatedActionPort）。
-
-    可选 ``action_status(device_id, idempotency_key)``：超时后用原幂等键对账，
-    不重新下发。编排层以 ``getattr`` 探测；无此方法时，对有副作用能力
-    超时后不自动重试（升 ``unknown``）。
-    """
-
-    def send_action(self, device_id: str, *, capability: str,
-                    args: Mapping[str, Any], idempotency_key: str,
-                    timeout_s: float) -> Mapping[str, Any]:
-        """下发 action.request 并等待回执 payload；不可用抛 DeviceUnavailable。"""
-        ...
 
 
 def action_fingerprint(capability: str, device_id: str, args: Mapping[str, Any]) -> str:

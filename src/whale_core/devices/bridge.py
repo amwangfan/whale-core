@@ -4,15 +4,15 @@
 （旧路径保留薄 shim，import 兼容）。它本质是 devices×life 的**边界模块**。
 
 依赖方向例外说明：本模块反向 import 了 ``life.autonomy``
-（``DeviceUnavailable`` 错误类型 / ``AutonomyController`` 类型标注）与
+（``AutonomyController`` 类型标注）与
 ``life.situation``（``FACT`` / ``SituationStore`` / ``SituationState``）。
 评估结论：**保留该 import 不做依赖注入**——理由：
 1. devices→life 的方向在仓内已有先例（``devices/event_consumer.py``
-   同样 import ``life.initiative``），且 life 侧不回指 devices，无环；
-2. 例外项都是运行期值（异常类型、常量、re-export），注入等于让调用方
-   传异常类/常量，只会污染 API 而不换得真实解耦；
-3. 彻底解耦需先抽取「动作回执语义 + 情境模型」稳定接口层，超出 #27
-   范围（issue 允许「必要时抽取稳定接口」，此处记录为后续候选）。
+   同样 import ``life.initiative``）；life 侧使用独立的 ``devices.actions``
+   接口模块，不回指本边界模块；
+2. 情境常量与 re-export 是运行期值；设备异常与回执状态已收拢到
+   ``devices.actions``，无需为这些对象再添加注入层；
+3. 剩余情境模型与自主裁决的依赖属于该边界模块职责，暂不拆分。
 ``tests/test_arch_channels.py`` 以白名单方式冻结本模块允许的 life 依赖。
 
 生产路径是 ``devices/gateway.py`` 的 WSS 长连（验签/去重/持久化/回执
@@ -38,11 +38,11 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 from uuid import uuid4
 
+from whale_core.devices.actions import DeviceUnavailable, TERMINAL_RECEIPT_STATES
 from whale_core.devices.registry import DeviceRegistry, now_ms
 from whale_core.devices.schema import PROTOCOL_VERSION, ContractValidator
 from whale_core.life.autonomy import (
     AutonomyController,
-    DeviceUnavailable,
 )
 from whale_core.life.situation import FACT, SituationState, SituationStore
 
@@ -94,7 +94,7 @@ class SimulatedActionPort:
       pending，供 ``action_status`` 对账测试。
     """
 
-    _TERMINAL = frozenset({"executed", "failed", "unknown"})
+    _TERMINAL = TERMINAL_RECEIPT_STATES
 
     def __init__(
         self,

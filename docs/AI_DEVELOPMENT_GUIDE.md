@@ -31,6 +31,7 @@ QQ / 网页 / 手机 / 眼镜 / 电话
 - **做事**：`core/runtime/` 的意图、工具调度、任务持久化与恢复；`life/do_request.py` 当前只对简单结果图等明确请求做快捷闭环，其他任务仍走既有编排。
 - **投递**：`life/result_delivery.py` 处理 QQ 图文和离线暂存；只有实际送达才应在用户提示中称为 delivered；当前离线 staging 仍可能返回 ok，需结合 stub 详情辨别，不能当作手机图库送达。
 - **设备**：`devices/gateway.py` 下发动作并对账；`devices/agent_loop.py` 已实现 observe→decide→control/shell 及模拟测试，`DeepSeekDecisionPort` 目前尚未接入常驻生产入口。
+- **设备动作接口**：`devices/actions.py` 集中维护动作端口、不可用异常和回执状态；跨仓入口与边界见 [Core/Mobile 互联说明](core-mobile-integration.md)。
 - **主动互动**：`life/proactive_greeting.py` 和 `initiative/` 的启停、时机、额度与回执；不要把判断模型和回复模型混成同一条固定链。
 
 ## 3. 代码地图

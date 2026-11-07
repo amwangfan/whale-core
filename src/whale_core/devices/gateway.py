@@ -27,6 +27,7 @@ import time
 import uuid
 from typing import Any
 
+from whale_core.devices.actions import TERMINAL_RECEIPT_STATES
 from whale_core.devices.perception import DevicePerceptionAdapter, DurableDevicePerceptionAdapter
 from whale_core.devices.registry import DeviceRegistry, now_ms
 from whale_core.devices.schema import (
@@ -45,10 +46,6 @@ REF_ID_FALLBACK = "0" * 16
 DEFAULT_HEARTBEAT_INTERVAL = 30   # hello_ack 告知端侧的心跳节奏（秒）
 DEFAULT_HEARTBEAT_TIMEOUT = 90    # §2：90s 无心跳判定离线
 DEFAULT_CHALLENGE_TTL = 30        # 秒；schema 限定 expires_in ∈ [1,300]
-
-#: action.receipt 终态（§4：received/accepted 只是中间态）
-TERMINAL_RECEIPT_STATES = frozenset({"executed", "failed", "unknown"})
-
 
 class GatewayError(ValueError):
     """下行通道失败（code 对齐 §4 错误码 + device_offline 管理面补充）。"""

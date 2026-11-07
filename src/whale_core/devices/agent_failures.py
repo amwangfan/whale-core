@@ -14,7 +14,8 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from whale_core.life.autonomy import DeviceUnavailable, validate_action_receipt, AutonomyError
+from whale_core.devices.actions import DeviceUnavailable
+from whale_core.life.autonomy import validate_action_receipt, AutonomyError
 
 FAILED_TIMEOUT = "failed/timeout"
 FAILED_UNAVAILABLE = "failed/unavailable"

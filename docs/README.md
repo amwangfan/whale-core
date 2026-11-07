@@ -11,6 +11,7 @@
 | 文档 | 内容 |
 | --- | --- |
 | [AI_DEVELOPMENT_GUIDE.md](AI_DEVELOPMENT_GUIDE.md) | 开发者与编程 AI 协作指南：三仓分工、代码导航、运行链路、实际权限与验收方式 |
+| [core-mobile-integration.md](core-mobile-integration.md) | Core/Mobile 实际互联入口、设备动作接口、精简候选和联合验收 |
 | [contracts.md](contracts.md) | 智能层与基础设施（whale-io）的边界契约：事件 / 意图 / 动作 |
 | [vision-map.md](vision-map.md) | 原设想 → whale-core 类型与模块落点对照（权威覆盖表在 whale-io） |
 | [devices.md](devices.md) | 设备面（whale-mobile 接入，D1–D4 范围说明）；协议 canonical 事实源是 **whale-mobile** 的 `contracts/v1/`（本仓同目录为镜像，漂移校验见 `scripts/contract_sync_check.py`） |
