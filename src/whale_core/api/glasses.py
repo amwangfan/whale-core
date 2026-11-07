@@ -15,8 +15,8 @@
 - ``POST /v1/qq/reply``：QQ 快捷回复——把用户口述的文本发给**已配置的
   绑定对端**（目标不从请求推导，防误发）；走 WeQ 发送链与既有风控
   （被动额度/静默时段豁免口径与 runner 一致：主人当面 dictation 属被动延续）。
-- ``POST /v1/result/deliver``：统一结果投递（ResultDelivery）——QQ 在线走
-  owner 私聊文字/图片；离线 stub 落盘 + 可选 ADB/MediaStore 探测 Magic8。
+- ``POST /v1/result/deliver``：统一结果投递（ResultDelivery）——QQ 在线优先；
+  QQ 离线走 Whale 原生通知（在线直发/离线补传），图片可继续回落手机图库。
   ``/v1/chat`` 请求体 ``deliverResult=true`` 时也会在回复后走同一路由。
 
 鉴权：``Authorization: Bearer <WHALE_GLASSES_TOKEN>``（phone 角色专用令牌，
