@@ -65,7 +65,11 @@ def test_concurrent_history_append_does_not_lose_turns():
         assert user["content"].removeprefix("user") == answer["content"].removeprefix("answer")
 
 
-def test_same_conversation_model_history_is_serialized():
+def test_same_conversation_overlapping_turns_see_prior_user_messages():
+    """PR#74 新语义：会话锁不包整轮 LLM，用户原话在轮次开头即落盘——
+    重叠轮能看见先前轮的用户消息（但看不到未完成的助手回复）。
+    期望第 i 轮看到 i 条（先前几轮的用户消息），而非旧串行语义的 [0,2,4,6]。
+    断言排序后比较（线程启动顺序不影响结论）。"""
     import time
     class Brain:
         def __init__(self): self.histories = []
@@ -77,7 +81,7 @@ def test_same_conversation_model_history_is_serialized():
     companion = WhaleCompanion(InMemoryStore(), brain)
     with ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(lambda i: companion.chat(str(i), conversation_id="c"), range(4)))
-    assert brain.histories == [0, 2, 4, 6]
+    assert sorted(brain.histories) == [0, 1, 2, 3]
 
 
 def test_conversation_delete_removes_only_linked_history_and_episodes():
