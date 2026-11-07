@@ -122,11 +122,11 @@ describe("Initiative 主动行为控制面板（issue #42）", () => {
     // 四字段当前值
     await waitFor(() =>
       expect(
-        (screen.getByLabelText("主动消息每日上限") as HTMLInputElement).value,
+        (screen.getByLabelText("主动消息每日上限（0=不限）") as HTMLInputElement).value,
       ).toBe("5"),
     );
     expect(
-      (screen.getByLabelText("被动回复每日保险丝") as HTMLInputElement).value,
+      (screen.getByLabelText("被动回复每日保险丝（0=不限）") as HTMLInputElement).value,
     ).toBe("200");
     expect(
       (screen.getByLabelText("静默开始时间") as HTMLInputElement).value,
@@ -159,10 +159,10 @@ describe("Initiative 主动行为控制面板（issue #42）", () => {
 
     await waitFor(() =>
       expect(
-        (screen.getByLabelText("主动消息每日上限") as HTMLInputElement).value,
+        (screen.getByLabelText("主动消息每日上限（0=不限）") as HTMLInputElement).value,
       ).toBe("5"),
     );
-    fireEvent.change(screen.getByLabelText("主动消息每日上限"), {
+    fireEvent.change(screen.getByLabelText("主动消息每日上限（0=不限）"), {
       target: { value: "8" },
     });
     fireEvent.click(screen.getByText("保存全局设置"));
