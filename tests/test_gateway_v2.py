@@ -150,6 +150,23 @@ class TestDispatchReliability:
         assert len(first.operations) == 1
         assert not adb.operations
 
+    def test_transport_exception_is_unknown_and_never_replayed(self):
+        class CrashingShell(ShellTransport):
+            async def execute(self, device_id, action):
+                self.operations.append({"capability": action.capability})
+                raise RuntimeError("socket lost after send")
+
+        gw = DeviceGatewayV2()
+        transport = CrashingShell()
+        gw.register_transport(transport)
+        first = run(gw.execute("dev1", "device.shell", {"command": "echo 1"},
+                               idempotency_key="unknown-on-exception"))
+        second = run(gw.execute("dev1", "device.shell", {"command": "echo 1"},
+                                idempotency_key="unknown-on-exception"))
+        assert first.status is ReceiptStatus.UNKNOWN
+        assert second.action_id == first.action_id
+        assert len(transport.operations) == 1
+
     def test_in_memory_receipts_have_configurable_capacity(self):
         gw = DeviceGatewayV2()
         gw.max_cached_receipts = 2
