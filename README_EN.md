@@ -2,6 +2,8 @@
 
 # whale-core
 
+> Dreaminutes fork progress: see [update notes](FORK_UPDATES.md) for changes, validation, and current work (Chinese).
+
 *“The mountain has trees, and trees have branches; my heart delights in you, yet you do not know.”*
 
 Whale's core brain: conversation, memory, tools, voice and exploration.

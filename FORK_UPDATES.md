@@ -1,0 +1,41 @@
+# Dreaminutes Fork 更新说明
+
+本页记录 `refactor/simplify-integration` 分支的开发进度，便于原作者和协作者审阅。修改只推送到 Dreaminutes 的 Fork，尚未合入 amwangfan 原仓库。
+
+## 当前状态
+
+2026-11-07：前两批改动已完成并推送，第三批“设备互联整理”进行中。当前网页控制台是本地服务，不是公网演示站点。下面的测试结果均为本机验证，不代表 Android 真机、语音或眼镜联调完成。
+
+## 第二批：回执校验解耦与 Windows 数据路径
+
+提交：`8f994f1`、`df94dd6`。
+
+- 将设备回执校验归入 `devices/actions.py`，设备失败分类不再导入生活层自主裁决模块。
+- 保留 `life.autonomy.validate_action_receipt` 入口，旧代码仍能捕获原有 `AutonomyError`，错误码和消息保持一致。
+- 修复诊断数据库路径在 Windows 上按 `/` 拆分的问题，数据库现在跟随记忆库目录创建，避免落到源码目录。
+- 同步更新 [Core/Mobile 互联说明](docs/core-mobile-integration.md)。
+
+验证：157 项设备、诊断 API 等相关测试通过，36 个跨仓协议文件一致。没有移动或删除现有数据库；已运行服务需重启后使用新路径逻辑。
+
+## 第一批：设备动作接口收拢与 Windows 启动
+
+提交：`3a56f8e`、`e5a507c`。
+
+- 新增稳定设备动作接口，集中 `DeviceActionPort`、`DeviceUnavailable` 和回执状态集合，减少三处重复定义。
+- 网关、模拟设备和生活逻辑共用同一份状态，保留旧导入路径与对象身份兼容。
+- Windows 进程锁改用原生字节锁，保留同一数据目录单实例保护；Linux/macOS 继续使用 flock。
+- 增加互联文档，列明配对、连接、感知、动作及大输出查询的实际入口。
+
+验证：201 项相关测试通过；Mobile 协议示例与负例 20/20 通过，36 个跨仓协议文件一致。Core 网页在 Windows 本地成功启动。
+
+## 第三批：设备互联整理（进行中）
+
+正在核对两端能力定义、协议校验入口与联合检查流程，实际交付范围在完成测试后更新。本节不代表功能已交付。
+
+## 如何查看与反馈
+
+- [全部代码差异](https://github.com/dreaminutes/whale-core/compare/main...refactor/simplify-integration)
+- [开发分支](https://github.com/dreaminutes/whale-core/tree/refactor/simplify-integration)
+- [Mobile Fork](https://github.com/dreaminutes/whale-mobile)
+
+目前未创建上游 PR；原作者的 main 未修改。完整命令日志与运行数据留在本地，不上传密钥、记忆、对话内容或数据库。
