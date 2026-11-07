@@ -1,0 +1,11 @@
+# 更新批次目录
+
+这是 Dreaminutes Fork 的开发批次，不是上游正式发行版本。每批一页，按编号查看。
+
+| 批次 | 状态 | 内容 |
+| --- | --- | --- |
+| [01 — 动作接口与 Windows 启动](01-device-actions-and-windows.md) | 已推送 | 动作接口、回执状态统一；Windows 进程锁 |
+| [02 — 回执校验与数据目录](02-receipts-and-data-paths.md) | 已推送 | 回执校验解耦；诊断数据库路径修复 |
+| [03 — 设备互联整理](03-device-interoperability.md) | 开发中 | 能力定义、协议检查与联合验证 |
+
+另见 [汇总说明](../../FORK_UPDATES.md) 与 [全部代码差异](https://github.com/dreaminutes/whale-core/compare/main...refactor/simplify-integration)。

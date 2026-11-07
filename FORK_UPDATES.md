@@ -2,6 +2,8 @@
 
 本页记录 `refactor/simplify-integration` 分支的开发进度，便于原作者和协作者审阅。修改只推送到 Dreaminutes 的 Fork，尚未合入 amwangfan 原仓库。
 
+**按批次查看：[第 01 批](docs/updates/01-device-actions-and-windows.md) · [第 02 批](docs/updates/02-receipts-and-data-paths.md) · [第 03 批](docs/updates/03-device-interoperability.md) · [总目录](docs/updates/README.md)。**
+
 ## 当前状态
 
 2026-11-07：前两批改动已完成并推送，第三批“设备互联整理”进行中。当前网页控制台是本地服务，不是公网演示站点。下面的测试结果均为本机验证，不代表 Android 真机、语音或眼镜联调完成。
