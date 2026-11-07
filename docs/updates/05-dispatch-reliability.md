@@ -1,6 +1,6 @@
 # 第 05 批：请求发送与连接可靠性
 
-状态：定向及联合验证完成。日期：2026-11-07。
+状态：已验证、两仓已推送。日期：2026-11-07。Core：a6d7ecb；Mobile：6c4b270。
 
 ## 修复
 
@@ -16,4 +16,4 @@
 
 本批未改协议、既有能力或授权范围，不替代真机和 APK 验收。
 
-[Core 本批差异](https://github.com/dreaminutes/whale-core/compare/18e2d5b...refactor/simplify-integration) · [返回批次目录](README.md)
+[Core 本批差异](https://github.com/dreaminutes/whale-core/compare/18e2d5b...a6d7ecb) · [Mobile 本批差异](https://github.com/dreaminutes/whale-mobile/compare/2eb54b9...6c4b270) · [返回批次目录](README.md)

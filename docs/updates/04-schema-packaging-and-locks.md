@@ -1,6 +1,6 @@
 # 第 04 批：协议校验、安装包与跨平台锁修复
 
-状态：本机验证完成。日期：2026-11-07。
+状态：已验证、已推送（提交 18e2d5b）。日期：2026-11-07。
 
 ## 改动
 
@@ -22,4 +22,4 @@
 
 不删除现有功能，不读取或上传个人数据，不修改原仓库。运行中的控制台未重启；新包只用于本地验证，未作为正式发行发布。
 
-[本批差异](https://github.com/dreaminutes/whale-core/compare/27b23a3...refactor/simplify-integration) · [返回批次目录](README.md)
+[本批差异](https://github.com/dreaminutes/whale-core/compare/27b23a3...18e2d5b) · [返回批次目录](README.md)

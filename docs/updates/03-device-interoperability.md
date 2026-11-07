@@ -29,8 +29,8 @@ Core 全量测试在 Windows 收集 `tests/test_shell_executor.py` 时被现有 
 
 ## 代码与使用说明
 
-- [本批 Core 差异](https://github.com/dreaminutes/whale-core/compare/4e9ac90...refactor/simplify-integration)
-- [本批 Mobile 差异](https://github.com/dreaminutes/whale-mobile/compare/main...refactor/simplify-integration)
+- [本批 Core 差异](https://github.com/dreaminutes/whale-core/compare/4e9ac90...9afddd4)
+- [本批 Mobile 差异](https://github.com/dreaminutes/whale-mobile/compare/e034ea7...637f3e6)
 - [互联开发与联合检查方法](https://github.com/dreaminutes/whale-mobile/blob/refactor/simplify-integration/docs/device-interop-development.md)
 
 这是两仓配套开发批次，不是上游正式发行。原作者仓库及 main 均未更改。
