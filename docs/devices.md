@@ -12,7 +12,7 @@
 | --- | --- |
 | `devices/registry.py` | `DeviceRegistry`：注册 / 6 位配对码（10min）/ 批准 / 吊销 / scope 上限；能力全集直读 `contracts/v2` §5.1 枚举；持久化走 MemoryStore kv（`device:{id}`），审计写 `audit:studio:*`（只元数据） |
 | `devices/embedded_wss.py` | `EmbeddedWssGateway`：`/api/v2/devices/ws` 长连（websockets sync server，独立端口），auth.challenge→hello 验签、逐帧 schema 校验、心跳/离线、experience/action/notification 上下行、§7.2 五终态回执状态机；同时实现 `DeviceWssPort`（NotificationGateway 首选送达口） |
-| `devices/gateway_v2.py` | `DeviceGatewayV2`：多 transport 编排器（embedded_wss/adb/ssh 选路 + 幂等） |
+| `devices/gateway_v2.py` | `DeviceGatewayV2`：多 transport 能力选路；仅内存缓存回执（最多 4096 条）、并发同键合并；不作为生产持久化幂等源 |
 | `devices/transports/embedded_wss.py` | `EmbeddedWssTransport`：embedded 通道的 `DeviceTransport` 实现（注册进编排器） |
 | `devices/schema.py` | `ContractValidator`：纯 stdlib 的 v2 schema 子集校验器（不引 jsonschema；遇到子集外关键字 fail closed） |
 | `devices/perception.py` | `DevicePerceptionAdapter`：实现 `perception/adapters.py` 的 `PerceptionAdapter` 协议，内存队列中转 `experience.event` |
@@ -97,8 +97,9 @@ schema 违例回 `error.invalid_message` 保持连接；未知类型静默忽略
 
 v1 的 `devices/agent_loop.py`（device.agent.* 三能力编排循环）已随 v1 下线
 删除；GUI 自主体由 `devices/gui_agent/` 承担（contracts/v2 能力名 +
-§7.2 五终态 + §8 元素绑定/过期检测），经 `DeviceGatewayV2` 选路
-（embedded_wss 优先于 adb/ssh，GUI 类能力）。
+§7.2 五终态 + §8 元素绑定/过期检测），可通过 `DeviceGatewayV2` 选路
+（GUI 类 embedded_wss 优先）。当前生产 REST 仍直接走 `EmbeddedWssGateway`。
+动作下发后遇到内部错误，不自动切换传输重放，以免重复执行。
 
 ## 停止任务
 
