@@ -49,6 +49,21 @@ whale-core 是鲸鱼的核心大脑，也是一个可扩展的 AI 伴侣与行�
 
 控制台包含总览、对话、媒体与语音、探索与工作流、插件、记忆、任务、审批、事件和设置十个页面，页面按需加载并支持手机布局。保存配置和批准操作都以服务器实际结果为准。
 
+## 结构与技术栈
+
+| 层 | 实际实现 | 主要技术 |
+| --- | --- | --- |
+| 核心对话与任务 | `src/whale_core/core/`、`life/` | Python 3.11、OpenAI 兼容 HTTP API、异步任务编排 |
+| 记忆 | `memory/` | SQLite；可选 embedding 与关键词融合 |
+| 工具与外部能力 | `plugins/`、`cloud/` | 插件接口、HTTP、Shell 与模型工具调用 |
+| 设备管理 | `devices/`、`api/devices_api.py` | Ed25519、WebSocket、V2 协议、回执与持久化记录 |
+| 管理界面 | `api/`、`web/` | Python 服务端、React / TypeScript |
+| 手机执行端 | [whale-mobile](https://github.com/amwangfan/whale-mobile) | Kotlin、Android 前台服务、Flutter |
+
+**已经接通**：对话/记忆/插件基本链路、Web 管理、设备身份与 V2 WSS、设备通知/查询/动作的管理入口。**仍待接通/验收**：ADB/SSH 与 WSS 的统一生产动作入口，完整的多设备自主任务调度，专用 Root 手机连续应用操作，以及真实眼镜显示回执。
+
+`DeviceGatewayV2` 目前是多传输编排组件，不是生产 REST 的唯一入口；它的内存回执仅用于本进程，跨重启幂等仍依赖已有 `EmbeddedWssGateway` 的持久化记录。具体接口和缺口见 [设备文档](docs/devices.md)。
+
 ## 从源码开始
 
 需要 Python 3.11+；构建前端使用 Node 24 和 pnpm 12。
