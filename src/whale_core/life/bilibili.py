@@ -42,7 +42,7 @@ class BilibiliContentAdapter:
         if parsed.scheme != "https" or host not in _ALLOWED_HOSTS or not path_match:
             return None
         bvid = path_match.group(1)
-        before = (line or "")[:match.start()].strip(" \\t-*•")
+        before = (line or "")[:match.start()].strip(" \t-*•")
         title = before.split(" — ", 1)[0].split(" – ", 1)[0].strip()
         snippet = ""
         if " — " in before:
