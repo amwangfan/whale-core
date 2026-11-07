@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import secrets
 import threading
 import time
@@ -66,6 +67,7 @@ class ConnectionState:
         self.challenge_deadline = 0.0
         self.session_id: str | None = None
         self.down_seq = 0
+        self.send_lock = threading.Lock()
         self.expected_up_seq: int | None = None
         self.last_heartbeat = time.monotonic()
         self.offline_marked = False
@@ -150,10 +152,28 @@ class DeviceGateway:
         return msg
 
     def send_msg(self, st: ConnectionState, msg_type: str, payload: dict) -> dict:
-        st.down_seq += 1
-        msg = self.build_message(msg_type, "downlink", payload, st.down_seq)
-        st.ws.send(json.dumps(msg, ensure_ascii=False))
-        return msg
+        with st.send_lock:
+            msg = self.build_message(msg_type, "downlink", payload, st.down_seq + 1)
+            st.down_seq += 1
+            st.ws.send(json.dumps(msg, ensure_ascii=False))
+            return msg
+
+    def _preflight(self, msg_type: str, payload: dict) -> None:
+        """Reuse the wire schema before reserving keys or registering a waiter."""
+        try:
+            self.build_message(msg_type, "downlink", payload, 0)
+        except (ValueError, TypeError) as exc:
+            raise GatewayError("invalid_message", str(exc)) from exc
+
+    @staticmethod
+    def _timeout(value: float) -> float:
+        try:
+            timeout = float(value)
+        except (TypeError, ValueError):
+            raise GatewayError("invalid_message", "timeout must be finite and positive") from None
+        if isinstance(value, bool) or not math.isfinite(timeout) or timeout <= 0:
+            raise GatewayError("invalid_message", "timeout must be finite and positive")
+        return timeout
 
     def send_error(self, st: ConnectionState, ref_id: Any, code: str, message: str):
         if not (isinstance(ref_id, str) and 16 <= len(ref_id) <= 64):
@@ -406,6 +426,8 @@ class DeviceGateway:
         超时/断线 → approved=False reason=timeout/unavailable（绝不默认批准）。
         """
         st = self._online_or_raise(device_id)
+        timeout_s = self._timeout(timeout_s)
+        self._preflight("device.confirm.request", payload)
         challenge_id = str(payload["challenge_id"])
         pend = _Pending(device_id)
         with self.lock:
@@ -653,6 +675,7 @@ class DeviceGateway:
         """下发 sensor.query 并在 deadline 内等待 sensor.result（§2/§4）。"""
         st = self._online_or_raise(device_id)
         self._check_scope(device_id, operation)
+        timeout_s = self._timeout(timeout_s)
         if not (1 <= int(max_items) <= 100):
             raise GatewayError("invalid_message", "max_items 须在 1..100")
         request_id = uuid.uuid4().hex
@@ -663,6 +686,7 @@ class DeviceGateway:
             "max_items": int(max_items),
             "deadline": now_ms() + int(timeout_s * 1000),
         }
+        self._preflight("sensor.query", payload)
         pend = _Pending(device_id)
         with self.lock:
             self.pending[request_id] = pend
@@ -685,18 +709,34 @@ class DeviceGateway:
         """下发 action.request；幂等键查重（§6），等待终态回执。"""
         st = self._online_or_raise(device_id)
         self._check_scope(device_id, capability)
-        idem_key = idempotency_key or f"idem-{uuid.uuid4().hex}"
-        if not (8 <= len(idem_key) <= 128):
+        timeout_s = self._timeout(timeout_s)
+        idem_key = f"idem-{uuid.uuid4().hex}" if idempotency_key is None else idempotency_key
+        if not isinstance(idem_key, str) or not (8 <= len(idem_key) <= 128):
             raise GatewayError("invalid_message", "idempotency_key 长度须为 8..128")
         action_id = uuid.uuid4().hex
         idem_store_key = f"device:action:{device_id}:{idem_key}"
+        created_at = now_ms()
+        expires_at = created_at + int(timeout_s * 1000)
+        payload: dict[str, Any] = {
+            "action_id": action_id,
+            "capability": capability,
+            "args": dict(args or {}),
+            "authorized_scope": list(authorized_scope or [capability]),
+            "expires_at": expires_at,
+            "idempotency_key": idem_key,
+        }
+        if approval_ref:
+            payload["approval_ref"] = approval_ref
+        if correlation_id:
+            payload["correlation_id"] = correlation_id
+        self._preflight("action.request", payload)
         def reserve(tx):
             if tx.get(idem_store_key) is not None:
                 return False
             tx.put(idem_store_key, {
                 "device_id": device_id, "idempotency_key": idem_key,
                 "action_id": action_id, "capability": capability,
-                "created_at": now_ms(), "expires_at": now_ms() + int(timeout_s * 1000),
+                "created_at": created_at, "expires_at": expires_at,
                 "state": "pending",
             })
             tx.put(f"device:action-id:{device_id}:{action_id}", idem_key)
@@ -705,19 +745,6 @@ class DeviceGateway:
         if not self.store.transact(reserve):
             raise GatewayError(
                 "duplicate", f"幂等键 {idem_key} 已对该设备下发过")
-        payload: dict[str, Any] = {
-            "action_id": action_id,
-            "capability": capability,
-            "args": dict(args or {}),
-            "authorized_scope": list(authorized_scope or [capability]),
-            "expires_at": now_ms() + int(timeout_s * 1000),
-            "idempotency_key": idem_key,
-        }
-        if approval_ref:
-            payload["approval_ref"] = approval_ref
-        if correlation_id:
-            # EV-02：事件→决策→动作关联键（契约 v1 minor：可选字段）
-            payload["correlation_id"] = correlation_id
         pend = _Pending(device_id)
         with self.lock:
             self.pending[action_id] = pend
