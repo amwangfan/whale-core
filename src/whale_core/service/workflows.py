@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 from whale_core.core.runtime import ConversationOrchestrator
 from whale_core.life.discovery import DiscoveredContent, DiscoveryPlanner
 from whale_core.life.exploration import ExplorationManager
+from whale_core.life.bilibili import BilibiliContentAdapter
 from whale_core.skills import parse_skill, SkillError, _render_template, _first_url
 
 DEFAULTS = {"paused": False, "daily_limit": 10, "quiet_start": "22:00",
@@ -204,7 +205,7 @@ class WorkflowsService:
             used = int(self.store.get(quota_key) or 0)
             if used >= settings["daily_limit"]:
                 return {"status": "quota_exhausted", "drafts": [], "tasks": []}
-            from whale_core.life.exploration import InterestTracker
+            from whale_core.life.exploration import InterestTracker, LAST_AT_KEY, BACKOFF_KEY
             tracker = InterestTracker(self.store)
             if topics is not None:
                 if not isinstance(topics, list) or len(topics) > 8 or any(not isinstance(v, str) or not v.strip() or len(v) > 120 for v in topics):
@@ -218,51 +219,84 @@ class WorkflowsService:
             fetch = next(iter(self.runtime.tools.for_capability("web.fetch")), None)
             if search is None or fetch is None:
                 return {"status": "unavailable", "drafts": [], "tasks": []}
-            from whale_core.life.exploration import LAST_AT_KEY, BACKOFF_KEY
             last = self.store.get(LAST_AT_KEY)
             if isinstance(last, str):
                 try:
-                    at = datetime.fromisoformat(last)
-                    if at.tzinfo is None:
-                        at = at.replace(tzinfo=timezone.utc)
+                    last_at = datetime.fromisoformat(last)
+                    if last_at.tzinfo is None:
+                        last_at = last_at.replace(tzinfo=timezone.utc)
                     backoff = max(0, min(4, int(self.store.get(BACKOFF_KEY) or 0)))
-                    if (now - at).total_seconds() < 21600 * (2 ** backoff):
+                    if (now - last_at).total_seconds() < 21600 * (2 ** backoff):
                         return {"status": "backoff", "drafts": [], "tasks": []}
                 except (ValueError, TypeError):
                     pass
-            # Reserve before the request, so repeated failures cannot bypass budget.
+
+            # Reserve the run before network calls so repeated failures cannot bypass budget.
             self.store.put(quota_key, used + 1)
-            items, task_ids = [], []
+            items, task_ids, seen_urls = [], [], set()
+
+            def _run_tool(tool, args):
+                if self.get_settings()["paused"] or (stop_event is not None and stop_event.is_set()):
+                    return ""
+                result = self.runtime.execute_tool(
+                    tool.name, args, conversation_id="exploration",
+                    source="api", timeout_s=30)
+                task_ids.append(result.task_id)
+                if result.status != "answered":
+                    return ""
+                return self._output(self.store.get(f"task:{result.task_id}") or {})
+
+            def _search(query, *, limit=3):
+                return _run_tool(search, {"query": query, "limit": limit})
+
+            def _fetch(url):
+                return _run_tool(fetch, {"url": url})
+
+            # General web discovery remains available; Bilibili is a dedicated
+            # public-video adapter over the same audited search/fetch capabilities.
+            bilibili = BilibiliContentAdapter(_search, _fetch, max_per_topic=2)
             for topic in selected:
                 if self.get_settings()["paused"] or (stop_event is not None and stop_event.is_set()):
                     break
-                result = self.runtime.execute_tool(search.name, {"query": topic, "limit": 3},
-                                                   conversation_id="exploration", source="api", timeout_s=30)
-                task_ids.append(result.task_id)
-                if result.status != "answered":
-                    continue
-                output = self._output(self.store.get(f"task:{result.task_id}") or {})
-                urls = list(dict.fromkeys(u.rstrip(".,;:!?。，；：！？") for u in _URLS.findall(output)))[:2]
+                output = _search(topic, limit=3)
+                urls = list(dict.fromkeys(
+                    u.rstrip(".,;:!?。，；：！？") for u in _URLS.findall(output)))[:2]
                 for url in urls:
                     if self.get_settings()["paused"] or (stop_event is not None and stop_event.is_set()):
                         break
-                    if urlsplit(url).scheme != "https":
+                    parsed = urlsplit(url)
+                    host = (parsed.hostname or "").lower()
+                    if parsed.scheme != "https" or host in {"bilibili.com", "www.bilibili.com"}:
                         continue
-                    read = self.runtime.execute_tool(fetch.name, {"url": url},
-                                                     conversation_id="exploration", source="api", timeout_s=30)
-                    task_ids.append(read.task_id)
-                    if read.status != "answered":
+                    page = _fetch(url)
+                    if len(page.strip()) < 24:
                         continue
-                    page = self._output(self.store.get(f"task:{read.task_id}") or {})
-                    if not page.strip():
+                    if url in seen_urls:
                         continue
-                    host = urlsplit(url).hostname or ""
-                    items.append(DiscoveredContent(hashlib.sha256(url.encode()).hexdigest()[:24],
-                        title=page.splitlines()[0][:80] or host, url=url, source_name=host,
-                        summary=page[:500], inspected=True))
+                    seen_urls.add(url)
+                    items.append(DiscoveredContent(
+                        hashlib.sha256(url.encode()).hexdigest()[:24],
+                        title=page.splitlines()[0][:80] or host, url=url,
+                        source_name=host, summary=page[:500], inspected=True,
+                        content_type="web", inspection_method="web_page_text"))
+                if not (self.get_settings()["paused"] or
+                        (stop_event is not None and stop_event.is_set())):
+                    for video in bilibili.discover(
+                            topic, should_stop=lambda: self.get_settings()["paused"] or
+                            (stop_event is not None and stop_event.is_set())):
+                        if video.url not in seen_urls:
+                            seen_urls.add(video.url)
+                            items.append(video)
+
             hosts = frozenset(urlsplit(item.url).hostname or "" for item in items)
-            manager = ExplorationManager(self.store, planner=DiscoveryPlanner(allowed_hosts=hosts))
+            manager = ExplorationManager(
+                self.store, planner=DiscoveryPlanner(allowed_hosts=hosts),
+                timezone_name=settings["timezone"])
             drafts = manager.maybe_explore(items, now=now)
-            return {"status": "completed", "sources_read": len(items),
-                    "drafts": [d.as_dict() for d in drafts], "tasks": task_ids,
-                    "execution_status": "not_dispatched", "verification": "source_fetched_not_fact_checked"}
+            return {
+                "status": "completed", "sources_read": len(items),
+                "videos_read": sum(1 for item in items if item.content_type == "video"),
+                "drafts": [d.as_dict() for d in drafts], "tasks": task_ids,
+                "execution_status": "not_dispatched",
+                "verification": "public_page_fetched_not_video_playback_or_fact_checked",
+            }
