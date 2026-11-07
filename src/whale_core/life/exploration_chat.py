@@ -118,8 +118,10 @@ def build_exploration_context(store: MemoryStore, query: str, *,
                     continue
                 is_video = item.get("content_type") == "video"
                 source_kind = "B站视频页面/简介" if is_video else "网页正文"
-                state = ("页面已读取，视频本体未播放" if is_video else
-                         "来源正文已读取" if item.get("inspected") else "仅发现，未核查")
+                state = (
+                    "页面已读取，视频本体未播放" if is_video and item.get("inspected") else
+                    "仅发现视频链接，页面未读取" if is_video else
+                    "来源正文已读取" if item.get("inspected") else "仅发现，未核查")
                 title = str(item.get("title") or "")[:160]
                 summary = str(item.get("summary") or "").replace("\n", " ")[:220]
                 url = str(item.get("url") or "")[:500]
