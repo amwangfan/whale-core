@@ -25,7 +25,7 @@ def test_device_inbox_survives_adapter_restart_until_consumption_ack(store):
         "privacy_class": "private", "summary": "noticed a schedule change",
         "evidence_ref": None, "schema_version": "1.0", "received_at": 1780000000001,
     }
-    # This is exactly the persistent record the gateway writes BEFORE sensor.ack.
+    # This is exactly the persistent record the gateway writes BEFORE event.ack.
     store.put("device:event:device1:evt1", event)
     first = DurableDevicePerceptionAdapter(store)
     pending = list(first.poll())

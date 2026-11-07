@@ -1,58 +1,61 @@
-# 设备面（whale-mobile 接入，D1–D4 范围说明）
+# 设备面（whale-mobile 接入，contracts/v2）
 
-> 协议 canonical 事实源：**whale-mobile** 的 `contracts/v1/`（PROTOCOL.md +
-> messages/*.schema.json + examples/*.json）；本仓 `contracts/v1/` 是整体覆盖
-> 同步的镜像，不允许在本仓单独修改 schema。漂移校验：
-> `python3 scripts/contract_sync_check.py --core . --mobile ../whale-mobile`，
-> 或手动触发 CI workflow `contract-sync` 指定两侧候选 ref 联合验收（issue #46）。
-> 参考实现：whale-mobile `server/dev_gateway.py`。
+> 协议 canonical 事实源：**whale-mobile** 的 `contracts/v2/`（PROTOCOL.md +
+> messages/*.schema.json + objects/*.schema.json + examples/*.json）；本仓
+> `contracts/v2/` 是整体覆盖同步的镜像，不允许在本仓单独修改 schema。
+> v1（`contracts/v1/`）已随 §18 破坏性变更整体下线并从本仓删除。
+> 漂移校验：`python3 scripts/contract_sync_check.py --core . --mobile ../whale-mobile`。
 
 ## 组件
 
 | 模块 | 职责 |
 | --- | --- |
-| `devices/registry.py` | `DeviceRegistry`：注册 / 6 位配对码（10min）/ 批准 / 吊销 / scope 上限；持久化走 MemoryStore kv（`device:{id}`，对齐 `memory/spaces.py` 模式），审计写 `audit:studio:*`（只元数据，对齐 studio.py 约定） |
-| `devices/gateway.py` | `DeviceGateway`：`/api/v1/devices/ws` 长连（websockets sync server，独立端口），挑战-应答验签、逐帧 schema 校验、心跳/离线、上下行 |
-| `devices/schema.py` | `ContractValidator`：纯 stdlib 的 V1 schema 子集校验器（不引 jsonschema；遇到子集外关键字 fail closed） |
-| `devices/perception.py` | `DevicePerceptionAdapter`：实现 `perception/adapters.py` 的 `PerceptionAdapter` 协议，内存队列中转 `sensor.event` |
-| `api/devices_api.py` | 管理端 REST 路由（全部走控制台 Bearer 鉴权） |
+| `devices/registry.py` | `DeviceRegistry`：注册 / 6 位配对码（10min）/ 批准 / 吊销 / scope 上限；能力全集直读 `contracts/v2` §5.1 枚举；持久化走 MemoryStore kv（`device:{id}`），审计写 `audit:studio:*`（只元数据） |
+| `devices/embedded_wss.py` | `EmbeddedWssGateway`：`/api/v2/devices/ws` 长连（websockets sync server，独立端口），auth.challenge→hello 验签、逐帧 schema 校验、心跳/离线、experience/action/notification 上下行、§7.2 五终态回执状态机；同时实现 `DeviceWssPort`（NotificationGateway 首选送达口） |
+| `devices/gateway_v2.py` | `DeviceGatewayV2`：多 transport 编排器（embedded_wss/adb/ssh 选路 + 幂等） |
+| `devices/transports/embedded_wss.py` | `EmbeddedWssTransport`：embedded 通道的 `DeviceTransport` 实现（注册进编排器） |
+| `devices/schema.py` | `ContractValidator`：纯 stdlib 的 v2 schema 子集校验器（不引 jsonschema；遇到子集外关键字 fail closed） |
+| `devices/perception.py` | `DevicePerceptionAdapter`：实现 `perception/adapters.py` 的 `PerceptionAdapter` 协议，内存队列中转 `experience.event` |
+| `api/devices_api.py` | 管理端 REST 路由（控制台 Bearer 鉴权；REST 仍随全站 `/api/v1` 前缀，设备**协议**为 v2） |
 
-可选依赖：`whale-core[devices]` = websockets + cryptography（pyproject 注明理由；
-registry 与校验器本身纯 stdlib，缺依赖时管理端点回 503）。
+可选依赖：`whale-core[devices]` = websockets + cryptography（registry 与
+校验器本身纯 stdlib，缺依赖时管理端点回 503）。
 
 ## 端点清单
 
-管理 REST（`Authorization: Bearer <console-token>`，与既有控制台一致）：
+管理 REST（`Authorization: Bearer <console-token>`）：
 
 | 方法/路径 | 说明 |
 | --- | --- |
-| `POST /api/v1/devices/pair` | body `{label, pubkey_hex, scopes?}` → `{code, device_id, expires_in}`；`device_id` = SHA256(公钥)前16字节 hex（§3） |
+| `POST /api/v1/devices/pair` | body `{label, pubkey_hex, scopes?}` → `{code, device_id, expires_in}`；`device_id` = SHA256(公钥)前16字节 hex（§3，32-hex） |
 | `POST /api/v1/devices/pair/approve` | body `{code}` → 设备转 `active`；过期回 410 |
-| `GET /api/v1/devices` | 列表 + 在线状态 + `ws_port`/`ws_path`（视图隐去配对码） |
+| `GET /api/v1/devices` | 列表 + 在线状态 + `ws_port`/`ws_path`（视图隐去配对码；capabilities 为 v2 §5.1 全集） |
 | `GET /api/v1/devices/{id}` | 单设备详情（含 session 状态） |
-| `DELETE /api/v1/devices/{id}` / `POST /api/v1/devices/{id}/revoke` | 吊销：状态即时生效 + `kick()` 在线连接（先回 `error.device_revoked` 再关闭，§3） |
+| `DELETE /api/v1/devices/{id}` / `POST .../revoke` | 吊销：状态即时生效 + `kick()` 在线连接（先回 `error.device_revoked` 再关闭，§4） |
 | `POST /api/v1/devices/{id}/scopes` | body `{scopes: string[]}` → 收窄/重设注册 scope（active）；编排循环据此停止自主体 |
-| `POST /api/v1/devices/{id}/query` | `{operation, filters?, max_items?, timeout?}` → 下发 `sensor.query`，deadline 内等 `sensor.result`；设备离线 409 `unavailable`，越权 403 `scope_denied`，超时 504 `expired` |
-| `POST /api/v1/devices/{id}/action` | `{capability, args?, idempotency_key?, authorized_scope?, approval_ref?, timeout?}` → `action.request`；幂等键查重（重复 409 `duplicate`），等待**终态**回执 |
-| `POST /api/v1/devices/{id}/action/status` | `{idempotency_key}` → 查询既有动作状态，不重新执行；终态 `receipt` 保留 `executed_at`、`error_code`、`provider_ref` 与 `result`（如设备提供） |
+| `POST /api/v1/devices/{id}/query` | `{operation, filters?, max_items?, timeout?}` → 下发 `sensor.query`（§5.3 查询子集），deadline 内等 `sensor.result`；离线 409 `unavailable`，越权 403 `scope_denied`，超时 504 `expired` |
+| `POST /api/v1/devices/{id}/action` | `{capability, arguments?, idempotency_key?, task_id?, run_id?, authorized_scope?, approval_ref?, timeout?}` → `action.request`；**重复幂等键回已记录状态（`duplicate=true`，绝不重放，§7.1）**，等待**终态**回执 |
+| `POST /api/v1/devices/{id}/action/status` | `{idempotency_key}` → 只读对账；终态 `receipt` 保留 `started_at`/`completed_at`、`error_code`、`provider_ref` 与 `result` |
+| `POST /api/v1/devices/{id}/confirm` | 设备确认挑战（§14 device.confirm.request/response；challenge_id 为 ULID，approved=true 时设备签名必填） |
 
-动作首次回执、手机重复动作重放、Core 重启后的状态对账均保留结果摘要和不透明输出引用。手机端新增回执内容随现有队列策略加密持久化；旧记录没有保存过的结果无法补回，不应为补结果自动重执行动作。
+动作首次回执、重复动作重放、Core 重启后的状态对账均保留结果摘要和不透明
+输出引用；不应为补结果自动重执行动作。大输出经 `operation="device.output.read"`
+（sensor.query 专属，§5.3）+ `filters.output_ref` 分页拉取。
 
-大输出通过 `/query` 的 `operation="device.agent.output.read"` 与 `filters.output_ref` 拉取，需要独立的设备注册 scope，旧设备授权不会自动扩大；须由主人显式重新配对批准。端侧还检查模块开关、全局暂停、紧急停止及对应输出的本地授权。此 scope 不授予执行 Shell 或采集新截图的能力。
-
-设备 WSS：`ws://<host>:<api_port+2>/api/v1/devices/ws`（长连，不套 voice.py 的
-60s 票据/会话超时；TLS 由外层反代终结，§1）。连接即下发 `auth.challenge`；
-`device.hello` 验签（Ed25519，签名输入 = challenge hex 串的 ASCII 字节）通过前
-拒绝其他帧；未知 major 回 `error.protocol_version` 关闭；schema 违例回
-`error.invalid_message` 保持连接；未知类型静默忽略。
+设备 WSS：`ws://<host>:<gateway_port>/api/v2/devices/ws`（长连；TLS 由外层
+反代/tailscale serve 终结，§1）。连接即下发 `auth.challenge`（64-hex +
+expires_in 秒）；`device.hello` 验签（Ed25519，签名输入 = challenge hex 串的
+ASCII 字节）通过前拒绝其他帧；未知 major 回 `error.protocol_version` 关闭；
+schema 违例回 `error.invalid_message` 保持连接；未知类型静默忽略（§4）。
 
 ## 配对流程
 
 1. 手机端生成/读取 Android Keystore 中的 Ed25519 密钥对，经
    `POST /devices/pair` 提交公钥 → 得 6 位配对码并上屏。
-2. 主人在控制台（Whale Studio/管理 API）`POST /devices/pair/approve` 输入配对码
-   → 设备 `active`，凭据 = 公钥指纹 + scope 上限。
-3. 设备连 WSS：`auth.challenge` → `device.hello`（签名）→ `device.hello_ack`
+2. 主人在控制台 `POST /devices/pair/approve` 输入配对码 → 设备 `active`，
+   凭据 = 公钥指纹 + scope 上限。
+3. 设备连 WSS：`auth.challenge` → `device.hello`（签名 + capabilities +
+   features + device + app_version/app_flavor）→ `device.hello_ack`
    （core 按设备 scope 上限收窄 `accepted_capabilities`）。
 4. 吊销：`DELETE /devices/{id}`，即时生效——在线连接立即收到
    `error.device_revoked` 并关闭；新握手回 `device_revoked`；每帧还会复查
@@ -60,96 +63,44 @@ registry 与校验器本身纯 stdlib，缺依赖时管理端点回 503）。
 
 ## scope 矩阵（D3）
 
-常量落在 `life/conversation_context.py`（`SCOPE_SCREEN_*` / `SCOPE_PHONE_*`，
-与 §5 能力枚举逐字一致）；裁决在 `life/context_resolver.py`：
+常量落在 `life/conversation_context.py`（`SCOPE_SCREEN_*` / `SCOPE_PHONE_*` /
+`SCOPE_DEVICE_*`，与 contracts/v2 §5.1 能力枚举逐字一致）；裁决在
+`life/context_resolver.py`：
 
 - `screen.*` **不在**任何基础 scope 集里（默认最小权限），只能经临时租约
   （`temporary_auth`，已纳入 `GRANTABLE_SCOPES`）显式授予；
-- 租约注入时 `screen.*` 仅 **owner 私聊 / API owner** 生效；**群聊硬上限拒绝**
-  （INV-03 一致），非主人会话同样拒绝；
-- `screen.evidence.read` 的「逐笔/短时租约二次授权」由租约机制本身承担
-  （TTL + max_uses），证据本体永不上行进感知事件（`evidence_ref` 只是引用）；
-- `derive_kind` 新增认识 `channel="mobile"` → `ConversationKind.PHONE`
+- 租约注入时 `screen.*` 仅 **owner 私聊 / API owner** 生效；**群聊硬上限拒绝**；
+- `derive_kind` 认识 `channel="mobile"` → `ConversationKind.PHONE`
   （基础 scope 仍最小，`chat.basic`）。
 
 检索标记约定：上行事件经 `DevicePerceptionAdapter` 转入 perception 时 payload
-固定带 `source="screenmemo"`、`device_id`、`privacy_class`、`occurred_at`；
+透传事件自带 `source`（§9 枚举）、`device_id`、`privacy_class`、`occurred_at`；
 **不做默认全局召回**（本层只入队，召回策略归 perception/reasoner）。
 
-## 与 dev_gateway 的语义差异
+## 回执与幂等（§7/§16）
 
-| 点 | dev_gateway（参考实现） | whale-core（本实现） |
-| --- | --- | --- |
-| 运行模型 | asyncio（`websockets.serve`） | 线程式 `websockets.sync.server`（对齐 api/voice.py） |
-| 持久化 | SQLite（`dev_gateway.db`） | MemoryStore kv（`device:*` / `device:event:*` / `device:action:*` / `device:receipts:*`），双后端一致 |
-| 管理通道 | 回环 JSON-lines（8766） | 控制台 Bearer REST（`/api/v1/devices/*`），复用既有鉴权 |
-| 审计 | 仅日志 | `audit:studio:*` 留痕（pair/approve/revoke/hello，不记正文） |
-| 配对码 | 不查撞码 | 撞码重摇（避免批准错设备） |
-| 过期判定 | `expires_at < now` | `expires_at <= now`（到期瞬间即失效） |
-| schema 校验 | jsonschema 库 | 纯 stdlib 子集校验器（devices/schema.py） |
-| 踢线 | 仅每帧复查 | kick 主动关 + 每帧复查双保险 |
-| 上行事件 | 只落库 | 落库去重 + 默认 `DurableDevicePerceptionAdapter` 持久待处理队列（自定义 adapter 仍可选） |
-| call.* 消息 | 无处理器，忽略 | 同样忽略（schema 先校验；信令落地属媒体通道后续） |
+- 回执状态机五终态：`succeeded`/`failed`/`timeout`/`cancelled`/`unknown`；
+  `received` 是唯一非终态（「已收到」≠「已执行」）。
+- `action_id` = 每次请求实例；`idempotency_key` = 逻辑动作。重复键回已记录
+  的真实状态，绝不重放；终态 first-wins，落库不可翻案。
+- 非终态记录过 `expires_at` + 24h 宽限 → 落 `unknown` 标记；终态记录保留
+  7 天后有界清理（`sweep_action_retention`）。
+- 通知面（§13）：`notification.event` 下行首选本 WSS（`DeviceWssPort`），
+  离线留队等 `notification.sync` 补传；`notification.receipt/action` 上行进
+  `NotificationGateway` 送达台账；`notification.revoke` 支持撤回。
 
-心跳/离线、challenge TTL、ack 幂等闭环、回执状态机、错误码集合与参考实现
-**完全一致**（§2/§3/§4/§6）。
+## GUI 自主体
 
-## 安卓自主体编排（core#58）
+v1 的 `devices/agent_loop.py`（device.agent.* 三能力编排循环）已随 v1 下线
+删除；GUI 自主体由 `devices/gui_agent/` 承担（contracts/v2 能力名 +
+§7.2 五终态 + §8 元素绑定/过期检测），经 `DeviceGatewayV2` 选路
+（embedded_wss 优先于 adb/ssh，GUI 类能力）。
 
-契约：PROTOCOL V1.1 三能力 `device.agent.control` / `observe` / `shell`，
-回执可选 `result.summary` + `result.output_ref`；大输出经
-`device.agent.output.read`（独立 scope）拉取。ScreenMemo 是历史检索；
-`device.agent.observe` 是自主体**实时**观察，二者不要混用。
+## 停止任务
 
-### 编排循环
-
-实现：`devices/agent_loop.py` → `DeviceAgentLoop`。
-
-1. 下发 `action.request`（observe → 决策 → control/shell）；
-2. 读 `receipt.result.summary`；若有 `output_ref` 且设备持有
-   `device.agent.output.read`，再经 query 拉取预览；
-3. 观察摘要写入设备私有记忆空间 `device-agent:{device_id}`（与 QQ 群/
-   主人私聊命名空间隔离）；
-4. 决策端口可注入：测试用 `ScriptedDecisionPort`；生产可接
-   `DeepSeekDecisionPort`（DeepSeek / 兼容端点）。意图/审操类模型仍可
-   走既有 AgentScope（`QQ_INTENT_*`）配置，不必绑死在本循环内。
-
-开关建议（脱敏，见 `docs/env-n100-checklist.md`）：
-`WHALE_DEVICE_AGENT_ENABLED`（默认关）、`WHALE_DEVICE_AGENT_MAX_STEPS`。
-
-### 失败语义（编排层）
-
-| 编排码 | 来源（gateway / receipt.error_code） | 编排行为 |
-| --- | --- | --- |
-| `failed/timeout` | `expired` / `timeout` | 仅 `device.agent.observe`（只读）可有界重试；control/shell 须先用原幂等键 `action_status` 对账，`pending`/`unknown` 升 `unknown` 且禁止自动重放；仅 `not_found` 可安全新键重试 |
-| `failed/unavailable` | `unavailable` / `device_revoked` / estop·暂停·权限缺失等 | 停止 |
-| `failed/scope_denied` | `scope_denied` / `capability_unknown` | 停止 |
-| `unknown` | 回执 `unknown` 或畸形 | **不重放**，停止 |
-
-实现：`devices/agent_failures.py`；与 `life/autonomy.py` 的
-`DeviceUnavailable` / `validate_action_receipt` /「unknown 不自动重试」对齐。
-
-### 停止任务
-
-- **端侧**：UI / 桥紧急停止（estop）保留；表现为设备回
-  `failed/unavailable`（或 offline）。
+- **端侧**：UI / 桥紧急停止（estop）保留；`estop_active` 错误码入 §15 枚举。
 - **core 侧等价**：
   - `DELETE|POST /api/v1/devices/{id}/revoke` 吊销并踢线；
-  - `POST /api/v1/devices/{id}/scopes` 收窄注册 scope（去掉
-    `device.agent.*`）。编排循环每步 `_preflight` 复查状态/scope，命中即
-    中止且不重放待执行动作。
-
-真机 E2E：须已配对设备持有 agent scopes，且端侧模块开关允许；未配对前
-以模拟 `SimulatedActionPort` 验收闭环。
-
-## 留给后续（D4+ / 阶段二）
-
-- **D4**：`temporary_auth.verify()` 的 `proof_method="device"`（租约确认推送到
-  已配对设备，主人在手机上点确认；本次未动 QQ 私聊限制）；
-- **D5**：Studio 设备节点卡（`_graph` 增 `kind:"device"`，数据源 = registry）；
-- **D6**：设备面指标汇总接口（当前审计已留痕，聚合视图未做）；
-- 媒体通道（call.* 信令处理、audio-bridge 对接）与 `screen.live.subscribe`
-  的推送流；
-- 感知事件进入长期记忆/召回的策略：默认待处理事件现可重启后重放；
-  消费者必须在处理成功后调用 `adapter.ack(device_id=…, event_id=…)`，
-  否则 `poll()` 会继续返回以保证至少一次交付。后续需要接入实际消费端并制定保留／清理策略。
+  - `POST /api/v1/devices/{id}/scopes` 收窄注册 scope。编排循环每步
+    scope/状态复查，命中即中止且不重放待执行动作；
+  - `device.stop` 能力（§5.1）可经 action.request 下发。

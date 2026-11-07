@@ -21,6 +21,14 @@ desktop = ["pywebview>=5,<7"]
 # - cryptography：Ed25519 挑战-应答验签（§3）。Python stdlib 无 Ed25519，
 #   自实现不安全，故引入这一个密码学依赖；registry/校验器本身仍是纯 stdlib。
 devices = ["websockets>=14,<18", "cryptography>=41"]
+# SSH transport（devices/transports/ssh.py）：懒加载，仅使用 SSH 通道时需要。
+# 钉 <2.15：asyncssh ≥2.15 需要更新的 cryptography（当前系统为 43，Debian 托管
+# 不可卸载）；2.14.x 与 cryptography 39–43 兼容，已在本仓环境验证。
+ssh = ["asyncssh>=2.14,<2.15"]
+# ADB transport（devices/transports/adb.py）：adb 二进制由宿主提供
+# （platform-tools），Python 侧仅截图 PNG 解码/32x32 灰度签名需要 Pillow，
+# 懒加载；不装时其余能力可用，observe(截图) 会以 internal 错误降级。
+adb = ["Pillow>=10"]
 
 [project.scripts]
 whale = "whale_core.cli.main:main"
@@ -45,3 +53,7 @@ artifacts = ["src/whale_core/static/**"]
 testpaths = ["tests"]
 # "." 让仓库根的 evals 包（issue #19 回放基准）可被测试导入
 pythonpath = ["src", "plugins", "."]
+markers = [
+    # 真机冒烟（默认跳过；WHALE_ADB_SMOKE=1 启用，主入口 scripts/adb_smoke.py）
+    "smoke: 真机冒烟测试（CI 跳过）",
+]

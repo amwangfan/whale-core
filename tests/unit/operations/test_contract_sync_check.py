@@ -21,15 +21,15 @@ def _load():
 
 def _make_tree(root: Path, files: dict) -> None:
     for rel, content in files.items():
-        p = root / "contracts" / "v1" / rel
+        p = root / "contracts" / "v2" / rel
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
 
 
 BASE = {
     "PROTOCOL.md": "# Protocol\n",
-    "messages/sensor.event.schema.json": '{"type": "object"}',
-    "examples/sensor.event.json": '{"type": "sensor.event"}',
+    "messages/experience.event.schema.json": '{"type": "object"}',
+    "examples/experience.event.json": '{"type": "experience.event"}',
 }
 
 
@@ -70,7 +70,7 @@ class TestContractSyncCheck:
         (tmp_path / "b").mkdir()
         rc = mod.main(["--a", str(tmp_path / "a"), "--b", str(tmp_path / "b")])
         assert rc == 2
-        assert "缺少 contracts/v1" in capsys.readouterr().err
+        assert "缺少 contracts/v2" in capsys.readouterr().err
 
     def test_requires_pair(self, tmp_path):
         mod = _load()
