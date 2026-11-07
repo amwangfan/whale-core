@@ -14,7 +14,7 @@ from whale_core.life.discovery import DiscoveredContent
 
 _BVID = re.compile(r"^/video/(BV[0-9A-Za-z]+)(?:/|$)")
 _VIDEO_URL = re.compile(
-    r"https?://(?:www\\.)?bilibili\\.com/video/BV[0-9A-Za-z]+(?:/)?(?:\\?[^\\s\\]\\)）]*)?",
+    r"https?://(?:www\.)?bilibili\.com/video/BV[0-9A-Za-z]+/?(?:\?[^\s)）]*)?",
     re.IGNORECASE,
 )
 _ALLOWED_HOSTS = frozenset({"www.bilibili.com", "bilibili.com"})
@@ -73,7 +73,7 @@ class BilibiliContentAdapter:
             page_text = str(page or "").strip()
             if len(page_text) < 24:
                 continue
-            summary = "\\n".join(part for part in (snippet, page_text[:700]) if part)
+            summary = "\n".join(part for part in (snippet, page_text[:700]) if part)
             out.append(DiscoveredContent(
                 item_id=bvid,
                 title=title or f"B站视频 {bvid}",
