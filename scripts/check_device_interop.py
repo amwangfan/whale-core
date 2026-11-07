@@ -62,6 +62,7 @@ def main(argv=None) -> int:
             'tests/test_device_request_ownership.py',
             'tests/unit/operations/test_device_interop_runner.py',
             'tests/test_device_receipt_results.py', 'tests/test_device_output_query.py',
+            'tests/test_device_retention.py',
             'tests/test_devices_registry.py', 'tests/test_devices_scopes.py',
             'tests/test_devices_ws.py', 'tests/test_durable_devices.py',
             'tests/test_arch_channels.py', 'tests/test_situation_autonomy.py',

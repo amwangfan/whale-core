@@ -485,42 +485,43 @@ class DeviceGateway:
         # Ignore receipts for unknown action IDs *before* writing any data.
         # This also prevents an authenticated device from flooding unbounded
         # receipt records with arbitrary UUIDs.
-        lookup = self.store.get(f"device:action-id:{st.device_id}:{action_id}")
-        if not isinstance(lookup, str):
-            log.warning("unmapped action receipt for device=%s action=%s",
-                        st.device_id, action_id)
-            return
+        resolved = p
         with self.lock:
+            lookup = self.store.get(f"device:action-id:{st.device_id}:{action_id}")
+            if not isinstance(lookup, str):
+                log.warning("unmapped action receipt for device=%s action=%s", st.device_id, action_id)
+                return
+            action_key = f"device:action:{st.device_id}:{lookup}"
+            record = self.store.get(action_key)
+            if not isinstance(record, dict) or record.get("action_id") != action_id:
+                return
             key = f"device:receipts:{st.device_id}:{action_id}"
             receipts = self.store.get(key) or []
             if isinstance(receipts, list):
                 receipts = (receipts + [{"state": str(state), "ts": now_ms()}])[-32:]
                 self.store.put(key, receipts)
-        # Persist terminal outcome against the original idempotency key, so a
-        # late receipt or process restart can be reconciled without replay.
-        if isinstance(lookup, str):
-            action_key = f"device:action:{st.device_id}:{lookup}"
-            with self.lock:
-                record = self.store.get(action_key)
-                if isinstance(record, dict) and record.get("action_id") == action_id:
-                    # First terminal receipt wins: a conflicting delayed
-                    # terminal must not rewrite an already recorded outcome.
-                    if record.get("state") not in TERMINAL_RECEIPT_STATES:
-                        record.update(state=state, updated_at=now_ms())
-                        if state in TERMINAL_RECEIPT_STATES:
-                            record["receipt"] = {
-                                k: p[k] for k in (
-                                    "state", "executed_at", "error_code",
-                                    "provider_ref", "result")
-                                if k in p
-                            }
-                        self.store.put(action_key, record)
+            # A retention timeout is an estimate, not a device-confirmed result.
+            # The first actual terminal receipt may reconcile it, without replay.
+            estimated = record.get("state") == "unknown" and record.get("outcome_source") == "retention_timeout"
+            if (record.get("state") not in TERMINAL_RECEIPT_STATES
+                    or (estimated and state in TERMINAL_RECEIPT_STATES)):
+                record = dict(record)
+                record.update(state=state, updated_at=now_ms())
+                if state in TERMINAL_RECEIPT_STATES:
+                    record["receipt"] = {k: p[k] for k in (
+                        "state", "executed_at", "error_code", "provider_ref", "result") if k in p}
+                    record["outcome_source"] = "device_receipt"
+                self.store.put(action_key, record)
+            elif state in TERMINAL_RECEIPT_STATES and isinstance(record.get("receipt"), dict):
+                # A racing duplicate waiter sees the same authoritative outcome
+                # as durable reconciliation, never the conflicting later frame.
+                resolved = {"action_id": action_id, **record["receipt"]}
         if state in TERMINAL_RECEIPT_STATES:
             pend = self._take_pending(self.pending, action_id, st.device_id, "action.receipt")
             if pend is not None:
-                pend.result = p
+                pend.result = resolved
                 pend.event.set()
-            self._emit("device:action_receipt", f"{st.device_id}:{action_id}:{state}")
+            self._emit("device:action_receipt", f"{st.device_id}:{action_id}:{resolved.get('state')}")
         else:
             log.info("action %s 中间态回执 %s（device=%s）", action_id, state,
                      st.device_id)
@@ -558,30 +559,30 @@ class DeviceGateway:
             if not key.startswith("device:action:"):
                 continue
             scanned += 1
-            record = self.store.get(key)
-            if not isinstance(record, dict):
-                continue
-            state = str(record.get("state") or "")
-            created = int(record.get("created_at") or 0)
-            expires = int(record.get("expires_at") or 0)
-            device_id = str(record.get("device_id") or "")
-            action_id = str(record.get("action_id") or "")
-            if state in TERMINAL_RECEIPT_STATES:
-                if created + self.ACTION_RETENTION_MS >= now:
-                    continue  # 保留窗口内：可核对、可被查重
-                if deleted >= max_deletes:
+            # Per-record critical sections coordinate with receipt writes without
+            # holding the gateway lock for the complete maintenance scan.
+            with self.lock:
+                record = self.store.get(key)
+                if not isinstance(record, dict):
                     continue
-                self.store.delete(key)
-                if device_id and action_id:
-                    self.store.delete(f"device:action-id:{device_id}:{action_id}")
-                    self.store.delete(f"device:receipts:{device_id}:{action_id}")
-                deleted += 1
-            elif now > expires + self.ACTION_PENDING_GRACE_MS:
-                # 过宽限的非终态：落 unknown 过期标记（下轮按终态清理）
-                record["state"] = "unknown"
-                record["updated_at"] = now
-                self.store.put(key, record)
-                marked += 1
+                state = str(record.get("state") or "")
+                created = int(record.get("created_at") or 0)
+                expires = int(record.get("expires_at") or 0)
+                device_id = str(record.get("device_id") or "")
+                action_id = str(record.get("action_id") or "")
+                if state in TERMINAL_RECEIPT_STATES:
+                    if created + self.ACTION_RETENTION_MS >= now or deleted >= max_deletes:
+                        continue
+                    self.store.delete(key)
+                    if device_id and action_id:
+                        self.store.delete(f"device:action-id:{device_id}:{action_id}")
+                        self.store.delete(f"device:receipts:{device_id}:{action_id}")
+                    deleted += 1
+                elif now > expires + self.ACTION_PENDING_GRACE_MS:
+                    record = dict(record)
+                    record.update(state="unknown", updated_at=now, outcome_source="retention_timeout")
+                    self.store.put(key, record)
+                    marked += 1
         # 孤儿回执流水（动作记录已不在）一并清，同受删除上限约束
         for key in list(self.store.keys()):
             if deleted >= max_deletes:
@@ -592,9 +593,10 @@ class DeviceGateway:
             if len(parts) < 4:
                 continue
             device_id, action_id = parts[2], parts[3]
-            if self.store.get(f"device:action-id:{device_id}:{action_id}") is None:
-                self.store.delete(key)
-                deleted += 1
+            with self.lock:
+                if self.store.get(f"device:action-id:{device_id}:{action_id}") is None:
+                    self.store.delete(key)
+                    deleted += 1
         return {"scanned": scanned, "deleted": deleted, "marked_unknown": marked}
 
     # ------------------------------------------------------------------

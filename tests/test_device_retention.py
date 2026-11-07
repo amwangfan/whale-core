@@ -1,6 +1,8 @@
 """issue #52：设备动作回执/幂等记录的有界保留与清理测试（离线）。"""
 from __future__ import annotations
 
+import threading
+
 from whale_core.devices.gateway import DeviceGateway
 from whale_core.memory.store import InMemoryStore
 
@@ -12,6 +14,7 @@ def _gateway(store: InMemoryStore) -> DeviceGateway:
     """sweep 只用 store——绕过 WS 监听构造（其它测试覆盖协议面）。"""
     gw = DeviceGateway.__new__(DeviceGateway)
     gw.store = store
+    gw.lock = threading.RLock()
     return gw
 
 
