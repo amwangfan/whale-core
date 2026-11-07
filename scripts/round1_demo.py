@@ -50,7 +50,7 @@ from whale_core.notifications.services.notification_service import (  # noqa: E4
 class RecordingWssPort:
     """演示用 WSS 端口：记录 notification.event payload，不真实发送。
 
-    生产实现 = embedded_wss v2 连接层（mobile v2 客户端就绪后接入）。
+    生产通知由 Core EmbeddedWssGateway 与 Mobile NodeRuntimeV2 接线。
     """
 
     def __init__(self) -> None:
@@ -66,10 +66,10 @@ class RecordingWssPort:
 
 
 class RestTransport:
-    """经运行中 dev core 的 REST 驱动 embedded_wss 通道的 transport。
+    """经 whale-core 管理 REST API 驱动已在线设备的 V2 embedded WSS 动作。
 
     observe 暂不支持（REST 观察返回 output_ref，需二次拉取——本演示用
-    adb/ssh 做观察，REST 做动作）；execute 全能力可用。
+    ADB/SSH 做观察，REST 做动作）；execute 走 Core 的真实动作与回执链路。
     """
 
     kind = "embedded_wss"
@@ -176,8 +176,6 @@ def make_deepseek_complete(secrets: dict[str, str]):
 
 async def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--device", default=os.environ.get("WHALE_DEVICE_NAME", "device"),
-                    help="仅用于输出标识，不用于设备寻址")
     ap.add_argument("--device-id", default=os.environ.get("WHALE_DEVICE_ID"))
     ap.add_argument("--serial", default=os.environ.get("WHALE_ADB_SERIAL"))
     ap.add_argument("--goal",
