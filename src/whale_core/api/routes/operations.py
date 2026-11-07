@@ -202,6 +202,13 @@ def life(handler, method: str, parts: list[str]) -> None:
             "reflection_diary": reflection_diary,
         }}))
         return
+    if parts == ["life", "maintenance"] and method == "POST":
+        from whale_core.memory.governance import run_memory_maintenance
+        with ctx.lock:
+            report = run_memory_maintenance(store)
+        ctx.log_event("memory:maintenance", "manual")
+        handler._send(200, _json_bytes({"result": report}))
+        return
     if parts == ["life", "interests"] and method == "POST":
         body = handler._body_json()
         topic = (body or {}).get("topic")
