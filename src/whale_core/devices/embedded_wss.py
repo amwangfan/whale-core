@@ -617,7 +617,6 @@ class EmbeddedWssGateway:
         p = msg["payload"]
         challenge_id = str(p["challenge_id"])
         with self.lock:
-            with self.lock:
             pend = self.pending_confirm.get(challenge_id)
             if pend is not None and pend.device_id != st.device_id:
                 mismatch = True
