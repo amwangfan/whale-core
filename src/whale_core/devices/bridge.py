@@ -1,4 +1,4 @@
-"""G5.4：Core 端模拟设备闭环 —— 可重放的 sensor.event → 情境 → 提醒/动作。
+"""G5.4：Core 端模拟设备闭环 —— 可重放的 experience.event → 情境 → 提醒/动作。
 
 位置（issue #27）：本模块由 ``life/device_bridge.py`` 迁入 devices 域
 （旧路径保留薄 shim，import 兼容）。它本质是 devices×life 的**边界模块**。
@@ -15,10 +15,10 @@
    范围（issue 允许「必要时抽取稳定接口」，此处记录为后续候选）。
 ``tests/test_arch_channels.py`` 以白名单方式冻结本模块允许的 life 依赖。
 
-生产路径是 ``devices/gateway.py`` 的 WSS 长连（验签/去重/持久化/回执
-状态机）。本模块提供**离线可重放**的同语义 Core 端通道，用于 CI 与
-验收回放（计划 §7.4：Core 端必须能用可重放的模拟设备事件完成一条
-「事件→情境→提醒」闭环；真实手机/眼镜效果另在 Mobile/IO 项目验收）。
+生产路径是 ``devices/embedded_wss.py`` 的 WSS 长连（contracts/v2，验签/
+去重/持久化/回执状态机）。本模块提供**离线可重放**的同语义 Core 端通道，
+用于 CI 与验收回放（计划 §7.4：Core 端必须能用可重放的模拟设备事件完成
+一条「事件→情境→提醒」闭环；真实手机/眼镜效果另在 Mobile/IO 项目验收）。
 
 与网关同语义的四条硬约束：
 
@@ -26,7 +26,7 @@
    设备的事件一律拒绝（伪造事件不得进入情境）。
 2. **去重 + 持久化**：event_id 幂等键落 ``device:event:{device}:{id}``
    （与网关同构 kv），重放命中只回 ack 不再消费。
-3. **契约校验**：payload 套用 contracts/v1 ``sensor.event`` schema
+3. **契约校验**：payload 套用 contracts/v2 ``experience.event`` schema
    （复用 ``devices/schema.py`` 校验器，不另写规则）。
 4. **明确不可用**：动作通道对离线/吊销/超时/不支持能力抛
    ``DeviceUnavailable``（携带协议错误码），绝不把「已发给设备」当作
@@ -40,6 +40,7 @@ from uuid import uuid4
 
 from whale_core.devices.registry import DeviceRegistry, now_ms
 from whale_core.devices.schema import PROTOCOL_VERSION, ContractValidator
+from whale_core.devices.transports.base import new_id, new_ulid
 from whale_core.life.autonomy import (
     AutonomyController,
     DeviceUnavailable,
@@ -50,7 +51,7 @@ DEFAULT_SUBJECT_ID = "owner"
 
 
 class BridgeError(ValueError):
-    """模拟设备桥拒绝（code 对齐 contracts/v1 §4 错误码）。"""
+    """模拟设备桥拒绝（code 对齐 contracts/v2 §15 错误码）。"""
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
@@ -88,13 +89,14 @@ class SimulatedActionPort:
     - ``online``：``{device_id: bool}`` 或 callable；缺省**全部离线**
       （fail closed——不假装有真实设备）。
     - ``receipts``：``capability -> payload dict | Exception | callable``；
-      缺省回 ``executed`` 终态。脚本化 ``DeviceUnavailable("expired")``
-      即模拟超时；``received``/``accepted`` 可验证「接受≠已执行」。
+      缺省回 ``succeeded`` 终态。脚本化 ``DeviceUnavailable("expired")``
+      即模拟超时；``received`` 可验证「已收到≠已执行」（v2 唯一非终态）。
     - 每次下发先按幂等键 reserve ``pending``（对齐 gateway）；超时异常保留
       pending，供 ``action_status`` 对账测试。
     """
 
-    _TERMINAL = frozenset({"executed", "failed", "unknown"})
+    _TERMINAL = frozenset(
+        {"succeeded", "failed", "timeout", "cancelled", "unknown"})
 
     def __init__(
         self,
@@ -127,7 +129,7 @@ class SimulatedActionPort:
             "device_id": device_id,
             "idempotency_key": idempotency_key,
             "capability": capability,
-            "action_id": f"sim-{uuid4().hex[:24]}",
+            "action_id": new_id("act"),
             "created_at": self._now_ms(),
             "expires_at": self._now_ms() + int(float(timeout_s) * 1000),
             "state": "pending",
@@ -157,12 +159,12 @@ class SimulatedActionPort:
         if isinstance(scripted, Exception):
             # expired/timeout：保留 pending（对齐 gateway 超时仍占幂等键）
             raise scripted
-        receipt = dict(scripted or {"state": "executed"})
+        receipt = dict(scripted or {"status": "succeeded"})
         receipt.setdefault("action_id", rec["action_id"])
-        if receipt.get("state") in ("executed", "failed"):
-            receipt.setdefault("executed_at", self._now_ms())
+        if receipt.get("status") in ("succeeded", "failed"):
+            receipt.setdefault("completed_at", self._now_ms())
         # 终态回写，供 action_status 对账
-        state = str(receipt.get("state") or "executed")
+        state = str(receipt.get("status") or "succeeded")
         rec["state"] = state
         rec["action_id"] = receipt["action_id"]
         if state == "failed" and receipt.get("error_code"):
@@ -184,10 +186,11 @@ class SimulatedActionPort:
 
 
 class GatewayActionPort:
-    """生产适配：把 DeviceGateway.send_action 包成 DeviceActionPort。
+    """生产适配：把 EmbeddedWssGateway.send_action 包成 DeviceActionPort。
 
-    GatewayError（离线/超时/scope/幂等冲突）统一转 DeviceUnavailable；
-    回执 payload 原样上交，由 AutonomyController 校验终态。
+    GatewayError（离线/超时/scope）统一转 DeviceUnavailable；
+    回执 payload 原样上交，由 AutonomyController 校验终态（v2 五终态）。
+    重复幂等键由网关回已记录状态（``duplicate=True``，绝不重放，§7.1）。
     可选 ``action_status``：超时后用原幂等键对账，禁止盲目重放。
     """
 
@@ -197,17 +200,17 @@ class GatewayActionPort:
     def send_action(self, device_id: str, *, capability: str,
                     args: Mapping[str, Any], idempotency_key: str,
                     timeout_s: float) -> Mapping[str, Any]:
-        from whale_core.devices.gateway import GatewayError
+        from whale_core.devices.embedded_wss import GatewayError
         try:
             return self._gateway.send_action(
-                device_id, capability=capability, args=dict(args),
+                device_id, capability=capability, arguments=dict(args),
                 idempotency_key=idempotency_key, timeout_s=timeout_s)
         except GatewayError as exc:
             raise DeviceUnavailable(exc.code, str(exc)) from exc
 
     def action_status(self, device_id: str, idempotency_key: str) -> Mapping[str, Any]:
         """查询既有动作状态；不重新执行。"""
-        from whale_core.devices.gateway import GatewayError
+        from whale_core.devices.embedded_wss import GatewayError
         try:
             return self._gateway.action_status(device_id, idempotency_key)
         except GatewayError as exc:
@@ -215,7 +218,7 @@ class GatewayActionPort:
 
 
 class SimulatedDeviceBridge:
-    """Core 端模拟设备面：可重放的 sensor.event 入口 + 可选自主接线。"""
+    """Core 端模拟设备面：可重放的 experience.event 入口 + 可选自主接线。"""
 
     def __init__(
         self,
@@ -244,9 +247,9 @@ class SimulatedDeviceBridge:
         self.privacy_space = privacy_space
         self.contracts = contracts or ContractValidator()
 
-    # ---- 上行：sensor.event ---------------------------------------------
+    # ---- 上行：experience.event（contracts/v2 §9） -------------------------
 
-    def ingest_sensor_event(
+    def ingest_experience_event(
         self,
         device_id: str,
         payload: Mapping[str, Any],
@@ -255,42 +258,53 @@ class SimulatedDeviceBridge:
         projector: Callable[[str, Mapping[str, Any]], Mapping[str, Any] | None] | None = None,
         busy: bool = False,
     ) -> dict[str, Any]:
-        """接收一条模拟 sensor.event：鉴权 → 契约校验 → 去重/持久化 → ack。
+        """接收一条模拟 experience.event：鉴权 → 契约校验 → 去重/持久化 → ack。
 
+        payload 即 v2 ExperienceEvent（§9，event_id=evt_+ULID 为幂等键）。
         配置了 SituationStore/AutonomyController 时继续走 情境 → 裁决 →
         受门控执行，返回全链路证据。重放（重复 event_id）只回 ack。
         """
         # 1. 鉴权：未配对/待批/吊销设备的事件不得进入任何后续环节
         status = self.registry.status_of(device_id)
         if status == "revoked":
-            self.registry.audit("sim.sensor_event", outcome="denied",
+            self.registry.audit("sim.experience_event", outcome="denied",
                                 reason="revoked", device_id=device_id)
             raise BridgeError("device_revoked", "设备已吊销")
         if status != "active":
-            self.registry.audit("sim.sensor_event", outcome="denied",
+            self.registry.audit("sim.experience_event", outcome="denied",
                                 reason="not_paired", device_id=device_id)
             raise BridgeError("auth_failed", "设备未配对或未批准")
-        # 2. 契约校验：套用 contracts/v1 sensor.event schema
-        envelope = {"v": PROTOCOL_VERSION, "id": uuid4().hex, "type": "sensor.event",
-                    "ts": now_ms(), "seq": 0, "dir": "uplink",
-                    "payload": dict(payload)}
-        err = self.contracts.validate("sensor.event", envelope)
+        # 2. 契约校验：套用 contracts/v2 experience.event schema
+        #    （payload.device_id 必须与入口身份一致——防串设备伪造）
+        body = dict(payload)
+        body.setdefault("device_id", device_id)
+        if body.get("device_id") != device_id:
+            raise BridgeError("invalid_message",
+                              "payload.device_id 与入口设备不符")
+        envelope = {"v": PROTOCOL_VERSION, "id": new_ulid(),
+                    "type": "experience.event", "ts": now_ms(), "seq": 0,
+                    "dir": "uplink", "payload": body}
+        err = self.contracts.validate("experience.event", envelope)
         if err:
-            raise BridgeError("invalid_message", f"sensor.event 契约校验失败: {err}")
-        event_id = str(payload["event_id"])
-        # 3. 去重 + 持久化（与网关同构 kv；§6 幂等闭环：新旧都回 ack）
+            raise BridgeError("invalid_message",
+                              f"experience.event 契约校验失败: {err}")
+        event_id = str(body["event_id"])
+        # 3. 去重 + 持久化（与网关同构 kv；§16 幂等闭环：新旧都回 ack）
         key = f"device:event:{device_id}:{event_id}"
         if self.store.get(key) is not None:
             return {"ack": [event_id], "duplicate": True}
         self.store.put(key, {
             "device_id": device_id,
             "event_id": event_id,
-            "kind": payload["kind"],
-            "occurred_at": payload["occurred_at"],
-            "privacy_class": payload["privacy_class"],
-            "summary": payload["summary"],
-            "evidence_ref": payload.get("evidence_ref"),
-            "schema_version": payload["schema_version"],
+            "kind": body["kind"],
+            "occurred_at": body["occurred_at"],
+            "source": body["source"],
+            "privacy_class": body["privacy_class"],
+            "summary": body["summary"],
+            "evidence_ref": body.get("evidence_ref"),
+            "task_id": body.get("task_id"),
+            "run_id": body.get("run_id"),
+            "schema_version": body["schema_version"],
             "received_at": now_ms(),
         })
         result: dict[str, Any] = {"ack": [event_id], "duplicate": False}
@@ -300,7 +314,7 @@ class SimulatedDeviceBridge:
                 lambda dev, p: default_projector(
                     dev, p, subject_id=self.subject_id,
                     privacy_space=self.privacy_space))
-            spec = project(device_id, payload)
+            spec = project(device_id, body)
             if spec is not None:
                 situation = self.situations.record(**dict(spec))
                 result["situation_id"] = situation.situation_id
@@ -319,8 +333,8 @@ class SimulatedDeviceBridge:
                                                "reason": record.reason,
                                                "receipt": record.receipt,
                                                "draft_id": record.draft_id}
-        self.registry.audit("sim.sensor_event", device_id=device_id,
-                            kind=str(payload.get("kind") or ""), event_id=event_id)
+        self.registry.audit("sim.experience_event", device_id=device_id,
+                            kind=str(body.get("kind") or ""), event_id=event_id)
         return result
 
 

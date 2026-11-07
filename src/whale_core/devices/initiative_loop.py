@@ -1,4 +1,4 @@
-"""EV-02 活接线：sensor.event → 情境 → 裁决 → 手机通知（真实网关）。
+"""EV-02 活接线：experience.event → 情境 → 裁决 → 手机通知（真实网关）。
 
 whale-mobile #12 的 Core 运行时侧：感知事件经网关 ``adapter.offer`` 到达，
 本适配器在落库（DurableDevicePerceptionAdapter）之后继续：
@@ -22,7 +22,7 @@ import time
 from typing import Any, Callable, Mapping, Optional
 
 from whale_core.devices.bridge import GatewayActionPort, default_projector
-from whale_core.devices.gateway import DeviceGateway
+from whale_core.devices.embedded_wss import EmbeddedWssGateway
 from whale_core.devices.perception import (DurableDevicePerceptionAdapter,
                                            DevicePerceptionAdapter,
                                            PerceptionEvent)
@@ -128,7 +128,7 @@ class DeviceInitiativeAdapter(DevicePerceptionAdapter):
         decision = controller.evaluate(situation, ctx)
         if decision.kind not in (KIND_REMIND, KIND_ACTION):
             return
-        gateway: Optional[DeviceGateway] = self._gateway_resolver()
+        gateway: Optional[EmbeddedWssGateway] = self._gateway_resolver()
         port = GatewayActionPort(gateway) if gateway is not None else None
         controller.execute(
             decision, ctx,

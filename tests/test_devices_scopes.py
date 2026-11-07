@@ -1,6 +1,6 @@
 """D3：screen.*/phone.* scope 常量、GRANTABLE_SCOPES 纳入与 resolver 矩阵。
 
-矩阵规则（contracts/v1/PROTOCOL.md §5 + D3）：
+矩阵规则（contracts/v2/PROTOCOL.md §5.1 + D3）：
 - screen.* 仅 owner 私聊 / API owner 可授；群聊硬上限拒绝；非主人会话拒绝；
 - 设备面 scope 不在任何基础 scope 集（默认最小权限），只能经租约授予；
 - derive_kind 认识 channel="mobile"。
@@ -42,13 +42,14 @@ def test_constants_match_protocol_names():
     assert SCOPE_PHONE_CALL_AUDIO == "phone.call.audio"
     assert SCOPE_PHONE_DEVICE_SAFE_ACTION == "phone.device.safe_action"
     from whale_core.life.conversation_context import (
-        SCOPE_DEVICE_AGENT_CONTROL, SCOPE_DEVICE_AGENT_OBSERVE,
-        SCOPE_DEVICE_AGENT_SHELL, SCOPE_DEVICE_AGENT_OUTPUT_READ,
+        SCOPE_DEVICE_OBSERVE, SCOPE_DEVICE_OUTPUT_READ,
+        SCOPE_DEVICE_SHELL, SCOPE_DEVICE_TAP,
     )
-    assert SCOPE_DEVICE_AGENT_CONTROL == "device.agent.control"
-    assert SCOPE_DEVICE_AGENT_OBSERVE == "device.agent.observe"
-    assert SCOPE_DEVICE_AGENT_SHELL == "device.agent.shell"
-    assert SCOPE_DEVICE_AGENT_OUTPUT_READ == "device.agent.output.read"
+    # contracts/v2 §5.1：v1 的 device.agent.* 四词已下线，换显式动作名
+    assert SCOPE_DEVICE_OBSERVE == "device.observe"
+    assert SCOPE_DEVICE_TAP == "device.tap"
+    assert SCOPE_DEVICE_SHELL == "device.shell"
+    assert SCOPE_DEVICE_OUTPUT_READ == "device.output.read"
     assert len(DEVICE_SCOPES) == 13
 
 

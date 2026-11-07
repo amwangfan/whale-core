@@ -89,7 +89,7 @@ SCOPE_TASK_READ_SELF = "task.read:self"
 SCOPE_DEVICE_NOTIFY = "device.notify"
 
 # ---- 设备面（whale-mobile，D3）scope 族 --------------------------------
-# 命名与 contracts/v1/PROTOCOL.md §5 能力枚举逐字一致；裁决矩阵见
+# 命名与 contracts/v2/PROTOCOL.md §5.1 能力枚举逐字一致；裁决矩阵见
 # context_resolver（screen.* 仅 owner 私聊 / API owner 可授，群聊硬上限拒绝）。
 SCOPE_SCREEN_CONTEXT_READ = "screen.context.read"
 SCOPE_SCREEN_HISTORY_SEARCH = "screen.history.search"
@@ -101,14 +101,16 @@ SCOPE_PHONE_CALL_RING = "phone.call.ring"
 SCOPE_PHONE_CALL_AUDIO = "phone.call.audio"
 SCOPE_PHONE_DEVICE_SAFE_ACTION = "phone.device.safe_action"
 
-# ---- 安卓自主体（core#58 / PROTOCOL V1.1）-------------------------------
+# ---- 安卓设备动作族（contracts/v2 §5.1 device.*）-------------------------
 # 设备注册 scope；编排循环经 ResolvedContext 复核时亦用同名常量。
-SCOPE_DEVICE_AGENT_CONTROL = "device.agent.control"
-SCOPE_DEVICE_AGENT_OBSERVE = "device.agent.observe"
-SCOPE_DEVICE_AGENT_SHELL = "device.agent.shell"
-SCOPE_DEVICE_AGENT_OUTPUT_READ = "device.agent.output.read"
+# （v1 的 device.agent.* 四词已随 contracts/v2 §18 下线：observe/control/shell
+#  细化为 device.observe/device.tap/device.shell 等显式能力名。）
+SCOPE_DEVICE_OBSERVE = "device.observe"
+SCOPE_DEVICE_TAP = "device.tap"
+SCOPE_DEVICE_SHELL = "device.shell"
+SCOPE_DEVICE_OUTPUT_READ = "device.output.read"
 
-#: 设备面 scope 全集（screen.* + phone.* + device.agent.*）。
+#: 设备面 scope 全集（screen.* + phone.* + device.* 精选动作族）。
 DEVICE_SCOPES: Tuple[str, ...] = (
     SCOPE_SCREEN_CONTEXT_READ,
     SCOPE_SCREEN_HISTORY_SEARCH,
@@ -119,10 +121,10 @@ DEVICE_SCOPES: Tuple[str, ...] = (
     SCOPE_PHONE_CALL_RING,
     SCOPE_PHONE_CALL_AUDIO,
     SCOPE_PHONE_DEVICE_SAFE_ACTION,
-    SCOPE_DEVICE_AGENT_CONTROL,
-    SCOPE_DEVICE_AGENT_OBSERVE,
-    SCOPE_DEVICE_AGENT_SHELL,
-    SCOPE_DEVICE_AGENT_OUTPUT_READ,
+    SCOPE_DEVICE_OBSERVE,
+    SCOPE_DEVICE_TAP,
+    SCOPE_DEVICE_SHELL,
+    SCOPE_DEVICE_OUTPUT_READ,
 )
 
 

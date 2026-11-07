@@ -1,33 +1,41 @@
-"""D2：WSS 设备端点 ``/api/v1/devices/ws``（长连，非票据中继）。
+"""contracts/v2 服务端 WSS 端点 ``/api/v2/devices/ws``（embedded_wss 通道）。
 
-协议事实源：contracts/v1/PROTOCOL.md（本仓版本化副本）。语义移植自
-whale-mobile ``server/dev_gateway.py``（参考实现），差异见 docs/devices.md：
+协议事实源：contracts/v2/PROTOCOL.md（本仓镜像，whale-mobile 为 canonical）。
+线程模型沿用 v1 网关：``websockets.sync.server`` 每连接一线程；离线判定由
+后台 sweeper 线程做（内存状态，90s 基线 §1）；持久化全部走 MemoryStore kv。
 
-- 线程模型：``websockets.sync.server``（与 api/voice.py 同一可选依赖），
-  每连接一线程；离线判定由后台 sweeper 线程做（内存状态，90s 基线 §2）。
-- 持久化：设备/事件/动作幂等键/回执全部走 MemoryStore kv（双后端一致），
-  不另开 SQLite。
-- 撤销即时生效双保险（§3）：吊销时 API 层调用 ``kick()`` 立即关连接；
-  已认证连接每帧复查 registry 状态，revoked 回 ``error.device_revoked`` 并关。
-- sensor.ack 幂等闭环（§6）：新收与去重命中都回 ack，端侧据此停发。
-- action.receipt 状态机：received/accepted 中间态只记录落库，
-  executed/failed/unknown 终态才 resolve 等待方（「接受」≠「已执行」）。
+与 v1 的差异（contracts/v2 §18）：
 
-与 voice.py 的本质区别：那是 60s 一次性票据中继；这里是设备长连，
-不套会话超时，只靠心跳超时判离线。
+- ID 全面「前缀+ULID」（``devices/transports/base.py`` 的 new_id/new_ulid）；
+- 回执状态机五终态 succeeded/failed/timeout/cancelled/unknown，received 是
+  唯一非终态；终态 first-wins，落库不可翻案（§7.2）；
+- 幂等语义（§7.1）：action_id=每次请求实例，idempotency_key=逻辑动作；
+  重复键回已记录的真实状态，绝不重放（不再回 duplicate 错误）；
+- sensor.event→experience.event、sensor.ack→event.ack（event_ids 批量≤200）；
+- 新增 notification.*（§13，转 NotificationGateway）、run.trace.event /
+  recording.state（§12，落库供录制对齐）、device.confirm.*（§14 设备确认）。
+
+违例纪律（§4）：schema 违例回 error.invalid_message 不断线；未知 type 静默
+忽略；未知 major 回 error.protocol_version 后关闭；撤销即踢（kick + 每帧复查）。
+
+本类同时实现 ``notifications/providers/whale_wss.py`` 的 ``DeviceWssPort``
+（send_notification_event / is_online，另加可选 send_notification_revoke）。
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import secrets
 import threading
 import time
-import uuid
-from typing import Any
+from typing import Any, Mapping
 
-from whale_core.devices.perception import DevicePerceptionAdapter, DurableDevicePerceptionAdapter
+from whale_core.devices.perception import (
+    DevicePerceptionAdapter,
+    DurableDevicePerceptionAdapter,
+)
 from whale_core.devices.registry import DeviceRegistry, now_ms
 from whale_core.devices.schema import (
     PROTOCOL_VERSION,
@@ -35,23 +43,28 @@ from whale_core.devices.schema import (
     ContractValidator,
     parse_major,
 )
+from whale_core.devices.transports.base import new_id, new_ulid
 from whale_core.memory.store import MemoryStore
 
-log = logging.getLogger("whale.devices.gateway")
+log = logging.getLogger("whale.devices.embedded_wss")
 
-WS_PATH = "/api/v1/devices/ws"
-MAX_FRAME_BYTES = 256 * 1024  # §2：单帧 ≤ 256 KiB
-REF_ID_FALLBACK = "0" * 16
+WS_PATH = "/api/v2/devices/ws"
+MAX_FRAME_BYTES = 256 * 1024  # §1：单帧 ≤ 256 KiB
+REF_ID_FALLBACK = "0" * 26    # 合法 ULID 形（错误帧 ref_id 兜底）
 DEFAULT_HEARTBEAT_INTERVAL = 30   # hello_ack 告知端侧的心跳节奏（秒）
-DEFAULT_HEARTBEAT_TIMEOUT = 90    # §2：90s 无心跳判定离线
+DEFAULT_HEARTBEAT_TIMEOUT = 90    # §1：90s 无心跳判定离线（标离线，不踢线）
 DEFAULT_CHALLENGE_TTL = 30        # 秒；schema 限定 expires_in ∈ [1,300]
 
-#: action.receipt 终态（§4：received/accepted 只是中间态）
-TERMINAL_RECEIPT_STATES = frozenset({"executed", "failed", "unknown"})
+#: action.receipt 终态（§7.2：received 是唯一非终态）
+TERMINAL_RECEIPT_STATES = frozenset(
+    {"succeeded", "failed", "timeout", "cancelled", "unknown"})
+
+#: 通知分类默认值（event_consumer 提醒类下行）
+NOTIFY_CAPABILITY = "phone.notification.post"
 
 
 class GatewayError(ValueError):
-    """下行通道失败（code 对齐 §4 错误码 + device_offline 管理面补充）。"""
+    """下行通道失败（code 对齐 contracts/v2 §15 错误码 + not_found 管理面补充）。"""
 
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
@@ -73,6 +86,15 @@ class ConnectionState:
         self.last_heartbeat = time.monotonic()
         self.offline_marked = False
         self.status = "connecting"
+        # hello 声明（§5.2）：能力/特征/设备描述/应用版本
+        self.declared_capabilities: tuple[str, ...] = ()
+        self.accepted_capabilities: tuple[str, ...] = ()
+        self.features: dict[str, bool] = {}
+        self.device_info: dict[str, Any] = {}
+        self.app_version = ""
+        self.app_flavor = ""
+        # 最近一次心跳带的模块状态摘要（§6 device.heartbeat.modules）
+        self.modules: dict[str, str] = {}
 
 
 class _Pending:
@@ -85,8 +107,10 @@ class _Pending:
         self.result: dict | None = None
 
 
-class DeviceGateway:
-    """设备控制长连网关。构造即监听（websockets 缺失时抛 ImportError）。"""
+class EmbeddedWssGateway:
+    """contracts/v2 设备控制长连网关。构造即监听（websockets 缺失时抛 ImportError）。"""
+
+    kind = "embedded_wss"
 
     def __init__(
         self,
@@ -96,6 +120,7 @@ class DeviceGateway:
         host: str = "127.0.0.1",
         port: int = 0,
         adapter: DevicePerceptionAdapter | None = None,
+        notification_gateway: Any = None,  # notifications.gateway.NotificationGateway
         heartbeat_interval: int = DEFAULT_HEARTBEAT_INTERVAL,
         heartbeat_timeout: int = DEFAULT_HEARTBEAT_TIMEOUT,
         challenge_ttl: int = DEFAULT_CHALLENGE_TTL,
@@ -107,6 +132,7 @@ class DeviceGateway:
         self.store = store
         self.host = host
         self.adapter = adapter if adapter is not None else DurableDevicePerceptionAdapter(store)
+        self.notification_gateway = notification_gateway
         if not (1 <= heartbeat_interval <= 3600):
             raise ValueError("heartbeat_interval 须在 1..3600（hello_ack schema）")
         if not (1 <= challenge_ttl <= 300):
@@ -119,7 +145,7 @@ class DeviceGateway:
         self.lock = threading.RLock()
         self.online: dict[str, ConnectionState] = {}
         self.pending: dict[str, _Pending] = {}
-        # AUTH-01：challenge_id → 待决确认
+        # 设备确认（§14）：challenge_id → 待决确认
         self.pending_confirm: dict[str, _Pending] = {}
         self.stopping = threading.Event()
         logger = logging.getLogger("whale.devices.transport")
@@ -128,23 +154,23 @@ class DeviceGateway:
         self.server = serve(
             self._handle, host, port,
             max_size=MAX_FRAME_BYTES,
-            ping_interval=None,  # 心跳语义由协议层 device.heartbeat 承担（§2）
+            ping_interval=None,  # 心跳语义由协议层 device.heartbeat 承担（§1）
             logger=logger,
         )
         self.port = self.server.socket.getsockname()[1]
         self.thread = threading.Thread(
-            target=self.server.serve_forever, daemon=True, name="whale-devices")
+            target=self.server.serve_forever, daemon=True, name="whale-devices-v2")
         self.thread.start()
         self._sweeper = threading.Thread(
-            target=self._sweep_loop, daemon=True, name="whale-devices-sweep")
+            target=self._sweep_loop, daemon=True, name="whale-devices-v2-sweep")
         self._sweeper.start()
 
     # ------------------------------------------------------------------
-    # 帧构造 / 校验（收发双向过 contracts schema，对齐 dev_gateway）
+    # 帧构造 / 校验（收发双向过 contracts v2 schema）
     # ------------------------------------------------------------------
 
     def build_message(self, msg_type: str, dir_: str, payload: dict, seq: int) -> dict:
-        msg = {"v": PROTOCOL_VERSION, "id": uuid.uuid4().hex, "type": msg_type,
+        msg = {"v": PROTOCOL_VERSION, "id": new_ulid(), "type": msg_type,
                "ts": now_ms(), "seq": seq, "dir": dir_, "payload": payload}
         err = self.contracts.validate(msg_type, msg)
         if err:  # 服务端自身构造的帧不应失败；失败即实现 bug
@@ -158,7 +184,7 @@ class DeviceGateway:
         return msg
 
     def send_error(self, st: ConnectionState, ref_id: Any, code: str, message: str):
-        if not (isinstance(ref_id, str) and 16 <= len(ref_id) <= 64):
+        if not (isinstance(ref_id, str) and len(ref_id) == 26):
             ref_id = REF_ID_FALLBACK
         try:
             self.send_msg(st, "error",
@@ -180,7 +206,7 @@ class DeviceGateway:
             ws.close(1008, f"only {WS_PATH} is served here")
             return
         st = ConnectionState(ws)
-        # 1. 首帧下发挑战（§3 auth.challenge）
+        # 1. 首帧下发挑战（§4 auth.challenge：64-hex + expires_in 秒）
         st.challenge = secrets.token_hex(32)
         st.challenge_deadline = time.monotonic() + self.challenge_ttl
         try:
@@ -222,7 +248,7 @@ class DeviceGateway:
             pass
 
     def _handle_hello(self, st: ConnectionState, raw: Any) -> bool:
-        """验签握手。失败时发送 error 并返回 False（调用方负责关闭）。"""
+        """验签握手（§4/§5）。失败时发送 error 并返回 False（调用方负责关闭）。"""
         ref_id = REF_ID_FALLBACK
 
         def fail(code: str, message: str) -> bool:
@@ -243,6 +269,15 @@ class DeviceGateway:
                         f"unsupported major version: {msg.get('v')}")
         if msg.get("type") != "device.hello":
             return fail("auth_failed", "first frame must be device.hello")
+        # hello.payload.protocol_version 独立声明设备支持版本（§6）；major 检查
+        # 先于 schema（schema 的 pattern 只认 2.x，会把它淹成 auth_failed）
+        p_raw = msg.get("payload")
+        if isinstance(p_raw, dict):
+            pv_major = parse_major(p_raw.get("protocol_version"))
+            if pv_major is not None and pv_major != SUPPORTED_MAJOR:
+                return fail("protocol_version",
+                            f"unsupported protocol_version: "
+                            f"{p_raw.get('protocol_version')}")
         err = self.contracts.validate("device.hello", msg)
         if err:
             return fail("auth_failed", f"device.hello schema invalid: {err}")
@@ -269,15 +304,21 @@ class DeviceGateway:
             self._audit("device.hello", outcome="denied", reason="bad_signature",
                         device_id=p["device_id"])
             return fail("auth_failed", "signature verification failed")
-        # 通过 → hello_ack（按设备 scopes 收窄能力，§4）
+        # 通过 → hello_ack（按设备注册 scopes 收窄能力，§5.2 hello_ack）
         scopes = set(meta.get("scopes") or ())
-        accepted = [c for c in p["capabilities"] if c in scopes]
+        accepted = tuple(c for c in p["capabilities"] if c in scopes)
         st.device_id = p["device_id"]
         st.authed = True
-        st.session_id = uuid.uuid4().hex
+        st.session_id = new_ulid()
         st.status = "online"
         st.last_heartbeat = time.monotonic()
         st.expected_up_seq = msg["seq"] + 1
+        st.declared_capabilities = tuple(p["capabilities"])
+        st.accepted_capabilities = accepted
+        st.features = dict(p["features"])
+        st.device_info = dict(p["device"])
+        st.app_version = str(p["app_version"])
+        st.app_flavor = str(p["app_flavor"])
         with self.lock:
             old = self.online.get(st.device_id)
             self.online[st.device_id] = st
@@ -289,13 +330,13 @@ class DeviceGateway:
             "session_id": st.session_id,
             "server_time": now_ms(),
             "heartbeat_interval": self.heartbeat_interval,
-            "accepted_capabilities": accepted,
+            "accepted_capabilities": list(accepted),
         })
         return True
 
     @staticmethod
     def _verify_signature(pubkey_hex: str, signature_hex: str, challenge: str) -> bool:
-        """§3：签名输入 = challenge 十六进制字符串的 ASCII 字节。"""
+        """§4：签名输入 = challenge 十六进制字符串的 ASCII（UTF-8）字节。"""
         from cryptography.exceptions import InvalidSignature
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
@@ -321,17 +362,17 @@ class DeviceGateway:
             ref_id = msg["id"]
         major = parse_major(msg.get("v"))
         if major is not None and major != SUPPORTED_MAJOR:
-            # §2：未知 major 拒绝并回 error.protocol_version
+            # §2：未知 major 拒绝并回 error.protocol_version 后关闭
             self.send_error(st, ref_id, "protocol_version",
                             f"unsupported major version: {msg.get('v')}")
             return False
-        # §3 撤销即时生效：已认证设备每帧复查状态，revoked 立即断线
+        # §4 撤销即时生效：已认证设备每帧复查状态，revoked 立即断线
         if st.device_id and self.registry.status_of(st.device_id) == "revoked":
             self.send_error(st, ref_id, "device_revoked", "device has been revoked")
             return False
         msg_type = msg.get("type")
         if not isinstance(msg_type, str) or msg_type not in self.contracts.validators:
-            # §3：未知消息类型静默忽略（前向兼容）
+            # §4：未知消息类型静默忽略（前向兼容）
             log.warning("忽略未知消息类型: %r", msg_type)
             return True
         err = self.contracts.validate(msg_type, msg)
@@ -363,46 +404,172 @@ class DeviceGateway:
             return
         st.last_heartbeat = time.monotonic()
         st.status = p["status"]
+        modules = p.get("modules")
+        if isinstance(modules, dict):
+            st.modules = {str(k): str(v) for k, v in modules.items()}
         if st.offline_marked:
             st.offline_marked = False
             self._emit("device:online", st.device_id)
             log.info("设备 %s 心跳恢复，重新标记在线", st.device_id)
 
-    def _on_sensor_event(self, st: ConnectionState, msg: dict) -> None:
+    def _on_experience_event(self, st: ConnectionState, msg: dict) -> None:
+        """§9：event_id 即幂等键；新收与去重命中都回 event.ack（§16 闭环）。"""
         p = msg["payload"]
         key = f"device:event:{st.device_id}:{p['event_id']}"
         with self.lock:
             duplicate = self.store.get(key) is not None
             if not duplicate:
-                # event_id 幂等键持久化（§6）；事件本体存 kv，供排障与重放
+                # event_id 幂等键持久化；事件本体存 kv，供排障与重放
                 self.store.put(key, {
                     "device_id": st.device_id,
                     "event_id": p["event_id"],
                     "kind": p["kind"],
                     "occurred_at": p["occurred_at"],
+                    "source": p["source"],
                     "privacy_class": p["privacy_class"],
                     "summary": p["summary"],
                     "evidence_ref": p.get("evidence_ref"),
+                    "task_id": p.get("task_id"),
+                    "run_id": p.get("run_id"),
+                    "extras": p.get("extras"),
                     "schema_version": p["schema_version"],
                     "received_at": now_ms(),
                 })
         if duplicate:
-            log.info("sensor.event 重复 event_id=%s（device=%s），幂等去重跳过",
+            log.info("experience.event 重复 event_id=%s（device=%s），幂等去重跳过",
                      p["event_id"], st.device_id)
         else:
             self.adapter.offer(device_id=st.device_id or "", payload=p)
-            self._emit("device:sensor_event",
+            self._emit("device:experience_event",
                        f"{st.device_id}:{p['kind']}:{p['event_id']}")
             # 脱敏日志：不记 summary 全文，只记长度
-            log.info("sensor.event device=%s kind=%s event_id=%s privacy_class=%s"
-                     " summary_len=%d", st.device_id, p["kind"], p["event_id"],
+            log.info("experience.event device=%s kind=%s event_id=%s "
+                     "privacy_class=%s summary_len=%d",
+                     st.device_id, p["kind"], p["event_id"],
                      p["privacy_class"], len(p["summary"]))
-        # §6 幂等闭环：无论新收还是去重命中都 ack，端侧据此停止重发
-        self.send_msg(st, "sensor.ack", {"event_ids": [p["event_id"]]})
+        self.send_msg(st, "event.ack", {"event_ids": [p["event_id"]]})
+
+    def _on_sensor_result(self, st: ConnectionState, msg: dict) -> None:
+        request_id = msg["payload"]["request_id"]
+        pend = self.pending.pop(request_id, None)
+        if pend is not None:
+            pend.result = msg["payload"]
+            pend.event.set()
+        else:
+            log.warning("收到无对应请求的 sensor.result request_id=%s，忽略",
+                        request_id)
+
+    def _on_action_receipt(self, st: ConnectionState, msg: dict) -> None:
+        """§7.2：received 中间态只落库；五终态才 resolve 等待方，first-wins。"""
+        p = msg["payload"]
+        action_id, status = p["action_id"], p.get("status")
+        # 未知 action_id 的回执直接忽略（防认证设备灌入任意回执记录）
+        lookup = self.store.get(f"device:action-id:{st.device_id}:{action_id}")
+        if not isinstance(lookup, str):
+            log.warning("unmapped action receipt for device=%s action=%s",
+                        st.device_id, action_id)
+            return
+        with self.lock:
+            key = f"device:receipts:{st.device_id}:{action_id}"
+            receipts = self.store.get(key) or []
+            if isinstance(receipts, list):
+                receipts = (receipts + [{"status": str(status), "ts": now_ms()}])[-32:]
+                self.store.put(key, receipts)
+        # 终态对原幂等键记录落库：迟到回执/进程重启均可对账，绝不重放
+        action_key = f"device:action:{st.device_id}:{lookup}"
+        with self.lock:
+            record = self.store.get(action_key)
+            if isinstance(record, dict) and record.get("action_id") == action_id:
+                # First terminal wins：已落终态不被迟到/冲突终态翻案
+                if record.get("state") not in TERMINAL_RECEIPT_STATES:
+                    record.update(state=status, updated_at=now_ms())
+                    if status in TERMINAL_RECEIPT_STATES:
+                        record["receipt"] = {
+                            k: p[k] for k in (
+                                "status", "task_id", "result", "error_code",
+                                "provider_ref", "started_at", "completed_at")
+                            if k in p
+                        }
+                    self.store.put(action_key, record)
+        if status in TERMINAL_RECEIPT_STATES:
+            pend = self.pending.pop(action_id, None)
+            if pend is not None:
+                pend.result = p
+                pend.event.set()
+            self._emit("device:action_receipt", f"{st.device_id}:{action_id}:{status}")
+        else:
+            log.info("action %s 中间态回执 %s（device=%s）", action_id, status,
+                     st.device_id)
+
+    # ---- 通知子协议（§13）：转 NotificationGateway -------------------------
+
+    def _on_notification_receipt(self, st: ConnectionState, msg: dict) -> None:
+        gw = self.notification_gateway
+        if gw is None:
+            log.warning("notification.receipt 到达但未装配 NotificationGateway，忽略")
+            return
+        try:
+            gw.handle_receipt(msg["payload"])
+        except Exception:  # noqa: BLE001 - 回执处理故障不影响连接主路径
+            log.warning("notification.receipt 处理失败", exc_info=True)
+
+    def _on_notification_action(self, st: ConnectionState, msg: dict) -> None:
+        gw = self.notification_gateway
+        if gw is None:
+            log.warning("notification.action 到达但未装配 NotificationGateway，忽略")
+            return
+        try:
+            gw.handle_action(msg["payload"])
+        except Exception:  # noqa: BLE001
+            log.warning("notification.action 处理失败", exc_info=True)
+
+    def _on_notification_sync(self, st: ConnectionState, msg: dict) -> None:
+        gw = self.notification_gateway
+        if gw is None:
+            log.warning("notification.sync 到达但未装配 NotificationGateway，忽略")
+            return
+        p = msg["payload"]
+        try:
+            # handle_sync 是 async（router.dispatch）；本线程是同步 WS 线程
+            sent = asyncio.run(gw.handle_sync(
+                st.device_id or p["device_id"], p.get("last_event_id")))
+            log.info("notification.sync device=%s 补传 %d 条", st.device_id, sent)
+        except Exception:  # noqa: BLE001
+            log.warning("notification.sync 处理失败", exc_info=True)
+
+    # ---- 执行轨迹 / 录制（§12）：落库供 run 存储与录制对齐 -------------------
+
+    def _on_run_trace_event(self, st: ConnectionState, msg: dict) -> None:
+        p = msg["payload"]
+        key = (f"device:run-trace:{st.device_id}:{p['run_id']}:"
+               f"{int(p['seq']):08d}")
+        try:
+            self.store.put(key, {
+                "device_id": st.device_id, "run_id": p["run_id"],
+                "seq": int(p["seq"]), "timestamp_ms": p["timestamp_ms"],
+                "kind": p["kind"], "payload": p, "received_at": now_ms(),
+            })
+        except Exception:  # noqa: BLE001
+            log.warning("run.trace.event 落库失败", exc_info=True)
+
+    def _on_recording_state(self, st: ConnectionState, msg: dict) -> None:
+        p = msg["payload"]
+        key = f"device:recording-state:{st.device_id}:{p['run_id']}"
+        try:
+            self.store.put(key, {
+                "device_id": st.device_id, "run_id": p["run_id"],
+                "state": p["state"], "file_ref": p.get("file_ref"),
+                "duration_ms": p.get("duration_ms"),
+                "error_code": p.get("error_code"), "received_at": now_ms(),
+            })
+        except Exception:  # noqa: BLE001
+            log.warning("recording.state 落库失败", exc_info=True)
+
+    # ---- 设备确认（§14） -------------------------------------------------
 
     def send_confirm_request(self, device_id: str, payload: dict,
                              timeout_s: float = 130.0) -> dict:
-        """AUTH-01：下发 device.confirm.request 并等待 confirm.response。
+        """下发 device.confirm.request 并等待 device.confirm.response。
 
         返回 {"approved": bool, "reason": str|None, "signature": str|None}。
         超时/断线 → approved=False reason=timeout/unavailable（绝不默认批准）。
@@ -430,97 +597,37 @@ class DeviceGateway:
             log.warning("收到无对应挑战的 confirm.response challenge=%s，忽略",
                         challenge_id)
             return
+        # 条件必填（§6，schema 子集表达不了）：approved=true 时 signature 必填
+        if p.get("approved") and not p.get("signature"):
+            log.warning("confirm.response approved=true 但缺 signature，按拒绝处理")
         pend.result = {
-            "approved": bool(p.get("approved")),
+            "approved": bool(p.get("approved")) and bool(p.get("signature")),
             "reason": p.get("reason"),
             "signature": p.get("signature"),
         }
         pend.event.set()
-
-    def _on_sensor_result(self, st: ConnectionState, msg: dict) -> None:
-        request_id = msg["payload"]["request_id"]
-        pend = self.pending.pop(request_id, None)
-        if pend is not None:
-            pend.result = msg["payload"]
-            pend.event.set()
-        else:
-            log.warning("收到无对应请求的 sensor.result request_id=%s，忽略",
-                        request_id)
-
-    def _on_action_receipt(self, st: ConnectionState, msg: dict) -> None:
-        p = msg["payload"]
-        action_id, state = p["action_id"], p.get("state")
-        # 回执状态机：received/accepted 中间态记录落库；
-        # executed/failed/unknown 终态才 resolve 等待方（§4「接受」≠「已执行」）。
-        # Ignore receipts for unknown action IDs *before* writing any data.
-        # This also prevents an authenticated device from flooding unbounded
-        # receipt records with arbitrary UUIDs.
-        lookup = self.store.get(f"device:action-id:{st.device_id}:{action_id}")
-        if not isinstance(lookup, str):
-            log.warning("unmapped action receipt for device=%s action=%s",
-                        st.device_id, action_id)
-            return
-        with self.lock:
-            key = f"device:receipts:{st.device_id}:{action_id}"
-            receipts = self.store.get(key) or []
-            if isinstance(receipts, list):
-                receipts = (receipts + [{"state": str(state), "ts": now_ms()}])[-32:]
-                self.store.put(key, receipts)
-        # Persist terminal outcome against the original idempotency key, so a
-        # late receipt or process restart can be reconciled without replay.
-        if isinstance(lookup, str):
-            action_key = f"device:action:{st.device_id}:{lookup}"
-            with self.lock:
-                record = self.store.get(action_key)
-                if isinstance(record, dict) and record.get("action_id") == action_id:
-                    # First terminal receipt wins: a conflicting delayed
-                    # terminal must not rewrite an already recorded outcome.
-                    if record.get("state") not in TERMINAL_RECEIPT_STATES:
-                        record.update(state=state, updated_at=now_ms())
-                        if state in TERMINAL_RECEIPT_STATES:
-                            record["receipt"] = {
-                                k: p[k] for k in (
-                                    "state", "executed_at", "error_code",
-                                    "provider_ref", "result")
-                                if k in p
-                            }
-                        self.store.put(action_key, record)
-        if state in TERMINAL_RECEIPT_STATES:
-            pend = self.pending.pop(action_id, None)
-            if pend is not None:
-                pend.result = p
-                pend.event.set()
-            self._emit("device:action_receipt", f"{st.device_id}:{action_id}:{state}")
-        else:
-            log.info("action %s 中间态回执 %s（device=%s）", action_id, state,
-                     st.device_id)
 
     def _on_error(self, st: ConnectionState, msg: dict) -> None:
         p = msg["payload"]
         log.warning("设备 %s 回报 error ref_id=%s code=%s message=%s",
                     st.device_id, p["ref_id"], p["code"], p["message"])
 
-    #: issue #52：终态/未知态动作记录的保留窗口（默认 7 天）——保留期内
-    #: 迟到回执可核对、重复提交可命中幂等查重；过期才清理。
+    #: 终态/未知态动作记录的保留窗口（默认 7 天）——保留期内迟到回执可核对、
+    #: 重复幂等键可命中查重；过期才清理。
     ACTION_RETENTION_MS = 7 * 24 * 3600 * 1000
-    #: 非终态记录过 expires_at 后的宽限期（默认 24h）：有效重试窗口内
-    #: 幂等键绝不提前释放；过宽限先落 unknown 标记，再按终态规则清理。
+    #: 非终态记录过 expires_at 后的宽限期（默认 24h，§16「pending 超 24h 标
+    #: unknown」）：有效重试窗口内幂等键绝不提前释放。
     ACTION_PENDING_GRACE_MS = 24 * 3600 * 1000
 
     def sweep_action_retention(self, *, now: int | None = None,
                                max_deletes: int = 500) -> dict:
-        """有界清理设备动作回执/幂等记录/反向索引（issue #52）。
+        """有界清理设备动作回执/幂等记录/反向索引。
 
-        - 终态（executed/failed/unknown）且过保留窗口 → 删除动作记录 +
-          反向索引（device:action-id:*）+ 回执流水（device:receipts:*）；
-        - 非终态且过 expires_at + 宽限 → 落 ``unknown`` 过期标记（保留窗口
-          内仍可由 action_status 核对、迟到终态回执照常对账），不删除；
+        - 终态且过保留窗口 → 删除动作记录 + 反向索引 + 回执流水；
+        - 非终态且过 expires_at + 24h 宽限 → 落 ``unknown`` 过期标记（§16），
+          保留窗口内仍可由 action_status 核对，不删除；
         - 仍在有效重试窗口内的记录一律不动（幂等键不提前释放）；
-        - 孤儿回执流水（无对应动作记录）直接清；
-        - 单趟删除量封顶 ``max_deletes``，其余下轮再清。
-
-        不改变撤销与回执核对语义：撤销设备只影响新动作授权，既有记录按
-        同一窗口老化。返回 ``{"scanned", "deleted", "marked_unknown"}``。
+        - 孤儿回执流水直接清；单趟删除量封顶 ``max_deletes``。
         """
         now = now if now is not None else now_ms()
         scanned = deleted = marked = 0
@@ -568,7 +675,7 @@ class DeviceGateway:
         return {"scanned": scanned, "deleted": deleted, "marked_unknown": marked}
 
     # ------------------------------------------------------------------
-    # 心跳离线扫描（内存状态即可，§2/§6）
+    # 心跳离线扫描（内存状态即可，§1）
     # ------------------------------------------------------------------
 
     def _sweep_loop(self) -> None:
@@ -586,7 +693,7 @@ class DeviceGateway:
                     self._emit("device:heartbeat_timeout", device_id)
                     log.warning("设备 %s 超过 %ss 无心跳，标记离线",
                                 device_id, self.heartbeat_timeout)
-            # issue #52：动作回执保留清理搭既有 sweep 线程（不另建后台系统），
+            # 动作回执保留清理搭既有 sweep 线程（不另建后台系统），
             # 每小时一趟、每趟删除量封顶。
             if now - last_retention_sweep >= 3600:
                 last_retention_sweep = now
@@ -598,7 +705,7 @@ class DeviceGateway:
                     log.warning("设备动作保留清理失败（下轮重试）", exc_info=True)
 
     # ------------------------------------------------------------------
-    # 下行通道（管理 API 线程调用）
+    # 下行通道（管理 API / transport / NotificationGateway 线程调用）
     # ------------------------------------------------------------------
 
     def _emit(self, kind: str, detail: str) -> None:
@@ -617,7 +724,7 @@ class DeviceGateway:
         return st is not None and not st.offline_marked
 
     def kick(self, device_id: str) -> bool:
-        """吊销即时踢线（§3）。返回是否有在线连接被关闭。"""
+        """吊销即时踢线（§4）。返回是否有在线连接被关闭。"""
         st = self.online_state(device_id)
         if st is None:
             return False
@@ -626,6 +733,14 @@ class DeviceGateway:
                             "device has been revoked")
         finally:
             self._safe_close(st.ws)
+        return True
+
+    def drop(self, device_id: str) -> bool:
+        """主动断开当前连接（非撤销，不发 error 帧；端侧会按退避重连）。"""
+        st = self.online_state(device_id)
+        if st is None:
+            return False
+        self._safe_close(st.ws, 1000)
         return True
 
     def _online_or_raise(self, device_id: str) -> ConnectionState:
@@ -641,15 +756,23 @@ class DeviceGateway:
         if capability not in self.registry.scopes_of(device_id):
             raise GatewayError("scope_denied", f"设备未授予 {capability}")
 
+    def capabilities_of(self, device_id: str) -> tuple[str, ...]:
+        """该设备经 hello 声明且被注册 scope 接受的在线能力（离线为空）。"""
+        st = self.online_state(device_id)
+        if st is None or st.offline_marked:
+            return ()
+        scopes = set(self.registry.scopes_of(device_id))
+        return tuple(c for c in st.accepted_capabilities if c in scopes)
+
     def send_query(self, device_id: str, *, operation: str,
                    filters: dict | None = None, max_items: int = 10,
                    timeout_s: float = 15.0) -> dict:
-        """下发 sensor.query 并在 deadline 内等待 sensor.result（§2/§4）。"""
+        """下发 sensor.query 并在 deadline 内等待 sensor.result（§5.3/§6）。"""
         st = self._online_or_raise(device_id)
         self._check_scope(device_id, operation)
         if not (1 <= int(max_items) <= 100):
             raise GatewayError("invalid_message", "max_items 须在 1..100")
-        request_id = uuid.uuid4().hex
+        request_id = new_ulid()
         payload = {
             "request_id": request_id,
             "operation": operation,
@@ -669,46 +792,76 @@ class DeviceGateway:
             self.pending.pop(request_id, None)
 
     def send_action(self, device_id: str, *, capability: str,
-                    args: dict | None = None, idempotency_key: str | None = None,
+                    arguments: dict | None = None,
+                    idempotency_key: str | None = None,
                     authorized_scope: list[str] | None = None,
                     approval_ref: str | None = None,
                     correlation_id: str | None = None,
+                    task_id: str | None = None,
+                    run_id: str | None = None,
+                    observation_id: str | None = None,
                     timeout_s: float = 15.0) -> dict:
-        """下发 action.request；幂等键查重（§6），等待终态回执。"""
+        """下发 action.request；幂等键查重（§7.1），等待终态回执。
+
+        重复幂等键：回已记录的 action_id 真实状态（``duplicate=True`` 标记），
+        绝不重放（§7.1）。
+        """
         st = self._online_or_raise(device_id)
         self._check_scope(device_id, capability)
-        idem_key = idempotency_key or f"idem-{uuid.uuid4().hex}"
+        idem_key = idempotency_key or f"agent:{new_ulid()}"
         if not (8 <= len(idem_key) <= 128):
             raise GatewayError("invalid_message", "idempotency_key 长度须为 8..128")
-        action_id = uuid.uuid4().hex
         idem_store_key = f"device:action:{device_id}:{idem_key}"
+        existing = self.store.get(idem_store_key)
+        if isinstance(existing, dict):
+            # §7.1：重复键回已记录状态，绝不重放；过有效期的非终态按 unknown 报
+            result = dict(existing)
+            if (result.get("state") not in TERMINAL_RECEIPT_STATES
+                    and now_ms() > int(result.get("expires_at") or 0)):
+                result["state"] = "unknown"
+            result["duplicate"] = True
+            return result
+        action_id = new_id("act")
+        timeout_ms = int(timeout_s * 1000)
+        if not (100 <= timeout_ms <= 600000):
+            raise GatewayError("invalid_message",
+                               "timeout 须在 0.1..600s（action.request schema）")
+
         def reserve(tx):
             if tx.get(idem_store_key) is not None:
                 return False
             tx.put(idem_store_key, {
                 "device_id": device_id, "idempotency_key": idem_key,
                 "action_id": action_id, "capability": capability,
-                "created_at": now_ms(), "expires_at": now_ms() + int(timeout_s * 1000),
+                "created_at": now_ms(), "expires_at": now_ms() + timeout_ms,
                 "state": "pending",
             })
             tx.put(f"device:action-id:{device_id}:{action_id}", idem_key)
             return True
 
         if not self.store.transact(reserve):
-            raise GatewayError(
-                "duplicate", f"幂等键 {idem_key} 已对该设备下发过")
+            # 并发下另一线程先占了键：同上，回已记录状态
+            result = dict(self.store.get(idem_store_key) or {})
+            result["duplicate"] = True
+            return result
         payload: dict[str, Any] = {
             "action_id": action_id,
             "capability": capability,
-            "args": dict(args or {}),
-            "authorized_scope": list(authorized_scope or [capability]),
-            "expires_at": now_ms() + int(timeout_s * 1000),
+            "arguments": dict(arguments or {}),
+            "timeout_ms": timeout_ms,
+            "expires_at": now_ms() + timeout_ms,
             "idempotency_key": idem_key,
+            "authorized_scope": list(authorized_scope or [capability]),
         }
+        if task_id:
+            payload["task_id"] = task_id
+        if run_id:
+            payload["run_id"] = run_id
+        if observation_id:
+            payload["observation_id"] = observation_id
         if approval_ref:
             payload["approval_ref"] = approval_ref
         if correlation_id:
-            # EV-02：事件→决策→动作关联键（契约 v1 minor：可选字段）
             payload["correlation_id"] = correlation_id
         pend = _Pending()
         self.pending[action_id] = pend
@@ -722,19 +875,44 @@ class DeviceGateway:
             self.pending.pop(action_id, None)
 
     def action_status(self, device_id: str, idempotency_key: str) -> dict:
-        """Read existing action state; never re-dispatch on timeout/restart."""
+        """只读对账（§7.1/§16）；过期的非终态记录按 unknown 报，绝不重发。"""
         if not (8 <= len(idempotency_key) <= 128):
             raise GatewayError("invalid_message", "invalid idempotency_key")
         record = self.store.get(f"device:action:{device_id}:{idempotency_key}")
         if not isinstance(record, dict):
             raise GatewayError("not_found", "unknown action idempotency key")
         result = dict(record)
-        # A restart drops pending in-memory waiters; the durable reservation
-        # remains, so uncertain side effects require reconciliation.
         if (result.get("state") not in TERMINAL_RECEIPT_STATES
                 and now_ms() > int(result.get("expires_at") or 0)):
             result["state"] = "unknown"
         return result
+
+    # ---- 通知下行（DeviceWssPort 实现，§13.4） -----------------------------
+
+    def _send_notification(self, device_id: str, msg_type: str,
+                           payload: Mapping[str, Any]) -> None:
+        st = self._online_or_raise(device_id)
+        self.send_msg(st, msg_type, dict(payload))
+        self._emit("device:notification", f"{device_id}:{msg_type}")
+
+    async def send_notification_event(self, device_id: str, payload: dict) -> None:
+        """DeviceWssPort：向在线设备写 notification.event payload（§13.1）。"""
+        self._send_notification(device_id, "notification.event", payload)
+
+    async def send_notification_revoke(self, device_id: str, payload: dict) -> None:
+        """whale_wss 可选撤回口（§13.3 notification.revoke）。"""
+        self._send_notification(device_id, "notification.revoke", payload)
+
+    # ---- 录制控制（§12.2） -------------------------------------------------
+
+    def send_recording_control(self, device_id: str, *, run_id: str, op: str,
+                               options: dict | None = None) -> None:
+        """下发 recording.control（fire-and-forget；状态经 recording.state 回报）。"""
+        st = self._online_or_raise(device_id)
+        payload: dict[str, Any] = {"run_id": run_id, "op": op}
+        if options:
+            payload["options"] = dict(options)
+        self.send_msg(st, "recording.control", payload)
 
     # ------------------------------------------------------------------
     # 生命周期

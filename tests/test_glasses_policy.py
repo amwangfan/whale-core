@@ -27,10 +27,10 @@ def test_validate_card_normalizes_and_bounds():
 
 def test_receipt_layering_never_fakes_shown():
     # 手机桥 executed ≠ 眼镜显示
-    v = classify_receipt({"status": "executed", "receipt_id": "r1"})
+    v = classify_receipt({"status": "succeeded", "receipt_id": "r1"})
     assert v.state == "bridge_sent"
     # 只有显示可证才报 shown
-    v2 = classify_receipt({"status": "executed", "receipt_id": "r2",
+    v2 = classify_receipt({"status": "succeeded", "receipt_id": "r2",
                            "display_proof": True})
     assert v2.state == "shown"
     # 无回执/失败/未知：诚实标注

@@ -1,10 +1,11 @@
-"""端云协议 V1 帧校验器（纯 stdlib，不依赖 jsonschema 库）。
+"""端云协议 V2 帧校验器（纯 stdlib，不依赖 jsonschema 库）。
 
-协议事实源是 whale-mobile ``contracts/v1/``；本仓在 ``contracts/v1/`` 持有
-版本化副本（见该目录 README）。V1 全部 16 个 schema 只用到一个很小的
-JSON Schema 子集（draft 2020-12）：type / const / enum / pattern /
-minLength / maxLength / minimum / maximum / minItems / maxItems /
-uniqueItems / items / properties / required / additionalProperties:false。
+协议事实源是 whale-mobile ``contracts/v2/``；本仓在 ``contracts/v2/`` 持有
+版本化镜像（见该目录 README）。V2 全部消息 schema 只用到一个很小的
+JSON Schema 子集（draft 2020-12，§19 明令禁止 $ref/$defs/oneOf 等）：
+type / const / enum / pattern / minLength / maxLength / minimum / maximum /
+minItems / maxItems / uniqueItems / items / properties / required /
+additionalProperties（false 或子 schema）/ maxProperties。
 本模块实现且仅实现该子集；遇到子集之外的关键字会抛 ``SchemaUnsupported``
 （fail closed——宁可拒绝校验也不静默跳过约束）。
 """
@@ -17,15 +18,15 @@ import re
 from pathlib import Path
 from typing import Any
 
-SUPPORTED_MAJOR = 1
-PROTOCOL_VERSION = "1.0"
+SUPPORTED_MAJOR = 2
+PROTOCOL_VERSION = "2.0"
 
 _SCHEMA_DIR_ENV = "WHALE_CONTRACTS_DIR"
 
 _KEYWORDS = {
     "type", "const", "enum", "pattern", "minLength", "maxLength",
     "minimum", "maximum", "minItems", "maxItems", "uniqueItems", "items",
-    "properties", "required", "additionalProperties",
+    "properties", "required", "additionalProperties", "maxProperties",
     # 仅元信息，无校验语义
     "$schema", "$id", "title", "description",
 }
@@ -36,17 +37,25 @@ class SchemaUnsupported(ValueError):
 
 
 def contracts_dir() -> Path:
-    """定位 contracts/v1/messages：环境变量优先，否则按仓库布局向上找。"""
+    """定位 contracts/v2/messages：环境变量优先，否则按仓库布局向上找。
+
+    ``WHALE_CONTRACTS_DIR`` 指向 contracts 根或 v2/messages 目录均可
+    （与 capabilities.py 的约定一致：传入根目录时自动补 v2/messages）。
+    """
     env = os.environ.get(_SCHEMA_DIR_ENV)
     if env:
-        return Path(env)
+        base = Path(env)
+        for candidate in (base, base / "v2" / "messages"):
+            if candidate.is_dir() and any(candidate.glob("*.schema.json")):
+                return candidate
+        return base
     here = Path(__file__).resolve()
     for parent in here.parents:
-        candidate = parent / "contracts" / "v1" / "messages"
+        candidate = parent / "contracts" / "v2" / "messages"
         if candidate.is_dir():
             return candidate
     raise FileNotFoundError(
-        "contracts/v1/messages 不存在；可用 WHALE_CONTRACTS_DIR 显式指定")
+        "contracts/v2/messages 不存在；可用 WHALE_CONTRACTS_DIR 显式指定")
 
 
 def parse_major(version: Any) -> int | None:
@@ -125,15 +134,25 @@ def _check(schema: dict, value: Any, path: str) -> str | None:
                 if err:
                     return err
     if isinstance(value, dict):
+        if "maxProperties" in schema and len(value) > schema["maxProperties"]:
+            return f"{path}: 字段数 > maxProperties {schema['maxProperties']}"
         required = schema.get("required") or []
         for key in required:
             if key not in value:
                 return f"{path}: 缺少必需字段 {key!r}"
         properties = schema.get("properties") or {}
-        if schema.get("additionalProperties") is False:
+        additional = schema.get("additionalProperties", True)
+        if additional is False:
             extra = set(value) - set(properties)
             if extra:
                 return f"{path}: 存在未声明字段 {sorted(extra)}"
+        elif isinstance(additional, dict):
+            # additionalProperties 为子 schema：未声明字段逐一过子校验
+            # （v2 用于 device.heartbeat.modules 这类开放 map）
+            for key in set(value) - set(properties):
+                err = _check(additional, value[key], f"{path}.{key}")
+                if err:
+                    return err
         for key, subschema in properties.items():
             if isinstance(subschema, dict) and key in value:
                 err = _check(subschema, value[key], f"{path}.{key}")
@@ -143,7 +162,7 @@ def _check(schema: dict, value: Any, path: str) -> str | None:
 
 
 class ContractValidator:
-    """加载 contracts/v1/messages 下逐消息 schema，按 type 索引。"""
+    """加载 contracts/v2/messages 下逐消息 schema，按 type 索引。"""
 
     def __init__(self, messages_dir: Path | None = None) -> None:
         directory = messages_dir if messages_dir is not None else contracts_dir()

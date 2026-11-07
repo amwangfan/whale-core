@@ -71,9 +71,10 @@ def validate_card(*, card_id: str, title: str, body: str,
 DISPLAY_STATES = ("requested", "phone_handled", "bridge_sent", "shown",
                   "degraded", "unknown")
 
-#: 桥接回执 status → 显示状态。保守映射：任何缺失字段都降级。
+#: 桥接回执 status → 显示状态（contracts/v2 §7.2 词汇）。保守映射：
+#: 任何缺失字段都降级。
 _RECEIPT_MAP = {
-    "executed": "bridge_sent",      # 手机桥确认已发出（≠ 眼镜已显示）
+    "succeeded": "bridge_sent",     # 手机桥确认已发出（≠ 眼镜已显示）
     "displayed": "shown",           # 眼镜显示可证（桥回显证明）
     "failed": "degraded",
     "unknown": "unknown",
@@ -92,13 +93,13 @@ class DisplayVerdict:
 def classify_receipt(receipt: Optional[dict]) -> DisplayVerdict:
     """把手机桥回执翻译成显示状态。无回执 → unknown（绝不猜 shown）。
 
-    只有桥回执显式 ``display_proof=True`` 且 status=executed 才报 shown。
+    只有桥回执显式 ``display_proof=True`` 且 status=succeeded 才报 shown。
     """
     if not isinstance(receipt, dict):
         return DisplayVerdict("unknown", "no-receipt")
     status = str(receipt.get("status") or "unknown")
     rid = str(receipt.get("receipt_id") or "")[:64]
-    if status == "executed" and receipt.get("display_proof") is True:
+    if status == "succeeded" and receipt.get("display_proof") is True:
         return DisplayVerdict("shown", rid or "bridge-proof")
     return DisplayVerdict(_RECEIPT_MAP.get(status, "unknown"),
                           rid or status or "unknown")

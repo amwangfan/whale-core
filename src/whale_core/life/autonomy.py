@@ -9,8 +9,9 @@
   既有 inspect：预算/静默时段/渠道许可）、幂等键（L2/L3 动作必带）。
 - 推断（inference）最多驱动 L1（提醒/询问/建议），**永不驱动动作**。
 - L4（任意 shell、删数据、改密钥、支付等）直接拒绝。
-- 设备动作回执校验：``executed`` 才算完成；``received``/``accepted`` 只是
-  中间态，不声称完成（「接受」≠「已执行」）；``unknown`` 不自动重试。
+- 设备动作回执校验（contracts/v2 §7.2）：``succeeded`` 才算完成；
+  ``received`` 是唯一非终态，不声称完成（「已收到」≠「已执行」）；
+  ``timeout``/``unknown`` 不自动重试（副作用可能已发生）。
 """
 from __future__ import annotations
 
@@ -44,9 +45,10 @@ KIND_REFUSE = "refuse"
 _DECISION_KINDS = frozenset(
     {KIND_OBSERVE, KIND_REMIND, KIND_DRAFT, KIND_ACTION, KIND_REFUSE})
 
-#: action.receipt 终态（与 contracts/v1 §4 一致；received/accepted 为中间态）
-TERMINAL_RECEIPT_STATES = frozenset({"executed", "failed", "unknown"})
-RECEIPT_STATES = TERMINAL_RECEIPT_STATES | {"received", "accepted"}
+#: action.receipt 终态（contracts/v2 §7.2；received 是唯一非终态）
+TERMINAL_RECEIPT_STATES = frozenset(
+    {"succeeded", "failed", "timeout", "cancelled", "unknown"})
+RECEIPT_STATES = TERMINAL_RECEIPT_STATES | {"received"}
 
 DEFAULT_ACTION_TIMEOUT_S = 15.0
 
@@ -92,10 +94,11 @@ def action_fingerprint(capability: str, device_id: str, args: Mapping[str, Any])
 
 def validate_action_receipt(payload: Mapping[str, Any], *,
                             expect_action_id: str = "") -> str:
-    """校验 action.receipt payload，返回 state；畸形回执抛 AutonomyError。"""
+    """校验 action.receipt payload（contracts/v2 §7），返回 status 词；
+    畸形回执抛 AutonomyError。"""
     if not isinstance(payload, Mapping):
         raise AutonomyError("invalid-receipt", "回执不是对象")
-    state = str(payload.get("state") or "")
+    state = str(payload.get("status") or "")
     if state not in RECEIPT_STATES:
         raise AutonomyError("invalid-receipt", f"未知回执状态 {state!r}")
     action_id = str(payload.get("action_id") or "")
@@ -159,7 +162,7 @@ class AutonomyProposal:
     channel: str = "hud"
     importance: float = 0.5
     topic: str = ""                # outbox 主题去重键
-    capability: str = ""           # action 的设备能力（contracts/v1 §5 枚举）
+    capability: str = ""           # action 的设备能力（contracts/v2 §5.1 枚举）
     device_id: str = ""
     args: Mapping[str, Any] = field(default_factory=dict)
     idempotency_key: str = ""      # action 必填（幂等）
@@ -393,14 +396,21 @@ class AutonomyController:
             return done("unknown", exc.code)
         receipt_ref = (f"action:{proposal.device_id}:{capability}:"
                        f"{receipt.get('action_id')}")
-        if state == "executed":
-            return done("executed", "device-receipt-executed", receipt=receipt_ref)
+        if state == "succeeded":
+            return done("executed", "device-receipt-succeeded", receipt=receipt_ref)
         if state == "failed":
             return done("failed",
                         f"device-receipt-failed:{receipt.get('error_code') or 'internal'}",
                         receipt=receipt_ref)
+        if state == "cancelled":
+            return done("failed", "device-receipt-cancelled: 执行前/中被取消",
+                        receipt=receipt_ref)
         if state == "unknown":
             return done("unknown", "device-receipt-unknown: 外部结果不可知，不自动重试",
                         receipt=receipt_ref)
-        # received/accepted：中间态，「接受」≠「已执行」，不声称完成
+        if state == "timeout":
+            # §7.2：超时不等于未执行（副作用可能已发生），不得自动重放 → unknown
+            return done("unknown", "device-receipt-timeout: 超时≠未执行，不自动重试",
+                        receipt=receipt_ref)
+        # received：唯一非终态，「已收到」≠「已执行」，不声称完成
         return done("deferred", f"receipt-not-terminal:{state}", receipt=receipt_ref)

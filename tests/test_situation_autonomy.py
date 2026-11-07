@@ -91,11 +91,13 @@ def active_device(store, scopes=(NOTIFY,)):
     return registry, info["device_id"]
 
 
-def event_payload(event_id="e111111111111111", kind="screen.memo.created",
+def event_payload(event_id="evt_01J9XK3EM8TQ2ZP0VN6W4RA7YC",
+                  kind="screen.memo.created",
                   summary="论文截止还剩 2 小时", occurred=1780000000000):
+    # contracts/v2 §9 ExperienceEvent：event_id=evt_+ULID 即幂等键
     return {"event_id": event_id, "kind": kind, "occurred_at": occurred,
             "privacy_class": "owner_private", "summary": summary,
-            "schema_version": "1.0"}
+            "source": "screen_memo", "schema_version": "2.0"}
 
 
 def record_fact(situations: SituationStore, *, key="curfew.notice", source,
@@ -359,11 +361,12 @@ def test_inference_never_drives_action_and_l4_refused():
 
 
 @pytest.mark.parametrize("state,expected", [
-    ("executed", "executed"),
+    ("succeeded", "executed"),
     ("failed", "failed"),
     ("unknown", "unknown"),
-    ("received", "deferred"),   # 「接受」≠「已执行」
-    ("accepted", "deferred"),
+    ("received", "deferred"),   # 「已收到」≠「已执行」（v2 唯一非终态）
+    ("timeout", "unknown"),     # §7.2：超时≠未执行，不自动重放
+    ("cancelled", "failed"),    # 执行前/中被取消
 ])
 def test_action_receipt_states(state, expected):
     store = InMemoryStore()
@@ -378,7 +381,7 @@ def test_action_receipt_states(state, expected):
                       event_id=f"evt-{state}")
     ctx = owner_ctx(NOTIFY)
     decision = controller.evaluate(sit, ctx)
-    receipt = {"state": state}
+    receipt = {"status": state}
     if state == "failed":
         receipt["error_code"] = "internal"
     port = SimulatedActionPort(registry, online={device_id: True},
@@ -569,7 +572,7 @@ def test_event_to_situation_to_reminder_closed_loop_replayable():
     ctx = resolved_owner_ctx()
 
     payload = event_payload()
-    result = bridge.ingest_sensor_event(device_id, payload, ctx=ctx)
+    result = bridge.ingest_experience_event(device_id, payload, ctx=ctx)
     # 确认（ack）+ 幂等持久化
     assert result["ack"] == [payload["event_id"]]
     assert result["duplicate"] is False
@@ -589,7 +592,7 @@ def test_event_to_situation_to_reminder_closed_loop_replayable():
     assert payload["event_id"] in draft.evidence
 
     # 重放同一事件：幂等去重，不产生第二个情境/草稿
-    again = bridge.ingest_sensor_event(device_id, payload, ctx=ctx)
+    again = bridge.ingest_experience_event(device_id, payload, ctx=ctx)
     assert again == {"ack": [payload["event_id"]], "duplicate": True}
     assert len(situations.active_for("owner")) == 1
 
@@ -607,12 +610,12 @@ def test_forged_device_events_never_trigger():
     ctx = resolved_owner_ctx()
     # 未配对设备
     with pytest.raises(BridgeError) as exc:
-        bridge.ingest_sensor_event("ff" * 16, event_payload(), ctx=ctx)
+        bridge.ingest_experience_event("ff" * 16, event_payload(), ctx=ctx)
     assert exc.value.code == "auth_failed"
     # 已吊销设备
     registry.revoke(device_id)
     with pytest.raises(BridgeError) as exc:
-        bridge.ingest_sensor_event(device_id, event_payload(), ctx=ctx)
+        bridge.ingest_experience_event(device_id, event_payload(), ctx=ctx)
     assert exc.value.code == "device_revoked"
     # schema 非法（缺 event_id）的已配对设备事件
     good_store = InMemoryStore()
@@ -622,7 +625,7 @@ def test_forged_device_events_never_trigger():
     bad = event_payload()
     bad.pop("event_id")
     with pytest.raises(BridgeError) as exc:
-        bridge2.ingest_sensor_event(dev2, bad)
+        bridge2.ingest_experience_event(dev2, bad)
     assert exc.value.code == "invalid_message"
     # 全部零副作用：无情境、无草稿、无持久化事件
     assert situations.active_for("owner") == ()

@@ -1,9 +1,9 @@
 """D1：DeviceRegistry —— 设备注册 / 配对码 / 吊销 / scope 上限。
 
-协议锚点：whale-mobile contracts/v1/PROTOCOL.md §3——
-设备身份 = Ed25519 密钥对；``device_id`` = 公钥 SHA-256 前 16 字节 hex
-（仅标识，不构成认证）。配对：设备提交公钥得 6 位配对码（10 min 有效），
-主人在管理端批准后设备转 active；吊销即时生效。
+协议锚点：contracts/v2/PROTOCOL.md §3/§4（本仓镜像，whale-mobile 为
+canonical）——设备身份 = Ed25519 密钥对；``device_id`` = 公钥 SHA-256
+前 16 字节 hex（仅标识，不构成认证）。配对：设备提交公钥得 6 位配对码
+（10 min 有效），主人在管理端批准后设备转 active；吊销即时生效。
 
 持久化对齐 ``memory/spaces.py`` 的 kv 模式：设备元数据存
 ``device:{device_id}``，InMemoryStore 与 SqliteMemoryStore 双后端天然一致。
@@ -24,18 +24,14 @@ from uuid import uuid4
 
 from whale_core.memory.store import MemoryStore
 
-#: V1 能力全集（§5 能力命名；与 contracts/v1/messages 中 enum 保持一致）。
-DEVICE_CAPABILITIES: tuple[str, ...] = (
-    "screen.context.read", "screen.history.search", "screen.evidence.read",
-    "screen.live.subscribe", "phone.notification.post", "phone.notification.read",
-    "phone.call.ring", "phone.call.audio", "phone.device.safe_action",
-    # V1.1（whale-mobile GL-01）：眼镜 HUD（端侧无桥时降级手机通知）
-    "glasses.card.show", "glasses.card.update", "glasses.card.dismiss",
-    # V1.1（core#58）：Root 手机自主体（UI 控制/观察/Shell）
-    "device.agent.control", "device.agent.observe", "device.agent.shell",
-    # Query-only scope; never implied by control/observe/shell or granted retroactively.
-    "device.agent.output.read",
-)
+def _load_device_capabilities() -> tuple[str, ...]:
+    """V2 能力全集（§5.1 单一事实源）：直读 contracts 镜像，不维护第二份清单。"""
+    from whale_core.devices.capabilities import all_capabilities
+    return all_capabilities()
+
+
+#: V2 能力全集（contracts/v2 §5.1；device.hello schema 枚举逐字一致）。
+DEVICE_CAPABILITIES: tuple[str, ...] = _load_device_capabilities()
 
 PAIR_CODE_TTL_S = 600
 DEVICE_KEY_PREFIX = "device:"
@@ -249,8 +245,8 @@ class DeviceRegistry:
     def set_scopes(self, device_id: str, scopes: Iterable[str]) -> dict[str, Any]:
         """收窄/重设设备注册 scope（active 设备）。
 
-        用于 core 侧「停止自主体」等价手段：去掉 ``device.agent.*`` 后编排循环
-        下一步 ``_preflight`` 得 ``failed/scope_denied`` 并中止、不重放。
+        用于 core 侧「停止自主体」等价手段：收窄后网关下一步 scope 检查
+        即拒（scope_denied），新动作不再下发；v2 能力名直读 contracts 枚举。
         只允许 ``DEVICE_CAPABILITIES`` 内的名字；空列表表示撤掉全部能力上限。
         """
         meta = self.get(device_id)

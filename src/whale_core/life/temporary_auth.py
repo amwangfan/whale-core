@@ -51,9 +51,12 @@ GRANTABLE_SCOPES = frozenset({
     "screen.context.read", "screen.history.search", "screen.evidence.read",
     "screen.live.subscribe", "phone.notification.post", "phone.notification.read",
     "phone.call.ring", "phone.call.audio", "phone.device.safe_action",
-    # core#58：安卓自主体能力（租约可携带；群聊仍受 GROUP_CEILING）
-    "device.agent.control", "device.agent.observe", "device.agent.shell",
-    "device.agent.output.read",
+    # contracts/v2 §5.1 设备动作族（租约可携带；群聊仍受 GROUP_CEILING）
+    "device.observe", "device.tap", "device.long_press", "device.swipe",
+    "device.input_text", "device.key", "device.wait",
+    "device.app.launch", "device.app.list", "device.shell",
+    "device.file.read", "device.file.write", "device.file.list",
+    "device.logcat", "device.stop", "device.output.read", "device.status",
 })
 
 MAX_ACTIVE_CODES = 64
@@ -256,7 +259,10 @@ class TemporaryAuthService:
         ttl = float(ttl_s if ttl_s is not None else self.DEVICE_CHALLENGE_TTL_S)
         if ttl <= 0:
             raise TemporaryAuthError("ttl_s 必须为正")
-        challenge_id = f"dc-{uuid4().hex[:16]}"
+        # contracts/v2 §3：challenge_id = 26 字符 ULID（device.confirm.request
+        # schema 硬性 pattern）；ULID 生成自包含于 transports/base.py
+        from whale_core.devices.transports.base import new_ulid
+        challenge_id = new_ulid()
         self.store.put(f"otp:device-challenge:{challenge_id}", {
             "challenge_id": challenge_id,
             "state": "pending",

@@ -1,16 +1,16 @@
-"""issue #52：设备动作回执/幂等记录的有界保留与清理测试（离线）。"""
+"""设备动作回执/幂等记录的有界保留与清理测试（离线，contracts/v2 §7/§16）。"""
 from __future__ import annotations
 
-from whale_core.devices.gateway import DeviceGateway
+from whale_core.devices.embedded_wss import EmbeddedWssGateway
 from whale_core.memory.store import InMemoryStore
 
 DAY = 24 * 3600 * 1000
 NOW = 10 * DAY
 
 
-def _gateway(store: InMemoryStore) -> DeviceGateway:
+def _gateway(store: InMemoryStore) -> EmbeddedWssGateway:
     """sweep 只用 store——绕过 WS 监听构造（其它测试覆盖协议面）。"""
-    gw = DeviceGateway.__new__(DeviceGateway)
+    gw = EmbeddedWssGateway.__new__(EmbeddedWssGateway)
     gw.store = store
     return gw
 
@@ -19,7 +19,7 @@ def _put_action(store, device, idem, *, state, created, expires=NOW, action_id=N
     action_id = action_id or f"aid-{idem}"
     store.put(f"device:action:{device}:{idem}", {
         "device_id": device, "idempotency_key": idem, "action_id": action_id,
-        "capability": "camera.capture", "created_at": created,
+        "capability": "device.tap", "created_at": created,
         "state": state, "expires_at": expires,
     })
     store.put(f"device:action-id:{device}:{action_id}", idem)
@@ -29,14 +29,14 @@ def _put_action(store, device, idem, *, state, created, expires=NOW, action_id=N
 def test_terminal_records_older_than_retention_deleted():
     store = InMemoryStore()
     gw = _gateway(store)
-    aid = _put_action(store, "dev1", "idem-old", state="executed",
+    aid = _put_action(store, "dev1", "idem-old", state="succeeded",
                       created=NOW, action_id="a1")
     # 让记录变老：直接改写 created_at 超过 7 天保留窗
     key = "device:action:dev1:idem-old"
     rec = store.get(key)
     rec["created_at"] = NOW - 8 * DAY
     store.put(key, rec)
-    store.put(f"device:receipts:dev1:{aid}", [{"state": "executed", "ts": 1}])
+    store.put(f"device:receipts:dev1:{aid}", [{"status": "succeeded", "ts": 1}])
     stats = gw.sweep_action_retention(now=NOW)
     assert stats["deleted"] == 1
     assert store.get(key) is None
@@ -47,7 +47,7 @@ def test_terminal_records_older_than_retention_deleted():
 def test_terminal_within_retention_kept_for_reconciliation():
     store = InMemoryStore()
     gw = _gateway(store)
-    _put_action(store, "dev1", "idem-new", state="executed", created=NOW - DAY)
+    _put_action(store, "dev1", "idem-new", state="succeeded", created=NOW - DAY)
     stats = gw.sweep_action_retention(now=NOW)
     assert stats["deleted"] == 0
     assert store.get("device:action:dev1:idem-new") is not None
@@ -91,7 +91,7 @@ def test_pending_past_grace_marked_unknown_not_deleted():
 def test_orphan_receipt_streams_cleaned():
     store = InMemoryStore()
     gw = _gateway(store)
-    store.put("device:receipts:dev1:ghost", [{"state": "executed", "ts": 1}])
+    store.put("device:receipts:dev1:ghost", [{"status": "succeeded", "ts": 1}])
     stats = gw.sweep_action_retention(now=NOW)
     assert store.get("device:receipts:dev1:ghost") is None
     assert stats["deleted"] == 1
@@ -101,7 +101,7 @@ def test_delete_cap_bounds_single_pass():
     store = InMemoryStore()
     gw = _gateway(store)
     for i in range(5):
-        _put_action(store, "dev1", f"idem-{i}", state="executed",
+        _put_action(store, "dev1", f"idem-{i}", state="succeeded",
                     created=NOW - 30 * DAY, action_id=f"a{i}")
     stats = gw.sweep_action_retention(now=NOW, max_deletes=2)
     assert stats["deleted"] == 2
