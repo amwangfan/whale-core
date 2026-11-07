@@ -22,10 +22,12 @@ from typing import Any, Callable, Mapping
 
 # Re-export these names for existing callers of life.autonomy.
 from whale_core.devices.actions import (
+    ActionReceiptError,
     DeviceActionPort,
     DeviceUnavailable,
     RECEIPT_STATES,
     TERMINAL_RECEIPT_STATES,
+    validate_action_receipt as _validate_action_receipt,
 )
 
 from whale_core.life.conversation_context import (
@@ -74,17 +76,10 @@ def action_fingerprint(capability: str, device_id: str, args: Mapping[str, Any])
 def validate_action_receipt(payload: Mapping[str, Any], *,
                             expect_action_id: str = "") -> str:
     """校验 action.receipt payload，返回 state；畸形回执抛 AutonomyError。"""
-    if not isinstance(payload, Mapping):
-        raise AutonomyError("invalid-receipt", "回执不是对象")
-    state = str(payload.get("state") or "")
-    if state not in RECEIPT_STATES:
-        raise AutonomyError("invalid-receipt", f"未知回执状态 {state!r}")
-    action_id = str(payload.get("action_id") or "")
-    if not action_id:
-        raise AutonomyError("invalid-receipt", "回执缺少 action_id")
-    if expect_action_id and action_id != expect_action_id:
-        raise AutonomyError("invalid-receipt", "回执 action_id 与请求不符")
-    return state
+    try:
+        return _validate_action_receipt(payload, expect_action_id=expect_action_id)
+    except ActionReceiptError as exc:
+        raise AutonomyError(exc.code, str(exc)) from exc
 
 
 class ApprovalBook:

@@ -35,12 +35,13 @@ flowchart LR
 - `DeviceActionPort`：下发动作的结构化接口。
 - `DeviceUnavailable`：携带协议错误码的不可用异常。
 - `RECEIPT_STATES` 和 `TERMINAL_RECEIPT_STATES`：中间态与终态的统一集合。
+- `validate_action_receipt` 与 `ActionReceiptError`：设备层回执校验；旧生活层入口保留 `AutonomyError` 异常兼容。
 
-生产网关、模拟设备和生活逻辑共用这一份定义。`life.autonomy` 继续导出旧名字，已有调用方和异常捕获保持兼容。生活层仍负责提议、审批和动作回执校验；本次不改动作权限或重试规则。
+生产网关、模拟设备和生活逻辑共用这一份定义。`life.autonomy` 继续导出旧名字，已有调用方和异常捕获保持兼容。生活层负责提议、审批，并调用设备层校验回执；本次不改动作权限或重试规则。
 
 ## 后续精简候选与验收边界
 
-1. 回执校验仍在 `life/autonomy.py`，`devices/agent_failures.py` 因此保留这一处反向依赖。下一步可单独评估迁移校验器，需保持 `AutonomyError` 捕获兼容。
+1. 回执校验已迁到设备层，`devices/agent_failures.py` 不再导入 `life/autonomy.py`。旧生活层函数只转接异常，保留原错误码与消息。
 2. Mobile 顶层 `modules/`、`transport/` 包含独立模块和历史资料；不能仅因 Android 使用 `app/` 就整目录删除，应先核对构建脚本、测试和引用。
 3. Core 的自主体有编排与模拟测试，生产决策入口及 Root 真机完整链路仍需单独验收。
 4. 手机图库投递尚未形成完整 Mobile API；Core 暂存不等于送达，不在本批中改成完成状态。

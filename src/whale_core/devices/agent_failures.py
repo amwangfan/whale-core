@@ -14,8 +14,9 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
-from whale_core.devices.actions import DeviceUnavailable
-from whale_core.life.autonomy import validate_action_receipt, AutonomyError
+from whale_core.devices.actions import (
+    ActionReceiptError, DeviceUnavailable, validate_action_receipt,
+)
 
 FAILED_TIMEOUT = "failed/timeout"
 FAILED_UNAVAILABLE = "failed/unavailable"
@@ -66,7 +67,7 @@ def classify_receipt(payload: Mapping[str, Any] | None, *,
         return UNKNOWN, "invalid-receipt"
     try:
         state = validate_action_receipt(payload, expect_action_id=expect_action_id)
-    except AutonomyError as exc:
+    except ActionReceiptError as exc:
         return UNKNOWN, exc.code
     if state == "executed":
         return "executed", "device-receipt-executed"

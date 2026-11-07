@@ -8,6 +8,28 @@ TERMINAL_RECEIPT_STATES = frozenset({"executed", "failed", "unknown"})
 RECEIPT_STATES = TERMINAL_RECEIPT_STATES | {"received", "accepted"}
 
 
+class ActionReceiptError(ValueError):
+    """设备回执格式或关联动作不合法。"""
+
+    code = "invalid-receipt"
+
+
+def validate_action_receipt(payload: Mapping[str, Any], *,
+                            expect_action_id: str = "") -> str:
+    """校验 action.receipt payload，返回 state；不负责自主权限裁决。"""
+    if not isinstance(payload, Mapping):
+        raise ActionReceiptError("回执不是对象")
+    state = str(payload.get("state") or "")
+    if state not in RECEIPT_STATES:
+        raise ActionReceiptError(f"未知回执状态 {state!r}")
+    action_id = str(payload.get("action_id") or "")
+    if not action_id:
+        raise ActionReceiptError("回执缺少 action_id")
+    if expect_action_id and action_id != expect_action_id:
+        raise ActionReceiptError("回执 action_id 与请求不符")
+    return state
+
+
 class DeviceUnavailable(Exception):
     """设备面明确不可用：离线/超时/吊销/不支持（携带协议错误码）。"""
 
