@@ -223,8 +223,16 @@ def resolve_pending_recommendation(store: MemoryStore, conversation_id: str,
     decision = "accept" if _affirmative(answer) else "reject" if _negative(answer) else ""
     if not decision:
         return None
+    if pending.get("conversation_id") != str(conversation_id)[:160]:
+        store.delete(key)
+        return None
     draft = store.get(f"life:draft:{pending.get('draft_id')}")
     if not isinstance(draft, dict):
+        store.delete(key)
+        return None
+    from whale_core.life.initiative import draft_is_pending
+    ledger = store.get(f"life:ledger:{pending.get('draft_id')}") or {}
+    if not draft_is_pending(draft, ledger):
         store.delete(key)
         return None
     pending["status"] = "attempting" if decision == "accept" else "resolving_rejected"
