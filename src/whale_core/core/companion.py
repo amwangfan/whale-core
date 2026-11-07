@@ -310,7 +310,7 @@ class WhaleCompanion:
                     complete_recommendation(
                         self.store, conversation_id, draft, outcome="rejected")
                     persona_text = (persona_text or "") + (
-                        "\\n主人明确拒绝了上一条内容推荐；不要继续推送同一条。")
+                        "\n主人明确拒绝了上一条内容推荐；不要继续推送同一条。")
                 else:
                     delivery = None
                     try:
@@ -326,7 +326,7 @@ class WhaleCompanion:
                               if outcome == "accepted"
                               else "投递结果不确定，未自动重试。")
                     persona_text = (persona_text or "") + (
-                        "\\n主人明确接受了上一条内容推荐。投递状态：" + detail)
+                        "\n主人明确接受了上一条内容推荐。投递状态：" + detail)
 
             exploration_context, exploration_candidates = build_exploration_context(
                 self.store, original)
