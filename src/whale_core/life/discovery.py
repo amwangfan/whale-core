@@ -17,6 +17,8 @@ class DiscoveredContent:
     summary: str = ""
     inspected: bool = False
     # inspected=True must be backed by actual source adapter evidence, never assumed.
+    content_type: str = "web"  # web | video
+    inspection_method: str = ""  # page text, public description, subtitle, etc.
 
 
 class DiscoveryPlanner:
@@ -44,9 +46,18 @@ class DiscoveryPlanner:
         result = []
         for _, item in ranked[:self.max_candidates]:
             # Source title and summary are treated as untrusted data, not instructions.
-            message = f"发现一个可能和你最近的兴趣有关的内容：《{item.title[:80]}》。要看看吗？"
+            if item.content_type == "video":
+                message = f"发现一个可能和你最近的兴趣有关的 B 站视频：《{item.title[:80]}》。要看看吗？"
+            else:
+                message = f"发现一个可能和你最近的兴趣有关的内容：《{item.title[:80]}》。要看看吗？"
+            matched_interest = next(
+                (interest for interest in state.interests
+                 if interest.lower() in (item.title + " " + item.summary).lower()), "")
+            method = item.inspection_method or ("source_fetched" if item.inspected else "not_inspected")
             result.append(ProactiveDraft(
                 draft_id=f"discovery:{item.item_id}", text=message,
-                reason=f"兴趣匹配；来源：{item.source_name[:80]}；已核查内容：{item.inspected}",
-                evidence=(item.url,), channel="hud", importance=0.45, created_at=at))
+                reason=(f"兴趣匹配；来源：{item.source_name[:80]}；"
+                        f"已读取来源：{item.inspected}；读取方式：{method}"),
+                evidence=(item.url,), channel="hud", importance=0.45,
+                created_at=at, topic=matched_interest))
         return tuple(result)
