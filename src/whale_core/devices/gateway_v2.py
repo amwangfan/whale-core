@@ -5,7 +5,7 @@
 - 按能力类别选路（GUI 类 embedded>adb>ssh；shell/文件类 ssh>embedded>adb）；
 - 幂等派发：同 device_id+idempotency_key 直接回已记录终态，绝不重放；
 - scope 检查走 registry（设备真相仍在 registry，transport 健康另报）；
-- 降级事实写入 receipt.provider_ref（如 "degraded:adb→ssh"）。
+- 能力不可用时跳过该通道；动作一经下发，不根据模糊失败自动跨通道重放。
 
 本类用于路由/演示，进程内回执有上限，不能替代生产 EmbeddedWssGateway 的持久化幂等记录。
 """
@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
-
 from typing import Any, Mapping, Sequence
 
 from whale_core.devices.capabilities import GUI_CAPS, SHELL_CAPS
@@ -69,11 +68,8 @@ class DeviceGatewayV2:
             return _GUI_ORDER
         return _DEFAULT_ORDER
 
-    async def _pick(self, device_id: str, capability: str,
-                    exclude: set[str] | None = None) -> DeviceTransport | None:
+    async def _pick(self, device_id: str, capability: str) -> DeviceTransport | None:
         for kind in self._route_order(capability):
-            if exclude and kind in exclude:
-                continue
             t = self._transports.get(kind)
             if t is None:
                 continue
