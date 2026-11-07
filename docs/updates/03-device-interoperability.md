@@ -1,6 +1,8 @@
 # 第 03 批：设备互联整理
 
-状态：实现和本机联合验证完成，待推送。日期：2026-11-07。
+状态：已完成本机联合验证，两仓均已推送。日期：2026-11-07。
+
+对应提交：[Core 9afddd4](https://github.com/dreaminutes/whale-core/commit/9afddd4)、[Mobile 637f3e6](https://github.com/dreaminutes/whale-mobile/commit/637f3e6)。
 
 ## 本批更新
 
