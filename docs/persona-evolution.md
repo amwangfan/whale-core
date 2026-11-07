@@ -31,3 +31,11 @@ and half-life decay; stable preferences do not decay. Pending facts now receive
 an explicit expiry and can be removed by `expire_pending_facts`. Confirmation
 and correction preserve the source memory space, so promotion cannot silently
 move a fact into a broader ACL domain.
+
+
+## Explicit maintenance
+
+The owner-authenticated `POST /api/v1/life/maintenance` endpoint runs
+`run_memory_maintenance` on demand. It reports deduplication and expiry
+counts; it is not silently scheduled. This keeps destructive retention cleanup
+under an explicit operator action until retention periods are reviewed.
