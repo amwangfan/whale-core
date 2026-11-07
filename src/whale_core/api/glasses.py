@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import contextvars
 import threading
 import json
 import os
@@ -102,6 +103,10 @@ def summarize_location_fields(
         # 保留约城市街区精度，避免把原始高精度坐标灌进提示词。
         parts.append(f"约 {lat_f:.4f},{lng_f:.4f}")
     return "；".join(parts)[:200]
+
+
+_glasses_request_location: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "whale_glasses_request_location", default="")
 
 
 def resolve_request_location(env: dict, store, body: dict | None) -> str:
@@ -187,11 +192,12 @@ def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict) 
 
 
 
-def install_request_location_intent_wrapper(orch, request_location: dict) -> None:
+def install_request_location_intent_wrapper(orch, request_location=None) -> None:
     """把「当前请求位置」注入 orch._intent_context；全生命周期只包装一次。
 
-    ``request_location`` 是可变 dict，键 ``value`` 由每轮 companion_chat 写入。
-    若每次请求都重新包装，闭包会嵌套捕获旧位置，导致东京→大阪仍含东京。
+    位置来自 ``_glasses_request_location`` ContextVar（每请求 set），避免
+    同进程重叠请求互相覆盖共享 dict；``request_location`` 参数保留兼容旧调用，
+    若传入则仅在 ContextVar 为空时回落读取其 ``value``。
     """
     if orch is None or getattr(orch, "_glasses_loc_wrapped", False):
         return
@@ -200,8 +206,10 @@ def install_request_location_intent_wrapper(orch, request_location: dict) -> Non
     def _intent_context_with_location(conversation_id, text, *, allowed_spaces=None):
         base = _orig_ctx(conversation_id, text, allowed_spaces=allowed_spaces)
         from whale_core.core.prompt_composer import format_location_context
-        loc_line = format_location_context(
-            location=request_location.get("value") or None)
+        loc = _glasses_request_location.get() or ""
+        if not loc and isinstance(request_location, dict):
+            loc = str(request_location.get("value") or "")
+        loc_line = format_location_context(location=loc or None)
         return (loc_line + ("\n" + base if base else ""))[:1500]
 
     orch._intent_context = _intent_context_with_location  # type: ignore
@@ -468,6 +476,8 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
         first = None
         turn_id = ""
         wait = False
+        # 每请求位置进 ContextVar，重叠请求互不覆盖（不再靠共享 dict）。
+        _glasses_request_location.set(location or "")
         with _orch_lock:
             if _cached["companion"] is None:
                 companion = _make_companion()
@@ -476,60 +486,58 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
                 _cached["orch"] = _build_search_orchestrator(companion)
             companion = _cached["companion"]
             orch = _cached["orch"]
-            brain = companion.model
-            try:
-                brain.default_location = location or None
-            except Exception:
-                pass
-            if orch is None:
-                # 无搜索 provider：退回纯陪伴（仍注入位置到 system）。
-                reply = companion.chat(
-                    text, conversation_id=conversation_id, location=location or None)
-                total = int((_time.perf_counter() - t_all) * 1000)
-                return reply, {"intentMs": 0, "toolMs": 0, "replyMs": total,
-                               "totalMs": total}
-            # 把位置摘要塞进意图上下文：SearchIntentRouter 本地生活规则会读
-            # 「当前位置：」行；LLM 规划也能把地点当缺省。
-            # 包装只安装一次；每轮只更新当前请求位置，避免层层嵌套。
-            _request_location["value"] = location or ""
-            install_request_location_intent_wrapper(orch, _request_location)
-            envelope = InputEnvelope(
-                conversation_id=conversation_id, text=text,
-                source="glasses:phone", channel="glasses",
-                owner_id=cfg.owner_uin or cfg.owner_uid)
-            if not (parallel_on and hasattr(orch, "handle_envelope_parallel")):
-                result = orch.handle_envelope(envelope)
-                timing = {
-                    "intentMs": int(getattr(result, "intent_ms", 0) or 0),
-                    "toolMs": int(getattr(result, "tool_ms", 0) or 0),
-                    "replyMs": int(getattr(result, "reply_ms", 0) or 0),
-                    "totalMs": int((_time.perf_counter() - t_all) * 1000),
-                }
-                return result.reply, timing
-            # 2026-11-06 并行链路：DS 第一条不等意图；Kimi 后台判定，
-            # 需要工具时第二条进 FollowupBoard（轮询取 / 旧客户端同步合并）。
-            turn_id = followups.open(conversation_id)
+            if orch is not None:
+                # 包装只安装一次；位置读 ContextVar。
+                install_request_location_intent_wrapper(orch, _request_location)
+        # 锁外跑 LLM：同会话连说时 B 能在 A 生成中启动，并靠 history 早落盘看见 A。
+        brain = companion.model
+        try:
+            brain.default_location = location or None
+        except Exception:
+            pass
+        if orch is None:
+            reply = companion.chat(
+                text, conversation_id=conversation_id, location=location or None)
+            total = int((_time.perf_counter() - t_all) * 1000)
+            return reply, {"intentMs": 0, "toolMs": 0, "replyMs": total,
+                           "totalMs": total}
+        envelope = InputEnvelope(
+            conversation_id=conversation_id, text=text,
+            source="glasses:phone", channel="glasses",
+            owner_id=cfg.owner_uin or cfg.owner_uid)
+        if not (parallel_on and hasattr(orch, "handle_envelope_parallel")):
+            result = orch.handle_envelope(envelope)
+            timing = {
+                "intentMs": int(getattr(result, "intent_ms", 0) or 0),
+                "toolMs": int(getattr(result, "tool_ms", 0) or 0),
+                "replyMs": int(getattr(result, "reply_ms", 0) or 0),
+                "totalMs": int((_time.perf_counter() - t_all) * 1000),
+            }
+            return result.reply, timing
+        # 2026-11-06 并行链路：DS 第一条不等意图；Kimi 后台判定，
+        # 需要工具时第二条进 FollowupBoard（轮询取 / 旧客户端同步合并）。
+        turn_id = followups.open(conversation_id)
 
-            def _settled(route, out, _tid=turn_id):
-                if route == "task" and out is not None and (out.reply or "").strip():
-                    followups.settle(_tid, "ready", reply=out.reply, timing={
-                        "intentMs": int(out.intent_ms or 0),
-                        "toolMs": int(out.tool_ms or 0),
-                        "followupMs": int(out.reply_ms or 0)})
-                else:
-                    followups.settle(_tid, "none")
+        def _settled(route, out, _tid=turn_id):
+            if route == "task" and out is not None and (out.reply or "").strip():
+                followups.settle(_tid, "ready", reply=out.reply, timing={
+                    "intentMs": int(out.intent_ms or 0),
+                    "toolMs": int(out.tool_ms or 0),
+                    "followupMs": int(out.reply_ms or 0)})
+            else:
+                followups.settle(_tid, "none")
 
-            first = orch.handle_envelope_parallel(envelope, on_settled=_settled)
-            wait_reason = ""
-            if followup_mode != "poll" and legacy_policy != "none":
-                if legacy_policy == "intent":
-                    wait_reason = "intent"
-                elif _rule_plan_is_task(orch, text, location):
-                    wait_reason = "rule"
-                elif (legacy_policy == "smart"
-                      and first_reply_promises_followup(first.reply)):
-                    wait_reason = "promise"
-            wait = bool(wait_reason)
+        first = orch.handle_envelope_parallel(envelope, on_settled=_settled)
+        wait_reason = ""
+        if followup_mode != "poll" and legacy_policy != "none":
+            if legacy_policy == "intent":
+                wait_reason = "intent"
+            elif _rule_plan_is_task(orch, text, location):
+                wait_reason = "rule"
+            elif (legacy_policy == "smart"
+                  and first_reply_promises_followup(first.reply)):
+                wait_reason = "promise"
+        wait = bool(wait_reason)
         # 锁外等待第二条：不阻塞下一轮请求进入。
         timing = {"intentMs": 0, "toolMs": 0,
                   "replyMs": int(first.reply_ms or 0), "followupMs": 0}
