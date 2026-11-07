@@ -48,11 +48,13 @@ flowchart LR
 
 ## 联合检查
 
+能力词表由 Mobile 的 `scripts/generate_capabilities.py` 从现有协议生成，Core 的 `devices/capabilities.py` 是发布时随包携带的生成文件，不在运行时读取另一个仓库。详细流程见 [Mobile 互联开发说明](https://github.com/dreaminutes/whale-mobile/blob/refactor/simplify-integration/docs/device-interop-development.md)。
+
 在 Core checkout 内运行：
 
 ```sh
-python scripts/contract_sync_check.py --core . --mobile ../whale-mobile
-python -m pytest tests/test_arch_channels.py tests/test_situation_autonomy.py tests/test_device_agent_loop.py tests/test_device_receipt_results.py
+python -m pip install -e '.[dev,devices]' -r ../whale-mobile/server/requirements.txt
+python scripts/check_device_interop.py --mobile ../whale-mobile --log-dir ../logs/04-device-interop
 ```
 
 在 Mobile checkout 内运行 `python tests/contract_validate.py`，需要 jsonschema。真实设备、Root、语音和眼镜需要另行联调；离线测试不能替代这些验收。

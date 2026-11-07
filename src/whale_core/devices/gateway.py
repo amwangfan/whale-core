@@ -75,9 +75,10 @@ class ConnectionState:
 class _Pending:
     """跨线程的请求-应答对（管理 API 线程等，WS 线程 resolve）。"""
 
-    __slots__ = ("event", "result")
+    __slots__ = ("device_id", "event", "result")
 
-    def __init__(self) -> None:
+    def __init__(self, device_id: str) -> None:
+        self.device_id = device_id
         self.event = threading.Event()
         self.result: dict | None = None
 
@@ -406,7 +407,7 @@ class DeviceGateway:
         """
         st = self._online_or_raise(device_id)
         challenge_id = str(payload["challenge_id"])
-        pend = _Pending()
+        pend = _Pending(device_id)
         with self.lock:
             self.pending_confirm[challenge_id] = pend
         try:
@@ -421,8 +422,7 @@ class DeviceGateway:
     def _on_device_confirm_response(self, st: ConnectionState, msg: dict) -> None:
         p = msg["payload"]
         challenge_id = str(p["challenge_id"])
-        with self.lock:
-            pend = self.pending_confirm.pop(challenge_id, None)
+        pend = self._take_pending(self.pending_confirm, challenge_id, st.device_id)
         if pend is None:
             log.warning("收到无对应挑战的 confirm.response challenge=%s，忽略",
                         challenge_id)
@@ -436,13 +436,22 @@ class DeviceGateway:
 
     def _on_sensor_result(self, st: ConnectionState, msg: dict) -> None:
         request_id = msg["payload"]["request_id"]
-        pend = self.pending.pop(request_id, None)
+        pend = self._take_pending(self.pending, request_id, st.device_id)
         if pend is not None:
             pend.result = msg["payload"]
             pend.event.set()
         else:
             log.warning("收到无对应请求的 sensor.result request_id=%s，忽略",
                         request_id)
+
+    def _take_pending(self, requests: dict[str, _Pending], ref_id: str,
+                      device_id: str | None) -> _Pending | None:
+        """Only the addressed device may complete a request; foreign replies leave it pending."""
+        with self.lock:
+            pending = requests.get(ref_id)
+            if pending is None or pending.device_id != device_id:
+                return None
+            return requests.pop(ref_id)
 
     def _on_action_receipt(self, st: ConnectionState, msg: dict) -> None:
         p = msg["payload"]
@@ -483,7 +492,7 @@ class DeviceGateway:
                             }
                         self.store.put(action_key, record)
         if state in TERMINAL_RECEIPT_STATES:
-            pend = self.pending.pop(action_id, None)
+            pend = self._take_pending(self.pending, action_id, st.device_id)
             if pend is not None:
                 pend.result = p
                 pend.event.set()
@@ -654,8 +663,9 @@ class DeviceGateway:
             "max_items": int(max_items),
             "deadline": now_ms() + int(timeout_s * 1000),
         }
-        pend = _Pending()
-        self.pending[request_id] = pend
+        pend = _Pending(device_id)
+        with self.lock:
+            self.pending[request_id] = pend
         try:
             self.send_msg(st, "sensor.query", payload)
             if not pend.event.wait(timeout_s + 5):
@@ -663,7 +673,8 @@ class DeviceGateway:
                     "expired", f"等待 sensor.result 超时（{timeout_s}s deadline）")
             return dict(pend.result or {})
         finally:
-            self.pending.pop(request_id, None)
+            with self.lock:
+                self.pending.pop(request_id, None)
 
     def send_action(self, device_id: str, *, capability: str,
                     args: dict | None = None, idempotency_key: str | None = None,
@@ -707,8 +718,9 @@ class DeviceGateway:
         if correlation_id:
             # EV-02：事件→决策→动作关联键（契约 v1 minor：可选字段）
             payload["correlation_id"] = correlation_id
-        pend = _Pending()
-        self.pending[action_id] = pend
+        pend = _Pending(device_id)
+        with self.lock:
+            self.pending[action_id] = pend
         try:
             self.send_msg(st, "action.request", payload)
             if not pend.event.wait(timeout_s + 5):
@@ -716,7 +728,8 @@ class DeviceGateway:
                     "expired", f"等待 action.receipt 超时（{timeout_s}s）")
             return dict(pend.result or {})
         finally:
-            self.pending.pop(action_id, None)
+            with self.lock:
+                self.pending.pop(action_id, None)
 
     def action_status(self, device_id: str, idempotency_key: str) -> dict:
         """Read existing action state; never re-dispatch on timeout/restart."""

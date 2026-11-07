@@ -43,7 +43,7 @@ def collect(root: Path) -> "dict[str, Path]":
             found[name] = p
     for pattern in SCOPE_GLOBS:
         for p in sorted(base.glob(pattern)):
-            found[str(p.relative_to(base))] = p
+            found[p.relative_to(base).as_posix()] = p
     return found
 
 
@@ -90,6 +90,12 @@ def main(argv: "list[str] | None" = None) -> int:
             "whale-core 镜像；不要两侧分别改。"
         )
         return 1
+    for label, root in (("A", a_root), ("B", b_root)):
+        base = root / "contracts/v1"
+        if (any(not (base / name).is_file() for name in SCOPE_FILES)
+                or any(not any(base.glob(pattern)) for pattern in SCOPE_GLOBS)):
+            print(f"error: {label} 侧契约不完整：需要 PROTOCOL.md、schema 和示例", file=sys.stderr)
+            return 2
     total = len(collect(a_root))
     print(f"ok: contracts/v1 范围内 {total} 个文件两侧一致")
     return 0

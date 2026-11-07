@@ -34,6 +34,18 @@ BASE = {
 
 
 class TestContractSyncCheck:
+    def test_two_empty_contract_trees_cannot_pass(self, tmp_path):
+        mod = _load()
+        for side in ('a', 'b'):
+            (tmp_path / side / 'contracts/v1').mkdir(parents=True)
+        assert mod.main(['--a', str(tmp_path / 'a'), '--b', str(tmp_path / 'b')]) == 2
+
+    def test_same_missing_category_on_both_sides_is_incomplete(self, tmp_path):
+        mod = _load()
+        for side in ('a', 'b'):
+            _make_tree(tmp_path / side, {k: v for k, v in BASE.items() if not k.startswith('messages/')})
+        assert mod.main(['--a', str(tmp_path / 'a'), '--b', str(tmp_path / 'b')]) == 2
+
     def test_in_sync(self, tmp_path, capsys):
         mod = _load()
         _make_tree(tmp_path / "a", BASE)

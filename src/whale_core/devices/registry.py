@@ -23,19 +23,7 @@ from typing import Any, Iterable, Optional
 from uuid import uuid4
 
 from whale_core.memory.store import MemoryStore
-
-#: V1 能力全集（§5 能力命名；与 contracts/v1/messages 中 enum 保持一致）。
-DEVICE_CAPABILITIES: tuple[str, ...] = (
-    "screen.context.read", "screen.history.search", "screen.evidence.read",
-    "screen.live.subscribe", "phone.notification.post", "phone.notification.read",
-    "phone.call.ring", "phone.call.audio", "phone.device.safe_action",
-    # V1.1（whale-mobile GL-01）：眼镜 HUD（端侧无桥时降级手机通知）
-    "glasses.card.show", "glasses.card.update", "glasses.card.dismiss",
-    # V1.1（core#58）：Root 手机自主体（UI 控制/观察/Shell）
-    "device.agent.control", "device.agent.observe", "device.agent.shell",
-    # Query-only scope; never implied by control/observe/shell or granted retroactively.
-    "device.agent.output.read",
-)
+from whale_core.devices.capabilities import DEVICE_CAPABILITIES
 
 PAIR_CODE_TTL_S = 600
 DEVICE_KEY_PREFIX = "device:"
