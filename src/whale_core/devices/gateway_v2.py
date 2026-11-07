@@ -143,7 +143,14 @@ class DeviceGatewayV2:
                         observation_id=observation_id)
                     # 动作一旦下发，失败可能发生在副作用执行之后。
                     # 不自动跨通道重放；调用方依据回执进行后续观察或人工核对。
-                    receipt = await transport.execute(device_id, request)
+                    try:
+                        receipt = await transport.execute(device_id, request)
+                    except Exception:
+                        # 无法确认是否已发生副作用，记录 unknown，禁止同键重放。
+                        receipt = ActionReceipt(
+                            action_id=action_id, status=ReceiptStatus.UNKNOWN,
+                            task_id=task_id, summary="传输异常，执行结果未知",
+                            error_code="internal", completed_at=now_ms())
 
                 self._receipts[key] = receipt
                 self._receipts.move_to_end(key)
