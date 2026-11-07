@@ -121,7 +121,7 @@ def build_exploration_context(store: MemoryStore, query: str, *,
                 state = ("页面已读取，视频本体未播放" if is_video else
                          "来源正文已读取" if item.get("inspected") else "仅发现，未核查")
                 title = str(item.get("title") or "")[:160]
-                summary = str(item.get("summary") or "").replace("\\n", " ")[:220]
+                summary = str(item.get("summary") or "").replace("\n", " ")[:220]
                 url = str(item.get("url") or "")[:500]
                 method = str(item.get("inspection_method") or "")[:80]
                 lines.append(f"  · [{source_kind}；{state}；{method}] {title} — {summary} {url}")
@@ -152,7 +152,7 @@ def build_exploration_context(store: MemoryStore, query: str, *,
                          f"来源：{', '.join(draft.get('evidence') or [])[:400]}")
     if not found:
         lines.append("对应日期没有可用的探索记录；不要编造看过的内容。")
-    return "\\n".join(lines), candidates
+    return "\n".join(lines), candidates
 
 
 def _offer_key(conversation_id: str) -> str:
@@ -161,13 +161,13 @@ def _offer_key(conversation_id: str) -> str:
 
 
 def _affirmative(text: str) -> bool:
-    value = re.sub(r"[\\s，。！？!?,、…~～]+", "", str(text or "")).lower()
+    value = re.sub(r"[\s，。！？!?,、…~～]+", "", str(text or "")).lower()
     return value in {"要", "要啊", "好", "好啊", "可以", "行", "想看",
                      "看看", "发我", "发过来", "给我", "发来", "来一个"}
 
 
 def _negative(text: str) -> bool:
-    value = re.sub(r"[\\s，。！？!?,、…~～]+", "", str(text or "")).lower()
+    value = re.sub(r"[\s，。！？!?,、…~～]+", "", str(text or "")).lower()
     return value in {"不要", "不用", "算了", "不看", "没兴趣", "不感兴趣",
                      "先不用", "下次吧", "不了", "不想看"}
 
