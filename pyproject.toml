@@ -12,7 +12,7 @@ keywords = ["companion-ai", "agent", "memory", "plugins", "whale-io"]
 dependencies = ["tzdata>=2024.1; sys_platform == 'win32'"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "Pillow>=10"]
+dev = ["pytest>=8.0", "Pillow>=10", "asyncssh>=2.14,<2.15"]
 # websockets 17 已验证兼容（PCM 中继 sync server/client 离线索引测试通过）
 voice = ["websockets>=14,<18"]
 desktop = ["pywebview>=5,<7"]
