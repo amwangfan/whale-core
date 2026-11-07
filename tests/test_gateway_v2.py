@@ -105,6 +105,61 @@ class TestRouting:
         assert r.error_code == "unavailable"
 
 
+class TestDispatchReliability:
+    def test_parallel_same_key_is_sent_once(self):
+        class SlowShell(ShellTransport):
+            async def execute(self, device_id, action):
+                await asyncio.sleep(0.03)
+                return await super().execute(device_id, action)
+
+        async def exercise():
+            gw = DeviceGatewayV2()
+            transport = SlowShell()
+            gw.register_transport(transport)
+            results = await asyncio.gather(*[
+                gw.execute("dev1", "device.shell", {"command": "id"},
+                           idempotency_key="parallel")
+                for _ in range(8)
+            ])
+            assert len(transport.operations) == 1
+            assert len({r.action_id for r in results}) == 1
+
+        run(exercise())
+
+    def test_ambiguous_failure_does_not_try_second_transport(self):
+        class FailingEmbedded(ShellTransport):
+            kind = "embedded_wss"
+
+            async def execute(self, device_id, action):
+                self.operations.append({"capability": action.capability})
+                return ActionReceipt(
+                    action_id=action.action_id, status=ReceiptStatus.FAILED,
+                    error_code="internal", completed_at=now_ms())
+
+        gw = DeviceGatewayV2()
+        first = FailingEmbedded()
+        adb = FlakyGuiTransport()
+        gw.register_transport(first)
+        gw.register_transport(adb)
+        # Shell 优先 embedded_wss（无 SSH）；即使 internal 也不跨通道重发。
+        receipt = run(gw.execute("dev1", "device.shell", {"command": "echo ok"},
+                                 idempotency_key="ambiguous"))
+        assert receipt.status is ReceiptStatus.FAILED
+        assert len(first.operations) == 1
+        assert not adb.operations
+
+    def test_in_memory_receipts_have_configurable_capacity(self):
+        gw = DeviceGatewayV2()
+        gw.max_cached_receipts = 2
+        gw.register_transport(gui_transport())
+        for i in range(3):
+            run(gw.execute("dev1", "device.tap", {"x": i, "y": i},
+                           idempotency_key=f"k{i}"))
+        assert gw.action_status("dev1", "k0") is None
+        assert gw.action_status("dev1", "k1") is not None
+        assert gw.action_status("dev1", "k2") is not None
+
+
 class TestIdempotency:
     def test_same_key_returns_recorded_receipt(self):
         gw = DeviceGatewayV2()
