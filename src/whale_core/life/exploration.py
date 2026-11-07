@@ -175,11 +175,13 @@ class ExplorationManager:
                                       InnerState(interests=tuple(interests)), now=at)
         drafts = [draft for draft in planned if self.outbox.propose(draft)]
         self.store.put(LAST_AT_KEY, at.isoformat())
-        sources = tuple(dict.fromkeys(item.url for item in items if item.url))
-        videos = [item for item in items if item.content_type == "video"]
-        note = (f"探索窗口：实际读取外部页面 {len(items)} 条，其中 B 站视频页面 {len(videos)} 条；"
+        read_items = [item for item in items if item.inspected]
+        sources = tuple(dict.fromkeys(item.url for item in read_items if item.url))
+        read_videos = [item for item in read_items if item.content_type == "video"]
+        note = (f"探索窗口：收到外部候选 {len(items)} 条，实际读取页面 {len(read_items)} 条，"
+                f"其中 B 站视频页面 {len(read_videos)} 条；"
                 f"{len(drafts)} 条进入候选草稿箱（未发送）。")
-        if videos:
+        if read_videos:
             note += " 视频记录仅代表公开页面/简介已读取，不代表播放或看完视频本体。"
         diary_items = [{
             "item_id": item.item_id, "title": item.title[:200],
