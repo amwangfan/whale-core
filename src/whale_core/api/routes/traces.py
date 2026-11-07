@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from whale_core.life.trace import TraceLedger, _trace_dict, explain
 
@@ -27,8 +28,7 @@ def _ledger(handler) -> TraceLedger:
         if not path:
             store_path = getattr(getattr(ctx, "store", None), "path", "") or ""
             if store_path and store_path != ":memory:":
-                path = store_path.rsplit("/", 1)[0] + "/trace.sqlite3" \
-                    if "/" in store_path else "trace.sqlite3"
+                path = str(Path(store_path).with_name("trace.sqlite3"))
             else:
                 path = ":memory:"
         led = TraceLedger(path)

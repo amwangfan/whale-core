@@ -5,12 +5,45 @@ from __future__ import annotations
 import json
 from contextlib import contextmanager
 from http.client import HTTPConnection
+from types import SimpleNamespace
 
+import pytest
+
+from whale_core.api.routes.traces import _ledger
 from whale_core.api.server import ApiContext, WhaleApiServer
 from whale_core.life.trace import TraceLedger
 from whale_core.memory.store import InMemoryStore
 
 TOKEN = "trace-api-test-token"
+
+
+@pytest.mark.parametrize("as_path", [False, True])
+def test_default_ledger_stays_beside_memory_database(tmp_path, monkeypatch, as_path):
+    monkeypatch.delenv("WHALE_TRACE_DB", raising=False)
+    data_dir = tmp_path / "private-data"
+    data_dir.mkdir()
+    memory_path = data_dir / "memory.sqlite3"
+    store = SimpleNamespace(path=memory_path if as_path else str(memory_path))
+    handler = SimpleNamespace(ctx=SimpleNamespace(store=store))
+    ledger = _ledger(handler)
+    try:
+        trace_id = ledger.begin("test")
+        assert (data_dir / "trace.sqlite3").is_file()
+        assert _ledger(handler) is ledger
+        assert trace_id
+    finally:
+        ledger.close()
+
+
+def test_explicit_ledger_path_wins(tmp_path, monkeypatch):
+    explicit = tmp_path / "custom-trace.sqlite3"
+    monkeypatch.setenv("WHALE_TRACE_DB", str(explicit))
+    handler = SimpleNamespace(ctx=SimpleNamespace(store=SimpleNamespace(path="unused/memory.sqlite3")))
+    ledger = _ledger(handler)
+    try:
+        assert explicit.is_file()
+    finally:
+        ledger.close()
 
 
 @contextmanager
