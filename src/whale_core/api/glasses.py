@@ -324,10 +324,18 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
             text = str(draft.get("text") or "").strip()
             if evidence:
                 text += "\n来源：" + evidence[0]
-            return deliver_result(
+            result = deliver_result(
                 [{"kind": "text", "text": text}],
                 conversation=conversation_id,
                 summary="exploration:" + str(draft.get("draft_id") or "")[:80])
+            # A logged stub is not a successful delivery. Only a QQ send or
+            # Whale notification accepted by the Core gateway resolves "要".
+            result["ok"] = any(
+                item.get("ok") and item.get("channel") in
+                {"qq_c2c", "qq_group", "whale_notification"}
+                for item in result.get("receipts", ())
+                if isinstance(item, dict))
+            return result
 
         return WhaleCompanion(
             store, brain_factory(), curator=MemoryCurator(store),
