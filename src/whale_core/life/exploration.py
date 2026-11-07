@@ -19,7 +19,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Callable
+from typing import Any, Callable, Mapping
+from zoneinfo import ZoneInfo
 
 from whale_core.life.discovery import DiscoveredContent, DiscoveryPlanner
 from whale_core.life.initiative import ProactiveDraft, ProactiveOutbox
@@ -114,9 +115,10 @@ class InterestTracker:
 
 @dataclass(frozen=True)
 class DiaryEntry:
-    day: str  # YYYY-MM-DD（UTC）
+    day: str  # YYYY-MM-DD（按探索配置时区）
     note: str
     sources: tuple[str, ...] = ()
+    items: tuple[dict[str, Any], ...] = ()
 
 
 class ExplorationManager:
@@ -126,7 +128,8 @@ class ExplorationManager:
 
     def __init__(self, store: MemoryStore, *, planner: DiscoveryPlanner,
                  now_fn: Callable[[], datetime] | None = None,
-                 base_interval_s: int = 21600, max_backoff: int = 4):
+                 base_interval_s: int = 21600, max_backoff: int = 4,
+                 timezone_name: str = "UTC"):
         self.store = store
         self.planner = planner
         self.tracker = InterestTracker(store)
@@ -134,6 +137,8 @@ class ExplorationManager:
         self._now_fn = now_fn
         self.base_interval_s = int(base_interval_s)
         self.max_backoff = max(0, int(max_backoff))
+        ZoneInfo(timezone_name)
+        self.timezone_name = timezone_name
 
     # ------------------------------------------------------------------ time
     def _now(self, now: datetime | None) -> datetime:
@@ -171,11 +176,27 @@ class ExplorationManager:
         for draft in drafts:
             self.outbox.propose(draft)
         self.store.put(LAST_AT_KEY, at.isoformat())
-        sources = tuple(dict.fromkeys(url for d in drafts for url in d.evidence))
-        self.write_diary(
-            f"探索窗口：审查外部供给内容 {len(items)} 条，"
-            f"{len(drafts)} 条进入候选草稿箱（未发送）。",
-            sources=sources, now=at)
+        sources = tuple(dict.fromkeys(item.url for item in items if item.url))
+        videos = [item for item in items if item.content_type == "video"]
+        note = (f"探索窗口：实际读取外部页面 {len(items)} 条，其中 B 站视频页面 {len(videos)} 条；"
+                f"{len(drafts)} 条进入候选草稿箱（未发送）。")
+        if videos:
+            note += " 视频记录仅代表公开页面/简介已读取，不代表播放或看完视频本体。"
+        diary_items = [{
+            "item_id": item.item_id, "title": item.title[:200],
+            "url": item.url[:2000], "source_name": item.source_name[:80],
+            "summary": item.summary[:700], "content_type": item.content_type,
+            "inspected": bool(item.inspected),
+            "inspection_method": item.inspection_method[:80],
+        } for item in items[:20]]
+        self.write_diary(note, sources=sources, items=diary_items, now=at)
+        from whale_core.life.exploration_chat import write_reflection
+        for draft in drafts:
+            write_reflection(
+                self.store, kind="recommended", note=draft.text,
+                draft_id=draft.draft_id, topic=draft.topic,
+                evidence=draft.evidence, status="pending",
+                now=at, timezone_name=self.timezone_name)
         return drafts
 
     # -------------------------------------------------------------- feedback
@@ -198,19 +219,40 @@ class ExplorationManager:
         return int(self.store.get(BACKOFF_KEY) or 0)
 
     # ----------------------------------------------------------------- diary
+    def _day(self, at: datetime) -> str:
+        return at.astimezone(ZoneInfo(self.timezone_name)).date().isoformat()
+
     def diary(self, day: str) -> tuple[DiaryEntry, ...]:
         raw = self.store.get(f"{DIARY_KEY_PREFIX}{day}") or []
-        return tuple(DiaryEntry(day=str(e.get("day", day)),
-                                note=str(e.get("note", "")),
-                                sources=tuple(e.get("sources", ())))
-                     for e in raw)
+        return tuple(DiaryEntry(
+            day=str(e.get("day", day)), note=str(e.get("note", "")),
+            sources=tuple(e.get("sources", ())),
+            items=tuple(dict(item) for item in e.get("items", ())
+                        if isinstance(item, dict)))
+            for e in raw if isinstance(e, dict))
 
-    def write_diary(self, note: str, *, sources=(), now: datetime | None = None) -> None:
-        """向当日（UTC 日期）日记追加一条；note 截断 500 字符，sources 保留 URL 列表。"""
+    def write_diary(self, note: str, *, sources=(), items=(),
+                    now: datetime | None = None) -> None:
+        """追加事实探索日记；只记真实读取过的来源，不将页面读取写成视频播放。"""
         at = self._now(now)
-        day = at.date().isoformat()
+        day = self._day(at)
         key = f"{DIARY_KEY_PREFIX}{day}"
         entries = list(self.store.get(key) or [])
+        safe_items = []
+        for item in items or ():
+            if not isinstance(item, Mapping):
+                continue
+            safe_items.append({
+                "item_id": str(item.get("item_id") or "")[:120],
+                "title": str(item.get("title") or "")[:200],
+                "url": str(item.get("url") or "")[:2000],
+                "source_name": str(item.get("source_name") or "")[:80],
+                "summary": str(item.get("summary") or "")[:700],
+                "content_type": str(item.get("content_type") or "web")[:30],
+                "inspected": bool(item.get("inspected")),
+                "inspection_method": str(item.get("inspection_method") or "")[:80],
+            })
         entries.append({"day": day, "note": str(note)[:DIARY_NOTE_MAX],
-                        "sources": [str(s) for s in sources]})
-        self.store.put(key, entries)
+                        "sources": [str(s)[:2000] for s in sources][:20],
+                        "items": safe_items[:20]})
+        self.store.put(key, entries[-100:])
