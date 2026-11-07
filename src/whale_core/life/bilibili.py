@@ -44,6 +44,7 @@ class BilibiliContentAdapter:
         bvid = path_match.group(1)
         before = (line or "")[:match.start()].strip(" \t-*•")
         title = before.split(" — ", 1)[0].split(" – ", 1)[0].strip()
+        title = re.sub(r"^\\s*\\d+[.)]\\s*", "", title).strip(" []()（）")
         snippet = ""
         if " — " in before:
             snippet = before.split(" — ", 1)[1].strip()
