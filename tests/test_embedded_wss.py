@@ -663,6 +663,13 @@ def test_action_receipt_from_other_device_does_not_consume_pending(api):
              "timeout": 5})
         req = sim.recv()
         action_id = req["payload"]["action_id"]
+        # 模拟 other device 侧也存在相同 action_id 映射，确保测试命中
+        # pending.device_id 校验，而不是仅由 action-id 查表前置检查拦截。
+        gateway.store.put(
+            f"device:action-id:{other.device_id}:{action_id}", "foreign-idem")
+        gateway.store.put(
+            f"device:action:{other.device_id}:foreign-idem",
+            {"action_id": action_id, "state": "pending"})
         now = now_ms()
         other.send(other.frame("action.receipt", {
             "action_id": action_id, "status": "succeeded",
