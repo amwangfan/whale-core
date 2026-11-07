@@ -26,7 +26,7 @@ class DeliveryItem:
 
 @dataclass
 class DeliveryReceipt:
-    channel: str  # qq_c2c | qq_group | phone_gallery | stub_log
+    channel: str  # qq_c2c | qq_group | whale_notification | phone_gallery | stub_log
     ok: bool
     detail: str = ""
     qq_online: bool | None = None
