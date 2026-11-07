@@ -86,16 +86,16 @@ class TestRouting:
         assert r.status is ReceiptStatus.SUCCEEDED
         assert gui.operations and not shell.operations
 
-    def test_degrade_on_channel_failure(self):
+    def test_ssh_preferred_when_both_ssh_and_adb_offer_shell(self):
         gw = DeviceGatewayV2()
         flaky = FlakyGuiTransport()  # kind=adb, shell 会 FAILED/internal
         shell = ShellTransport()
         gw.register_transport(flaky)
         gw.register_transport(shell)
-        # shell 能力顺序 ssh>embedded>adb——ssh 直接可用，不会到 adb
         r = run(gw.execute("dev1", "device.shell", {"command": "id"},
                            idempotency_key="k3"))
         assert r.status is ReceiptStatus.SUCCEEDED
+        assert shell.operations and not flaky.operations
 
     def test_no_channel_unavailable(self):
         gw = DeviceGatewayV2()
