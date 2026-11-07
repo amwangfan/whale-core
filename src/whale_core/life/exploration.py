@@ -13,7 +13,7 @@
 - ``life:explore:interests``      兴趣台账 {小写键: {topic, weight}}
 - ``life:explore:last_at``        上次真实探索时间（ISO8601）
 - ``life:explore:backoff``        无回应退避等级（int，0..max_backoff）
-- ``life:explore:diary:{day}``    当日日记条目列表（day 为 UTC 日期）
+- ``life:explore:diary:{day}``    当日日记条目列表（day 为探索配置时区日期）
 """
 from __future__ import annotations
 
