@@ -318,8 +318,20 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
     def _make_companion():
         from whale_core.core.companion import WhaleCompanion
         from whale_core.memory.curation import MemoryCurator
-        return WhaleCompanion(store, brain_factory(),
-                              curator=MemoryCurator(store))
+
+        def _deliver_exploration(draft, conversation_id):
+            evidence = list(draft.get("evidence") or ())
+            text = str(draft.get("text") or "").strip()
+            if evidence:
+                text += "\\n来源：" + evidence[0]
+            return deliver_result(
+                [{"kind": "text", "text": text}],
+                conversation=conversation_id,
+                summary="exploration:" + str(draft.get("draft_id") or "")[:80])
+
+        return WhaleCompanion(
+            store, brain_factory(), curator=MemoryCurator(store),
+            exploration_delivery=_deliver_exploration)
 
     # 单 owner 通道：复用 companion/orchestrator，避免每请求重建搜索/shell 插件。
     # ThreadingHTTPServer 下用锁串行化一轮 handle，避免改 location / intent 上下文竞态。
