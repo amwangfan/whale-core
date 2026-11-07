@@ -36,6 +36,7 @@ def main(argv=None) -> int:
     if not args.contracts_only:
         core_tests = [
             'tests/test_device_action_receipts.py', 'tests/test_device_agent_loop.py',
+            'tests/test_device_schema.py',
             'tests/test_device_request_ownership.py',
             'tests/test_device_receipt_results.py', 'tests/test_device_output_query.py',
             'tests/test_devices_registry.py', 'tests/test_devices_scopes.py',

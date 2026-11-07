@@ -33,9 +33,11 @@ def main() -> int:
         stage = Path(temporary)
         for name in ("pyproject.toml", "README.md", "README_EN.md", "CONTRIBUTING.md"):
             shutil.copy2(ROOT / name, stage / name)
-        for name in ("src", "licenses", "docs", "plugins"):
+        for name in ("src", "docs", "plugins", "contracts"):
             shutil.copytree(ROOT / name, stage / name,
                             ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "static"))
+        if (ROOT / "licenses").is_dir():
+            shutil.copytree(ROOT / "licenses", stage / "licenses")
         shutil.copytree(web, stage / "src" / "whale_core" / "static")
         command = [sys.executable, "-m", "pip", "wheel", "--no-deps",
                    "--wheel-dir", str(output)]

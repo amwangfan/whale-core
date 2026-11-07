@@ -8,6 +8,7 @@ tmp_path，不碰生产 /tmp/whale-qq-runner.lock。
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -121,3 +122,22 @@ def test_run_acquires_lock_before_runner_checks(tmp_path, monkeypatch):
     rc = cli_main(["qq", *_run_args(tmp_path)])
     assert rc == 2  # 运行器 fail closed：WEQ_SSE_TOKEN 未配置
     assert qq_cli.LOCK_PATH.exists()  # 锁文件已由 CLI 入口创建
+
+
+@pytest.mark.parametrize('raises', [False, True])
+def test_run_holds_lock_then_releases_on_return_or_error(monkeypatch, raises):
+    def run(args, *, prog):
+        assert qq_cli._try_acquire_lock(qq_cli.LOCK_PATH) is None
+        if raises:
+            raise RuntimeError('runner failed')
+        return 0
+    monkeypatch.setattr(qq_cli, '_load_runner', lambda: SimpleNamespace(main=run))
+    if raises:
+        with pytest.raises(RuntimeError, match='runner failed'):
+            qq_cli.main(['run'])
+    else:
+        assert qq_cli.main(['run']) == 0
+    assert qq_cli._LOCK_FD is None
+    fd = qq_cli._try_acquire_lock(qq_cli.LOCK_PATH)
+    assert fd is not None
+    os.close(fd)

@@ -25,6 +25,10 @@ assert package.parent == Path(sys.argv[1]).resolve(), package
 static = _repo_static_dir()
 assert static is not None and package in static.parents, static
 assert (static / "index.html").is_file()
+from whale_core.devices.schema import ContractValidator, contracts_dir
+assert package in contracts_dir().parents, contracts_dir()
+contracts = ContractValidator()
+assert len(contracts.validators) >= 17
 from whale_core.profiles import assemble_runtime
 from whale_core.service.workflows import WorkflowsService
 bundle = assemble_runtime('local', store=InMemoryStore(), env={})
