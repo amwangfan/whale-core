@@ -526,6 +526,40 @@ def test_query_result_roundtrip(api):
         sim.close()
 
 
+def test_query_result_from_other_device_does_not_consume_pending(api):
+    """同 request_id 的回包只能由发起查询的已认证设备完成。"""
+    sim, gateway = _api_rig(api)
+    other, _ = _api_rig(api)
+    sim.connect(gateway.port)
+    other.connect(gateway.port)
+    try:
+        box, thread = _http_in_thread(
+            api, "POST", f"/api/v1/devices/{sim.device_id}/query",
+            {"operation": "screen.history.search", "timeout": 5})
+        query = sim.recv()
+        request_id = query["payload"]["request_id"]
+
+        other.send(other.frame("sensor.result", {
+            "request_id": request_id, "status": "ok",
+            "data": [{"title": "wrong device"}], "truncated": False,
+            "source": "capture.local"}))
+        time.sleep(0.2)
+        assert thread.is_alive(), "其他设备的回包不能消费 pending 请求"
+
+        sim.send(sim.frame("sensor.result", {
+            "request_id": request_id, "status": "ok",
+            "data": [{"title": "origin device"}], "truncated": False,
+            "source": "capture.local"}))
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+        status, body = box["result"]
+        assert status == 200
+        assert body["result"]["result"]["data"] == [{"title": "origin device"}]
+    finally:
+        sim.close()
+        other.close()
+
+
 def test_query_offline_device(api):
     sim, gateway = _api_rig(api)
     status, body = _req(api, "POST", f"/api/v1/devices/{sim.device_id}/query",

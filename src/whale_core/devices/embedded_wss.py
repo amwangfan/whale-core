@@ -98,13 +98,14 @@ class ConnectionState:
 
 
 class _Pending:
-    """跨线程的请求-应答对（管理 API 线程等，WS 线程 resolve）。"""
+    """跨线程请求-应答对，并绑定发起请求的已认证设备身份。"""
 
-    __slots__ = ("event", "result")
+    __slots__ = ("event", "result", "device_id")
 
-    def __init__(self) -> None:
+    def __init__(self, device_id: str | None = None) -> None:
         self.event = threading.Event()
         self.result: dict | None = None
+        self.device_id = device_id
 
 
 class EmbeddedWssGateway:
@@ -451,7 +452,19 @@ class EmbeddedWssGateway:
 
     def _on_sensor_result(self, st: ConnectionState, msg: dict) -> None:
         request_id = msg["payload"]["request_id"]
-        pend = self.pending.pop(request_id, None)
+        with self.lock:
+            pend = self.pending.get(request_id)
+            if pend is not None and pend.device_id != st.device_id:
+                mismatch = True
+            else:
+                mismatch = False
+                if pend is not None:
+                    self.pending.pop(request_id, None)
+        if mismatch:
+            log.warning(
+                "sensor.result 设备身份不匹配 request_id=%s expected=%s actual=%s，忽略",
+                request_id, pend.device_id, st.device_id)
+            return
         if pend is not None:
             pend.result = msg["payload"]
             pend.event.set()
@@ -492,8 +505,19 @@ class EmbeddedWssGateway:
                         }
                     self.store.put(action_key, record)
         if status in TERMINAL_RECEIPT_STATES:
-            pend = self.pending.pop(action_id, None)
-            if pend is not None:
+            with self.lock:
+                pend = self.pending.get(action_id)
+                if pend is not None and pend.device_id != st.device_id:
+                    mismatch = True
+                else:
+                    mismatch = False
+                    if pend is not None:
+                        self.pending.pop(action_id, None)
+            if mismatch:
+                log.warning(
+                    "action.receipt 设备身份不匹配 action_id=%s expected=%s actual=%s，忽略等待方",
+                    action_id, pend.device_id, st.device_id)
+            elif pend is not None:
                 pend.result = p
                 pend.event.set()
             self._emit("device:action_receipt", f"{st.device_id}:{action_id}:{status}")
@@ -576,7 +600,7 @@ class EmbeddedWssGateway:
         """
         st = self._online_or_raise(device_id)
         challenge_id = str(payload["challenge_id"])
-        pend = _Pending()
+        pend = _Pending(device_id)
         with self.lock:
             self.pending_confirm[challenge_id] = pend
         try:
@@ -586,13 +610,26 @@ class EmbeddedWssGateway:
             return dict(pend.result or {"approved": False, "reason": "empty"})
         finally:
             with self.lock:
-                self.pending_confirm.pop(challenge_id, None)
+                if self.pending_confirm.get(challenge_id) is pend:
+                    self.pending_confirm.pop(challenge_id, None)
 
     def _on_device_confirm_response(self, st: ConnectionState, msg: dict) -> None:
         p = msg["payload"]
         challenge_id = str(p["challenge_id"])
         with self.lock:
-            pend = self.pending_confirm.pop(challenge_id, None)
+            with self.lock:
+            pend = self.pending_confirm.get(challenge_id)
+            if pend is not None and pend.device_id != st.device_id:
+                mismatch = True
+            else:
+                mismatch = False
+                if pend is not None:
+                    self.pending_confirm.pop(challenge_id, None)
+        if mismatch:
+            log.warning(
+                "confirm.response 设备身份不匹配 challenge=%s expected=%s actual=%s，忽略",
+                challenge_id, pend.device_id, st.device_id)
+            return
         if pend is None:
             log.warning("收到无对应挑战的 confirm.response challenge=%s，忽略",
                         challenge_id)
@@ -780,8 +817,9 @@ class EmbeddedWssGateway:
             "max_items": int(max_items),
             "deadline": now_ms() + int(timeout_s * 1000),
         }
-        pend = _Pending()
-        self.pending[request_id] = pend
+        pend = _Pending(device_id)
+        with self.lock:
+            self.pending[request_id] = pend
         try:
             self.send_msg(st, "sensor.query", payload)
             if not pend.event.wait(timeout_s + 5):
@@ -789,7 +827,9 @@ class EmbeddedWssGateway:
                     "expired", f"等待 sensor.result 超时（{timeout_s}s deadline）")
             return dict(pend.result or {})
         finally:
-            self.pending.pop(request_id, None)
+            with self.lock:
+                if self.pending.get(request_id) is pend:
+                    self.pending.pop(request_id, None)
 
     def send_action(self, device_id: str, *, capability: str,
                     arguments: dict | None = None,
@@ -863,8 +903,9 @@ class EmbeddedWssGateway:
             payload["approval_ref"] = approval_ref
         if correlation_id:
             payload["correlation_id"] = correlation_id
-        pend = _Pending()
-        self.pending[action_id] = pend
+        pend = _Pending(device_id)
+        with self.lock:
+            self.pending[action_id] = pend
         try:
             self.send_msg(st, "action.request", payload)
             if not pend.event.wait(timeout_s + 5):
@@ -872,7 +913,9 @@ class EmbeddedWssGateway:
                     "expired", f"等待 action.receipt 超时（{timeout_s}s）")
             return dict(pend.result or {})
         finally:
-            self.pending.pop(action_id, None)
+            with self.lock:
+                if self.pending.get(action_id) is pend:
+                    self.pending.pop(action_id, None)
 
     def action_status(self, device_id: str, idempotency_key: str) -> dict:
         """只读对账（§7.1/§16）；过期的非终态记录按 unknown 报，绝不重发。"""
