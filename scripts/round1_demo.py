@@ -301,7 +301,7 @@ async def main() -> int:
     # ---- 报告 ----
     sent = provider.drain_sent()
     report = {
-        "device": args.device, "goal": args.goal,
+        "device": args.device_id, "goal": args.goal,
         "task_results": task_results,
         "im_outbound_recorded_count": len(sent),
         "im_outbound_preview": [s.get("params", {}) for s in sent][:3],
