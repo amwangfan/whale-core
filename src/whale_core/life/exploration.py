@@ -171,10 +171,9 @@ class ExplorationManager:
             interval = self.base_interval_s * (2 ** self.backoff_level())
             if (at - last_at).total_seconds() < interval:
                 return ()
-        drafts = self.planner.drafts(list(items),
-                                     InnerState(interests=tuple(interests)), now=at)
-        for draft in drafts:
-            self.outbox.propose(draft)
+        planned = self.planner.drafts(list(items),
+                                      InnerState(interests=tuple(interests)), now=at)
+        drafts = [draft for draft in planned if self.outbox.propose(draft)]
         self.store.put(LAST_AT_KEY, at.isoformat())
         sources = tuple(dict.fromkeys(item.url for item in items if item.url))
         videos = [item for item in items if item.content_type == "video"]
