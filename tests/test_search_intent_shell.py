@@ -261,12 +261,11 @@ def test_media_and_toolish_phrases_all_reach_intent_llm():
     assert "给我一个千早爱音抱着奶龙的图" in echo.prompts[2]
 
 
-def test_honesty_red_line_covers_media_claims():
-    """诚实红线必须明文覆盖媒体产物虚称（画好了/发你了/这就安排）。"""
+def test_prompt_tracks_actual_tool_results_without_telling_character_how_to_act():
     from whale_core.core.prompt_composer import HOST_CONTRACT
-    assert "我搜过了" in HOST_CONTRACT
-    assert "发你了" in HOST_CONTRACT
-    assert "这就安排" in HOST_CONTRACT
+    assert "实际完成" in HOST_CONTRACT
+    assert "不编造完成状态" in HOST_CONTRACT
+    assert "这就安排" not in HOST_CONTRACT
 
 
 class _WeatherTools:

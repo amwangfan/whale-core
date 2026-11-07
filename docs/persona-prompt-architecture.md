@@ -12,9 +12,9 @@ shipped with the repository.
    accurate responses, persona consistency when selected, no authorization changes.
 2. **Selected expression card**: name, summary, temperament, relationship,
    style rules and example dialogue are rendered through EffectivePersona;
-   external text is labeled as context and subject to a character limit.
-3. **Recall context**: up to eight relevant history memories, quoted as JSON
-   and bounded separately. These are background evidence, not instructions.
+   imported card text is included directly, subject to a character limit.
+3. **Recall context**: up to eight memory items, bounded and passed as
+   background context rather than a substitute for the current request.
 4. **Conversation history and current user message**: original chat roles stay
    separate from system data. The current request is not inferred from memories.
 
@@ -37,12 +37,12 @@ to the selected global card, or to neutral behavior.
 `BUILTIN_CARDS` and `AIGENGTU_CATALOG` remain empty deprecated exports
 for source compatibility; no card content or catalog ships with core.
 
-## Prompt security
+## Model expression and tool access
 
-Do not confuse a selected roleplay prompt with authorization. Tool requests,
-ShellPolicy and owner identity are verified outside model text. Quoting or
-delimiting untrusted character content reduces accidents but cannot guarantee
-LLM resistance to malicious instructions. Keep auditing at the execution boundary.
+The selected character card controls tone, roleplay and interaction style;
+no additional system-level taboo list is added by Core. User-defined preferences
+are applied only when configured. Tool permission, device identity, shell access
+and memory visibility are enforced by the execution layer independently.
 
 References:
 - https://docs.sillytavern.app/usage/prompts/prompt-manager/

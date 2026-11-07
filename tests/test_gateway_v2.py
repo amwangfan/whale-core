@@ -86,16 +86,16 @@ class TestRouting:
         assert r.status is ReceiptStatus.SUCCEEDED
         assert gui.operations and not shell.operations
 
-    def test_degrade_on_channel_failure(self):
+    def test_ssh_preferred_when_both_ssh_and_adb_offer_shell(self):
         gw = DeviceGatewayV2()
         flaky = FlakyGuiTransport()  # kind=adb, shell 会 FAILED/internal
         shell = ShellTransport()
         gw.register_transport(flaky)
         gw.register_transport(shell)
-        # shell 能力顺序 ssh>embedded>adb——ssh 直接可用，不会到 adb
         r = run(gw.execute("dev1", "device.shell", {"command": "id"},
                            idempotency_key="k3"))
         assert r.status is ReceiptStatus.SUCCEEDED
+        assert shell.operations and not flaky.operations
 
     def test_no_channel_unavailable(self):
         gw = DeviceGatewayV2()
@@ -103,6 +103,80 @@ class TestRouting:
                            idempotency_key="k4"))
         assert r.status is ReceiptStatus.FAILED
         assert r.error_code == "unavailable"
+
+
+class TestDispatchReliability:
+    def test_parallel_same_key_is_sent_once(self):
+        class SlowShell(ShellTransport):
+            async def execute(self, device_id, action):
+                await asyncio.sleep(0.03)
+                return await super().execute(device_id, action)
+
+        async def exercise():
+            gw = DeviceGatewayV2()
+            transport = SlowShell()
+            gw.register_transport(transport)
+            results = await asyncio.gather(*[
+                gw.execute("dev1", "device.shell", {"command": "id"},
+                           idempotency_key="parallel")
+                for _ in range(8)
+            ])
+            assert len(transport.operations) == 1
+            assert len({r.action_id for r in results}) == 1
+
+        run(exercise())
+
+    def test_ambiguous_failure_does_not_try_second_transport(self):
+        class FailingEmbedded(ShellTransport):
+            def __init__(self):
+                super().__init__()
+                self.kind = "embedded_wss"
+
+            async def execute(self, device_id, action):
+                self.operations.append({"capability": action.capability})
+                return ActionReceipt(
+                    action_id=action.action_id, status=ReceiptStatus.FAILED,
+                    error_code="internal", completed_at=now_ms())
+
+        gw = DeviceGatewayV2()
+        first = FailingEmbedded()
+        adb = FlakyGuiTransport()
+        gw.register_transport(first)
+        gw.register_transport(adb)
+        # Shell 优先 embedded_wss（无 SSH）；即使 internal 也不跨通道重发。
+        receipt = run(gw.execute("dev1", "device.shell", {"command": "echo ok"},
+                                 idempotency_key="ambiguous"))
+        assert receipt.status is ReceiptStatus.FAILED
+        assert len(first.operations) == 1
+        assert not adb.operations
+
+    def test_transport_exception_is_unknown_and_never_replayed(self):
+        class CrashingShell(ShellTransport):
+            async def execute(self, device_id, action):
+                self.operations.append({"capability": action.capability})
+                raise RuntimeError("socket lost after send")
+
+        gw = DeviceGatewayV2()
+        transport = CrashingShell()
+        gw.register_transport(transport)
+        first = run(gw.execute("dev1", "device.shell", {"command": "echo 1"},
+                               idempotency_key="unknown-on-exception"))
+        second = run(gw.execute("dev1", "device.shell", {"command": "echo 1"},
+                                idempotency_key="unknown-on-exception"))
+        assert first.status is ReceiptStatus.UNKNOWN
+        assert second.action_id == first.action_id
+        assert len(transport.operations) == 1
+
+    def test_in_memory_receipts_have_configurable_capacity(self):
+        gw = DeviceGatewayV2()
+        gw.max_cached_receipts = 2
+        gw.register_transport(gui_transport())
+        for i in range(3):
+            run(gw.execute("dev1", "device.tap", {"x": i, "y": i},
+                           idempotency_key=f"k{i}"))
+        assert gw.action_status("dev1", "k0") is None
+        assert gw.action_status("dev1", "k1") is not None
+        assert gw.action_status("dev1", "k2") is not None
 
 
 class TestIdempotency:

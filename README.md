@@ -14,6 +14,8 @@
 
 whale-core 是鲸鱼的核心大脑，也是一个可扩展的 AI 伴侣与行动智能体。它把对话、人格、长期记忆、意图判断、工具与主动行为组织在一起，让鲸鱼既能聊天，也能通过设备观察环境、作出选择和完成任务。「电子女友」是其中一种体验形态，不是能力边界。
 
+角色人格来自用户选用或导入的角色卡，核心不内置角色禁忌表，也不通过系统提示词限制扮演与日常互动。设备操作、外部工具和记忆访问则通过真实执行权限处理，不交给角色提示词判断。
+
 网页控制台、QQ、手机、通话与眼镜共享这套智能层。Android 感知和执行在 [whale-mobile](https://github.com/amwangfan/whale-mobile)；QQ/WeQ 渠道与历史桥接见 [whale-io](https://github.com/amwangfan/whale-io)。
 
 本仓库提供核心库、命令行、管理 API、网页控制台，以及 Linux/macOS 桌面入口和容器部署。没有生产用 mock/demo 档：需要模型或服务的功能走真实端点，缺配置会明确报错。官方搜索与 QQ 渠道插件随安装包分发；第三方目录插件按显式路径加载，不做自动发现。
@@ -48,6 +50,21 @@ whale-core 是鲸鱼的核心大脑，也是一个可扩展的 AI 伴侣与行�
 | 备份与恢复 | JSONL 记忆交换、完整 SQLite 备份/恢复 | 恢复前停止服务；完整配置和媒体还需备份数据目录 |
 
 控制台包含总览、对话、媒体与语音、探索与工作流、插件、记忆、任务、审批、事件和设置十个页面，页面按需加载并支持手机布局。保存配置和批准操作都以服务器实际结果为准。
+
+## 结构与技术栈
+
+| 层 | 实际实现 | 主要技术 |
+| --- | --- | --- |
+| 核心对话与任务 | `src/whale_core/core/`、`life/` | Python 3.11、OpenAI 兼容 HTTP API、异步任务编排 |
+| 记忆 | `memory/` | SQLite；可选 embedding 与关键词融合 |
+| 工具与外部能力 | `plugins/`、`cloud/` | 插件接口、HTTP、Shell 与模型工具调用 |
+| 设备管理 | `devices/`、`api/devices_api.py` | Ed25519、WebSocket、V2 协议、回执与持久化记录 |
+| 管理界面 | `api/`、`web/` | Python 服务端、React / TypeScript |
+| 手机执行端 | [whale-mobile](https://github.com/amwangfan/whale-mobile) | Kotlin、Android 前台服务、Flutter |
+
+**已经接通**：对话/记忆/插件基本链路、Web 管理、设备身份与 V2 WSS、设备通知/查询/动作的管理入口。**仍待接通/验收**：ADB/SSH 与 WSS 的统一生产动作入口，完整的多设备自主任务调度，专用 Root 手机连续应用操作，以及真实眼镜显示回执。
+
+`DeviceGatewayV2` 目前是多传输编排组件，不是生产 REST 的唯一入口；它的内存回执仅用于本进程，跨重启幂等仍依赖已有 `EmbeddedWssGateway` 的持久化记录。具体接口和缺口见 [设备文档](docs/devices.md)。
 
 ## 从源码开始
 

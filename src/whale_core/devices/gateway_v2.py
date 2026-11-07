@@ -5,13 +5,14 @@
 - 按能力类别选路（GUI 类 embedded>adb>ssh；shell/文件类 ssh>embedded>adb）；
 - 幂等派发：同 device_id+idempotency_key 直接回已记录终态，绝不重放；
 - scope 检查走 registry（设备真相仍在 registry，transport 健康另报）；
-- 降级事实写入 receipt.provider_ref（如 "degraded:adb→ssh"）。
+- 能力不可用时跳过该通道；动作一经下发，不根据模糊失败自动跨通道重放。
 
-第一轮范围：幂等记录为进程内存（重启即清）；跨重启持久幂等表沿用 v1
-gateway 的 kv 语义，embedded_wss transport 就位时并入。
+本类用于路由/演示，进程内回执有上限，不能替代生产 EmbeddedWssGateway 的持久化幂等记录。
 """
 from __future__ import annotations
 
+import asyncio
+from collections import OrderedDict
 from typing import Any, Mapping, Sequence
 
 from whale_core.devices.capabilities import GUI_CAPS, SHELL_CAPS
@@ -45,7 +46,9 @@ class DeviceGatewayV2:
         # registry 可选：缺省跳过 scope 检查（开发/测试）；生产必须注入。
         self.registry = registry
         self._transports: dict[str, DeviceTransport] = {}
-        self._receipts: dict[tuple[str, str], ActionReceipt] = {}
+        self._receipts: OrderedDict[tuple[str, str], ActionReceipt] = OrderedDict()
+        self._inflight: dict[tuple[str, str], asyncio.Task[ActionReceipt]] = {}
+        self.max_cached_receipts = 4096
 
     # ---- transport 登记 ----
 
@@ -65,11 +68,8 @@ class DeviceGatewayV2:
             return _GUI_ORDER
         return _DEFAULT_ORDER
 
-    async def _pick(self, device_id: str, capability: str,
-                    exclude: set[str] | None = None) -> DeviceTransport | None:
+    async def _pick(self, device_id: str, capability: str) -> DeviceTransport | None:
         for kind in self._route_order(capability):
-            if exclude and kind in exclude:
-                continue
             t = self._transports.get(kind)
             if t is None:
                 continue
@@ -117,44 +117,48 @@ class DeviceGatewayV2:
         if seen is not None:
             return seen
 
-        action_id = new_id("act")
-        tried: set[str] = set()
-        receipt: ActionReceipt | None = None
-        degraded_from: str | None = None
-        used_kind: str | None = None
-        while True:
-            transport = await self._pick(device_id, capability, exclude=tried)
-            if transport is None:
-                receipt = ActionReceipt(
-                    action_id=action_id, status=ReceiptStatus.FAILED,
-                    task_id=task_id, summary=f"无可用通道执行 {capability}",
-                    error_code="unavailable", completed_at=now_ms())
-                break
-            tried.add(transport.kind)
-            used_kind = transport.kind
-            req = ActionRequest(
-                action_id=action_id, capability=capability,
-                arguments=dict(arguments), idempotency_key=idempotency_key,
-                timeout_ms=timeout_ms, task_id=task_id, run_id=run_id,
-                observation_id=observation_id)
-            receipt = await transport.execute(device_id, req)
-            if receipt.status is ReceiptStatus.FAILED and receipt.error_code in (
-                    "unavailable", "internal") and len(tried) < len(self._transports):
-                # 通道级失败可降级一次；动作级失败（scope_denied/stale 等）不降级
-                degraded_from = used_kind
-                continue
-            break
+        key = (device_id, idempotency_key)
+        pending = self._inflight.get(key)
+        if pending is not None:
+            return await asyncio.shield(pending)
 
-        if degraded_from and receipt is not None:
-            note = f"degraded:{degraded_from}→{used_kind}"
-            receipt = ActionReceipt(
-                **{**receipt.__dict__,
-                   "provider_ref": (receipt.provider_ref + " " if receipt.provider_ref else "")
-                   + note})
+        async def dispatch() -> ActionReceipt:
+            try:
+                transport = await self._pick(device_id, capability)
+                action_id = new_id("act")
+                if transport is None:
+                    receipt = ActionReceipt(
+                        action_id=action_id, status=ReceiptStatus.FAILED,
+                        task_id=task_id, summary=f"无可用通道执行 {capability}",
+                        error_code="unavailable", completed_at=now_ms())
+                else:
+                    request = ActionRequest(
+                        action_id=action_id, capability=capability,
+                        arguments=dict(arguments), idempotency_key=idempotency_key,
+                        timeout_ms=timeout_ms, task_id=task_id, run_id=run_id,
+                        observation_id=observation_id)
+                    # 动作一旦下发，失败可能发生在副作用执行之后。
+                    # 不自动跨通道重放；调用方依据回执进行后续观察或人工核对。
+                    try:
+                        receipt = await transport.execute(device_id, request)
+                    except Exception:
+                        # 无法确认是否已发生副作用，记录 unknown，禁止同键重放。
+                        receipt = ActionReceipt(
+                            action_id=action_id, status=ReceiptStatus.UNKNOWN,
+                            task_id=task_id, summary="传输异常，执行结果未知",
+                            error_code="internal", completed_at=now_ms())
 
-        if receipt is not None:
-            self._receipts[(device_id, idempotency_key)] = receipt
-        return receipt
+                self._receipts[key] = receipt
+                self._receipts.move_to_end(key)
+                if len(self._receipts) > self.max_cached_receipts:
+                    self._receipts.popitem(last=False)
+                return receipt
+            finally:
+                self._inflight.pop(key, None)
+
+        task = asyncio.create_task(dispatch())
+        self._inflight[key] = task
+        return await asyncio.shield(task)
 
     async def observe(self, device_id: str,
                       request: ObserveRequest | None = None) -> Observation:

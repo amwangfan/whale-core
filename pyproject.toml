@@ -1,7 +1,7 @@
 [project]
 name = "whale-core"
 version = "0.1.0"
-description = "Whale intelligence layer: companion AI core with events-in / intents-out contracts, memory, persona cards, plugin system and safety gates"
+description = "Whale AI companion and agent core: conversation, memory, persona cards, tools, events and devices"
 readme = "README.md"
 # Third-party notices only; the project-level license is still owner-pending.
 license-files = ["licenses/*"]
@@ -12,7 +12,7 @@ keywords = ["companion-ai", "agent", "memory", "plugins", "whale-io"]
 dependencies = ["tzdata>=2024.1; sys_platform == 'win32'"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "Pillow>=10", "asyncssh>=2.14,<2.15"]
 # websockets 17 已验证兼容（PCM 中继 sync server/client 离线索引测试通过）
 voice = ["websockets>=14,<18"]
 desktop = ["pywebview>=5,<7"]
