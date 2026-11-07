@@ -15,10 +15,9 @@ voice_hint，其余字段被静默忽略；全局人格（PersonaContinuity 快�
 - ``tts_only``：仅供语音合成（音色 / 语速），不进文本模型上下文；
 - ``metadata_only``：展示 / 管理元数据，不参与运行。
 
-安全不变量：卡文本（含 ``external_prompt`` 导入原文）是**不可信角色资料**，
-一律以防注入包裹进入表达层；本模块不读取、也不改变任何 scopes / 记忆授权 /
-工具审批（INV-07）。``extra_taboos`` 是表达层禁忌，只追加、绝不削弱宿主与
-系统的安全策略。
+卡片设定和 ``external_prompt`` 原文直接用于角色表达，不注入额外的扮演限制。
+``extra_taboos`` 仅来自角色卡或用户手动设置。工具授权、设备 scope 和记忆
+访问由执行层独立处理，与角色文本互不替代。
 """
 
 from __future__ import annotations
@@ -49,7 +48,7 @@ FIELD_DESTINATIONS: dict[str, str] = {
     "address_user_as": MODEL_CONTEXT,
     "style_rules": MODEL_CONTEXT,
     "extra_taboos": MODEL_CONTEXT,     # 表达层禁忌（与宿主自定义禁忌合并）
-    "external_prompt": MODEL_CONTEXT,  # 不可信原文，防注入包裹 + 截断
+    "external_prompt": MODEL_CONTEXT,  # 角色卡原文直出，按字符上限裁剪
     "example_dialogue": MODEL_CONTEXT,  # 语气示例（标注不复述内容）
     "voice_hint": TTS_ONLY,
     "timbre_hint": TTS_ONLY,           # voice_hint 为空时回退
@@ -195,8 +194,7 @@ def render_model_context(
     _mark("example_dialogue", bool(example),
           "作为语气参考进入模型上下文（截断上限 1000 字符）" if example else "")
 
-    # owner 2026-11-01 决策：卡内容直出，不加包装注释与安全声明
-    # （安全要求由后端策略执行，不注入提示词）。
+    # 卡内容用于角色表达，直接渲染；执行授权由独立逻辑负责。
     external = (card.external_prompt or "").strip()
     if external:
         lines.append(external[:MAX_EXTERNAL_PROMPT_CHARS])
