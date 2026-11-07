@@ -11,5 +11,6 @@
 | [05 — 连接可靠性](05-dispatch-reliability.md) | 两仓已推送 | 请求预检、幂等键与并发发送顺序 |
 | [06 — 验证工具收尾](06-validation-tooling.md) | 最后一轮已验证 | 超时、独立日志、机器可读摘要与 Schema 检查 |
 | [07 — 回包类型匹配](07-response-type-matching.md) | 联合验证完成 | ID、设备和类型同时匹配才完成请求 |
+| [08 — 迟到回执对账](08-late-receipt-reconciliation.md) | 最后一轮已验证 | 区分超时推定与真实终态、防止并发清理覆盖结果 |
 
 另见 [汇总说明](../../FORK_UPDATES.md) 与 [全部代码差异](https://github.com/dreaminutes/whale-core/compare/main...refactor/simplify-integration)。

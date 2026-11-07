@@ -1,6 +1,6 @@
 # 第 07 批：请求与回包类型匹配
 
-日期：2026-11-07。状态：联合验证完成。
+日期：2026-11-07。状态：已验证、两仓已推送。Core：7b8280b；Mobile：cd9c59d。
 
 - Core 与 Mobile 参考网关的等待项记录预期回包类型。
 - 只有请求 ID、目标设备和回包类型全部匹配，才能完成等待；查询结果不再误结束动作请求。
@@ -11,4 +11,4 @@
 
 APK、Linux 全量和真机验收限制沿用前批说明。按本次新指令，本批后再做第08批并停止。
 
-[返回目录](README.md)
+[Core 本批差异](https://github.com/dreaminutes/whale-core/compare/f674524...7b8280b) · [Mobile 本批差异](https://github.com/dreaminutes/whale-mobile/compare/f224e82...cd9c59d) · [返回目录](README.md)
