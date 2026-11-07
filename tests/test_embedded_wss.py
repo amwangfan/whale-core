@@ -526,6 +526,40 @@ def test_query_result_roundtrip(api):
         sim.close()
 
 
+def test_query_result_from_other_device_does_not_consume_pending(api):
+    """同 request_id 的回包只能由发起查询的已认证设备完成。"""
+    sim, gateway = _api_rig(api)
+    other, _ = _api_rig(api)
+    sim.connect(gateway.port)
+    other.connect(gateway.port)
+    try:
+        box, thread = _http_in_thread(
+            api, "POST", f"/api/v1/devices/{sim.device_id}/query",
+            {"operation": "screen.history.search", "timeout": 5})
+        query = sim.recv()
+        request_id = query["payload"]["request_id"]
+
+        other.send(other.frame("sensor.result", {
+            "request_id": request_id, "status": "ok",
+            "data": [{"title": "wrong device"}], "truncated": False,
+            "source": "capture.local"}))
+        time.sleep(0.2)
+        assert thread.is_alive(), "其他设备的回包不能消费 pending 请求"
+
+        sim.send(sim.frame("sensor.result", {
+            "request_id": request_id, "status": "ok",
+            "data": [{"title": "origin device"}], "truncated": False,
+            "source": "capture.local"}))
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+        status, body = box["result"]
+        assert status == 200
+        assert body["result"]["result"]["data"] == [{"title": "origin device"}]
+    finally:
+        sim.close()
+        other.close()
+
+
 def test_query_offline_device(api):
     sim, gateway = _api_rig(api)
     status, body = _req(api, "POST", f"/api/v1/devices/{sim.device_id}/query",
@@ -610,6 +644,55 @@ def test_action_receipt_state_machine(api):
             key: value for key, value in terminal.items() if key != "action_id"}
     finally:
         sim.close()
+
+
+
+def test_action_receipt_from_other_device_does_not_consume_pending(api):
+    """只有发起动作的已认证设备可以完成对应 action_id。"""
+    sim, gateway = _api_rig(api)
+    other, _ = _api_rig(api)
+    sim.connect(gateway.port)
+    other.connect(gateway.port)
+    try:
+        box, thread = _http_in_thread(
+            api, "POST", f"/api/v1/devices/{sim.device_id}/action",
+            {"capability": "phone.notification.post",
+             "arguments": {"text": "identity check"},
+             "idempotency_key": "idem-cross-device-0001",
+             "task_id": new_id("task"), "run_id": new_id("run"),
+             "timeout": 5})
+        req = sim.recv()
+        action_id = req["payload"]["action_id"]
+        # 模拟 other device 侧也存在相同 action_id 映射，确保测试命中
+        # pending.device_id 校验，而不是仅由 action-id 查表前置检查拦截。
+        gateway.store.put(
+            f"device:action-id:{other.device_id}:{action_id}", "foreign-idem")
+        gateway.store.put(
+            f"device:action:{other.device_id}:foreign-idem",
+            {"action_id": action_id, "state": "pending"})
+        now = now_ms()
+        other.send(other.frame("action.receipt", {
+            "action_id": action_id, "status": "succeeded",
+            "started_at": now - 10, "completed_at": now,
+            "provider_ref": "other-device",
+            "result": {"summary": "must be ignored"}}))
+        time.sleep(0.2)
+        assert thread.is_alive(), "其他设备的回执不能消费 pending 动作"
+
+        terminal = {
+            "action_id": action_id, "status": "succeeded",
+            "started_at": now_ms() - 10, "completed_at": now_ms(),
+            "provider_ref": "origin-device",
+            "result": {"summary": "accepted"}}
+        sim.send(sim.frame("action.receipt", terminal))
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+        status, body = box["result"]
+        assert status == 200
+        assert body["result"]["receipt"] == terminal
+    finally:
+        sim.close()
+        other.close()
 
 
 def test_action_idempotency_replay_never_redispatches(api):
@@ -855,6 +938,47 @@ def test_confirm_request_response_roundtrip(rig):
         assert box["resp"]["signature"] == sig
     finally:
         sim.close()
+
+
+
+def test_confirm_response_from_other_device_does_not_consume_pending(rig):
+    """只有发起确认请求的已认证设备可以完成对应 challenge_id。"""
+    registry, _, gateway = rig
+    sim = _paired_active(registry)
+    other = _paired_active(registry)
+    sim.connect(gateway.port)
+    other.connect(gateway.port)
+    try:
+        challenge_id = new_ulid()
+        payload = {"challenge_id": challenge_id, "device_id": sim.device_id,
+                   "principal_id": "owner", "channel": "api",
+                   "scopes": ["device.shell"], "expires_at": now_ms() + 60000}
+        box: dict = {}
+        thread = threading.Thread(
+            target=lambda: box.setdefault(
+                "resp", gateway.send_confirm_request(sim.device_id, payload, timeout_s=5)),
+            daemon=True)
+        thread.start()
+        frame = sim.recv()
+        assert frame["type"] == "device.confirm.request"
+
+        other.send(other.frame("device.confirm.response", {
+            "challenge_id": challenge_id, "approved": False,
+            "responded_at": now_ms()}))
+        time.sleep(0.2)
+        assert thread.is_alive(), "其他设备的确认响应不能消费 pending challenge"
+
+        sig = sim.key.sign(challenge_id.encode("utf-8")).hex()
+        sim.send(sim.frame("device.confirm.response", {
+            "challenge_id": challenge_id, "approved": True,
+            "signature": sig, "responded_at": now_ms()}))
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+        assert box["resp"]["approved"] is True
+        assert box["resp"]["signature"] == sig
+    finally:
+        sim.close()
+        other.close()
 
 
 def test_confirm_approved_without_signature_is_rejected(rig):
