@@ -323,7 +323,7 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
             evidence = list(draft.get("evidence") or ())
             text = str(draft.get("text") or "").strip()
             if evidence:
-                text += "\\n来源：" + evidence[0]
+                text += "\n来源：" + evidence[0]
             return deliver_result(
                 [{"kind": "text", "text": text}],
                 conversation=conversation_id,
@@ -619,7 +619,7 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
 
         texts = [str(item.text or "").strip() for item in items
                  if getattr(item, "kind", "") == "text" and str(item.text or "").strip()]
-        body = "\\n".join(texts)[:2000]
+        body = "\n".join(texts)[:2000]
         if not body:
             body = str(summary or "").strip()[:2000]
         if not body:
