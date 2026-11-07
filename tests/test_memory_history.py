@@ -5,7 +5,9 @@ from __future__ import annotations
 from whale_core.memory.history import (
     MAX_CONTENT_CHARS,
     MAX_HISTORY_TURNS,
+    append_assistant_message,
     append_turn,
+    append_user_message,
     clear_history,
     load_history,
 )
@@ -95,3 +97,22 @@ def test_sqlite_persistence_across_reopen(tmp_path):
         {"role": "assistant", "content": "在的"},
     ]
     reopened.close()
+
+
+def test_append_user_visible_before_assistant():
+    """重叠轮：用户话先落盘，助手未回时 load 也能看到。"""
+    store = InMemoryStore()
+    append_user_message(store, "c", "xxx")
+    assert load_history(store, "c") == [{"role": "user", "content": "xxx"}]
+    append_assistant_message(store, "c", "收到 xxx")
+    assert load_history(store, "c") == [
+        {"role": "user", "content": "xxx"},
+        {"role": "assistant", "content": "收到 xxx"},
+    ]
+
+
+def test_append_assistant_skips_blank():
+    store = InMemoryStore()
+    append_user_message(store, "c", "hi")
+    append_assistant_message(store, "c", "   ")
+    assert load_history(store, "c") == [{"role": "user", "content": "hi"}]

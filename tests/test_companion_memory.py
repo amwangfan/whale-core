@@ -194,3 +194,66 @@ def test_time_query_not_written_as_episode(tmp_path, monkeypatch):
     t1 = compose_companion_system(
         now=datetime(2026, 11, 5, 9, 51, tzinfo=ZoneInfo("Asia/Shanghai")))
     assert "01:00" in t0 and "09:51" in t1 and "01:00" not in t1
+
+
+def test_overlapping_turns_second_sees_first_user():
+    """连说竞态：A 还在生成时 B 已启动 → B 的 history 必须含 A 的用户原话。"""
+    import threading
+    import time
+
+    from whale_core.memory.history import load_history
+
+    store = InMemoryStore()
+    b_saw_a = threading.Event()
+    errors: list[str] = []
+
+    class SlowThenFast:
+        def __init__(self):
+            self.calls: list[dict] = []
+            self._lock = threading.Lock()
+
+        def reply(self, text, *, persona="", memories=(), history=()):
+            with self._lock:
+                self.calls.append({"text": text, "history": list(history)})
+            if text == "xxx":
+                if not b_saw_a.wait(3):
+                    errors.append("timed out waiting for B to see A")
+                return "答 A"
+            # B：必须已经能在 history 里看到 A 的用户原话
+            if not any(m.get("role") == "user" and m.get("content") == "xxx"
+                       for m in history):
+                errors.append(f"B history missing xxx: {history!r}")
+            else:
+                b_saw_a.set()
+            return "答 B"
+
+    brain = SlowThenFast()
+    companion = WhaleCompanion(store, brain, curator=MemoryCurator(store))
+    cid = "conv-overlap"
+
+    def run_a():
+        companion.chat("xxx", conversation_id=cid)
+
+    def run_b():
+        for _ in range(100):
+            if any(m.get("content") == "xxx" for m in load_history(store, cid)):
+                break
+            time.sleep(0.01)
+        else:
+            errors.append("A user text never appeared in store")
+            return
+        companion.chat("abc", conversation_id=cid)
+
+    t_a = threading.Thread(target=run_a)
+    t_b = threading.Thread(target=run_b)
+    t_a.start()
+    t_b.start()
+    t_a.join(5)
+    t_b.join(5)
+    assert not errors, errors
+    b_calls = [c for c in brain.calls if c["text"] == "abc"]
+    assert b_calls, brain.calls
+    assert any(m.get("content") == "xxx" for m in b_calls[0]["history"])
+    final = load_history(store, cid)
+    assert {"role": "user", "content": "xxx"} in final
+    assert {"role": "user", "content": "abc"} in final

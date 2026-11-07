@@ -53,6 +53,45 @@ def load_history(store: MemoryStore, conversation_id: str) -> list[dict[str, str
     return out
 
 
+def _trim(history: list[dict[str, str]]) -> list[dict[str, str]]:
+    return history[-(MAX_HISTORY_TURNS * 2):]
+
+
+def append_user_message(
+    store: MemoryStore,
+    conversation_id: str,
+    user_text: str,
+) -> None:
+    """请求一开始就落盘用户原话，供同会话重叠请求立刻可见。
+
+    助手回复尚未生成时，历史可能以一条 user 结尾（半轮）；后续
+    ``append_assistant_message`` / ``append_turn`` 再补齐。
+    """
+    cid = (conversation_id or "").strip()
+    if not cid:
+        return
+    with conversation_lock(store, cid):
+        history = load_history(store, cid)
+        history.append({"role": "user", "content": (user_text or "")[:MAX_CONTENT_CHARS]})
+        store.put(_key(cid), _trim(history))
+
+
+def append_assistant_message(
+    store: MemoryStore,
+    conversation_id: str,
+    assistant_text: str,
+) -> None:
+    """在已落盘的用户话之后追加助手回复（不重复写 user）。"""
+    cid = (conversation_id or "").strip()
+    if not cid or not (assistant_text or "").strip():
+        return
+    with conversation_lock(store, cid):
+        history = load_history(store, cid)
+        history.append(
+            {"role": "assistant", "content": (assistant_text or "")[:MAX_CONTENT_CHARS]})
+        store.put(_key(cid), _trim(history))
+
+
 def append_turn(
     store: MemoryStore,
     conversation_id: str,
@@ -67,7 +106,7 @@ def append_turn(
         history = load_history(store, cid)
         history.append({"role": "user", "content": (user_text or "")[:MAX_CONTENT_CHARS]})
         history.append({"role": "assistant", "content": (assistant_text or "")[:MAX_CONTENT_CHARS]})
-        store.put(_key(cid), history[-(MAX_HISTORY_TURNS * 2):])
+        store.put(_key(cid), _trim(history))
 
 
 def append_assistant_followup(

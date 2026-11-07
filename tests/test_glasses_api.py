@@ -414,7 +414,8 @@ def test_glasses_source_mounts_shell_and_latency():
 
 def test_intent_location_wrapper_installs_once_and_updates():
     """回归：位置 intent 包装只装一次；东京→大阪不得嵌套保留东京。"""
-    from whale_core.api.glasses import install_request_location_intent_wrapper
+    from whale_core.api.glasses import (
+        _glasses_request_location, install_request_location_intent_wrapper)
 
     class Orch:
         def __init__(self):
@@ -424,28 +425,31 @@ def test_intent_location_wrapper_installs_once_and_updates():
             return f"BASE:{text}"
 
     orch = Orch()
-    request_location = {"value": ""}
+    token = _glasses_request_location.set("")
+    try:
+        install_request_location_intent_wrapper(orch)
+        first_fn = orch._intent_context
+        assert getattr(orch, "_glasses_loc_wrapped") is True
 
-    install_request_location_intent_wrapper(orch, request_location)
-    first_fn = orch._intent_context
-    assert getattr(orch, "_glasses_loc_wrapped") is True
+        # 第二次安装必须是 no-op（同一包装函数，不嵌套）
+        install_request_location_intent_wrapper(orch)
+        assert orch._intent_context is first_fn
 
-    # 第二次安装必须是 no-op（同一包装函数，不嵌套）
-    install_request_location_intent_wrapper(orch, request_location)
-    assert orch._intent_context is first_fn
+        # 重叠请求靠 ContextVar 隔离位置，不再写共享 dict。
+        _glasses_request_location.set("东京")
+        ctx1 = orch._intent_context("c1", "找餐厅")
+        assert "东京" in ctx1
+        assert "大阪" not in ctx1
+        assert ctx1.count("当前位置") + ctx1.count("位置") >= 1 or "东京" in ctx1
 
-    request_location["value"] = "东京"
-    ctx1 = orch._intent_context("c1", "找餐厅")
-    assert "东京" in ctx1
-    assert "大阪" not in ctx1
-    assert ctx1.count("当前位置") + ctx1.count("位置") >= 1 or "东京" in ctx1
-
-    request_location["value"] = "大阪"
-    ctx2 = orch._intent_context("c1", "找餐厅")
-    assert "大阪" in ctx2
-    assert "东京" not in ctx2
-    # 不得因嵌套包装而出现两份位置行/旧城残留
-    assert ctx2.count("大阪") == 1
+        _glasses_request_location.set("大阪")
+        ctx2 = orch._intent_context("c1", "找餐厅")
+        assert "大阪" in ctx2
+        assert "东京" not in ctx2
+        # 不得因嵌套包装而出现两份位置行/旧城残留
+        assert ctx2.count("大阪") == 1
+    finally:
+        _glasses_request_location.reset(token)
 
 
 def test_intent_location_wrapper_nested_bug_would_keep_old_city():
