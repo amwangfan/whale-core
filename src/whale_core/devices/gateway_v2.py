@@ -102,15 +102,7 @@ class DeviceGatewayV2:
         run_id: str | None = None,
         observation_id: str | None = None,
     ) -> ActionReceipt:
-        # scope 检查（registry 注入时）
-        if self.registry is not None:
-            status = self.registry.status_of(device_id)
-            if status != "active":
-                raise GatewayError(
-                    "device_revoked" if status == "revoked" else "unavailable",
-                    f"设备状态 {status}")
-            if capability not in set(self.registry.scopes_of(device_id)):
-                raise GatewayError("scope_denied", f"设备未授予 {capability}")
+        self._authorize(device_id, capability)
 
         # 幂等：同键已有记录 → 直接回真实状态
         seen = self._receipts.get((device_id, idempotency_key))
@@ -132,6 +124,8 @@ class DeviceGatewayV2:
                         task_id=task_id, summary=f"无可用通道执行 {capability}",
                         error_code="unavailable", completed_at=now_ms())
                 else:
+                    # 选路包含 await，期间设备可能被吊销或收回 scope。
+                    self._authorize(device_id, capability)
                     request = ActionRequest(
                         action_id=action_id, capability=capability,
                         arguments=dict(arguments), idempotency_key=idempotency_key,
@@ -160,11 +154,24 @@ class DeviceGatewayV2:
         self._inflight[key] = task
         return await asyncio.shield(task)
 
+    def _authorize(self, device_id: str, capability: str) -> None:
+        """观察与执行共用设备状态/scope 检查；开发时允许不注入 registry。"""
+        if self.registry is not None:
+            status = self.registry.status_of(device_id)
+            if status != "active":
+                raise GatewayError(
+                    "device_revoked" if status == "revoked" else "unavailable",
+                    f"设备状态 {status}")
+            if capability not in set(self.registry.scopes_of(device_id)):
+                raise GatewayError("scope_denied", f"设备未授予 {capability}")
+
     async def observe(self, device_id: str,
                       request: ObserveRequest | None = None) -> Observation:
+        self._authorize(device_id, "device.observe")
         transport = await self._pick(device_id, "device.observe")
         if transport is None:
             raise GatewayError("unavailable", "无可用观察通道")
+        self._authorize(device_id, "device.observe")
         return await transport.observe(device_id, request or ObserveRequest())
 
     async def health_report(self, device_id: str) -> dict[str, str]:
