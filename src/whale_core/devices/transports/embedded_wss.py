@@ -251,9 +251,11 @@ def _receipt_from_payload(action: ActionRequest, payload: dict) -> ActionReceipt
         record = payload
         embedded = record.get("receipt") if isinstance(
             record.get("receipt"), dict) else {}
-        payload = {"action_id": record.get("action_id") or action.action_id,
-                   "status": record.get("state") or "unknown",
-                   "task_id": action.task_id, **(embedded or {})}
+        state = record.get("state") or "unknown"
+        payload = {**embedded,
+                   "action_id": record.get("action_id") or action.action_id,
+                   "status": "received" if state == "pending" else state,
+                   "task_id": embedded.get("task_id") or action.task_id}
         payload.setdefault("provider_ref", "idempotent:replay-suppressed")
     status_raw = str(payload.get("status") or "unknown")
     try:
@@ -280,6 +282,7 @@ def _receipt_from_payload(action: ActionRequest, payload: dict) -> ActionReceipt
                       if payload.get("provider_ref") else None),
         started_at=(int(payload["started_at"]) if payload.get("started_at") is not None
                     else None),
-        completed_at=(int(payload["completed_at"])
-                      if payload.get("completed_at") is not None else now_ms()),
+        completed_at=((int(payload["completed_at"])
+                       if payload.get("completed_at") is not None else now_ms())
+                      if status.terminal else None),
     )
