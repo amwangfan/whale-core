@@ -194,6 +194,14 @@ device.output.read         device.screen.record       device.status
 - `verification.status` ∈ `passed` / `failed` / `skipped`。坐标类动作若端侧未做验证则标 `skipped`，禁止伪报 `passed`。
 - `provider_ref`：诚实性注解（如 `corr:<event_id>`、`degraded:phone_notification`）。
 
+### 7.4 device.output.read 字节分页
+
+`sensor.query.filters` 使用 `output_ref`、`offset`（非负字节偏移，默认 0）、`max_bytes`（正整数，默认且每页最多 49152 字节）。端侧以文件随机读取返回单页，文本也按原始 UTF-8 字节编码，避免跨页切断字符时丢失数据。
+
+`sensor.result.data[0]` 返回 `bytes_b64`、`offset`、`next_offset`、`total_bytes`、`truncated`；外层 `truncated` 与本页一致。`next_offset = offset + 解码字节数`，`truncated = next_offset < total_bytes`。到达或超过 EOF 返回空页，偏移收敛到文件长度。单页二进制 48 KiB，base64 后仍为 64 KiB，为 256 KiB 帧上限预留信封空间。
+
+旧输出源的 `text` / `data_base64` 由运行时转换为相同分页格式；如果旧源本身已经截断，附加 `source_truncated=true`，Core 不得把拼接结果当成完整输出。读取期间文件长度变化、页不前进或超过 Core 总读取预算均应报错；接收端先拼接字节，再解码文本。本节规定查询数据对象，不新增消息类型或信封字段。
+
 ## 8. GUI 观察与元素绑定
 
 - 一次观察产生 `observation_id`；观察结果中的语义元素携带**观察内局部**整数 `element_id`（不跨观察稳定）。
