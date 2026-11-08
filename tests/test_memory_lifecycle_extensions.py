@@ -34,3 +34,27 @@ def test_confirm_and_correct_preserve_memory_space_acl():
     updated = store.get_record(new_key)
     assert updated.space_id == "member-private"
     assert "superseded" in store.get_record(confirmed[0].key).tags
+
+
+def test_memory_dedupe_never_crosses_spaces_or_deletes_pending_facts():
+    from whale_core.memory.continuity import remember_episode
+    from whale_core.memory.governance import dedupe_episodes
+
+    store = InMemoryStore()
+    remember_episode(store, summary="相同内容", key="group:one",
+                     tags=("chat",), space_id="group:one")
+    remember_episode(store, summary="相同内容", key="owner:one",
+                     tags=("chat",), space_id="owner:one")
+    pending = propose_fact(store, "相同内容", source="conversation",
+                           evidence_id="msg:2", space_id="owner:one")
+    assert dedupe_episodes(store) == 0
+    assert store.get_record("group:one") is not None
+    assert store.get_record("owner:one") is not None
+    assert store.get_record(pending) is not None
+
+    remember_episode(store, summary="相同内容", key="owner:two",
+                     tags=("chat",), space_id="owner:one")
+    assert dedupe_episodes(store) == 1
+    assert store.get_record("owner:two") is not None
+    assert store.get_record("group:one") is not None
+    assert store.get_record(pending) is not None

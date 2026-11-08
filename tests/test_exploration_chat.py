@@ -66,3 +66,36 @@ def test_negative_reply_closes_offer_without_sending():
     assert decision and decision["decision"] == "reject"
     complete_recommendation(store, "glasses:s1", decision["draft"], outcome="rejected")
     assert store.get("life:ledger:" + draft.draft_id)["status"] == "closed"
+
+
+def test_only_discovery_drafts_appear_in_exploration_offers():
+    from whale_core.life.exploration_chat import pending_recommendations
+
+    store = InMemoryStore()
+    outbox = ProactiveOutbox(store)
+    outbox.propose(ProactiveDraft(
+        draft_id="ordinary-chat", text="日常聊天", reason="chat",
+        evidence=("chat:1",), channel="hud"))
+    outbox.propose(ProactiveDraft(
+        draft_id="discovery:BV1Abc123", text="《FPGA 入门》要看看吗？",
+        reason="exploration", evidence=("https://www.bilibili.com/video/BV1Abc123/",),
+        channel="hud"))
+    items = pending_recommendations(store)
+    assert [item["draft_id"] for item in items] == ["discovery:BV1Abc123"]
+
+
+def test_concurrent_yes_can_only_claim_offer_once():
+    from concurrent.futures import ThreadPoolExecutor
+    store = InMemoryStore()
+    draft = ProactiveDraft(
+        draft_id="discovery:BV1Abc123", text="《FPGA 入门》要看看吗？",
+        reason="exploration", evidence=("https://www.bilibili.com/video/BV1Abc123/",),
+        channel="hud")
+    ProactiveOutbox(store).propose(draft)
+    assert maybe_remember_offer(store, "glasses:one", draft.text,
+                                [store.get("life:draft:" + draft.draft_id)])
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        decisions = list(pool.map(
+            lambda _: resolve_pending_recommendation(store, "glasses:one", "要"),
+            range(12)))
+    assert sum(result is not None for result in decisions) == 1

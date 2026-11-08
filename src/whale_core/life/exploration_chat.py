@@ -61,6 +61,9 @@ def pending_recommendations(store: MemoryStore, *, limit: int = 3) -> tuple[dict
         if not isinstance(draft, dict):
             continue
         draft_id = str(draft.get("draft_id") or key[len(DRAFT_KEY_PREFIX):])
+        # Exploration offers must never consume ordinary chat/reply approval drafts.
+        if not draft_id.startswith("discovery:"):
+            continue
         if not draft_is_pending(draft, store.get(f"life:ledger:{draft_id}") or {}):
             continue
         expires = draft.get("expires_at")
@@ -207,40 +210,44 @@ def maybe_remember_offer(store: MemoryStore, conversation_id: str,
 def resolve_pending_recommendation(store: MemoryStore, conversation_id: str,
                                    answer: str, *,
                                    now: datetime | None = None) -> dict | None:
-    key = _offer_key(conversation_id)
-    pending = store.get(key)
-    if not isinstance(pending, dict) or pending.get("status") != "offered":
-        return None
-    at = _now(now)
-    try:
-        expires = datetime.fromisoformat(str(pending.get("expires_at")))
-        if expires.tzinfo is None:
-            expires = expires.replace(tzinfo=timezone.utc)
-    except (TypeError, ValueError):
-        store.delete(key)
-        return None
-    if expires <= at:
-        store.delete(key)
-        return None
+    """Atomically claim a pending offer; parallel "要" replies only deliver once."""
     decision = "accept" if _affirmative(answer) else "reject" if _negative(answer) else ""
     if not decision:
         return None
-    if pending.get("conversation_id") != str(conversation_id)[:160]:
-        store.delete(key)
-        return None
-    draft = store.get(f"life:draft:{pending.get('draft_id')}")
-    if not isinstance(draft, dict):
-        store.delete(key)
-        return None
+    key = _offer_key(conversation_id)
+    at = _now(now)
     from whale_core.life.initiative import draft_is_pending
-    ledger = store.get(f"life:ledger:{pending.get('draft_id')}") or {}
-    if not draft_is_pending(draft, ledger):
-        store.delete(key)
-        return None
-    pending["status"] = "attempting" if decision == "accept" else "resolving_rejected"
-    pending["decision"] = decision
-    store.put(key, pending)
-    return {"decision": decision, "draft": dict(draft), "offer_key": key}
+
+    def claim(tx):
+        pending = tx.get(key)
+        if not isinstance(pending, dict) or pending.get("status") != "offered":
+            return None
+        if pending.get("conversation_id") != str(conversation_id)[:160]:
+            return None
+        try:
+            expires = datetime.fromisoformat(str(pending.get("expires_at")))
+            if expires.tzinfo is None:
+                expires = expires.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            expires = at
+        if expires <= at:
+            tx.put(key, {**pending, "status": "expired"})
+            return None
+        draft_id = str(pending.get("draft_id") or "")
+        if not draft_id.startswith("discovery:"):
+            return None
+        draft = tx.get(f"life:draft:{draft_id}")
+        ledger = tx.get(f"life:ledger:{draft_id}") or {}
+        if not draft_is_pending(draft, ledger):
+            tx.put(key, {**pending, "status": "stale"})
+            return None
+        tx.put(key, {
+            **pending, "status": "attempting" if decision == "accept"
+            else "resolving_rejected", "decision": decision,
+        })
+        return {"decision": decision, "draft": dict(draft), "offer_key": key}
+
+    return store.transact(claim)
 
 
 def complete_recommendation(store: MemoryStore, conversation_id: str,

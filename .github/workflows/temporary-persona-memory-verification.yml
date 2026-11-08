@@ -3,6 +3,9 @@ on:
   push:
     branches:
       - feat/persona-memory-evolution-20261108
+concurrency:
+  group: persona-memory-verification
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
