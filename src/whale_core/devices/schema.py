@@ -13,7 +13,6 @@ additionalProperties（false 或子 schema）/ maxProperties。
 from __future__ import annotations
 
 import json
-import os
 import re
 from pathlib import Path
 from typing import Any
@@ -21,8 +20,6 @@ from whale_core.devices.contract_paths import messages_dir
 
 SUPPORTED_MAJOR = 2
 PROTOCOL_VERSION = "2.0"
-
-_SCHEMA_DIR_ENV = "WHALE_CONTRACTS_DIR"
 
 _KEYWORDS = {
     "type", "const", "enum", "pattern", "minLength", "maxLength",
@@ -59,14 +56,28 @@ class _Validator:
     __slots__ = ("schema",)
 
     def __init__(self, schema: dict):
-        unknown = set(schema) - _KEYWORDS
-        if unknown:
-            raise SchemaUnsupported(f"不支持的 schema 关键字: {sorted(unknown)}")
+        _check_supported(schema)
         self.schema = schema
 
     def validate(self, instance: Any) -> str | None:
         """返回第一条违例描述；通过返回 None。"""
         return _check(self.schema, instance, "$")
+
+
+def _check_supported(schema: dict) -> None:
+    if not isinstance(schema, dict):
+        raise SchemaUnsupported("schema 必须是对象")
+    unknown = set(schema) - _KEYWORDS
+    if unknown:
+        raise SchemaUnsupported(f"不支持的 schema 关键字: {sorted(unknown)}")
+    if schema.get("type") not in (None, "object", "array", "string", "integer", "boolean"):
+        raise SchemaUnsupported(f"不支持的 schema type: {schema['type']!r}")
+    for child in schema.get("properties", {}).values():
+        _check_supported(child)
+    for key in ("items", "additionalProperties"):
+        child = schema.get(key)
+        if isinstance(child, dict):
+            _check_supported(child)
 
 
 def _check(schema: dict, value: Any, path: str) -> str | None:
@@ -164,6 +175,8 @@ class ContractValidator:
                 self.validators[msg_type] = validator
             elif schema.get("title") == "envelope":
                 self.envelope = validator
+        if not self.validators:
+            raise ValueError(f"没有可用的消息 schema: {directory}")
 
     def validate(self, msg_type: str, message: Any) -> str | None:
         """校验完整信封帧；未知 type 返回 None（由调用方决定忽略/拒绝）。"""
