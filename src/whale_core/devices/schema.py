@@ -17,6 +17,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any
+from whale_core.devices.contract_paths import messages_dir
 
 SUPPORTED_MAJOR = 2
 PROTOCOL_VERSION = "2.0"
@@ -42,20 +43,7 @@ def contracts_dir() -> Path:
     ``WHALE_CONTRACTS_DIR`` 指向 contracts 根或 v2/messages 目录均可
     （与 capabilities.py 的约定一致：传入根目录时自动补 v2/messages）。
     """
-    env = os.environ.get(_SCHEMA_DIR_ENV)
-    if env:
-        base = Path(env)
-        for candidate in (base, base / "v2" / "messages"):
-            if candidate.is_dir() and any(candidate.glob("*.schema.json")):
-                return candidate
-        return base
-    here = Path(__file__).resolve()
-    for parent in here.parents:
-        candidate = parent / "contracts" / "v2" / "messages"
-        if candidate.is_dir():
-            return candidate
-    raise FileNotFoundError(
-        "contracts/v2/messages 不存在；可用 WHALE_CONTRACTS_DIR 显式指定")
+    return messages_dir()
 
 
 def parse_major(version: Any) -> int | None:
