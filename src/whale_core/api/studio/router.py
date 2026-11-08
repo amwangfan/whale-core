@@ -44,6 +44,10 @@ from whale_core.api.studio.memory_browse import (
     _pause as _memory_pause,
     _subjects as _memory_subjects,
 )
+from whale_core.api.studio.persona_evolution import (
+    _evolution_decide, _evolution_propose,
+    _evolution_rollback, _evolution_view,
+)
 from whale_core.api.studio.personas import (
     _create_persona,
     _get_persona_detail,
@@ -81,6 +85,23 @@ def _dispatch_studio(handler, method: str, parts: list[str]) -> None:
         _import_preview(handler, ctx, svc)
     elif rest == ["personas", "playtest"] and method == "POST":
         _playtest(handler, ctx, svc)
+    elif len(rest) == 3 and rest[0] == "personas" and rest[2] == "evolution":
+        if method != "GET":
+            raise StudioError(405, "method_not_allowed", "use GET")
+        _evolution_view(handler, ctx, svc, rest[1])
+    elif len(rest) == 4 and rest[0] == "personas" and rest[2:] == ["evolution", "proposals"]:
+        if method != "POST":
+            raise StudioError(405, "method_not_allowed", "use POST")
+        _evolution_propose(handler, ctx, svc, rest[1])
+    elif len(rest) == 4 and rest[0] == "personas" and rest[2:] == ["evolution", "rollback"]:
+        if method != "POST":
+            raise StudioError(405, "method_not_allowed", "use POST")
+        _evolution_rollback(handler, ctx, svc, rest[1])
+    elif (len(rest) == 5 and rest[0] == "personas"
+          and rest[2] == "evolution" and rest[4] in {"approve", "reject"}):
+        if method != "POST":
+            raise StudioError(405, "method_not_allowed", "use POST")
+        _evolution_decide(handler, ctx, svc, rest[1], rest[3], rest[4])
     elif len(rest) == 2 and rest[0] == "personas":
         if method == "GET":
             _get_persona_detail(handler, ctx, svc, rest[1])
@@ -185,8 +206,12 @@ def _path_known(rest: list[str]) -> bool:
         return True
     if len(rest) == 2 and rest[0] == "personas":
         return True
-    if len(rest) == 3 and rest[0] == "personas" and rest[2] == "effective":
+    if len(rest) == 3 and rest[0] == "personas" and rest[2] in ("effective", "evolution"):
         return True
+    if len(rest) == 4 and rest[0] == "personas" and rest[2] == "evolution":
+        return rest[3] in ("proposals", "rollback")
+    if len(rest) == 5 and rest[0] == "personas" and rest[2] == "evolution":
+        return rest[4] in ("approve", "reject")
     return len(rest) == 3 and rest[0] == "conversations" \
         and rest[2] in ("persona", "memories", "capabilities", "rhythm")
 

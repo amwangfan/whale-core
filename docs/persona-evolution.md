@@ -39,3 +39,24 @@ The owner-authenticated `POST /api/v1/life/maintenance` endpoint runs
 `run_memory_maintenance` on demand. It reports deduplication and expiry
 counts; it is not silently scheduled. This keeps destructive retention cleanup
 under an explicit operator action until retention periods are reviewed.
+
+
+## Studio management API
+
+The following endpoints are protected by the normal owner Studio Bearer token:
+
+- `GET /api/v1/studio/personas/{id}/evolution` lists active expression
+  fields, pending/approved proposals and version history.
+- `POST /api/v1/studio/personas/{id}/evolution/proposals` accepts
+  `{"patch":{"tone":"..."},"rationale":"...","evidence_ids":["chat:..."]}`.
+  Alternatively pass `experience_ids` and `principal_id` to validate
+  selected experiences before proposing.
+- `POST /api/v1/studio/personas/{id}/evolution/{proposal_id}/approve`
+  approves a pending version proposal; `reject` denies it.
+- `POST /api/v1/studio/personas/{id}/evolution/rollback` with
+  `{"to_version":0}` restores a previous overlay while creating a new
+  version entry. The original card is never rewritten.
+
+The `{id}` segment may be `active` for the globally selected card.
+These endpoints only change expression fields. No prompt can grant tool
+permissions or change memory access scopes.
