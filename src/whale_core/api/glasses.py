@@ -652,9 +652,11 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
         for meta in devices:
             device_id = str(meta["device_id"])
             accepted = False
+            ambiguous = False
             detail = ""
             if api_token:
                 try:
+                    import urllib.error
                     import urllib.request
                     from urllib.parse import quote
 
@@ -679,9 +681,18 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
                     with opener.open(request, timeout=4) as response:
                         accepted = int(response.status) == 200
                         detail = "core_gateway_accepted" if accepted else f"http_{response.status}"
+                except urllib.error.HTTPError as exc:
+                    # An explicit HTTP rejection (not a committed notification)
+                    # may use the shared SQLite fallback. 5xx other than the
+                    # known pre-dispatch 503 is treated as ambiguous.
+                    detail = f"core_gateway:http_{exc.code}"
+                    ambiguous = exc.code >= 500 and exc.code != 503
                 except Exception as exc:
-                    detail = f"core_gateway:{type(exc).__name__}"
-            if not accepted:
+                    # A timeout/read failure may occur AFTER the gateway queued
+                    # the event. Never invent a second event ID on this path.
+                    detail = f"core_gateway:unknown_{type(exc).__name__}"
+                    ambiguous = True
+            if not accepted and not ambiguous:
                 try:
                     import asyncio
                     notification_id = asyncio.run(gateway.notify(

@@ -50,3 +50,7 @@ the owner read the notification.
 The receiving phone/glasses client still needs to implement the V2
 `notification.event` WSS downlink and receipt/sync behavior. This PR does not
 change whale-mobile or whale-io.
+
+If an HTTP request to the live gateway times out or the response is
+ambiguous, Core reports an unknown result and does **not** create a second
+notification with a new event ID in the SQLite fallback queue.
