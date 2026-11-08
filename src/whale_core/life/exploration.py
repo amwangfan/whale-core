@@ -198,7 +198,9 @@ class ExplorationManager:
                 draft_id=draft.draft_id, topic=draft.topic,
                 evidence=draft.evidence, status="pending",
                 now=at, timezone_name=self.timezone_name)
-        return drafts
+        # 返回规划结果，保持 ExplorationManager 原有 tuple 接口与调用方契约；
+        # 只有实际进入 Outbox 的条目才被写入推荐互动日记。
+        return tuple(planned)
 
     # -------------------------------------------------------------- feedback
     def feedback(self, topic: str, signal: str) -> None:

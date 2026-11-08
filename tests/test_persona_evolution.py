@@ -33,7 +33,7 @@ def test_evolution_is_proposal_until_approved_and_can_rollback():
     after = build_effective_persona(store)
     assert approved["state"] == "approved"
     assert after.evolution_version == 1
-    assert "语气：温柔但克制" in after.model_context
+    assert "气质：温柔但克制" in after.model_context
     assert "少用客服腔" in after.model_context
     assert after.content_sha != before.content_sha
 

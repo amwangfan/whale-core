@@ -208,14 +208,14 @@ def test_uninspected_item_not_blocked_reason_marks_unchecked():
     mgr.tracker.add("AI")
     drafts = mgr.maybe_explore([make_item(inspected=False)])
     assert len(drafts) == 1
-    assert "已核查内容：False" in drafts[0].reason  # 未核查如实标注，不阻断
+    assert "已读取来源：False" in drafts[0].reason  # 未核查如实标注，不阻断
 
 
 def test_inspected_item_reason_marks_checked():
     mgr, _, _ = make_manager()
     mgr.tracker.add("AI")
     drafts = mgr.maybe_explore([make_item(inspected=True)])
-    assert "已核查内容：True" in drafts[0].reason
+    assert "已读取来源：True" in drafts[0].reason
 
 
 # ------------------------------------------------------------------ backoff

@@ -269,7 +269,7 @@ class WorkflowsService:
                     if parsed.scheme != "https" or host in {"bilibili.com", "www.bilibili.com"}:
                         continue
                     page = _fetch(url)
-                    if len(page.strip()) < 24:
+                    if not page.strip():
                         continue
                     if url in seen_urls:
                         continue
