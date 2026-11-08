@@ -27,7 +27,7 @@ def req(server, method, path, body=None, *, token=TOKEN):
     headers = {"Authorization": "Bearer " + token} if token else {}
     payload = None
     if body is not None:
-        payload = json.dumps(body, ensure_ascii=False)
+        payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
         headers["Content-Type"] = "application/json"
     conn.request(method, path, body=payload, headers=headers)
     response = conn.getresponse()

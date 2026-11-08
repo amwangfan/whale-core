@@ -176,7 +176,9 @@ class ExplorationManager:
         drafts = [draft for draft in planned if self.outbox.propose(draft)]
         self.store.put(LAST_AT_KEY, at.isoformat())
         read_items = [item for item in items if item.inspected]
-        sources = tuple(dict.fromkeys(item.url for item in read_items if item.url))
+        # sources includes discovered links for continuity with existing diary API;
+        # each items[] entry distinguishes discovered-only from actually fetched.
+        sources = tuple(dict.fromkeys(item.url for item in items if item.url))
         read_videos = [item for item in read_items if item.content_type == "video"]
         note = (f"探索窗口：收到外部候选 {len(items)} 条，实际读取页面 {len(read_items)} 条，"
                 f"其中 B 站视频页面 {len(read_videos)} 条；"

@@ -54,3 +54,8 @@ change whale-mobile or whale-io.
 If an HTTP request to the live gateway times out or the response is
 ambiguous, Core reports an unknown result and does **not** create a second
 notification with a new event ID in the SQLite fallback queue.
+
+The diary `sources` array includes discovered links for compatibility with
+older clients. The `items[].inspected` flag and `inspection_method` specify
+which sources were actually fetched; discovery alone is never described as
+reading the page or watching a video.
