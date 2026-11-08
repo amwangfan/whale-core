@@ -58,3 +58,41 @@ def test_offline_text_only_logged():
     assert receipts[0].ok is True
     assert receipts[0].channel == "stub_log"
     assert port.sent == []
+
+
+
+def test_offline_text_prefers_whale_notification():
+    port = FakePort()
+    from whale_core.life.result_delivery import DeliveryReceipt
+
+    pushed = []
+    def whale_push(items, conversation, summary):
+        pushed.append((items, conversation, summary))
+        return [DeliveryReceipt(
+            channel="whale_notification", ok=True,
+            detail="queued_for_device_sync", qq_online=False)]
+
+    d = ResultDelivery(port, owner_uid="u_owner",
+                       online_probe=lambda: False, whale_push=whale_push)
+    receipts = d.deliver(
+        [DeliveryItem(kind="text", text="B站视频《FPGA 入门》")],
+        conversation="glasses:s1", summary="exploration:BV1")
+    assert len(receipts) == 1
+    assert receipts[0].channel == "whale_notification"
+    assert receipts[0].ok is True
+    assert pushed and pushed[0][1] == "glasses:s1"
+    assert port.sent == []
+
+
+def test_offline_whale_failure_falls_back_to_stub_log():
+    port = FakePort()
+    from whale_core.life.result_delivery import DeliveryReceipt
+
+    d = ResultDelivery(
+        port, owner_uid="u_owner", online_probe=lambda: False,
+        whale_push=lambda items, conversation, summary: [
+            DeliveryReceipt(channel="whale_notification", ok=False,
+                            detail="gateway_unavailable", qq_online=False)])
+    receipts = d.deliver([DeliveryItem(kind="text", text="内容")])
+    assert any(r.channel == "whale_notification" and not r.ok for r in receipts)
+    assert any(r.channel == "stub_log" for r in receipts)

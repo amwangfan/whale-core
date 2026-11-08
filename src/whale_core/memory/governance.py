@@ -19,6 +19,8 @@ from datetime import datetime, timezone, timedelta
 from whale_core.memory.store import MemoryKind, MemoryStore
 
 GOVERNABLE_TAGS = ("chat", "call")  # 低价值情节的来源标签（curated 永不治理掉）
+PENDING_FACT_TTL_DAYS = 30
+SUPERSEDED_RETENTION_DAYS = 30
 
 
 def layer_of(record) -> str:
@@ -40,21 +42,25 @@ def dedupe_episodes(store: MemoryStore) -> int:
 
     返回删除条数。
     """
-    seen: set[str] = set()
+    seen: set[tuple[str, str, str]] = set()
     removed = 0
-    # list_by_kind 按 created_at 倒序（新的在前）：先遇即最新，保留；
-    # 之后遇到的同 summary 记录是更老的重复，删除。
+    # 仅治理普通聊天/通话情节。待确认事实、更正审计、curated
+    # 各有独立生命周期，不能被跨空间、跨层去重误删。
+    # list_by_kind 按 created_at 倒序：先遇即最新。
     for record in store.list_by_kind(MemoryKind.EPISODE):
-        if "curated" in record.tags:
+        if not any(tag in GOVERNABLE_TAGS for tag in record.tags):
+            continue
+        if any(tag in record.tags for tag in ("curated", "pending_fact", "superseded")):
             continue
         summary = str((record.content or {}).get("summary", "")).strip()
         if not summary:
             continue
-        if summary in seen:
+        key = (record.space_id, layer_of(record), summary)
+        if key in seen:
             store.delete(record.key)
             removed += 1
         else:
-            seen.add(summary)
+            seen.add(key)
     return removed
 
 
@@ -81,7 +87,9 @@ def expire_episodes(store: MemoryStore, *, older_than_days: float = 90.0,
 
 
 def propose_fact(store: MemoryStore, summary: str, *, source: str,
-                 evidence_id: str, confidence: float = 0.5) -> str:
+                 evidence_id: str, confidence: float = 0.5,
+                 ttl_days: float = PENDING_FACT_TTL_DAYS,
+                 space_id: str = "") -> str:
     """模型推断的事实**只进 pending_fact 层**：不召回、不升级。
 
     返回记录 key；经 confirm_fact 显式确认后才参与召回。
@@ -91,15 +99,21 @@ def propose_fact(store: MemoryStore, summary: str, *, source: str,
 
     if not summary.strip():
         raise ValueError("summary required")
+    if ttl_days <= 0:
+        raise ValueError("ttl_days must be positive")
     key = f"pending:{uuid4().hex}"
+    created = datetime.now(timezone.utc)
     record = MemoryRecord(
         kind=MemoryKind.EPISODE,
         key=key,
         content={"summary": summary[:1500], "source": source[:120],
                  "evidence_id": evidence_id[:160],
                  "confidence": max(0.0, min(1.0, confidence)),
-                 "layer": "pending_fact"},
+                 "layer": "pending_fact",
+                 "expires_at": (created + timedelta(days=ttl_days)).isoformat()},
+        created_at=created,
         tags=("pending_fact",),
+        space_id=space_id,
     )
     store.put_record(record)
     return key
@@ -122,7 +136,8 @@ def confirm_fact(store: MemoryStore, key: str, *, curator=None,
         curator = MemoryCurator(store)
     curator.remember(summary, source=source, evidence_id=evidence,
                      confidence=float(content.get("confidence", 1.0)),
-                     stable_fact=True, consent=True)
+                     stable_fact=True, consent=True,
+                     space_id=record.space_id)
     return True
 
 
@@ -143,11 +158,12 @@ def supersede(store: MemoryStore, old_key: str, new_summary: str, *,
     content["superseded_at"] = datetime.now(timezone.utc).isoformat()
     store.put_record(type(old)(kind=old.kind, key=old.key, content=content,
                                record_id=old.record_id, created_at=old.created_at,
-                               tags=tuple(set(old.tags) | {"superseded"})))
+                               tags=tuple(set(old.tags) | {"superseded"}),
+                               space_id=old.space_id))
     _purge_embedding(registry, str(content.get("summary", "")))
     new = MemoryCurator(store).remember(
         new_summary, source=source, evidence_id=evidence_id,
-        stable_fact=True, consent=True)
+        stable_fact=True, consent=True, space_id=old.space_id)
     return new.key
 
 
@@ -173,3 +189,69 @@ def forget_gone_everywhere(store: MemoryStore, key: str, *, registry=None) -> bo
     store.delete(key)
     _purge_embedding(registry, summary)
     return True
+
+
+
+def expire_pending_facts(store: MemoryStore, *,
+                         now: datetime | None = None,
+                         older_than_days: float = PENDING_FACT_TTL_DAYS) -> int:
+    """删除已过期或超过保留期的待确认事实；不触碰已晋升记忆。"""
+    if older_than_days <= 0:
+        raise ValueError("older_than_days must be positive")
+    current = now or datetime.now(timezone.utc)
+    cutoff = current - timedelta(days=older_than_days)
+    removed = 0
+    for record in store.list_by_kind(MemoryKind.EPISODE):
+        if "pending_fact" not in record.tags:
+            continue
+        expires = (record.content or {}).get("expires_at")
+        expired = record.created_at < cutoff
+        if expires:
+            try:
+                expiry = datetime.fromisoformat(str(expires))
+                if expiry.tzinfo is None:
+                    expiry = expiry.replace(tzinfo=timezone.utc)
+                expired = expired or expiry <= current
+            except (TypeError, ValueError):
+                pass
+        if expired:
+            store.delete(record.key)
+            removed += 1
+    return removed
+
+
+def expire_superseded(store: MemoryStore, *,
+                      now: datetime | None = None,
+                      older_than_days: float = SUPERSEDED_RETENTION_DAYS) -> int:
+    """删除已更正记录的审计副本；新版本不受影响。"""
+    if older_than_days <= 0:
+        raise ValueError("older_than_days must be positive")
+    current = now or datetime.now(timezone.utc)
+    cutoff = current - timedelta(days=older_than_days)
+    removed = 0
+    for kind in (MemoryKind.EPISODE, MemoryKind.PREFERENCE):
+        for record in store.list_by_kind(kind):
+            if "superseded" not in record.tags:
+                continue
+            raw = (record.content or {}).get("superseded_at")
+            try:
+                at = datetime.fromisoformat(str(raw))
+                if at.tzinfo is None:
+                    at = at.replace(tzinfo=timezone.utc)
+            except (TypeError, ValueError):
+                at = record.created_at
+            if at < cutoff:
+                store.delete(record.key)
+                removed += 1
+    return removed
+
+
+def run_memory_maintenance(store: MemoryStore, *,
+                           now: datetime | None = None) -> dict[str, int]:
+    """一次有界记忆维护：去重、过期情节、清理待确认事实与更正副本。"""
+    return {
+        "deduped_episodes": dedupe_episodes(store),
+        "expired_episodes": expire_episodes(store, now=now),
+        "expired_pending_facts": expire_pending_facts(store, now=now),
+        "expired_superseded": expire_superseded(store, now=now),
+    }

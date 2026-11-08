@@ -15,8 +15,8 @@
 - ``POST /v1/qq/reply``：QQ 快捷回复——把用户口述的文本发给**已配置的
   绑定对端**（目标不从请求推导，防误发）；走 WeQ 发送链与既有风控
   （被动额度/静默时段豁免口径与 runner 一致：主人当面 dictation 属被动延续）。
-- ``POST /v1/result/deliver``：统一结果投递（ResultDelivery）——QQ 在线走
-  owner 私聊文字/图片；离线 stub 落盘 + 可选 ADB/MediaStore 探测 Magic8。
+- ``POST /v1/result/deliver``：统一结果投递（ResultDelivery）——QQ 在线优先；
+  QQ 离线走 Whale 原生通知（在线直发/离线补传），图片可继续回落手机图库。
   ``/v1/chat`` 请求体 ``deliverResult=true`` 时也会在回复后走同一路由。
 
 鉴权：``Authorization: Bearer <WHALE_GLASSES_TOKEN>``（phone 角色专用令牌，
@@ -318,8 +318,28 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
     def _make_companion():
         from whale_core.core.companion import WhaleCompanion
         from whale_core.memory.curation import MemoryCurator
-        return WhaleCompanion(store, brain_factory(),
-                              curator=MemoryCurator(store))
+
+        def _deliver_exploration(draft, conversation_id):
+            evidence = list(draft.get("evidence") or ())
+            text = str(draft.get("text") or "").strip()
+            if evidence:
+                text += "\n来源：" + evidence[0]
+            result = deliver_result(
+                [{"kind": "text", "text": text}],
+                conversation=conversation_id,
+                summary="exploration:" + str(draft.get("draft_id") or "")[:80])
+            # A logged stub is not a successful delivery. Only a QQ send or
+            # Whale notification accepted by the Core gateway resolves "要".
+            result["ok"] = any(
+                item.get("ok") and item.get("channel") in
+                {"qq_c2c", "qq_group", "whale_notification"}
+                for item in result.get("receipts", ())
+                if isinstance(item, dict))
+            return result
+
+        return WhaleCompanion(
+            store, brain_factory(), curator=MemoryCurator(store),
+            exploration_delivery=_deliver_exploration)
 
     # 单 owner 通道：复用 companion/orchestrator，避免每请求重建搜索/shell 插件。
     # ThreadingHTTPServer 下用锁串行化一轮 handle，避免改 location / intent 上下文竞态。
@@ -598,14 +618,109 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
         ok = port.send_c2c(cfg.owner_uid, text) if hasattr(port, "send_c2c") else False
         return bool(ok), ("accepted" if ok else "send_failed")
 
+    def _whale_push(items, conversation: str, summary: str):
+        """QQ 离线时向已配对设备提交原生通知；无在线网关时先入本地补传队列。"""
+        from whale_core.devices.registry import DeviceRegistry
+        from whale_core.life.result_delivery import DeliveryReceipt
+        from whale_core.notifications.gateway import NotificationGateway
+        from whale_core.notifications.models import NotificationCategory, NotificationTarget
+
+        texts = [str(item.text or "").strip() for item in items
+                 if getattr(item, "kind", "") == "text" and str(item.text or "").strip()]
+        body = "\n".join(texts)[:2000]
+        if not body:
+            body = str(summary or "").strip()[:2000]
+        if not body:
+            return []
+        try:
+            devices = [meta for meta in DeviceRegistry(store).list_devices()
+                       if meta.get("status") == "active" and meta.get("device_id")]
+        except Exception as exc:
+            return [DeliveryReceipt(
+                channel="whale_notification", ok=False,
+                detail=f"device_registry:{type(exc).__name__}", qq_online=False)]
+        if not devices:
+            return []
+
+        api_base = (env.get("WHALE_API") or env.get("WHALE_API_URL")
+                    or "http://127.0.0.1:8080").strip().rstrip("/")
+        api_token = (env.get("WHALE_API_TOKEN") or "").strip()
+        target = NotificationTarget("chat", str(conversation or "")[:128])
+        group_key = ("explore:" + str(conversation or "owner"))[:128]
+        gateway = NotificationGateway(store)
+        receipts = []
+        for meta in devices:
+            device_id = str(meta["device_id"])
+            accepted = False
+            ambiguous = False
+            detail = ""
+            if api_token:
+                try:
+                    import urllib.error
+                    import urllib.request
+                    from urllib.parse import quote
+
+                    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+                        def redirect_request(self, req, fp, code, msg, headers, newurl):
+                            return None
+
+                    payload = json.dumps({
+                        "category": NotificationCategory.CHAT_MESSAGE,
+                        "title": "鲸鱼有一条新发现",
+                        "body": body,
+                        "target": target.to_payload(),
+                        "group_key": group_key,
+                        "collapse_key": group_key,
+                    }, ensure_ascii=False).encode("utf-8")
+                    request = urllib.request.Request(
+                        f"{api_base}/api/v1/devices/{quote(device_id, safe='')}/notify",
+                        data=payload, method="POST",
+                        headers={"Authorization": f"Bearer {api_token}",
+                                 "Content-Type": "application/json"})
+                    opener = urllib.request.build_opener(_NoRedirect())
+                    with opener.open(request, timeout=4) as response:
+                        accepted = int(response.status) == 200
+                        detail = "core_gateway_accepted" if accepted else f"http_{response.status}"
+                except urllib.error.HTTPError as exc:
+                    # An explicit HTTP rejection (not a committed notification)
+                    # may use the shared SQLite fallback. 5xx other than the
+                    # known pre-dispatch 503 is treated as ambiguous.
+                    detail = f"core_gateway:http_{exc.code}"
+                    ambiguous = exc.code >= 500 and exc.code != 503
+                except Exception as exc:
+                    # A timeout/read failure may occur AFTER the gateway queued
+                    # the event. Never invent a second event ID on this path.
+                    detail = f"core_gateway:unknown_{type(exc).__name__}"
+                    ambiguous = True
+            if not accepted and not ambiguous:
+                try:
+                    import asyncio
+                    notification_id = asyncio.run(gateway.notify(
+                        device_id, NotificationCategory.CHAT_MESSAGE,
+                        "鲸鱼有一条新发现", body, target=target,
+                        group_key=group_key, collapse_key=group_key))
+                    record = gateway.queue.get_delivery(device_id, notification_id)
+                    accepted = bool(notification_id and record is not None)
+                    detail = ("queued_for_device_sync" if accepted else
+                              detail or "local_queue_failed")
+                except Exception as exc:
+                    detail = f"local_queue:{type(exc).__name__}"
+                    accepted = False
+            receipts.append(DeliveryReceipt(
+                channel="whale_notification", ok=accepted,
+                detail=detail or ("accepted" if accepted else "unavailable"),
+                qq_online=False))
+        return receipts
+
     def deliver_result(items, *, conversation: str = "", summary: str = "",
                        prefer_owner_dm: bool = True) -> dict:
-        """统一投递：QQ online → WeQ；offline → 手机图库 stub/ADB。"""
+        """统一投递：QQ online → WeQ；offline → Whale 通知/补传队列，再回落图库。"""
         from whale_core.life.result_delivery import (
             DeliveryItem, ResultDelivery, summarize_receipts)
         port = send_port_factory()
         delivery = ResultDelivery(
-            port, owner_uid=cfg.owner_uid, prefer_owner_dm=prefer_owner_dm)
+            port, owner_uid=cfg.owner_uid, prefer_owner_dm=prefer_owner_dm,
+            whale_push=_whale_push)
         norm = []
         for it in items or ():
             if isinstance(it, DeliveryItem):
@@ -938,7 +1053,7 @@ def _openapi() -> dict:
                                       "responses": {"200": {"description": "ok"}},
                                       "security": [{"bearerAuth": []}]}},
             "/v1/result/deliver": {"post": {
-                "summary": "统一结果投递（QQ online / 手机图库 stub）",
+                "summary": "统一结果投递（QQ online / Whale 原生通知 / 手机图库）",
                 "responses": {"200": {"description": "delivery receipts"}},
                 "security": [{"bearerAuth": []}]}},
             "/v1/health": {"get": {"summary": "存活与能力"}},

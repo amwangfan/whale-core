@@ -91,6 +91,7 @@ class EffectivePersonaSnapshot:
     dispositions: tuple = ()          # tuple[FieldDisposition, ...]
     content_sha: str = ""             # sha256(model_context)[:12]，日志/Trace 引用
     fallback_reason: str = ""         # 解析回退原因（无回退为空）
+    evolution_version: int = 0        # 已审批的人格演化版本
 
     def as_dict(self) -> dict:
         return {
@@ -101,6 +102,7 @@ class EffectivePersonaSnapshot:
             "voice": dict(self.voice),
             "content_sha": self.content_sha,
             "fallback_reason": self.fallback_reason,
+            "evolution_version": self.evolution_version,
             "dispositions": [
                 {"field": d.field, "destination": d.destination,
                  "applied": d.applied, "used_value": d.used_value}
@@ -277,6 +279,18 @@ def build_effective_persona(
             content_sha=hashlib.sha256(text.encode("utf-8")).hexdigest()[:12],
             fallback_reason=fallback_reason,
         )
+    evolution_version = 0
+    try:
+        from dataclasses import replace as _replace
+        from whale_core.memory.persona_evolution import PersonaEvolutionStore
+
+        overlay, evolution_version = PersonaEvolutionStore(store).active_overlay(
+            card.card_id)
+        if overlay:
+            card = _replace(card, **overlay)
+    except Exception:
+        # A malformed or unavailable evolution overlay must not block chat.
+        evolution_version = 0
     text, dispositions = render_model_context(card, host_taboos=host_taboos)
     return EffectivePersonaSnapshot(
         persona_id=card.card_id,
@@ -290,6 +304,7 @@ def build_effective_persona(
         dispositions=dispositions,
         content_sha=hashlib.sha256(text.encode("utf-8")).hexdigest()[:12],
         fallback_reason=fallback_reason,
+        evolution_version=evolution_version,
     )
 
 

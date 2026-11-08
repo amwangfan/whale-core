@@ -26,7 +26,7 @@ class DeliveryItem:
 
 @dataclass
 class DeliveryReceipt:
-    channel: str  # qq_c2c | qq_group | phone_gallery | stub_log
+    channel: str  # qq_c2c | qq_group | whale_notification | phone_gallery | stub_log
     ok: bool
     detail: str = ""
     qq_online: bool | None = None
@@ -46,6 +46,7 @@ class DeliveryReceipt:
 
 OnlineProbe = Callable[[], bool]
 PhoneGallerySink = Callable[[bytes, str], "tuple[bool, str]"]
+WhalePushSink = Callable[[Sequence[DeliveryItem], str, str], Sequence[DeliveryReceipt]]
 
 
 def _unwrap_send_port(port):
@@ -112,12 +113,14 @@ class ResultDelivery:
         owner_uid: str,
         online_probe: OnlineProbe | None = None,
         phone_gallery: PhoneGallerySink | None = None,
+        whale_push: WhalePushSink | None = None,
         prefer_owner_dm: bool = True,
     ) -> None:
         self.port = send_port
         self.owner_uid = str(owner_uid or "").strip()
         self.online_probe = online_probe or (lambda: probe_weq_qq_online(send_port))
         self.phone_gallery = phone_gallery
+        self.whale_push = whale_push
         self.prefer_owner_dm = prefer_owner_dm
         self.last_receipts: list[DeliveryReceipt] = []
 
@@ -147,11 +150,26 @@ class ResultDelivery:
         if online:
             receipts = self._deliver_qq(items, conversation=conversation)
         else:
-            receipts = self._deliver_phone(items, summary=summary or "")
-            # 离线也落一条文字摘要到日志，便于事后补发
+            # QQ 离线时先走 Whale 原生通知；图片仍可独立回落图库。
+            whale_receipts = self._deliver_whale(
+                items, conversation=conversation, summary=summary or "")
+            whale_text_accepted = any(
+                receipt.ok and receipt.channel == "whale_notification"
+                for receipt in whale_receipts)
+            images = [item for item in items
+                      if item.kind == "image" and item.image_bytes]
+            if images:
+                phone_receipts = self._deliver_phone(
+                    images, summary="" if whale_text_accepted else (summary or ""))
+            elif not whale_text_accepted:
+                phone_receipts = self._deliver_phone(items, summary=summary or "")
+            else:
+                phone_receipts = []
+            receipts = [*whale_receipts, *phone_receipts]
+            # 离线也落一条文字摘要到日志，便于事后补发。
             log.info(
-                "result_delivery qq_offline summary=%r items=%d",
-                (summary or "")[:120], len(items))
+                "result_delivery qq_offline summary=%r items=%d whale_accepted=%s",
+                (summary or "")[:120], len(items), whale_text_accepted)
         self.last_receipts = receipts
         return receipts
 
@@ -239,6 +257,20 @@ class ResultDelivery:
                 channel="stub_log", ok=False,
                 detail=f"unsupported-kind:{item.kind}", qq_online=True))
         return receipts
+
+    def _deliver_whale(
+        self, items: Sequence[DeliveryItem], *, conversation: str, summary: str
+    ) -> list[DeliveryReceipt]:
+        if self.whale_push is None:
+            return []
+        try:
+            result = self.whale_push(items, conversation, summary)
+            return list(result or ())
+        except Exception as exc:
+            log.warning("whale notification push failed: %s", type(exc).__name__)
+            return [DeliveryReceipt(
+                channel="whale_notification", ok=False,
+                detail=f"push_failed:{type(exc).__name__}", qq_online=False)]
 
     def _deliver_phone(
         self, items: Sequence[DeliveryItem], *, summary: str

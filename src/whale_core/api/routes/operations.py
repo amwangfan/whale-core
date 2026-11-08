@@ -158,10 +158,9 @@ def life(handler, method: str, parts: list[str]) -> None:
     from dataclasses import asdict
 
     from whale_core.life.exploration import (
-        DIARY_KEY_PREFIX,
-        ExplorationManager,
-        InterestTracker,
+        DIARY_KEY_PREFIX, ExplorationManager, InterestTracker,
     )
+    from whale_core.life.exploration_chat import REFLECTION_KEY_PREFIX
 
     ctx = handler.ctx
     store = ctx.store
@@ -177,11 +176,38 @@ def life(handler, method: str, parts: list[str]) -> None:
                         "day": str(entry.get("day", "")),
                         "note": str(entry.get("note", "")),
                         "sources": [str(u) for u in entry.get("sources", ())],
+                        "items": [dict(item) for item in entry.get("items", ())
+                                  if isinstance(item, dict)],
+                    })
+        reflection_diary = []
+        reflection_days = sorted(
+            k for k in store.keys() if k.startswith(REFLECTION_KEY_PREFIX)
+        )[-_LIFE_DIARY_DAYS:]
+        for key in reflection_days:
+            for entry in store.get(key) or []:
+                if isinstance(entry, dict):
+                    reflection_diary.append({
+                        "day": str(entry.get("day", "")),
+                        "at": str(entry.get("at", "")),
+                        "kind": str(entry.get("kind", "")),
+                        "note": str(entry.get("note", "")),
+                        "draft_id": str(entry.get("draft_id", "")),
+                        "topic": str(entry.get("topic", "")),
+                        "status": str(entry.get("status", "")),
+                        "evidence": [str(u) for u in entry.get("evidence", ())],
                     })
         handler._send(200, _json_bytes({"result": {
             "interests": [asdict(i) for i in InterestTracker(store).topics()],
             "diary": diary,
+            "reflection_diary": reflection_diary,
         }}))
+        return
+    if parts == ["life", "maintenance"] and method == "POST":
+        from whale_core.memory.governance import run_memory_maintenance
+        with ctx.lock:
+            report = run_memory_maintenance(store)
+        ctx.log_event("memory:maintenance", "manual")
+        handler._send(200, _json_bytes({"result": report}))
         return
     if parts == ["life", "interests"] and method == "POST":
         body = handler._body_json()

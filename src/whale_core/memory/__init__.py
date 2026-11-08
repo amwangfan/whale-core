@@ -6,6 +6,10 @@ from whale_core.memory.continuity import (
     remember_episode,
     remember_preference,
 )
+from whale_core.memory.persona_evolution import PersonaEvolutionStore
+from whale_core.memory.governance import (
+    expire_pending_facts, expire_superseded, run_memory_maintenance,
+)
 from whale_core.memory.store import (
     InMemoryStore,
     MemoryKind,
@@ -24,4 +28,8 @@ __all__ = [
     "build_continuity_context",
     "remember_episode",
     "remember_preference",
+    "PersonaEvolutionStore",
+    "expire_pending_facts",
+    "expire_superseded",
+    "run_memory_maintenance",
 ]

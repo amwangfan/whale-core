@@ -59,7 +59,7 @@ def test_life_requires_auth(api):
 def test_life_empty_state(api):
     status, body = _req(api, "GET", "/api/v1/life")
     assert status == 200
-    assert body["result"] == {"interests": [], "diary": []}
+    assert body["result"] == {"interests": [], "diary": [], "reflection_diary": []}
 
 
 def test_interest_add_list_remove_roundtrip(api):
