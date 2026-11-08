@@ -26,6 +26,8 @@ def test_only_current_session_disconnect_marks_device_offline(mode):
     gateway.challenge_ttl = 30
     gateway.lock = threading.RLock()
     gateway.online = {}
+    gateway.pending = {}
+    gateway.pending_confirm = {}
     gateway.stopping = threading.Event()
     events = []
     gateway._log_event = lambda kind, detail: events.append((kind, detail))

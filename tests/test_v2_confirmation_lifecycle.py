@@ -17,7 +17,11 @@ def gateway():
     gateway.contracts = ContractValidator()
     gateway.lock = threading.RLock()
     gateway.pending_confirm = {}
-    gateway._online_or_raise = lambda _: object()
+    gateway.pending = {}
+    gateway.stopping = threading.Event()
+    gateway.online = {device: SimpleNamespace(device_id=device, offline_marked=False)
+                      for device in (DEVICE, "b" * 32)}
+    gateway._online_or_raise = lambda device: gateway.online[device]
     gateway.send_msg = lambda *_: pytest.fail("invalid request must not be sent")
     return gateway
 

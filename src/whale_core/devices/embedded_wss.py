@@ -119,14 +119,16 @@ class _Pending:
     sensor.result/action.receipt/confirm.response 之间不回包误匹配）。
     """
 
-    __slots__ = ("event", "result", "device_id", "response_type")
+    __slots__ = ("event", "result", "device_id", "response_type", "connection", "error")
 
     def __init__(self, device_id: str | None = None,
-                 response_type: str = "") -> None:
+                 response_type: str = "", connection: ConnectionState | None = None) -> None:
         self.event = threading.Event()
         self.result: dict | None = None
         self.device_id = device_id
         self.response_type = response_type
+        self.connection = connection
+        self.error: GatewayError | None = None
 
 
 class EmbeddedWssGateway:
@@ -256,15 +258,62 @@ class EmbeddedWssGateway:
         except (ConnectionClosed, OSError):
             pass
         finally:
-            removed = False
-            with self.lock:
-                if st.device_id and self.online.get(st.device_id) is st:
-                    del self.online[st.device_id]
-                    removed = True
-            if removed:
-                self._emit("device:offline", st.device_id)
-                log.info("设备 %s 断开，标记离线", st.device_id)
+            self._finish_session(st)
             self._safe_close(ws)
+
+    def _finish_session(self, st: ConnectionState) -> None:
+        """Release only waiters belonging to this connection, never its replacement."""
+        with self.lock:
+            removed = bool(st.device_id and self.online.get(st.device_id) is st)
+            if removed:
+                del self.online[st.device_id]
+            for pending in (self.pending, self.pending_confirm):
+                for key, waiter in list(pending.items()):
+                    if waiter.connection is not st:
+                        continue
+                    pending.pop(key, None)
+                    if waiter.response_type == "action.receipt":
+                        # Disconnect says nothing about effects. Keep the durable record for late receipts.
+                        waiter.result = {"action_id": key, "status": "unknown",
+                                         "provider_ref": "core:connection-lost"}
+                    elif waiter.response_type == "device.confirm.response":
+                        waiter.result = {"approved": False, "reason": "unavailable", "signature": None}
+                    else:
+                        waiter.error = GatewayError("unavailable", "设备连接已断开")
+                    waiter.event.set()
+        if removed:
+            self._emit("device:offline", st.device_id)
+
+    def _await_response(self, st: ConnectionState, key: str, msg_type: str,
+                        payload: dict, timeout_s: float, response_type: str, *,
+                        confirm: bool = False) -> dict:
+        from websockets.exceptions import ConnectionClosed
+        pending = self.pending_confirm if confirm else self.pending
+        waiter = _Pending(st.device_id, response_type, st)
+        with self.lock:
+            if (self.stopping.is_set() or self.online.get(st.device_id) is not st
+                    or st.offline_marked):
+                raise GatewayError("unavailable", "设备会话已变化或服务正在关闭")
+            if key in pending:
+                raise GatewayError("invalid_message", "请求 ID 已有等待项")
+            pending[key] = waiter
+        try:
+            try:
+                self.send_msg(st, msg_type, payload)
+            except (ConnectionClosed, OSError):
+                self._finish_session(st)
+                self._safe_close(st.ws)
+            if not waiter.event.wait(timeout_s + 5):
+                if confirm:
+                    return {"approved": False, "reason": "timeout", "signature": None}
+                raise GatewayError("expired", f"等待 {response_type} 超时（{timeout_s}s）")
+            if waiter.error is not None:
+                raise waiter.error
+            return dict(waiter.result or ({"approved": False, "reason": "empty"} if confirm else {}))
+        finally:
+            with self.lock:
+                if pending.get(key) is waiter:
+                    pending.pop(key, None)
 
     @staticmethod
     def _safe_close(ws, code: int = 1008) -> None:
@@ -637,20 +686,8 @@ class EmbeddedWssGateway:
         if payload["device_id"] != device_id:
             raise GatewayError("invalid_message", "确认请求的 device_id 与目标设备不一致")
         challenge_id = payload["challenge_id"]
-        pend = _Pending(device_id, "device.confirm.response")
-        with self.lock:
-            if challenge_id in self.pending_confirm:
-                raise GatewayError("invalid_message", "challenge_id 已有等待中的确认请求")
-            self.pending_confirm[challenge_id] = pend
-        try:
-            self.send_msg(st, "device.confirm.request", payload)
-            if not pend.event.wait(timeout_s + 5):
-                return {"approved": False, "reason": "timeout", "signature": None}
-            return dict(pend.result or {"approved": False, "reason": "empty"})
-        finally:
-            with self.lock:
-                if self.pending_confirm.get(challenge_id) is pend:
-                    self.pending_confirm.pop(challenge_id, None)
+        return self._await_response(st, challenge_id, "device.confirm.request", payload,
+                                    timeout_s, "device.confirm.response", confirm=True)
 
     def _on_device_confirm_response(self, st: ConnectionState, msg: dict) -> None:
         p = msg["payload"]
@@ -810,6 +847,7 @@ class EmbeddedWssGateway:
             self.send_error(st, REF_ID_FALLBACK, "device_revoked",
                             "device has been revoked")
         finally:
+            self._finish_session(st)
             self._safe_close(st.ws)
         return True
 
@@ -818,6 +856,7 @@ class EmbeddedWssGateway:
         st = self.online_state(device_id)
         if st is None:
             return False
+        self._finish_session(st)
         self._safe_close(st.ws, 1000)
         return True
 
@@ -863,19 +902,7 @@ class EmbeddedWssGateway:
             "deadline": now_ms() + timeout_ms,
         }
         self._preflight("sensor.query", payload)
-        pend = _Pending(device_id, "sensor.result")
-        with self.lock:
-            self.pending[request_id] = pend
-        try:
-            self.send_msg(st, "sensor.query", payload)
-            if not pend.event.wait(timeout_s + 5):
-                raise GatewayError(
-                    "expired", f"等待 sensor.result 超时（{timeout_s}s deadline）")
-            return dict(pend.result or {})
-        finally:
-            with self.lock:
-                if self.pending.get(request_id) is pend:
-                    self.pending.pop(request_id, None)
+        return self._await_response(st, request_id, "sensor.query", payload, timeout_s, "sensor.result")
 
     def send_action(self, device_id: str, *, capability: str,
                     arguments: dict | None = None,
@@ -947,19 +974,7 @@ class EmbeddedWssGateway:
             result = self.action_status(device_id, idem_key)
             result["duplicate"] = True
             return result
-        pend = _Pending(device_id, "action.receipt")
-        with self.lock:
-            self.pending[action_id] = pend
-        try:
-            self.send_msg(st, "action.request", payload)
-            if not pend.event.wait(timeout_s + 5):
-                raise GatewayError(
-                    "expired", f"等待 action.receipt 超时（{timeout_s}s）")
-            return dict(pend.result or {})
-        finally:
-            with self.lock:
-                if self.pending.get(action_id) is pend:
-                    self.pending.pop(action_id, None)
+        return self._await_response(st, action_id, "action.request", payload, timeout_s, "action.receipt")
 
     def _preflight(self, msg_type: str, payload: dict) -> None:
         try:
@@ -991,11 +1006,11 @@ class EmbeddedWssGateway:
 
     async def send_notification_event(self, device_id: str, payload: dict) -> None:
         """DeviceWssPort：向在线设备写 notification.event payload（§13.1）。"""
-        self._send_notification(device_id, "notification.event", payload)
+        await asyncio.to_thread(self._send_notification, device_id, "notification.event", payload)
 
     async def send_notification_revoke(self, device_id: str, payload: dict) -> None:
         """whale_wss 可选撤回口（§13.3 notification.revoke）。"""
-        self._send_notification(device_id, "notification.revoke", payload)
+        await asyncio.to_thread(self._send_notification, device_id, "notification.revoke", payload)
 
     # ---- 录制控制（§12.2） -------------------------------------------------
 
@@ -1015,10 +1030,10 @@ class EmbeddedWssGateway:
     def close(self) -> None:
         self.stopping.set()
         with self.lock:
-            sessions = [st.ws for st in self.online.values()]
-            self.online.clear()
-        for ws in sessions:
-            self._safe_close(ws, 1001)
+            sessions = list(self.online.values())
+        for st in sessions:
+            self._finish_session(st)
+            self._safe_close(st.ws, 1001)
         self.server.shutdown()
         self.thread.join(timeout=3)
         self._sweeper.join(timeout=3)
