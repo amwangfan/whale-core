@@ -6,6 +6,7 @@
 - ``PROTOCOL.md``
 - ``messages/*.schema.json``
 - ``objects/*.schema.json``
+- ``objects/examples/*.json``
 - ``examples/*.json``
 
 canonical source 是 **whale-mobile**（``contracts/v2/README.md`` 与
@@ -32,7 +33,8 @@ import sys
 from pathlib import Path
 
 SCOPE_FILES = ("PROTOCOL.md",)
-SCOPE_GLOBS = ("messages/*.schema.json", "objects/*.schema.json", "examples/*.json")
+SCOPE_GLOBS = ("messages/*.schema.json", "objects/*.schema.json", "examples/*.json",
+               "objects/examples/*.json")
 
 
 def collect(root: Path) -> "dict[str, Path]":
@@ -44,7 +46,7 @@ def collect(root: Path) -> "dict[str, Path]":
             found[name] = p
     for pattern in SCOPE_GLOBS:
         for p in sorted(base.glob(pattern)):
-            found[str(p.relative_to(base))] = p
+            found[p.relative_to(base).as_posix()] = p
     return found
 
 
@@ -92,6 +94,12 @@ def main(argv: "list[str] | None" = None) -> int:
         )
         return 1
     total = len(collect(a_root))
+    base = a_root / "contracts" / "v2"
+    missing = [name for name in SCOPE_FILES if not (base / name).is_file()]
+    missing += [pattern for pattern in SCOPE_GLOBS if not any(base.glob(pattern))]
+    if missing:
+        print(f"error: contracts/v2 不完整，缺少: {', '.join(missing)}", file=sys.stderr)
+        return 2
     print(f"ok: contracts/v2 范围内 {total} 个文件两侧一致")
     return 0
 

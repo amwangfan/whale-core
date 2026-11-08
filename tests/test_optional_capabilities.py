@@ -26,7 +26,9 @@ def test_artifact_roundtrip_expiry_integrity_and_paths(tmp_path, monkeypatch):
     artifact = artifacts.save_reference('data:image/png;base64,'+base64.b64encode(b'image').decode())
     assert artifacts.read(artifact.artifact_id) == (artifact, b'image')
     assert artifact.url.startswith('/api/v1/artifacts/')
-    assert os.stat(next(tmp_path.iterdir())).st_mode & 0o777 == 0o600
+    # Windows stat/chmod expose read-only flags rather than POSIX permission bits.
+    if os.name == 'posix':
+        assert os.stat(next(tmp_path.iterdir())).st_mode & 0o777 == 0o600
     with pytest.raises(KeyError): artifacts.read('../etc/passwd')
     path = next(tmp_path.iterdir())
     path.write_bytes(b'corrupted')

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import pytest
 from pathlib import Path
 
 SCRIPT = (
@@ -12,8 +13,8 @@ SCRIPT = (
 )
 
 
-def _load():
-    spec = importlib.util.spec_from_file_location("contract_sync_check", SCRIPT)
+def _load(script=SCRIPT):
+    spec = importlib.util.spec_from_file_location("contract_sync_check", script)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -30,6 +31,8 @@ BASE = {
     "PROTOCOL.md": "# Protocol\n",
     "messages/experience.event.schema.json": '{"type": "object"}',
     "examples/experience.event.json": '{"type": "experience.event"}',
+    "objects/task.schema.json": '{"type": "object"}',
+    "objects/examples/task.json": '{"id": "example"}',
 }
 
 
@@ -80,3 +83,18 @@ class TestContractSyncCheck:
             assert exc.code == 2
         else:  # pragma: no cover
             raise AssertionError("expected SystemExit")
+
+
+@pytest.mark.parametrize("files", [{}, {"PROTOCOL.md": "# empty\n"}])
+def test_identically_incomplete_trees_are_errors(tmp_path, files):
+    for name in ("a", "b"):
+        (tmp_path / name / "contracts/v2").mkdir(parents=True)
+        _make_tree(tmp_path / name, files)
+    assert _load().main(["--a", str(tmp_path / "a"), "--b", str(tmp_path / "b")]) == 2
+
+
+def test_object_example_drift_is_detected(tmp_path, capsys):
+    _make_tree(tmp_path / "a", BASE)
+    _make_tree(tmp_path / "b", {**BASE, "objects/examples/task.json": '{"id":"changed"}'})
+    assert _load().main(["--a", str(tmp_path / "a"), "--b", str(tmp_path / "b")]) == 1
+    assert "DIFFERS    objects/examples/task.json" in capsys.readouterr().out
