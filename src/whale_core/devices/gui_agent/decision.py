@@ -80,8 +80,16 @@ class ScriptedDecision:
 _AGENT_RULES = """你是手机 GUI 自主体。规则：
 1. 每个回合只输出一个动作，JSON 格式：{"action": "...", "arguments": {...}, "reason": "...", "label": "...", "done": false}
 2. action 只能是：observe / device.tap / device.long_press / device.swipe / device.input_text / device.key / device.wait / device.app.launch / finish
-3. 点击元素用 {"action":"device.tap","arguments":{"element_id":N}}；元素序号只对最近一次观察有效，不确定就先 observe
-4. 输入中文用 device.input_text；坐标点击用 {"action":"device.tap","arguments":{"x":123,"y":456}}
+3. 参数形状（严格，错名即失败）：
+   - device.tap 点元素 {"element_id": N}；点坐标 {"x": 123, "y": 456}
+   - device.long_press {"element_id": N} 或 {"x": 123, "y": 456, "duration_ms": 800}
+   - device.swipe {"x1": 540, "y1": 1800, "x2": 540, "y2": 600, "duration_ms": 300}
+   - device.input_text {"text": "要输入的文字"}；可选 "element_id" 先聚焦
+   - device.key {"key": "back|home|enter|delete|tab"}
+   - device.wait {"duration_ms": 1500}
+   - device.app.launch {"package": "com.example.app"}
+   - observe 无参数；finish {"success": true}
+4. 点击元素用 element_id；元素序号只对最近一次观察有效，不确定就先 observe
 5. 完成后 {"action":"finish","done":true,"success":true,"reason":"...","label":"任务完成的简述"}
 6. label 用简短中文说明这一步做什么（如「点击搜索按钮」），不要解释思考过程
 7. 只输出 JSON，不要输出其他文字"""
