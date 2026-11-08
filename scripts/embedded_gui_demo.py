@@ -135,14 +135,19 @@ class EmbeddedRestTransport:
     async def execute(self, device_id: str, action) -> ActionReceipt:
         return await self.execute_raw(
             device_id, action.capability, action.arguments,
-            idem=action.idempotency_key, timeout_s=max(1, action.timeout_ms // 1000))
+            idem=action.idempotency_key,
+            observation_id=action.observation_id,
+            timeout_s=max(1, action.timeout_ms // 1000))
 
     async def execute_raw(self, device_id: str, capability: str,
                           arguments: dict, *, idem: str | None = None,
+                          observation_id: str | None = None,
                           timeout_s: int = 30) -> ActionReceipt:
         body = {"capability": capability, "args": dict(arguments),
                 "idempotency_key": idem or f"embedded-gui-{now_ms()}",
                 "authorized_scope": [capability], "timeout": timeout_s}
+        if observation_id:
+            body["observation_id"] = observation_id
         started = now_ms()
         try:
             r = await asyncio.to_thread(
@@ -183,14 +188,21 @@ def _load_secrets() -> dict[str, str]:
 
 
 def make_complete(secrets):
-    key = secrets.get("DEEPSEEK_API_KEY", "")
-    base = secrets.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
-    model = secrets.get("DEEPSEEK_MODEL", "deepseek-chat")
+    """决策模型：kimi-k3 经 AgentScope 平台（QQ_INTENT_* 凭据），thinking 关闭。
+
+    用户指定：GUI 决策与实际使用都用 platform 的 kimi 模型、思考关/medium。
+    """
+    key = secrets.get("QQ_INTENT_API_KEY") or secrets.get("DEEPSEEK_API_KEY", "")
+    base = (secrets.get("QQ_INTENT_BASE_URL")
+            or secrets.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")).rstrip("/")
+    model = secrets.get("QQ_INTENT_MODEL", "kimi-k3")
     if not base.endswith("/v1"):
         base += "/v1"
 
     async def complete(prompt: str) -> str:
-        body = json.dumps({"model": model, "temperature": 0.2,
+        # kimi-k3 不接受 temperature 参数（platform 侧 400）；thinking 关闭
+        body = json.dumps({"model": model,
+                           "thinking": {"type": "disabled"},
                            "messages": [{"role": "user", "content": prompt}]}).encode()
 
         def _c() -> str:
@@ -216,7 +228,8 @@ async def main() -> int:
     transport = EmbeddedRestTransport(args.device_id)
     trace = RunTraceWriter(new_id("run"), sink_dir=args.out)
     loop = GuiAgentLoop(transport, max_steps=args.max_steps,
-                        action_timeout_ms=60_000, observe_timeout_ms=120_000)
+                        action_timeout_ms=60_000, observe_timeout_ms=120_000,
+                        task_timeout_ms=1_200_000)
     result = await loop.run(args.device_id, goal=args.goal,
                             decision=LlmJsonDecision(make_complete(_load_secrets())),
                             trace=trace, task_id=new_id("task"))

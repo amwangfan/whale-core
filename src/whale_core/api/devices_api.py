@@ -536,6 +536,8 @@ def _downlink(handler, gateway: EmbeddedWssGateway | None, device_id: str, *,
                     body.get("task_id"), str) else None,
                 run_id=body.get("run_id") if isinstance(
                     body.get("run_id"), str) else None,
+                observation_id=body.get("observation_id") if isinstance(
+                    body.get("observation_id"), str) else None,
                 timeout_s=timeout)
             handler.ctx.log_event("device:action", f"{device_id}:{capability}")
             # §7.1：重复幂等键回已记录状态（duplicate=True），200 而非 409
