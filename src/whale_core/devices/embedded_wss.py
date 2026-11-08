@@ -629,9 +629,15 @@ class EmbeddedWssGateway:
         超时/断线 → approved=False reason=timeout/unavailable（绝不默认批准）。
         """
         st = self._online_or_raise(device_id)
-        challenge_id = str(payload["challenge_id"])
+        _timeout_ms(timeout_s, 0.001, threading.TIMEOUT_MAX - 5)
+        self._preflight("device.confirm.request", payload)
+        if payload["device_id"] != device_id:
+            raise GatewayError("invalid_message", "确认请求的 device_id 与目标设备不一致")
+        challenge_id = payload["challenge_id"]
         pend = _Pending(device_id, "device.confirm.response")
         with self.lock:
+            if challenge_id in self.pending_confirm:
+                raise GatewayError("invalid_message", "challenge_id 已有等待中的确认请求")
             self.pending_confirm[challenge_id] = pend
         try:
             self.send_msg(st, "device.confirm.request", payload)
