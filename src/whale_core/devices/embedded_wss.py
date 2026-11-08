@@ -29,6 +29,7 @@ import copy
 import json
 import logging
 import math
+import re
 import secrets
 import threading
 import time
@@ -71,6 +72,17 @@ class GatewayError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+def _reject_json_constant(value: str):
+    raise ValueError(f"non-standard JSON constant: {value}")
+
+
+def _finite_json_float(value: str) -> float:
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError("JSON number exceeds finite floating-point range")
+    return result
 
 
 def _timeout_ms(value: float, minimum: float, maximum: float) -> int:
@@ -194,23 +206,33 @@ class EmbeddedWssGateway:
     # ------------------------------------------------------------------
 
     def build_message(self, msg_type: str, dir_: str, payload: dict, seq: int) -> dict:
+        return self._encoded_message(msg_type, dir_, payload, seq)[0]
+
+    def _encoded_message(self, msg_type: str, dir_: str, payload: dict, seq: int) -> tuple[dict, str]:
         msg = {"v": PROTOCOL_VERSION, "id": new_ulid(), "type": msg_type,
                "ts": now_ms(), "seq": seq, "dir": dir_, "payload": payload}
         err = self.contracts.validate(msg_type, msg)
         if err:  # 服务端自身构造的帧不应失败；失败即实现 bug
             raise ValueError(f"出站帧未通过 {msg_type} schema: {err}")
-        return msg
+        try:
+            encoded = json.dumps(msg, ensure_ascii=False, allow_nan=False)
+            size = len(encoded.encode("utf-8"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("出站帧不是有效的 JSON 数据") from exc
+        if size > MAX_FRAME_BYTES:
+            raise ValueError("出站帧超过 256 KiB 协议上限，请使用输出引用")
+        return msg, encoded
 
     def send_msg(self, st: ConnectionState, msg_type: str, payload: dict) -> dict:
         # 每连接串行：锁内分配 seq 并发送，保证序号与线上顺序一致
         with st.send_lock:
             st.down_seq += 1
-            msg = self.build_message(msg_type, "downlink", payload, st.down_seq)
-            st.ws.send(json.dumps(msg, ensure_ascii=False))
+            msg, encoded = self._encoded_message(msg_type, "downlink", payload, st.down_seq)
+            st.ws.send(encoded)
             return msg
 
     def send_error(self, st: ConnectionState, ref_id: Any, code: str, message: str):
-        if not (isinstance(ref_id, str) and len(ref_id) == 26):
+        if not (isinstance(ref_id, str) and re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{26}", ref_id)):
             ref_id = REF_ID_FALLBACK
         try:
             self.send_msg(st, "error",
@@ -332,8 +354,8 @@ class EmbeddedWssGateway:
             return False
 
         try:
-            msg = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
+            msg = json.loads(raw, parse_constant=_reject_json_constant, parse_float=_finite_json_float)
+        except (ValueError, TypeError):
             return fail("auth_failed", "first frame is not valid JSON")
         if not isinstance(msg, dict):
             return fail("auth_failed", "first frame is not an object")
@@ -426,8 +448,8 @@ class EmbeddedWssGateway:
         """认证后的常规帧。返回 False 表示应关闭连接。"""
         ref_id = REF_ID_FALLBACK
         try:
-            msg = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
+            msg = json.loads(raw, parse_constant=_reject_json_constant, parse_float=_finite_json_float)
+        except (ValueError, TypeError):
             self.send_error(st, ref_id, "invalid_message", "frame is not valid JSON")
             return True
         if not isinstance(msg, dict):
@@ -944,6 +966,8 @@ class EmbeddedWssGateway:
                 "action_id": action_id, "capability": capability,
                 "created_at": now_ms(), "expires_at": now_ms() + timeout_ms,
                 "state": "pending",
+                **{key: payload[key] for key in ("task_id", "run_id", "observation_id", "correlation_id")
+                   if key in payload},
             })
             tx.put(f"device:action-id:{device_id}:{action_id}", idem_key)
             return True
@@ -955,17 +979,17 @@ class EmbeddedWssGateway:
             "timeout_ms": timeout_ms,
             "expires_at": now_ms() + timeout_ms,
             "idempotency_key": idem_key,
-            "authorized_scope": list(authorized_scope or [capability]),
+            "authorized_scope": list([capability] if authorized_scope is None else authorized_scope),
         }
-        if task_id:
+        if task_id is not None:
             payload["task_id"] = task_id
-        if run_id:
+        if run_id is not None:
             payload["run_id"] = run_id
-        if observation_id:
+        if observation_id is not None:
             payload["observation_id"] = observation_id
-        if approval_ref:
+        if approval_ref is not None:
             payload["approval_ref"] = approval_ref
-        if correlation_id:
+        if correlation_id is not None:
             payload["correlation_id"] = correlation_id
         # 先组装完整帧做 schema 预检（非法动作不占幂等键；PR#75 batch05）
         self._preflight("action.request", payload)

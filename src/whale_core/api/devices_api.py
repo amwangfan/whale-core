@@ -29,6 +29,7 @@ import re
 from typing import Any
 
 from whale_core.api.server import _error, _json_bytes
+from whale_core.api.device_inputs import action_options, confirmation_options, query_options
 from whale_core.devices.capabilities import action_capabilities, query_operations
 from whale_core.devices.embedded_wss import (
     WS_PATH,
@@ -42,7 +43,6 @@ from whale_core.devices.registry import (
 )
 
 _DEVICE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
-_MAX_TIMEOUT_S = 60.0
 
 #: DeviceRegistryError.code → HTTP 状态
 _REGISTRY_STATUS = {
@@ -124,14 +124,6 @@ def ensure_device_services(ctx, server) -> tuple[DeviceRegistry, EmbeddedWssGate
             gw2 = ctx.device_gateway_v2 = DeviceGatewayV2(registry)
         gw2.register_transport(EmbeddedWssTransport(gateway))
     return registry, gateway
-
-
-def _clamp_timeout(body: dict) -> float:
-    try:
-        value = float(body.get("timeout", 15))
-    except (TypeError, ValueError):
-        value = 15.0
-    return max(1.0, min(_MAX_TIMEOUT_S, value))
 
 
 def dispatch_devices(handler, method: str, parts: list[str]) -> None:
@@ -382,6 +374,11 @@ def _confirm(handler, gateway: EmbeddedWssGateway | None, registry: DeviceRegist
     if body is None:
         send(400, _error("bad_request", "JSON body required"))
         return
+    try:
+        body = confirmation_options(body)
+    except ValueError as exc:
+        send(400, _error("bad_request", str(exc)))
+        return
     scopes = body.get("scopes")
     if not (isinstance(scopes, list)
             and all(isinstance(x, str) for x in scopes) and scopes):
@@ -484,7 +481,6 @@ def _downlink(handler, gateway: EmbeddedWssGateway | None, device_id: str, *,
     if body is None:
         send(400, _error("bad_request", "JSON body required"))
         return
-    timeout = _clamp_timeout(body)
     try:
         if op == "query":
             operation = str(body.get("operation") or "")
@@ -493,17 +489,7 @@ def _downlink(handler, gateway: EmbeddedWssGateway | None, device_id: str, *,
                                  f"operation 须为 v2 查询子集之一: "
                                  f"{list(query_operations())}"))
                 return
-            filters = body.get("filters") or {}
-            if not isinstance(filters, dict):
-                send(400, _error("bad_request", "filters must be an object"))
-                return
-            try:
-                max_items = int(body.get("max_items", 10))
-            except (TypeError, ValueError):
-                max_items = 10
-            result = gateway.send_query(
-                device_id, operation=operation, filters=filters,
-                max_items=max_items, timeout_s=timeout)
+            result = gateway.send_query(device_id, operation=operation, **query_options(body))
             handler.ctx.log_event("device:query", f"{device_id}:{operation}")
             send(200, _json_bytes({"result": {"ok": True, "result": result}}))
         else:
@@ -513,32 +499,7 @@ def _downlink(handler, gateway: EmbeddedWssGateway | None, device_id: str, *,
                                  f"capability 须为 v2 动作子集之一: "
                                  f"{list(action_capabilities())}"))
                 return
-            arguments = body.get("arguments")
-            if arguments is None:
-                arguments = body.get("args")  # 管理面兼容别名
-            if not isinstance(arguments or {}, dict):
-                send(400, _error("bad_request", "arguments must be an object"))
-                return
-            authorized_scope = body.get("authorized_scope")
-            if authorized_scope is not None and not (
-                    isinstance(authorized_scope, list)
-                    and all(isinstance(s, str) for s in authorized_scope)):
-                send(400, _error("bad_request",
-                                 "authorized_scope must be a list of strings"))
-                return
-            receipt = gateway.send_action(
-                device_id, capability=capability, arguments=dict(arguments or {}),
-                idempotency_key=body.get("idempotency_key"),
-                correlation_id=body.get("correlation_id"),
-                authorized_scope=authorized_scope,
-                approval_ref=body.get("approval_ref"),
-                task_id=body.get("task_id") if isinstance(
-                    body.get("task_id"), str) else None,
-                run_id=body.get("run_id") if isinstance(
-                    body.get("run_id"), str) else None,
-                observation_id=body.get("observation_id") if isinstance(
-                    body.get("observation_id"), str) else None,
-                timeout_s=timeout)
+            receipt = gateway.send_action(device_id, capability=capability, **action_options(body))
             handler.ctx.log_event("device:action", f"{device_id}:{capability}")
             # §7.1：重复幂等键回已记录状态（duplicate=True），200 而非 409
             send(200, _json_bytes({"result": {"ok": True, "receipt": receipt}}))

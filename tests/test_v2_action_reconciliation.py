@@ -6,9 +6,10 @@ import pytest
 
 from whale_core.devices.embedded_wss import EmbeddedWssGateway, GatewayError
 from whale_core.devices.gateway_v2 import DeviceGatewayV2
-from whale_core.devices.transports.base import ActionReceipt, ReceiptStatus, now_ms
+from whale_core.devices.transports.base import ActionReceipt, ReceiptStatus, new_id, new_ulid, now_ms
 from whale_core.devices.transports.embedded_wss import EmbeddedWssTransport
 from whale_core.memory.store import InMemoryStore
+from whale_core.devices.schema import ContractValidator
 
 
 def persistent_gateway(state="pending", expired=False):
@@ -125,3 +126,17 @@ def test_route_cache_eviction_is_bounded_with_receipts():
         assert await gateway.reconcile_action("dev", "0") is None
         assert transport.sent == 5
     asyncio.run(run())
+
+
+def test_inflight_task_metadata_survives_durable_status_read():
+    gateway = persistent_gateway()
+    gateway.contracts = ContractValidator()
+    gateway._online_or_raise = lambda _: object()
+    gateway._await_response = lambda st, key, *args: {"action_id": key, "status": "received"}
+    task, run, observation = new_id("task"), new_id("run"), new_id("obs")
+    gateway.send_action("dev", capability="device.tap", arguments={}, idempotency_key="new-task-key",
+                        task_id=task, run_id=run, observation_id=observation, correlation_id=new_ulid())
+    stored = gateway.action_status("dev", "new-task-key")
+    assert (stored["task_id"], stored["run_id"], stored["observation_id"]) == (task, run, observation)
+    receipt = asyncio.run(EmbeddedWssTransport(gateway).action_status("dev", "new-task-key"))
+    assert receipt.task_id == task and receipt.status is ReceiptStatus.RECEIVED

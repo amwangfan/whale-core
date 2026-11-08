@@ -12,6 +12,7 @@ class PagedGateway:
         self.content, self.mutate, self.offsets = content, mutate, []
 
     def send_query(self, device, **kwargs):
+        assert kwargs["filters"]["page_format"] == "bytes.v1"
         offset, limit = kwargs["filters"]["offset"], kwargs["filters"]["max_bytes"]
         self.offsets.append(offset)
         chunk = self.content[offset:offset + min(limit, 997)]

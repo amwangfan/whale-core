@@ -196,7 +196,7 @@ device.output.read         device.screen.record       device.status
 
 ### 7.4 device.output.read 字节分页
 
-`sensor.query.filters` 使用 `output_ref`、`offset`（非负字节偏移，默认 0）、`max_bytes`（正整数，默认且每页最多 49152 字节）。端侧以文件随机读取返回单页，文本也按原始 UTF-8 字节编码，避免跨页切断字符时丢失数据。
+`sensor.query.filters` 显式传入 `page_format="bytes.v1"` 启用分页，另使用 `output_ref`、`offset`（非负字节偏移，默认 0）、`max_bytes`（正整数，默认且每页最多 49152 字节）。未启用时保留现有 text/data_base64 输出形状，兼容原有调用方。端侧以文件随机读取返回单页，文本也按原始 UTF-8 字节编码，避免跨页切断字符时丢失数据。
 
 `sensor.result.data[0]` 返回 `bytes_b64`、`offset`、`next_offset`、`total_bytes`、`truncated`；外层 `truncated` 与本页一致。`next_offset = offset + 解码字节数`，`truncated = next_offset < total_bytes`。到达或超过 EOF 返回空页，偏移收敛到文件长度。单页二进制 48 KiB，base64 后仍为 64 KiB，为 256 KiB 帧上限预留信封空间。
 

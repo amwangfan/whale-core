@@ -188,7 +188,7 @@ class EmbeddedWssTransport:
                 self._gateway.send_query, device_id,
                 operation="device.output.read",
                 filters={"output_ref": output_ref, "offset": int(offset),
-                         "max_bytes": int(max_bytes)},
+                         "max_bytes": int(max_bytes), "page_format": "bytes.v1"},
                 max_items=1, timeout_s=_READ_TIMEOUT_S)
         except GatewayError as exc:
             raise GatewayError(exc.code, f"read_output 失败：{exc}") from exc

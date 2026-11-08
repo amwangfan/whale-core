@@ -14,7 +14,8 @@ def gateway(monkeypatch):
     def no_send(*_):
         pytest.fail("invalid input must not be sent")
     monkeypatch.setattr(gateway, "send_msg", no_send)
-    return gateway
+    yield gateway
+    gateway.close()
 
 
 @pytest.mark.parametrize("timeout", [float("nan"), float("inf"), -1, 0, True, "15", 10**400])
