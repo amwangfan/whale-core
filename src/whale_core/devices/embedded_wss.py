@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import math
@@ -891,7 +892,6 @@ class EmbeddedWssGateway:
         重复幂等键：回已记录的 action_id 真实状态（``duplicate=True`` 标记），
         绝不重放（§7.1）。
         """
-        st = self._online_or_raise(device_id)
         self._check_scope(device_id, capability)
         idem_key = f"agent:{new_ulid()}" if idempotency_key is None else idempotency_key
         if not isinstance(idem_key, str) or not (8 <= len(idem_key) <= 128):
@@ -900,12 +900,10 @@ class EmbeddedWssGateway:
         existing = self.store.get(idem_store_key)
         if isinstance(existing, dict):
             # §7.1：重复键回已记录状态，绝不重放；过有效期的非终态按 unknown 报
-            result = dict(existing)
-            if (result.get("state") not in TERMINAL_RECEIPT_STATES
-                    and now_ms() > int(result.get("expires_at") or 0)):
-                result["state"] = "unknown"
+            result = self.action_status(device_id, idem_key)
             result["duplicate"] = True
             return result
+        st = self._online_or_raise(device_id)
         action_id = new_id("act")
         timeout_ms = _timeout_ms(timeout_s, 0.1, 600)
         if arguments is not None and not isinstance(arguments, dict):
@@ -946,7 +944,7 @@ class EmbeddedWssGateway:
         self._preflight("action.request", payload)
         if not self.store.transact(reserve):
             # 并发下另一线程先占了键：同上，回已记录状态
-            result = dict(self.store.get(idem_store_key) or {})
+            result = self.action_status(device_id, idem_key)
             result["duplicate"] = True
             return result
         pend = _Pending(device_id, "action.receipt")
@@ -976,10 +974,11 @@ class EmbeddedWssGateway:
         record = self.store.get(f"device:action:{device_id}:{idempotency_key}")
         if not isinstance(record, dict):
             raise GatewayError("not_found", "unknown action idempotency key")
-        result = dict(record)
+        result = copy.deepcopy(record)
         if (result.get("state") not in TERMINAL_RECEIPT_STATES
                 and now_ms() > int(result.get("expires_at") or 0)):
             result["state"] = "unknown"
+            result["outcome_source"] = "expires_at"
         return result
 
     # ---- 通知下行（DeviceWssPort 实现，§13.4） -----------------------------

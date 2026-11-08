@@ -136,6 +136,7 @@ class EmbeddedWssTransport:
                     action_id=action.action_id, status=ReceiptStatus.TIMEOUT,
                     task_id=action.task_id, error_code="timeout",
                     summary=f"等待 action.receipt 超时（{timeout_s}s）",
+                    provider_ref="core:wait-timeout",
                     completed_at=now_ms())
             # 离线/吊销/scope 拒绝：FAILED + 协议错误码（不悬挂 received）
             return ActionReceipt(
@@ -143,6 +144,19 @@ class EmbeddedWssTransport:
                 task_id=action.task_id, error_code=exc.code, summary=str(exc),
                 completed_at=now_ms())
         return _receipt_from_payload(action, result)
+
+    async def action_status(self, device_id: str, idempotency_key: str) -> ActionReceipt | None:
+        """Read durable state without sending an action, even while the device is offline."""
+        from whale_core.devices.embedded_wss import GatewayError
+        try:
+            record = await asyncio.to_thread(self._gateway.action_status, device_id, idempotency_key)
+        except GatewayError as exc:
+            if exc.code == "not_found":
+                return None
+            raise
+        action = ActionRequest(str(record["action_id"]), str(record.get("capability") or ""),
+                               {}, idempotency_key, task_id=record.get("task_id"))
+        return _receipt_from_payload(action, {**record, "duplicate": True})
 
     # ---- 大输出拉取（§7.3/§10 agent:out: 等） --------------------------------
 
@@ -204,7 +218,8 @@ def _receipt_from_payload(action: ActionRequest, payload: dict) -> ActionReceipt
                    "action_id": record.get("action_id") or action.action_id,
                    "status": "received" if state == "pending" else state,
                    "task_id": embedded.get("task_id") or action.task_id}
-        payload.setdefault("provider_ref", "idempotent:replay-suppressed")
+        payload.setdefault("provider_ref", "core:estimated-outcome" if record.get("outcome_source")
+                           in ("expires_at", "retention_timeout") else "idempotent:replay-suppressed")
     status_raw = str(payload.get("status") or "unknown")
     try:
         status = ReceiptStatus(status_raw)
