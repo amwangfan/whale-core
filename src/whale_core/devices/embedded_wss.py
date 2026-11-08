@@ -242,11 +242,11 @@ class EmbeddedWssGateway:
         except Exception:  # noqa: BLE001
             self._safe_close(ws)
             return
-        if not self._handle_hello(st, raw):
-            self._safe_close(ws)
-            return
         # 2. 认证后主循环（长连，无会话超时；心跳超时只标离线不踢线）
         try:
+            # hello 已登记会话后发送 ack 也可能断线，必须走同一清理路径。
+            if not self._handle_hello(st, raw):
+                return
             for raw in ws:
                 if self.stopping.is_set():
                     break
@@ -255,10 +255,12 @@ class EmbeddedWssGateway:
         except (ConnectionClosed, OSError):
             pass
         finally:
+            removed = False
             with self.lock:
                 if st.device_id and self.online.get(st.device_id) is st:
                     del self.online[st.device_id]
-            if st.device_id:
+                    removed = True
+            if removed:
                 self._emit("device:offline", st.device_id)
                 log.info("设备 %s 断开，标记离线", st.device_id)
             self._safe_close(ws)

@@ -8,7 +8,7 @@
 
 [English](README_EN.md) · [使用与部署](docs/deployment.md) · [能力配置](docs/media-and-voice.md) · [开发者指南](docs/AI_DEVELOPMENT_GUIDE.md)
 
-[Fork：V2 五轮更新说明](docs/v2-updates/README.md)
+[Fork：V2 逐轮更新说明](docs/v2-updates/README.md)
 
 </div>
 
