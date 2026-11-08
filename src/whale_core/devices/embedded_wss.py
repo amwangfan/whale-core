@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import secrets
 import threading
 import time
@@ -69,6 +70,17 @@ class GatewayError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+def _timeout_ms(value: float, minimum: float, maximum: float) -> int:
+    try:
+        valid = (isinstance(value, (int, float)) and not isinstance(value, bool)
+                 and math.isfinite(value) and minimum <= value <= maximum)
+    except OverflowError:
+        valid = False
+    if not valid:
+        raise GatewayError("invalid_message", f"timeout 须为 {minimum}..{maximum}s 内的有限数值")
+    return int(value * 1000)
 
 
 class ConnectionState:
@@ -827,16 +839,21 @@ class EmbeddedWssGateway:
         """下发 sensor.query 并在 deadline 内等待 sensor.result（§5.3/§6）。"""
         st = self._online_or_raise(device_id)
         self._check_scope(device_id, operation)
-        if not (1 <= int(max_items) <= 100):
+        if isinstance(max_items, bool) or not isinstance(max_items, int) or not 1 <= max_items <= 100:
             raise GatewayError("invalid_message", "max_items 须在 1..100")
+        if filters is not None and not isinstance(filters, dict):
+            raise GatewayError("invalid_message", "filters 须为对象")
+        maximum = min((4102444800000 - now_ms()) / 1000, threading.TIMEOUT_MAX - 5)
+        timeout_ms = _timeout_ms(timeout_s, 0.001, maximum)
         request_id = new_ulid()
         payload = {
             "request_id": request_id,
             "operation": operation,
             "filters": dict(filters or {}),
             "max_items": int(max_items),
-            "deadline": now_ms() + int(timeout_s * 1000),
+            "deadline": now_ms() + timeout_ms,
         }
+        self._preflight("sensor.query", payload)
         pend = _Pending(device_id, "sensor.result")
         with self.lock:
             self.pending[request_id] = pend
@@ -868,8 +885,8 @@ class EmbeddedWssGateway:
         """
         st = self._online_or_raise(device_id)
         self._check_scope(device_id, capability)
-        idem_key = idempotency_key or f"agent:{new_ulid()}"
-        if not (8 <= len(idem_key) <= 128):
+        idem_key = f"agent:{new_ulid()}" if idempotency_key is None else idempotency_key
+        if not isinstance(idem_key, str) or not (8 <= len(idem_key) <= 128):
             raise GatewayError("invalid_message", "idempotency_key 长度须为 8..128")
         idem_store_key = f"device:action:{device_id}:{idem_key}"
         existing = self.store.get(idem_store_key)
@@ -882,10 +899,9 @@ class EmbeddedWssGateway:
             result["duplicate"] = True
             return result
         action_id = new_id("act")
-        timeout_ms = int(timeout_s * 1000)
-        if not (100 <= timeout_ms <= 600000):
-            raise GatewayError("invalid_message",
-                               "timeout 须在 0.1..600s（action.request schema）")
+        timeout_ms = _timeout_ms(timeout_s, 0.1, 600)
+        if arguments is not None and not isinstance(arguments, dict):
+            raise GatewayError("invalid_message", "arguments 须为对象")
 
         def reserve(tx):
             if tx.get(idem_store_key) is not None:
@@ -919,11 +935,7 @@ class EmbeddedWssGateway:
         if correlation_id:
             payload["correlation_id"] = correlation_id
         # 先组装完整帧做 schema 预检（非法动作不占幂等键；PR#75 batch05）
-        probe = self.build_message("action.request", "downlink", payload, 0)
-        err = self.contracts.validate("action.request", probe)
-        if err:
-            raise GatewayError("invalid_message",
-                               f"出站帧未通过 action.request schema: {err}")
+        self._preflight("action.request", payload)
         if not self.store.transact(reserve):
             # 并发下另一线程先占了键：同上，回已记录状态
             result = dict(self.store.get(idem_store_key) or {})
@@ -943,9 +955,15 @@ class EmbeddedWssGateway:
                 if self.pending.get(action_id) is pend:
                     self.pending.pop(action_id, None)
 
+    def _preflight(self, msg_type: str, payload: dict) -> None:
+        try:
+            self.build_message(msg_type, "downlink", payload, 0)
+        except ValueError as exc:
+            raise GatewayError("invalid_message", str(exc)) from exc
+
     def action_status(self, device_id: str, idempotency_key: str) -> dict:
         """只读对账（§7.1/§16）；过期的非终态记录按 unknown 报，绝不重发。"""
-        if not (8 <= len(idempotency_key) <= 128):
+        if not isinstance(idempotency_key, str) or not (8 <= len(idempotency_key) <= 128):
             raise GatewayError("invalid_message", "invalid idempotency_key")
         record = self.store.get(f"device:action:{device_id}:{idempotency_key}")
         if not isinstance(record, dict):
