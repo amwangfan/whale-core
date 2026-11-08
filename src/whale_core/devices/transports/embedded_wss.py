@@ -16,11 +16,11 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 from typing import Any, Sequence
 
+from whale_core.devices.observation_codec import observation, validate_request
 from whale_core.devices.output_pages import MAX_PAGE_BYTES, OutputPage, collect_pages, decode_page
 
 from whale_core.devices.transports.base import (
@@ -30,7 +30,6 @@ from whale_core.devices.transports.base import (
     ObserveRequest,
     ReceiptStatus,
     TransportHealth,
-    UiElement,
     Verification,
     VerificationStatus,
     new_id,
@@ -80,11 +79,15 @@ class EmbeddedWssTransport:
     async def observe(self, device_id: str, request: ObserveRequest) -> Observation:
         """下发 action.request device.observe，等终态回执并组装 Observation。
 
-        观察负载本体按 §8 经 output_ref 拉取；拉不到时诚实降级为空观察
-        （screenshot_ref 保留引用，绝不伪造元素/截图）。
+        观察负载本体按 §8 经 output_ref 分页拉取；不完整或无效输出明确报错。
+        截图引用仅来自实际观察负载，不把 UI JSON 引用当作截图。
         """
         from whale_core.devices.embedded_wss import GatewayError
 
+        try:
+            validate_request(request)
+        except ValueError as exc:
+            raise GatewayError("invalid_message", str(exc)) from exc
         req = ActionRequest(
             action_id=new_id("act"), capability="device.observe",
             arguments={
@@ -100,46 +103,14 @@ class EmbeddedWssTransport:
                 receipt.error_code or "unavailable",
                 f"device.observe 未成功：{receipt.status.value}"
                 + (f"/{receipt.error_code}" if receipt.error_code else ""))
-        # 优先解析 output_ref 指向的观察负载（§8：本体不占回执帧预算）
-        payload: dict[str, Any] = {}
-        if receipt.output_ref:
-            try:
-                raw, _ = await self.read_output(device_id, receipt.output_ref,
-                                                max_bytes=256 * 1024)
-                data = json.loads(raw.decode("utf-8"))
-                if isinstance(data, dict):
-                    payload = data
-            except Exception:  # noqa: BLE001 - 拉取失败降级为空观察
-                log.warning("observe output_ref 拉取失败（%s）",
-                            receipt.output_ref, exc_info=True)
-        elements = tuple(
-            _parse_element(e) for e in (payload.get("elements") or [])
-            if isinstance(e, dict))
-        return Observation(
-            observation_id=str(payload.get("observation_id") or new_id("obs")),
-            device_id=device_id,
-            taken_at=int(payload.get("taken_at") or now_ms()),
-            foreground_package=str(payload.get("foreground_package") or ""),
-            activity=(str(payload["activity"])
-                      if payload.get("activity") else None),
-            elements=elements,
-            ui_signature=hashlib.sha256(
-                json.dumps(
-                    [_element_fingerprint_source(e) for e in
-                     (payload.get("elements") or [])],
-                    sort_keys=True, ensure_ascii=False).encode("utf-8")
-            ).hexdigest(),
-            screenshot_ref=(str(payload.get("screenshot_ref"))
-                            if payload.get("screenshot_ref")
-                            else receipt.output_ref),
-            screenshot_signature=(str(payload["screenshot_signature"])
-                                  if payload.get("screenshot_signature") else None),
-            screen_width=int(payload.get("screen_width") or 0),
-            screen_height=int(payload.get("screen_height") or 0),
-            keyboard_shown=bool(payload.get("keyboard_shown") or False),
-            locked=bool(payload.get("locked") or False),
-            truncated=bool(payload.get("truncated") or False),
-        )
+        if not receipt.output_ref:
+            raise GatewayError("invalid_message", "device.observe 未返回观察输出引用")
+        try:
+            raw = await self.read_output_complete(device_id, receipt.output_ref)
+            payload = json.loads(raw.decode("utf-8"))
+            return observation(device_id, payload, request)
+        except (ValueError, UnicodeError) as exc:
+            raise GatewayError("invalid_message", f"观察输出无法解析：{exc}") from exc
 
     # ---- 执行（§7） ---------------------------------------------------------
 
@@ -216,34 +187,6 @@ class EmbeddedWssTransport:
         except ValueError as exc:
             raise GatewayError("invalid_message", str(exc)) from exc
 
-
-def _parse_element(data: dict) -> UiElement:
-    """端侧观察元素 dict → UiElement（缺省宽容，bounds 缺省零矩形）。"""
-    bounds_raw = data.get("bounds")
-    if not (isinstance(bounds_raw, list) and len(bounds_raw) == 4):
-        bounds_raw = [0, 0, 0, 0]
-    bounds = tuple(int(x) for x in bounds_raw)
-    return UiElement(
-        element_id=int(data.get("element_id") or 0),
-        class_name=str(data.get("class_name") or ""),
-        text=str(data.get("text") or ""),
-        resource_id=str(data.get("resource_id") or ""),
-        content_desc=str(data.get("content_desc") or ""),
-        bounds=bounds,  # type: ignore[arg-type]
-        clickable=bool(data.get("clickable") or False),
-        long_clickable=bool(data.get("long_clickable") or False),
-        scrollable=bool(data.get("scrollable") or False),
-        editable=bool(data.get("editable") or False),
-        enabled=bool(data.get("enabled", True)),
-        fingerprint=str(data.get("fingerprint") or ""),
-    )
-
-
-def _element_fingerprint_source(data: Any) -> Any:
-    """ui_signature 计算用的去 id 元素表（与 base.Observation 约定一致）。"""
-    if not isinstance(data, dict):
-        return data
-    return {k: v for k, v in data.items() if k != "element_id"}
 
 
 def _receipt_from_payload(action: ActionRequest, payload: dict) -> ActionReceipt:
