@@ -16,6 +16,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hashlib
 import json
 import logging
@@ -192,16 +194,22 @@ class EmbeddedWssTransport:
             raise GatewayError(
                 str(result.get("status") or "unavailable"),
                 f"sensor.result 状态非 ok：{result.get('status')}")
-        data = result.get("data") or []
-        chunk = b""
-        if data and isinstance(data[0], dict):
-            item = data[0]
-            if isinstance(item.get("text"), str):
-                chunk = item["text"].encode("utf-8")
-            elif isinstance(item.get("bytes_b64"), str):
-                import base64
-                chunk = base64.b64decode(item["bytes_b64"])
-        return chunk, bool(result.get("truncated"))
+        data = result.get("data")
+        if not isinstance(data, list) or not data or not isinstance(data[0], dict):
+            raise GatewayError("invalid_message", "device.output.read 缺少输出对象")
+        item = data[0]
+        if isinstance(item.get("text"), str):
+            chunk = item["text"].encode("utf-8")
+        else:
+            # Agent2 的图片输出使用 data_base64；保留既有 bytes_b64 数据源。
+            encoded = item.get("data_base64", item.get("bytes_b64"))
+            if not isinstance(encoded, str):
+                raise GatewayError("invalid_message", "device.output.read 未声明输出编码")
+            try:
+                chunk = base64.b64decode(encoded, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise GatewayError("invalid_message", "device.output.read base64 无效") from exc
+        return chunk, bool(result.get("truncated") or item.get("truncated"))
 
 
 def _parse_element(data: dict) -> UiElement:
