@@ -22,6 +22,11 @@ from whale_core.api.server import ApiContext, WhaleApiServer
 from whale_core.memory.store import InMemoryStore
 package = Path(whale_core.__file__).resolve().parent
 assert package.parent == Path(sys.argv[1]).resolve(), package
+from whale_core.devices.schema import ContractValidator, contracts_dir
+from whale_core.devices.capabilities import all_capabilities, action_capabilities, query_operations
+assert package in contracts_dir().parents, contracts_dir()
+assert ContractValidator().validators
+assert all_capabilities() and action_capabilities() and query_operations()
 static = _repo_static_dir()
 assert static is not None and package in static.parents, static
 assert (static / "index.html").is_file()
@@ -46,7 +51,7 @@ try:
         assert json.load(response)["result"]["ok"] is True
 finally:
     server.stop()
-print("Installed wheel serves the packaged console and authenticated API.")
+print("Installed wheel loads V2 contracts and serves the packaged console and authenticated API.")
 '''
 
 

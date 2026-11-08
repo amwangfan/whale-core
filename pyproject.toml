@@ -49,6 +49,9 @@ packages = ["src/whale_core", "plugins/search_web", "plugins/qweather", "plugins
 # can continue to use web/dist without committing generated JavaScript.
 artifacts = ["src/whale_core/static/**"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"contracts/v2" = "whale_core/contracts/v2"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # "." 让仓库根的 evals 包（issue #19 回放基准）可被测试导入

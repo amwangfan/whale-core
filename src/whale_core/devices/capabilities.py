@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import json
-import os
 from functools import lru_cache
 from pathlib import Path
 from whale_core.devices.contract_paths import messages_dir

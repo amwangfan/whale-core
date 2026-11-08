@@ -144,8 +144,10 @@ def main(argv=None) -> int:
                    "--collect-submodules", "weq_channel",
                    "--add-data", f"{web}:whale_core/static",
                    "--add-data", f"{skills}:whale_core/workflow_skills",
-                   "--add-data", f"{ROOT / 'licenses'}:licenses",
+                   "--add-data", f"{ROOT / 'contracts' / 'v2'}:whale_core/contracts/v2",
                    "--add-data", f"{notices}:THIRD_PARTY_NOTICES"]
+        if (ROOT / "licenses").is_dir():
+            command += ["--add-data", f"{ROOT / 'licenses'}:licenses"]
         # Some managed Python builds ship an SSL policy data file beside
         # ssl.py. Preserve that policy in the frozen runtime instead of
         # disabling certificate validation or leaving a missing-file startup.
