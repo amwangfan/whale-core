@@ -42,21 +42,25 @@ def dedupe_episodes(store: MemoryStore) -> int:
 
     返回删除条数。
     """
-    seen: set[str] = set()
+    seen: set[tuple[str, str, str]] = set()
     removed = 0
-    # list_by_kind 按 created_at 倒序（新的在前）：先遇即最新，保留；
-    # 之后遇到的同 summary 记录是更老的重复，删除。
+    # 仅治理普通聊天/通话情节。待确认事实、更正审计、curated
+    # 各有独立生命周期，不能被跨空间、跨层去重误删。
+    # list_by_kind 按 created_at 倒序：先遇即最新。
     for record in store.list_by_kind(MemoryKind.EPISODE):
-        if "curated" in record.tags:
+        if not any(tag in GOVERNABLE_TAGS for tag in record.tags):
+            continue
+        if any(tag in record.tags for tag in ("curated", "pending_fact", "superseded")):
             continue
         summary = str((record.content or {}).get("summary", "")).strip()
         if not summary:
             continue
-        if summary in seen:
+        key = (record.space_id, layer_of(record), summary)
+        if key in seen:
             store.delete(record.key)
             removed += 1
         else:
-            seen.add(summary)
+            seen.add(key)
     return removed
 
 
