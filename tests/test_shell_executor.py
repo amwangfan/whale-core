@@ -111,7 +111,7 @@ def test_default_cwd_is_tmpdir():
 
 # ---------- 降权 ----------
 
-@pytest.mark.skipif(os.geteuid() != 0 or shutil.which("id") is None,
+@pytest.mark.skipif(getattr(os, "geteuid", lambda: -1)() != 0 or shutil.which("id") is None,
                     reason="需要 root 演示降权")
 def test_drop_to_nobody():
     result = _executor(drop_to_user="nobody").run("id -un", is_owner=True)

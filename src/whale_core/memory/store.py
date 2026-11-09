@@ -147,7 +147,7 @@ class MemoryStore(Protocol):
     def transact(self, fn):
         """S4：在单个原子事务中执行 ``fn(tx)`` 并返回其结果。
 
-        ``tx`` 提供 ``get(key)`` / ``put(key, value)``（仅 kv 区）。
+        ``tx`` 提供 ``get(key)`` / ``put(key, value)`` / ``delete(key)``（仅 kv 区）。
         用于一次性口令的「校验+核销+签发租约」原子序列（INV-05）。
         """
         ...
@@ -163,17 +163,21 @@ class InMemoryStore:
         self._records: dict[str, MemoryRecord] = {}
 
     def get(self, key: str) -> Any | None:
-        return self._data.get(key)
+        with self._lock:
+            return self._data.get(key)
 
     def put(self, key: str, value: Any) -> None:
-        self._data[key] = value
+        with self._lock:
+            self._data[key] = value
 
     def delete(self, key: str) -> None:
-        self._data.pop(key, None)
-        self._records.pop(key, None)
+        with self._lock:
+            self._data.pop(key, None)
+            self._records.pop(key, None)
 
     def keys(self) -> list[str]:
-        return sorted(set(self._data) | set(self._records))
+        with self._lock:
+            return sorted(set(self._data) | set(self._records))
 
     def put_record(self, record: MemoryRecord) -> None:
         # JSON 往返归一 content/tags（与 SqliteMemoryStore 序列化语义对齐）：
@@ -235,14 +239,18 @@ class InMemoryStore:
 
     def transact(self, fn):
         """进程内后端的事务实现：RLock 保护 kv 读写序列即可满足原子性。"""
+        import copy
         store = self
 
         class _Tx:
             def get(self, key: str):
-                return store._data.get(key)
+                return copy.deepcopy(store._data.get(key))
 
             def put(self, key: str, value) -> None:
-                store._data[key] = value
+                store._data[key] = copy.deepcopy(value)
+
+            def delete(self, key: str) -> None:
+                store._data.pop(key, None)
 
             def get_record(self, key: str):
                 return store._records.get(key)

@@ -157,6 +157,9 @@ class SqliteMemoryStore:
                     "INSERT OR REPLACE INTO kv VALUES (?,?)",
                     (key, json.dumps(value, ensure_ascii=False)))
 
+            def delete(self, key: str) -> None:
+                store.db.execute("DELETE FROM kv WHERE key=?", (key,))
+
             def get_record(self, key: str):
                 row = store.db.execute(
                     "SELECT key,kind,content,record_id,created_at,tags,space_id "

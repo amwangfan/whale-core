@@ -35,6 +35,7 @@ import threading
 import time
 from typing import Any, Mapping
 
+from whale_core.devices.action_records import ActionRecords, TERMINAL_STATES
 from whale_core.devices.perception import (
     DevicePerceptionAdapter,
     DurableDevicePerceptionAdapter,
@@ -59,8 +60,7 @@ DEFAULT_HEARTBEAT_TIMEOUT = 90    # §1：90s 无心跳判定离线（标离线�
 DEFAULT_CHALLENGE_TTL = 30        # 秒；schema 限定 expires_in ∈ [1,300]
 
 #: action.receipt 终态（§7.2：received 是唯一非终态）
-TERMINAL_RECEIPT_STATES = frozenset(
-    {"succeeded", "failed", "timeout", "cancelled", "unknown"})
+TERMINAL_RECEIPT_STATES = TERMINAL_STATES
 
 #: 通知分类默认值（event_consumer 提醒类下行）
 NOTIFY_CAPABILITY = "phone.notification.post"
@@ -573,41 +573,14 @@ class EmbeddedWssGateway:
         """§7.2：received 中间态只落库；五终态才 resolve 等待方，first-wins。"""
         p = msg["payload"]
         action_id, status = p["action_id"], p.get("status")
-        # 未知 action_id 的回执直接忽略（防认证设备灌入任意回执记录）
-        lookup = self.store.get(f"device:action-id:{st.device_id}:{action_id}")
-        if not isinstance(lookup, str):
-            log.warning("unmapped action receipt for device=%s action=%s",
-                        st.device_id, action_id)
+        record = ActionRecords(self.store).receive(st.device_id, p, now_ms())
+        if record is None:
+            log.warning("unmapped action receipt for device=%s action=%s", st.device_id, action_id)
             return
-        with self.lock:
-            key = f"device:receipts:{st.device_id}:{action_id}"
-            receipts = self.store.get(key) or []
-            if isinstance(receipts, list):
-                receipts = (receipts + [{"status": str(status), "ts": now_ms()}])[-32:]
-                self.store.put(key, receipts)
-        # 终态对原幂等键记录落库：迟到回执/进程重启均可对账，绝不重放
-        action_key = f"device:action:{st.device_id}:{lookup}"
-        with self.lock:
-            record = self.store.get(action_key)
-            if isinstance(record, dict) and record.get("action_id") == action_id:
-                # First terminal wins：已落终态不被迟到/冲突终态翻案
-                estimated_unknown = (
-                    record.get("state") == "unknown"
-                    and record.get("outcome_source") == "retention_timeout")
-                if (record.get("state") not in TERMINAL_RECEIPT_STATES
-                        or (estimated_unknown
-                            and status in TERMINAL_RECEIPT_STATES)):
-                    record.update(state=status, updated_at=now_ms())
-                    record.pop("outcome_source", None)
-                    if status in TERMINAL_RECEIPT_STATES:
-                        record["receipt"] = {
-                            k: p[k] for k in (
-                                "status", "task_id", "result", "error_code",
-                                "provider_ref", "started_at", "completed_at")
-                            if k in p
-                        }
-                    self.store.put(action_key, record)
+        status = record.get("state")
         if status in TERMINAL_RECEIPT_STATES:
+            # Always deliver the persisted first terminal, including a concurrent/conflicting receipt.
+            p = {**(record.get("receipt") or {}), "action_id": action_id, "status": status}
             with self.lock:
                 pend = self.pending.get(action_id)
                 if pend is not None and (pend.device_id != st.device_id
@@ -763,53 +736,9 @@ class EmbeddedWssGateway:
         - 仍在有效重试窗口内的记录一律不动（幂等键不提前释放）；
         - 孤儿回执流水直接清；单趟删除量封顶 ``max_deletes``。
         """
-        now = now if now is not None else now_ms()
-        scanned = deleted = marked = 0
-        for key in list(self.store.keys()):
-            if not key.startswith("device:action:"):
-                continue
-            scanned += 1
-            record = self.store.get(key)
-            if not isinstance(record, dict):
-                continue
-            state = str(record.get("state") or "")
-            created = int(record.get("created_at") or 0)
-            expires = int(record.get("expires_at") or 0)
-            device_id = str(record.get("device_id") or "")
-            action_id = str(record.get("action_id") or "")
-            if state in TERMINAL_RECEIPT_STATES:
-                if created + self.ACTION_RETENTION_MS >= now:
-                    continue  # 保留窗口内：可核对、可被查重
-                if deleted >= max_deletes:
-                    continue
-                self.store.delete(key)
-                if device_id and action_id:
-                    self.store.delete(f"device:action-id:{device_id}:{action_id}")
-                    self.store.delete(f"device:receipts:{device_id}:{action_id}")
-                deleted += 1
-            elif now > expires + self.ACTION_PENDING_GRACE_MS:
-                # 过宽限的非终态：落 unknown 过期标记（下轮按终态清理）。
-                # 这是清理任务的**推定**而非设备确认——打 outcome_source 标记，
-                # 迟到的真实终态回执仍可补齐（PR#75 batch08 移植）。
-                record["state"] = "unknown"
-                record["outcome_source"] = "retention_timeout"
-                record["updated_at"] = now
-                self.store.put(key, record)
-                marked += 1
-        # 孤儿回执流水（动作记录已不在）一并清，同受删除上限约束
-        for key in list(self.store.keys()):
-            if deleted >= max_deletes:
-                break
-            if not key.startswith("device:receipts:"):
-                continue
-            parts = key.split(":", 3)
-            if len(parts) < 4:
-                continue
-            device_id, action_id = parts[2], parts[3]
-            if self.store.get(f"device:action-id:{device_id}:{action_id}") is None:
-                self.store.delete(key)
-                deleted += 1
-        return {"scanned": scanned, "deleted": deleted, "marked_unknown": marked}
+        return ActionRecords(self.store).sweep(
+            now if now is not None else now_ms(), self.ACTION_RETENTION_MS,
+            self.ACTION_PENDING_GRACE_MS, max_deletes)
 
     # ------------------------------------------------------------------
     # 心跳离线扫描（内存状态即可，§1）

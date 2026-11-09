@@ -3,14 +3,13 @@ from __future__ import annotations
 
 import io
 import os
+import subprocess
+import sys
 
 import pytest
 
 from whale_core.cli.main import main
 from whale_core.core.lease import RuntimeBusy, RuntimeLease
-
-
-pytestmark = pytest.mark.skipif(os.name != "posix", reason="fcntl advisory locks require POSIX")
 
 
 def test_second_owner_refused_then_lock_released(tmp_path):
@@ -20,7 +19,8 @@ def test_second_owner_refused_then_lock_released(tmp_path):
         assert first is not None
     with RuntimeLease(tmp_path):
         pass
-    assert (tmp_path / ".runtime.lock").stat().st_mode & 0o077 == 0
+    if os.name == "posix":
+        assert (tmp_path / ".runtime.lock").stat().st_mode & 0o077 == 0
 
 
 def test_cli_run_refuses_another_host(tmp_path, monkeypatch, capsys):
@@ -43,3 +43,30 @@ def test_live_restore_refused_before_opening_backup(tmp_path, capsys):
         assert main(["memory", "restore", str(missing), "--config-dir", str(tmp_path)]) == 2
     assert not (tmp_path / "memory.sqlite3").exists()
     assert "恢复前" in capsys.readouterr().err
+
+
+def test_lock_is_process_wide_and_released_after_close(tmp_path):
+    code = """
+import sys
+from whale_core.core.lease import RuntimeLease, RuntimeBusy
+try:
+    with RuntimeLease(sys.argv[1]):
+        print('acquired')
+except RuntimeBusy:
+    print('busy')
+"""
+    with RuntimeLease(tmp_path):
+        result = subprocess.run([sys.executable, "-c", code, str(tmp_path)],
+                                capture_output=True, text=True, timeout=10, check=True)
+        assert result.stdout.strip() == "busy"
+    result = subprocess.run([sys.executable, "-c", code, str(tmp_path)],
+                            capture_output=True, text=True, timeout=10, check=True)
+    assert result.stdout.strip() == "acquired"
+
+
+def test_close_is_idempotent(tmp_path):
+    lease = RuntimeLease(tmp_path)
+    lease.close()
+    lease.close()
+    with RuntimeLease(tmp_path):
+        pass
