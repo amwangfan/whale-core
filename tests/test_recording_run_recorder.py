@@ -18,15 +18,16 @@ import pytest
 
 from whale_core.devices.recording import RecordingOptions, RecordingStore, RunRecorder
 from whale_core.devices.recording._types import RawRecording
+from whale_core.devices.schema import contracts_dir
 from whale_core.devices.recording.run_recorder import (
     RecorderStateError,
     device_id_from_serial,
 )
 
 # whale-mobile 仓的 vendor jsonschema + contracts/v2 schema
-WHALE_MOBILE = Path(os.environ.get("WHALE_MOBILE_ROOT", "/opt/whale/whale-mobile"))
+WHALE_MOBILE = Path(os.environ.get("WHALE_MOBILE_ROOT", Path(__file__).resolve().parents[2] / "whale-mobile"))
 VENDOR_DIR = WHALE_MOBILE / "tests" / "_vendor"
-SCHEMA_DIR = WHALE_MOBILE / "contracts" / "v2"
+SCHEMA_DIR = WHALE_MOBILE / "contracts" / "v2" if "WHALE_MOBILE_ROOT" in os.environ else contracts_dir().parent
 
 if VENDOR_DIR.is_dir():
     sys.path.insert(0, str(VENDOR_DIR))

@@ -11,8 +11,8 @@
   环境变量 ``QQ_LIVE_AUTOSEND=1``，缺一即 fail closed；默认人工审批，
   ``--auto-approve`` 只是 dry-run 演示。判定逻辑全在运行器内，本模块不动。
 - 单实例锁：``run`` 子命令转发前对 ``/tmp/whale-qq-runner.lock`` 取
-  ``fcntl.flock`` 非阻塞排他锁；锁冲突打印明确错误并返回退出码 **3**。
-  锁 fd 持有至进程退出（进程终止即释放）。``approve``/``show``/``jobs``
+  共享跨平台非阻塞排他锁；锁冲突打印明确错误并返回退出码 **3**。
+  锁 fd 持有至运行器结束（返回/异常/进程终止均释放）；Windows使用系统临时目录。``approve``/``show``/``jobs``
   是短命查询进程，不加锁；``run --help`` 等纯求助路径也不取锁。
   运行器本体（examples 直跑）暂无锁——锁是 CLI 入口的增量保护。
 """
@@ -22,15 +22,17 @@ from __future__ import annotations
 import importlib.util
 import os
 import sys
+import tempfile
+from whale_core.core.lease import RuntimeBusy, lock_descriptor
 from pathlib import Path
 from typing import Sequence
 
 # 单实例锁路径（测试可 monkeypatch 到 tmp_path）。
-LOCK_PATH = Path("/tmp/whale-qq-runner.lock")
+LOCK_PATH = Path(tempfile.gettempdir() if os.name == "nt" else "/tmp") / "whale-qq-runner.lock"
 
 LOCK_CONFLICT_EXIT = 3
 
-# 锁 fd 存活引用：进程退出前不关闭（flock 随 fd 关闭/进程终止释放）。
+# 锁 fd 在运行器存活期间保持；返回、异常或进程终止时释放。
 _LOCK_FD: int | None = None
 
 
@@ -51,15 +53,16 @@ def _load_runner():
 
 
 def _try_acquire_lock(lock_path: Path) -> int | None:
-    """非阻塞排他 flock；成功返回打开的 fd（调用方须保持引用），冲突返回 None。"""
-    import fcntl
-
+    """跨平台非阻塞文件锁；成功返回 fd（调用方负责关闭），冲突返回 None。"""
     fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
+        lock_descriptor(fd)
+    except RuntimeBusy:
         os.close(fd)
         return None
+    except BaseException:
+        os.close(fd)
+        raise
     return fd
 
 
@@ -72,33 +75,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     global _LOCK_FD
     args = list(sys.argv[1:] if argv is None else argv)
 
-    # 单实例锁只护 run（常驻监听进程）；求助路径不取锁，保证 --help 永远可用。
-    if args[:1] == ["run"] and not _help_requested(args[1:]):
-        try:
-            import fcntl  # noqa: F401
-        except ImportError:
-            print("[qq] 提示：本平台无 fcntl，单实例锁不可用（继续启动）",
-                  file=sys.stderr)
-        else:
+    fd = None
+    try:
+        # Only run holds a lifetime lock; query/help commands keep their existing behavior.
+        if args[:1] == ["run"] and not _help_requested(args[1:]):
             fd = _try_acquire_lock(LOCK_PATH)
             if fd is None:
-                print(
-                    f"错误：已有 whale qq 运行器实例持有锁 {LOCK_PATH}；"
-                    "请先停止旧实例（或确认无残留进程）后再启动。",
-                    file=sys.stderr,
-                )
+                print(f"错误：已有 whale qq 运行器实例持有锁 {LOCK_PATH}；请先停止旧实例。", file=sys.stderr)
                 return LOCK_CONFLICT_EXIT
             _LOCK_FD = fd
-
-    runner = _load_runner()
-    if runner is None:
-        print(
-            f"错误：未找到 QQ 运行器 {_runner_path()}（whale qq 目前随源码仓"
-            "examples/ 分发；请在仓库内使用或安装包含运行器的版本）。",
-            file=sys.stderr,
-        )
-        return 2
-    return int(runner.main(args, prog="whale qq"))
+        runner = _load_runner()
+        if runner is None:
+            print(f"错误：未找到 QQ 运行器 {_runner_path()}（请在仓库内使用或安装包含运行器的版本）。", file=sys.stderr)
+            return 2
+        return int(runner.main(args, prog="whale qq"))
+    finally:
+        if fd is not None:
+            if _LOCK_FD == fd:
+                _LOCK_FD = None
+            os.close(fd)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import pytest
+from pathlib import Path
 
 from whale_core.cli.main import build_parser
 from whale_core.ops.local_runtime import (
@@ -44,7 +45,7 @@ def make_manager(
     cwds = cwds or {}
     cmdlines = cmdlines or {}
     listeners = listeners or []
-    heads = heads or {}
+    heads = {str(Path(path).resolve()): head for path, head in (heads or {}).items()}
     http = http or {}
     tcp = tcp or {}
     calls: list[list[str]] = []
@@ -60,7 +61,7 @@ def make_manager(
         if cmd[0] == "systemctl" and cmd[1] in ("start", "stop"):
             return 0, "", ""
         if cmd[0] == "git":
-            head = heads.get(cmd[2])
+            head = heads.get(str(Path(cmd[2]).resolve()))
             return (0, f"{head}\n", "") if head else (128, "", "not a repo")
         if cmd[0] == "ps":
             pid = int(cmd[-1])

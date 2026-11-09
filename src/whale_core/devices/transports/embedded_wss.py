@@ -16,10 +16,12 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 from typing import Any, Sequence
+
+from whale_core.devices.observation_codec import observation, validate_request
+from whale_core.devices.output_pages import MAX_PAGE_BYTES, OutputPage, collect_pages, decode_page
 
 from whale_core.devices.transports.base import (
     ActionReceipt,
@@ -28,7 +30,6 @@ from whale_core.devices.transports.base import (
     ObserveRequest,
     ReceiptStatus,
     TransportHealth,
-    UiElement,
     Verification,
     VerificationStatus,
     new_id,
@@ -78,11 +79,15 @@ class EmbeddedWssTransport:
     async def observe(self, device_id: str, request: ObserveRequest) -> Observation:
         """下发 action.request device.observe，等终态回执并组装 Observation。
 
-        观察负载本体按 §8 经 output_ref 拉取；拉不到时诚实降级为空观察
-        （screenshot_ref 保留引用，绝不伪造元素/截图）。
+        观察负载本体按 §8 经 output_ref 分页拉取；不完整或无效输出明确报错。
+        截图引用仅来自实际观察负载，不把 UI JSON 引用当作截图。
         """
         from whale_core.devices.embedded_wss import GatewayError
 
+        try:
+            validate_request(request)
+        except ValueError as exc:
+            raise GatewayError("invalid_message", str(exc)) from exc
         req = ActionRequest(
             action_id=new_id("act"), capability="device.observe",
             arguments={
@@ -98,46 +103,14 @@ class EmbeddedWssTransport:
                 receipt.error_code or "unavailable",
                 f"device.observe 未成功：{receipt.status.value}"
                 + (f"/{receipt.error_code}" if receipt.error_code else ""))
-        # 优先解析 output_ref 指向的观察负载（§8：本体不占回执帧预算）
-        payload: dict[str, Any] = {}
-        if receipt.output_ref:
-            try:
-                raw, _ = await self.read_output(device_id, receipt.output_ref,
-                                                max_bytes=256 * 1024)
-                data = json.loads(raw.decode("utf-8"))
-                if isinstance(data, dict):
-                    payload = data
-            except Exception:  # noqa: BLE001 - 拉取失败降级为空观察
-                log.warning("observe output_ref 拉取失败（%s）",
-                            receipt.output_ref, exc_info=True)
-        elements = tuple(
-            _parse_element(e) for e in (payload.get("elements") or [])
-            if isinstance(e, dict))
-        return Observation(
-            observation_id=str(payload.get("observation_id") or new_id("obs")),
-            device_id=device_id,
-            taken_at=int(payload.get("taken_at") or now_ms()),
-            foreground_package=str(payload.get("foreground_package") or ""),
-            activity=(str(payload["activity"])
-                      if payload.get("activity") else None),
-            elements=elements,
-            ui_signature=hashlib.sha256(
-                json.dumps(
-                    [_element_fingerprint_source(e) for e in
-                     (payload.get("elements") or [])],
-                    sort_keys=True, ensure_ascii=False).encode("utf-8")
-            ).hexdigest(),
-            screenshot_ref=(str(payload.get("screenshot_ref"))
-                            if payload.get("screenshot_ref")
-                            else receipt.output_ref),
-            screenshot_signature=(str(payload["screenshot_signature"])
-                                  if payload.get("screenshot_signature") else None),
-            screen_width=int(payload.get("screen_width") or 0),
-            screen_height=int(payload.get("screen_height") or 0),
-            keyboard_shown=bool(payload.get("keyboard_shown") or False),
-            locked=bool(payload.get("locked") or False),
-            truncated=bool(payload.get("truncated") or False),
-        )
+        if not receipt.output_ref:
+            raise GatewayError("invalid_message", "device.observe 未返回观察输出引用")
+        try:
+            raw = await self.read_output_complete(device_id, receipt.output_ref)
+            payload = json.loads(raw.decode("utf-8"))
+            return observation(device_id, payload, request)
+        except (ValueError, UnicodeError) as exc:
+            raise GatewayError("invalid_message", f"观察输出无法解析：{exc}") from exc
 
     # ---- 执行（§7） ---------------------------------------------------------
 
@@ -163,6 +136,7 @@ class EmbeddedWssTransport:
                     action_id=action.action_id, status=ReceiptStatus.TIMEOUT,
                     task_id=action.task_id, error_code="timeout",
                     summary=f"等待 action.receipt 超时（{timeout_s}s）",
+                    provider_ref="core:wait-timeout",
                     completed_at=now_ms())
             # 离线/吊销/scope 拒绝：FAILED + 协议错误码（不悬挂 received）
             return ActionReceipt(
@@ -171,20 +145,50 @@ class EmbeddedWssTransport:
                 completed_at=now_ms())
         return _receipt_from_payload(action, result)
 
+    async def action_status(self, device_id: str, idempotency_key: str) -> ActionReceipt | None:
+        """Read durable state without sending an action, even while the device is offline."""
+        from whale_core.devices.embedded_wss import GatewayError
+        try:
+            record = await asyncio.to_thread(self._gateway.action_status, device_id, idempotency_key)
+        except GatewayError as exc:
+            if exc.code == "not_found":
+                return None
+            raise
+        action = ActionRequest(str(record["action_id"]), str(record.get("capability") or ""),
+                               {}, idempotency_key, task_id=record.get("task_id"))
+        return _receipt_from_payload(action, {**record, "duplicate": True})
+
     # ---- 大输出拉取（§7.3/§10 agent:out: 等） --------------------------------
 
     async def read_output(self, device_id: str, output_ref: str, *,
                           offset: int = 0,
                           max_bytes: int = 65536) -> tuple[bytes, bool]:
         """sensor.query device.output.read 分页读取；返回 (chunk, truncated)。"""
-        from whale_core.devices.embedded_wss import GatewayError
+        page = await self._read_page(device_id, output_ref, offset, max_bytes)
+        return page.data, page.truncated or page.source_truncated
 
+    async def read_output_complete(self, device_id: str, output_ref: str, *,
+                                   max_bytes: int = 1024 * 1024) -> bytes:
+        from whale_core.devices.embedded_wss import GatewayError
+        try:
+            return await collect_pages(
+                lambda offset, limit: self._read_page(device_id, output_ref, offset, limit),
+                max_bytes=max_bytes)
+        except ValueError as exc:
+            raise GatewayError("invalid_message", str(exc)) from exc
+
+    async def _read_page(self, device_id: str, output_ref: str,
+                         offset: int, max_bytes: int) -> OutputPage:
+        from whale_core.devices.embedded_wss import GatewayError
+        if type(offset) is not int or offset < 0 or type(max_bytes) is not int or max_bytes <= 0:
+            raise GatewayError("invalid_message", "输出偏移须为非负整数，读取长度须为正整数")
+        max_bytes = min(max_bytes, MAX_PAGE_BYTES)
         try:
             result = await asyncio.to_thread(
                 self._gateway.send_query, device_id,
                 operation="device.output.read",
                 filters={"output_ref": output_ref, "offset": int(offset),
-                         "max_bytes": int(max_bytes)},
+                         "max_bytes": int(max_bytes), "page_format": "bytes.v1"},
                 max_items=1, timeout_s=_READ_TIMEOUT_S)
         except GatewayError as exc:
             raise GatewayError(exc.code, f"read_output 失败：{exc}") from exc
@@ -192,45 +196,11 @@ class EmbeddedWssTransport:
             raise GatewayError(
                 str(result.get("status") or "unavailable"),
                 f"sensor.result 状态非 ok：{result.get('status')}")
-        data = result.get("data") or []
-        chunk = b""
-        if data and isinstance(data[0], dict):
-            item = data[0]
-            if isinstance(item.get("text"), str):
-                chunk = item["text"].encode("utf-8")
-            elif isinstance(item.get("bytes_b64"), str):
-                import base64
-                chunk = base64.b64decode(item["bytes_b64"])
-        return chunk, bool(result.get("truncated"))
+        try:
+            return decode_page(result, offset, max_bytes)
+        except ValueError as exc:
+            raise GatewayError("invalid_message", str(exc)) from exc
 
-
-def _parse_element(data: dict) -> UiElement:
-    """端侧观察元素 dict → UiElement（缺省宽容，bounds 缺省零矩形）。"""
-    bounds_raw = data.get("bounds")
-    if not (isinstance(bounds_raw, list) and len(bounds_raw) == 4):
-        bounds_raw = [0, 0, 0, 0]
-    bounds = tuple(int(x) for x in bounds_raw)
-    return UiElement(
-        element_id=int(data.get("element_id") or 0),
-        class_name=str(data.get("class_name") or ""),
-        text=str(data.get("text") or ""),
-        resource_id=str(data.get("resource_id") or ""),
-        content_desc=str(data.get("content_desc") or ""),
-        bounds=bounds,  # type: ignore[arg-type]
-        clickable=bool(data.get("clickable") or False),
-        long_clickable=bool(data.get("long_clickable") or False),
-        scrollable=bool(data.get("scrollable") or False),
-        editable=bool(data.get("editable") or False),
-        enabled=bool(data.get("enabled", True)),
-        fingerprint=str(data.get("fingerprint") or ""),
-    )
-
-
-def _element_fingerprint_source(data: Any) -> Any:
-    """ui_signature 计算用的去 id 元素表（与 base.Observation 约定一致）。"""
-    if not isinstance(data, dict):
-        return data
-    return {k: v for k, v in data.items() if k != "element_id"}
 
 
 def _receipt_from_payload(action: ActionRequest, payload: dict) -> ActionReceipt:
@@ -243,10 +213,13 @@ def _receipt_from_payload(action: ActionRequest, payload: dict) -> ActionReceipt
         record = payload
         embedded = record.get("receipt") if isinstance(
             record.get("receipt"), dict) else {}
-        payload = {"action_id": record.get("action_id") or action.action_id,
-                   "status": record.get("state") or "unknown",
-                   "task_id": action.task_id, **(embedded or {})}
-        payload.setdefault("provider_ref", "idempotent:replay-suppressed")
+        state = record.get("state") or "unknown"
+        payload = {**embedded,
+                   "action_id": record.get("action_id") or action.action_id,
+                   "status": "received" if state == "pending" else state,
+                   "task_id": embedded.get("task_id") or action.task_id}
+        payload.setdefault("provider_ref", "core:estimated-outcome" if record.get("outcome_source")
+                           in ("expires_at", "retention_timeout") else "idempotent:replay-suppressed")
     status_raw = str(payload.get("status") or "unknown")
     try:
         status = ReceiptStatus(status_raw)
@@ -272,6 +245,7 @@ def _receipt_from_payload(action: ActionRequest, payload: dict) -> ActionReceipt
                       if payload.get("provider_ref") else None),
         started_at=(int(payload["started_at"]) if payload.get("started_at") is not None
                     else None),
-        completed_at=(int(payload["completed_at"])
-                      if payload.get("completed_at") is not None else now_ms()),
+        completed_at=((int(payload["completed_at"])
+                       if payload.get("completed_at") is not None else now_ms())
+                      if status.terminal else None),
     )

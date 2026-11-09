@@ -6,6 +6,7 @@ restore a live runtime while tools or outbound workers are executing.
 """
 from __future__ import annotations
 
+from contextlib import closing
 import json
 import os
 from pathlib import Path
@@ -55,7 +56,7 @@ def create_backup(store: SqliteMemoryStore, destination: str | Path) -> Path:
     fd, temporary = tempfile.mkstemp(prefix=".whale-backup-", dir=target.parent)
     os.close(fd)
     try:
-        with sqlite3.connect(temporary) as output, store._lock:
+        with closing(sqlite3.connect(temporary)) as output, store._lock:
             store.db.backup(output)
             _validate(output)
         os.chmod(temporary, 0o600)
@@ -79,7 +80,7 @@ def restore_backup(store: SqliteMemoryStore, source: str | Path) -> dict:
     if path == Path(store.path).expanduser().resolve():
         raise ValueError("restore source must differ from live database")
     uri = path.as_uri() + "?mode=ro"
-    with sqlite3.connect(uri, uri=True) as snapshot:
+    with closing(sqlite3.connect(uri, uri=True)) as snapshot:
         _validate(snapshot)
         with store._lock:
             # An in-flight or interrupted action must never be replayed by a

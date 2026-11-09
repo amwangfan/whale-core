@@ -1,5 +1,6 @@
 """Host-level regression coverage for settings, lifecycle and API boundaries."""
 from __future__ import annotations
+import os
 import base64
 import json
 from http.client import HTTPConnection
@@ -46,7 +47,8 @@ def test_settings_persist_and_activate_without_returning_credentials(host, tmp_p
     assert response['result']['model']['api_key_configured'] is True
     assert 'PRIVATE-KEY' not in json.dumps(response)
     assert 'PRIVATE-KEY' not in (tmp_path/'config.json').read_text()
-    assert (tmp_path/'secrets/settings.json').stat().st_mode & 0o077 == 0
+    if os.name == "posix":
+        assert (tmp_path/'secrets/settings.json').stat().st_mode & 0o077 == 0
     assert request(server, 'POST', 'providers/test')[1]['result']['ok'] is True
     assert request(server, 'POST', 'chat', {'text': 'hello'})[1]['result']['reply'] == 'connected chosen-model'
     reloaded = assemble_runtime('cloud', config_dir=str(tmp_path), env={})

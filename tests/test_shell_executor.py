@@ -1,6 +1,7 @@
 """cloud/shell_executor.py 受控执行器测试（真实子进程，本机回环；不触网）。"""
 
 from __future__ import annotations
+import sys
 
 import os
 import shutil
@@ -44,6 +45,7 @@ def test_managed_tier_denies_free_command():
 
 # ---------- 真实执行 ----------
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell integration")
 def test_echo_success():
     result = _executor().run("echo hello-whale", is_owner=True)
     assert result.status == "success"
@@ -52,17 +54,20 @@ def test_echo_success():
     assert result.duration_s < 5.0
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell integration")
 def test_nonzero_exit_is_failed():
     result = _executor().run("exit 3", is_owner=True)
     assert result.status == "failed"
     assert result.exit_code == 3
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell integration")
 def test_stderr_captured():
     result = _executor().run("echo oops >&2", is_owner=True)
     assert "oops" in result.stderr
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell integration")
 def test_timeout_kills_process_group():
     ex = _executor(timeout_s=0.5)
     result = ex.run("sleep 30", is_owner=True)
@@ -70,6 +75,7 @@ def test_timeout_kills_process_group():
     assert result.duration_s < 5.0  # 强杀生效，没等满 30s
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell integration")
 def test_output_truncated():
     ex = _executor(output_chars=200)
     result = ex.run("seq 1 100000", is_owner=True)
@@ -78,6 +84,7 @@ def test_output_truncated():
 
 # ---------- 环境擦洗 ----------
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell integration")
 def test_env_scrubbed_of_secrets():
     env = dict(os.environ)
     env["MY_API_KEY"] = "should-not-leak"
@@ -98,12 +105,14 @@ def test_scrub_env_allowlist():
 
 def test_cwd_whitelist(tmp_path):
     ex = _executor(allowed_cwds=(str(tmp_path),))
-    ok = ex.run("pwd", is_owner=True, cwd=str(tmp_path))
-    assert ok.status == "success" and str(tmp_path) in ok.stdout
+    if os.name == "posix":
+        ok = ex.run("pwd", is_owner=True, cwd=str(tmp_path))
+        assert ok.status == "success" and str(tmp_path) in ok.stdout
     bad = ex.run("pwd", is_owner=True, cwd="/etc")
     assert bad.status == "denied"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell integration")
 def test_default_cwd_is_tmpdir():
     result = _executor().run("pwd", is_owner=True)
     assert result.status == "success"
@@ -111,7 +120,7 @@ def test_default_cwd_is_tmpdir():
 
 # ---------- 降权 ----------
 
-@pytest.mark.skipif(os.geteuid() != 0 or shutil.which("id") is None,
+@pytest.mark.skipif(getattr(os, "geteuid", lambda: -1)() != 0 or shutil.which("id") is None,
                     reason="需要 root 演示降权")
 def test_drop_to_nobody():
     result = _executor(drop_to_user="nobody").run("id -un", is_owner=True)
@@ -124,12 +133,14 @@ def test_drop_to_nobody():
         assert result.stdout.strip() == "nobody"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell integration")
 def test_drop_to_unknown_user_errors():
     result = _executor(drop_to_user="no_such_user_xyz").run("id", is_owner=True)
     assert result.status == "error"
     assert "unknown drop user" in result.verdict_reason
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell integration")
 def test_invalid_bytes_in_output_do_not_escape():
     """安全审查回归：非法字节输出经 errors=replace 不抛 UnicodeDecodeError。"""
     result = _executor().run("printf '\\377\\376abc'", is_owner=True)
@@ -146,7 +157,8 @@ def test_default_sandbox_fails_closed_without_bwrap(monkeypatch):
 
 
 def test_root_sandbox_needs_unprivileged_account(monkeypatch):
-    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(os, "geteuid", lambda: 0, raising=False)
     monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/" + name)
     result = ShellExecutor(PERSONAL).run("echo should-not-run", is_owner=True)
     assert result.status == "error"
@@ -154,7 +166,8 @@ def test_root_sandbox_needs_unprivileged_account(monkeypatch):
 
 
 def test_sandbox_launcher_exposes_only_explicit_workspace(monkeypatch, tmp_path):
-    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(os, "geteuid", lambda: 1000, raising=False)
     monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/" + name)
     ex = ShellExecutor(PERSONAL, allowed_cwds=(str(tmp_path),))
     argv = ex._argv("echo safe", str(tmp_path))
@@ -165,6 +178,7 @@ def test_sandbox_launcher_exposes_only_explicit_workspace(monkeypatch, tmp_path)
     assert argv[-3:] == ["/bin/sh", "-c", "echo safe"]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell integration")
 def test_unbounded_output_is_killed_with_bounded_capture():
     result = _executor(output_chars=100, max_output_bytes=2048).run(
         "while :; do echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; done", is_owner=True)
@@ -173,6 +187,7 @@ def test_unbounded_output_is_killed_with_bounded_capture():
     assert result.duration_s < 3
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell integration")
 def test_no_cwd_uses_unique_private_directory():
     result = _executor().run("pwd; stat -c %a .", is_owner=True)
     assert result.status == "success"
@@ -199,7 +214,8 @@ def test_real_namespace_support_is_explicit():
 
 
 def test_process_limit_is_installed_inside_required_user_namespace(monkeypatch, tmp_path):
-    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(os, "geteuid", lambda: 1000, raising=False)
     monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/" + name)
     ex = ShellExecutor(PERSONAL, max_processes=7)
     argv = ex._argv("echo isolated", str(tmp_path))
@@ -217,6 +233,7 @@ def test_process_limit_is_installed_inside_required_user_namespace(monkeypatch, 
     assert "--nofile=64:64" in argv[:bwrap]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell integration")
 def test_trusted_host_shell_never_sets_a_shared_uid_process_limit():
     ex = _executor(max_processes=1)
     argv = ex._argv("sleep 0.01; echo trusted-child", "/tmp")

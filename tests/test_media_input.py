@@ -94,8 +94,14 @@ def media_tree(tmp_path):
     outside = tmp_path / "secret.png"
     outside.write_bytes(make_png())
     # 白名单内的符号链接 → 指向白名单外（逃逸）
-    (root / "escape.png").symlink_to(outside)
-    return {"root": root, "outside": outside}
+    symlink_available = True
+    try:
+        (root / "escape.png").symlink_to(outside)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) != 1314:
+            raise
+        symlink_available = False
+    return {"root": root, "outside": outside, "symlink_available": symlink_available}
 
 
 def test_local_path_within_root_ok(media_tree):
@@ -111,6 +117,8 @@ def test_local_path_outside_root_rejected(media_tree):
 
 
 def test_local_path_symlink_escape_rejected(media_tree):
+    if not media_tree["symlink_available"]:
+        pytest.skip("Windows account lacks symlink privilege")
     v = ImageInputValidator(allowed_roots=(str(media_tree["root"]),))
     with pytest.raises(MediaInputError, match="outside allowed roots"):
         v.from_local_path(str(media_tree["root"] / "escape.png"))

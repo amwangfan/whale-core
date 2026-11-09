@@ -7,50 +7,35 @@
 from __future__ import annotations
 
 import json
-import os
 from functools import lru_cache
+from pathlib import Path
+from whale_core.devices.contract_paths import messages_dir
 
 
 def _contracts_root() -> str:
-    override = os.environ.get("WHALE_CONTRACTS_DIR")
-    if override:
-        return override
-    here = os.path.dirname(os.path.abspath(__file__))
-    # src/whale_core/devices/ -> 仓根
-    return os.path.normpath(os.path.join(here, "..", "..", "..", "contracts"))
+    return str(messages_dir().parent.parent)
 
 
-@lru_cache(maxsize=1)
+@lru_cache(maxsize=16)
+def _enum(directory: str, message: str, field: str, array: bool) -> tuple[str, ...]:
+    schema = json.loads((Path(directory) / f'{message}.schema.json').read_text(encoding='utf-8'))
+    node = schema['properties']['payload']['properties'][field]
+    return tuple((node['items'] if array else node)['enum'])
+
+
 def all_capabilities() -> tuple[str, ...]:
     """hello/hello_ack 全集（§5.1）。"""
-    path = os.path.join(_contracts_root(), "v2", "messages",
-                        "device.hello.schema.json")
-    with open(path, encoding="utf-8") as f:
-        schema = json.load(f)
-    return tuple(schema["properties"]["payload"]["properties"]
-                 ["capabilities"]["items"]["enum"])
+    return _enum(str(messages_dir()), 'device.hello', 'capabilities', True)
 
 
-@lru_cache(maxsize=1)
 def action_capabilities() -> tuple[str, ...]:
     """action.request 可用子集（§5.3）。"""
-    path = os.path.join(_contracts_root(), "v2", "messages",
-                        "action.request.schema.json")
-    with open(path, encoding="utf-8") as f:
-        schema = json.load(f)
-    return tuple(schema["properties"]["payload"]["properties"]
-                 ["capability"]["enum"])
+    return _enum(str(messages_dir()), 'action.request', 'capability', False)
 
 
-@lru_cache(maxsize=1)
 def query_operations() -> tuple[str, ...]:
     """sensor.query 可用子集（§5.3）。"""
-    path = os.path.join(_contracts_root(), "v2", "messages",
-                        "sensor.query.schema.json")
-    with open(path, encoding="utf-8") as f:
-        schema = json.load(f)
-    return tuple(schema["properties"]["payload"]["properties"]
-                 ["operation"]["enum"])
+    return _enum(str(messages_dir()), 'sensor.query', 'operation', False)
 
 
 # GUI 类能力：observe 与屏幕交互（选路偏好 embedded_wss > adb > ssh）

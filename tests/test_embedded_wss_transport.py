@@ -266,7 +266,7 @@ def test_observe_roundtrip_via_output_ref(rig):
     assert len(obs.elements) == 1
     el = obs.elements[0]
     assert el.text == "搜索" and el.clickable and el.center == (105, 50)
-    assert obs.screenshot_ref == "agent:ui/latest"
+    assert obs.screenshot_ref is None  # UI JSON is not a screenshot reference.
     assert obs.ui_signature  # sha256 签名存在
 
 

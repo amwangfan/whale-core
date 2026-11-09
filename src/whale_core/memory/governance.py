@@ -89,7 +89,7 @@ def expire_episodes(store: MemoryStore, *, older_than_days: float = 90.0,
 def propose_fact(store: MemoryStore, summary: str, *, source: str,
                  evidence_id: str, confidence: float = 0.5,
                  ttl_days: float = PENDING_FACT_TTL_DAYS,
-                 space_id: str = "") -> str:
+                 space_id: str = "", now: datetime | None = None) -> str:
     """模型推断的事实**只进 pending_fact 层**：不召回、不升级。
 
     返回记录 key；经 confirm_fact 显式确认后才参与召回。
@@ -102,7 +102,8 @@ def propose_fact(store: MemoryStore, summary: str, *, source: str,
     if ttl_days <= 0:
         raise ValueError("ttl_days must be positive")
     key = f"pending:{uuid4().hex}"
-    created = datetime.now(timezone.utc)
+    created = now if now is not None else datetime.now(timezone.utc)
+    created = created.replace(tzinfo=timezone.utc) if created.tzinfo is None else created.astimezone(timezone.utc)
     record = MemoryRecord(
         kind=MemoryKind.EPISODE,
         key=key,

@@ -42,7 +42,8 @@ def test_secrets_never_stored_in_regular_kv_and_reload(tmp_path):
     assert '"api_token": "***"' in serialized
     assert manager.config_view("demo_plugin")["api_token"] == "***"
     assert private.exists()
-    assert private.joinpath("demo_plugin.json").stat().st_mode & 0o077 == 0
+    if os.name == "posix":
+        assert private.joinpath("demo_plugin.json").stat().st_mode & 0o077 == 0
     reloaded = _manager(store, private)
     assert reloaded.runtime_config("demo_plugin")["api_token"] == "sk-PRIVATE"
     reloaded.patch_config("demo_plugin", {"region": "cn", "api_token": "***"})

@@ -8,6 +8,8 @@ Whale's core brain: conversation, memory, tools, voice and exploration.
 
 [中文](README.md) · [Deployment](docs/deployment.md) · [Capabilities](docs/media-and-voice.md) · [Developer guide](docs/AI_DEVELOPMENT_GUIDE.md)
 
+[Fork: V2 integration update log (Chinese)](docs/v2-updates/README.md)
+
 </div>
 
 ## What it is

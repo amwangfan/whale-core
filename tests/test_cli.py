@@ -6,6 +6,7 @@ memory 导出导入往返、run REPL（替身模型）历史累积、argparse Sy
 """
 
 from __future__ import annotations
+import os
 
 import io
 import json
@@ -373,7 +374,8 @@ def test_api_token_resolution(tmp_path, monkeypatch):
     assert token and "新生成" in source
     import stat
     mode = stat.S_IMODE((tmp_path / "api_token").stat().st_mode)
-    assert mode == 0o600
+    if os.name == "posix":
+        assert mode == 0o600
     # 第二次复用同一 token
     token2, source2 = _resolve_api_token(tmp_path, env={})
     assert token2 == token and "新生成" not in source2

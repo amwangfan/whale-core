@@ -48,6 +48,8 @@ class DeviceGatewayV2:
         self._transports: dict[str, DeviceTransport] = {}
         self._receipts: OrderedDict[tuple[str, str], ActionReceipt] = OrderedDict()
         self._inflight: dict[tuple[str, str], asyncio.Task[ActionReceipt]] = {}
+        self._receipt_routes: dict[tuple[str, str], tuple[DeviceTransport, str]] = {}
+        self._reconciling: dict[tuple[str, str], asyncio.Task[ActionReceipt | None]] = {}
         self.max_cached_receipts = 4096
 
     # ---- transport 登记 ----
@@ -88,6 +90,47 @@ class DeviceGatewayV2:
         """只读对账（绝不重发）。"""
         return self._receipts.get((device_id, idempotency_key))
 
+    def _remember(self, key, receipt, transport, capability) -> None:
+        self._receipts[key] = receipt
+        self._receipts.move_to_end(key)
+        if transport is not None:
+            self._receipt_routes[key] = (transport, capability)
+        while len(self._receipts) > self.max_cached_receipts:
+            evicted, _ = self._receipts.popitem(last=False)
+            self._receipt_routes.pop(evicted, None)
+
+    async def reconcile_action(self, device_id: str, idempotency_key: str) -> ActionReceipt | None:
+        """Refresh in-flight/ambiguous receipts using the original channel's optional read-only API."""
+        key = (device_id, idempotency_key)
+        previous = self._receipts.get(key)
+        route = self._receipt_routes.get(key)
+        if previous is None or route is None:
+            return previous
+        transport, capability = route
+        self._authorize(device_id, capability)
+        reader = getattr(transport, "action_status", None)
+        if reader is None or previous.status in (
+                ReceiptStatus.SUCCEEDED, ReceiptStatus.FAILED, ReceiptStatus.CANCELLED):
+            return previous
+        pending = self._reconciling.get(key)
+        if pending is not None:
+            return await asyncio.shield(pending)
+        async def refresh():
+            try:
+                current = await reader(device_id, idempotency_key)
+                self._authorize(device_id, capability)
+                if current is None:
+                    return previous
+                if current.action_id != previous.action_id and previous.provider_ref != "core:wait-timeout":
+                    raise GatewayError("invalid_message", "动作对账返回了不同的 action_id")
+                self._remember(key, current, transport, capability)
+                return current
+            finally:
+                self._reconciling.pop(key, None)
+        task = asyncio.create_task(refresh())
+        self._reconciling[key] = task
+        return await asyncio.shield(task)
+
     # ---- 执行 ----
 
     async def execute(
@@ -102,20 +145,12 @@ class DeviceGatewayV2:
         run_id: str | None = None,
         observation_id: str | None = None,
     ) -> ActionReceipt:
-        # scope 检查（registry 注入时）
-        if self.registry is not None:
-            status = self.registry.status_of(device_id)
-            if status != "active":
-                raise GatewayError(
-                    "device_revoked" if status == "revoked" else "unavailable",
-                    f"设备状态 {status}")
-            if capability not in set(self.registry.scopes_of(device_id)):
-                raise GatewayError("scope_denied", f"设备未授予 {capability}")
+        self._authorize(device_id, capability)
 
         # 幂等：同键已有记录 → 直接回真实状态
         seen = self._receipts.get((device_id, idempotency_key))
         if seen is not None:
-            return seen
+            return await self.reconcile_action(device_id, idempotency_key)
 
         key = (device_id, idempotency_key)
         pending = self._inflight.get(key)
@@ -132,6 +167,8 @@ class DeviceGatewayV2:
                         task_id=task_id, summary=f"无可用通道执行 {capability}",
                         error_code="unavailable", completed_at=now_ms())
                 else:
+                    # 选路包含 await，期间设备可能被吊销或收回 scope。
+                    self._authorize(device_id, capability)
                     request = ActionRequest(
                         action_id=action_id, capability=capability,
                         arguments=dict(arguments), idempotency_key=idempotency_key,
@@ -148,10 +185,7 @@ class DeviceGatewayV2:
                             task_id=task_id, summary="传输异常，执行结果未知",
                             error_code="internal", completed_at=now_ms())
 
-                self._receipts[key] = receipt
-                self._receipts.move_to_end(key)
-                if len(self._receipts) > self.max_cached_receipts:
-                    self._receipts.popitem(last=False)
+                self._remember(key, receipt, transport, capability)
                 return receipt
             finally:
                 self._inflight.pop(key, None)
@@ -160,11 +194,24 @@ class DeviceGatewayV2:
         self._inflight[key] = task
         return await asyncio.shield(task)
 
+    def _authorize(self, device_id: str, capability: str) -> None:
+        """观察与执行共用设备状态/scope 检查；开发时允许不注入 registry。"""
+        if self.registry is not None:
+            status = self.registry.status_of(device_id)
+            if status != "active":
+                raise GatewayError(
+                    "device_revoked" if status == "revoked" else "unavailable",
+                    f"设备状态 {status}")
+            if capability not in set(self.registry.scopes_of(device_id)):
+                raise GatewayError("scope_denied", f"设备未授予 {capability}")
+
     async def observe(self, device_id: str,
                       request: ObserveRequest | None = None) -> Observation:
+        self._authorize(device_id, "device.observe")
         transport = await self._pick(device_id, "device.observe")
         if transport is None:
             raise GatewayError("unavailable", "无可用观察通道")
+        self._authorize(device_id, "device.observe")
         return await transport.observe(device_id, request or ObserveRequest())
 
     async def health_report(self, device_id: str) -> dict[str, str]:
