@@ -517,15 +517,18 @@ class EmbeddedWssGateway:
             log.warning("心跳 device_id 与连接身份不符（%s != %s），忽略",
                         p["device_id"], st.device_id)
             return
-        st.last_heartbeat = time.monotonic()
-        st.status = p["status"]
-        modules = p.get("modules")
-        if isinstance(modules, dict):
-            st.modules = {str(k): str(v) for k, v in modules.items()}
-        if st.offline_marked:
-            st.offline_marked = False
-            self._emit("device:online", st.device_id)
-            log.info("设备 %s 心跳恢复，重新标记在线", st.device_id)
+        with self.lock:
+            if self.stopping.is_set() or self.online.get(st.device_id) is not st:
+                return
+            st.last_heartbeat = time.monotonic()
+            st.status = p["status"]
+            modules = p.get("modules")
+            if isinstance(modules, dict):
+                st.modules = {str(k): str(v) for k, v in modules.items()}
+            if st.offline_marked:
+                st.offline_marked = False
+                self._emit("device:online", st.device_id)
+                log.info("设备 %s 心跳恢复，重新标记在线", st.device_id)
 
     def _on_experience_event(self, st: ConnectionState, msg: dict) -> None:
         """§9：event_id 即幂等键；新收与去重命中都回 event.ack（§16 闭环）。"""
@@ -773,13 +776,7 @@ class EmbeddedWssGateway:
             with self.lock:
                 snapshot = list(self.online.items())
             for device_id, st in snapshot:
-                if not st.offline_marked \
-                        and now - st.last_heartbeat > self.heartbeat_timeout:
-                    st.offline_marked = True
-                    st.status = "offline"
-                    self._emit("device:heartbeat_timeout", device_id)
-                    log.warning("设备 %s 超过 %ss 无心跳，标记离线",
-                                device_id, self.heartbeat_timeout)
+                self._expire_heartbeat(device_id, st, now)
             # 动作回执保留清理搭既有 sweep 线程（不另建后台系统），
             # 每小时一趟、每趟删除量封顶。
             if now - last_retention_sweep >= 3600:
@@ -790,6 +787,18 @@ class EmbeddedWssGateway:
                         log.info("设备动作保留清理：%s", stats)
                 except Exception:
                     log.warning("设备动作保留清理失败（下轮重试）", exc_info=True)
+
+    def _expire_heartbeat(self, device_id: str, st: ConnectionState, now: float) -> None:
+        # A reconnect or fresh heartbeat may have invalidated the sweep snapshot.
+        with self.lock:
+            if (self.stopping.is_set() or self.online.get(device_id) is not st
+                    or st.offline_marked or now - st.last_heartbeat <= self.heartbeat_timeout):
+                return
+            st.offline_marked = True
+            st.status = "offline"
+            self._emit("device:heartbeat_timeout", device_id)
+            log.warning("设备 %s 超过 %ss 无心跳，标记离线",
+                        device_id, self.heartbeat_timeout)
 
     # ------------------------------------------------------------------
     # 下行通道（管理 API / transport / NotificationGateway 线程调用）
