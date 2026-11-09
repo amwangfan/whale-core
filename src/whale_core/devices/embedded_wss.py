@@ -409,7 +409,7 @@ class EmbeddedWssGateway:
         st.session_id = new_ulid()
         st.status = "online"
         st.last_heartbeat = time.monotonic()
-        st.expected_up_seq = msg["seq"] + 1
+        st.expected_up_seq = int(msg["seq"]) + 1
         st.declared_capabilities = tuple(p["capabilities"])
         st.accepted_capabilities = accepted
         st.features = dict(p["features"])
@@ -477,11 +477,11 @@ class EmbeddedWssGateway:
             self.send_error(st, ref_id, "invalid_message",
                             f"schema validation failed: {err}"[:500])
             return True
-        if isinstance(msg.get("seq"), int):
+        if isinstance(msg.get("seq"), (int, float)) and not isinstance(msg["seq"], bool):
             if st.expected_up_seq is not None and msg["seq"] != st.expected_up_seq:
                 log.warning("设备 %s 上行 seq 跳变: 期望 %s 实到 %s（仅记录不拒绝）",
                             st.device_id, st.expected_up_seq, msg["seq"])
-            st.expected_up_seq = msg["seq"] + 1
+            st.expected_up_seq = int(msg["seq"]) + 1
         handler = getattr(self, f"_on_{msg_type.replace('.', '_')}", None)
         if handler is None:
             log.warning("类型 %s 无处理逻辑，忽略", msg_type)

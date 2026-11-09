@@ -31,6 +31,7 @@ from typing import Any
 from whale_core.api.server import _error, _json_bytes
 from whale_core.api.device_inputs import action_options, confirmation_options, query_options
 from whale_core.devices.capabilities import action_capabilities, query_operations
+from whale_core.devices.schema import SchemaUnsupported
 from whale_core.devices.embedded_wss import (
     WS_PATH,
     EmbeddedWssGateway,
@@ -137,6 +138,9 @@ def dispatch_devices(handler, method: str, parts: list[str]) -> None:
         return
     except FileNotFoundError:
         send(503, _error("unavailable", "contracts/v2 schemas missing"))
+        return
+    except (SchemaUnsupported, json.JSONDecodeError):
+        send(503, _error("unavailable", "contracts/v2 schemas invalid"))
         return
 
     # -- WS 端点提示（升级发生在 gateway 独立端口，不在 HTTP 服务上） ----

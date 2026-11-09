@@ -13,6 +13,7 @@ additionalProperties（false 或子 schema）/ maxProperties。
 from __future__ import annotations
 
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any
@@ -70,14 +71,57 @@ def _check_supported(schema: dict) -> None:
     unknown = set(schema) - _KEYWORDS
     if unknown:
         raise SchemaUnsupported(f"不支持的 schema 关键字: {sorted(unknown)}")
-    if schema.get("type") not in (None, "object", "array", "string", "integer", "boolean"):
+    if "type" in schema and schema["type"] not in ("object", "array", "string", "integer", "boolean"):
         raise SchemaUnsupported(f"不支持的 schema type: {schema['type']!r}")
-    for child in schema.get("properties", {}).values():
+    for key in ("minLength", "maxLength", "minItems", "maxItems", "maxProperties"):
+        if key in schema and (type(schema[key]) is not int or schema[key] < 0):
+            raise SchemaUnsupported(f"{key} 必须为非负整数")
+    for key in ("minimum", "maximum"):
+        if key in schema and not _number(schema[key]):
+            raise SchemaUnsupported(f"{key} 必须为有限数值")
+    for key in ("$schema", "$id", "title", "description", "pattern"):
+        if key in schema and not isinstance(schema[key], str):
+            raise SchemaUnsupported(f"{key} 必须为字符串")
+    if "pattern" in schema:
+        try:
+            re.compile(schema["pattern"])
+        except re.error as exc:
+            raise SchemaUnsupported("pattern 无法编译") from exc
+    if "uniqueItems" in schema and type(schema["uniqueItems"]) is not bool:
+        raise SchemaUnsupported("uniqueItems 必须为布尔值")
+    if "enum" in schema and not isinstance(schema["enum"], list):
+        raise SchemaUnsupported("enum 必须为数组")
+    required = schema.get("required", [])
+    if not (isinstance(required, list) and all(isinstance(key, str) for key in required)
+            and len(required) == len(set(required))):
+        raise SchemaUnsupported("required 必须为不重复的字符串数组")
+    properties = schema.get("properties", {})
+    if not isinstance(properties, dict):
+        raise SchemaUnsupported("properties 必须为对象")
+    for child in properties.values():
         _check_supported(child)
-    for key in ("items", "additionalProperties"):
-        child = schema.get(key)
-        if isinstance(child, dict):
-            _check_supported(child)
+    if "items" in schema:
+        _check_supported(schema["items"])
+    if "additionalProperties" in schema and type(schema["additionalProperties"]) is not bool:
+        _check_supported(schema["additionalProperties"])
+
+
+def _number(value: Any) -> bool:
+    return type(value) is int or type(value) is float and math.isfinite(value)
+
+
+def _json_key(value: Any):
+    if value is None:
+        return ("null",)
+    if type(value) is bool:
+        return ("boolean", value)
+    if _number(value):
+        return ("number", value)
+    if isinstance(value, list):
+        return ("array", tuple(_json_key(item) for item in value))
+    if isinstance(value, dict):
+        return ("object", frozenset((key, _json_key(item)) for key, item in value.items()))
+    return ("value", type(value).__name__, value)
 
 
 def _check(schema: dict, value: Any, path: str) -> str | None:
@@ -93,15 +137,15 @@ def _check(schema: dict, value: Any, path: str) -> str | None:
             return f"{path}: 期望 string"
     elif stype == "integer":
         # bool 是 int 子类，JSON Schema 里 integer 不含 true/false
-        if not isinstance(value, int) or isinstance(value, bool):
+        if not _number(value) or type(value) is float and not value.is_integer():
             return f"{path}: 期望 integer"
     elif stype == "boolean":
         if not isinstance(value, bool):
             return f"{path}: 期望 boolean"
 
-    if "const" in schema and value != schema["const"]:
+    if "const" in schema and _json_key(value) != _json_key(schema["const"]):
         return f"{path}: 必须等于 {schema['const']!r}"
-    if "enum" in schema and value not in schema["enum"]:
+    if "enum" in schema and not any(_json_key(value) == _json_key(item) for item in schema["enum"]):
         return f"{path}: 不在枚举 {schema['enum']!r} 内"
 
     if isinstance(value, str):
@@ -111,7 +155,7 @@ def _check(schema: dict, value: Any, path: str) -> str | None:
             return f"{path}: 长度 > maxLength {schema['maxLength']}"
         if "pattern" in schema and not re.search(schema["pattern"], value):
             return f"{path}: 不匹配 pattern {schema['pattern']!r}"
-    if isinstance(value, int) and not isinstance(value, bool):
+    if _number(value):
         if "minimum" in schema and value < schema["minimum"]:
             return f"{path}: 小于 minimum {schema['minimum']}"
         if "maximum" in schema and value > schema["maximum"]:
@@ -122,8 +166,7 @@ def _check(schema: dict, value: Any, path: str) -> str | None:
         if "maxItems" in schema and len(value) > schema["maxItems"]:
             return f"{path}: 元素数 > maxItems {schema['maxItems']}"
         if schema.get("uniqueItems"):
-            seen = [json.dumps(item, sort_keys=True, ensure_ascii=False)
-                    for item in value]
+            seen = [_json_key(item) for item in value]
             if len(set(seen)) != len(seen):
                 return f"{path}: 元素不唯一"
         item_schema = schema.get("items")
