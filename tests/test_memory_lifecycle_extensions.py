@@ -11,7 +11,7 @@ def test_pending_facts_expire_and_keep_their_memory_space():
     now = datetime(2026, 11, 8, tzinfo=timezone.utc)
     key = propose_fact(store, "用户正在准备模拟电路考试",
                        source="conversation", evidence_id="message:1",
-                       ttl_days=1, space_id="owner-working")
+                       ttl_days=1, space_id="owner-working", now=now)
     record = store.get_record(key)
     assert record.space_id == "owner-working"
     assert expire_pending_facts(store, now=now + timedelta(days=2)) == 1

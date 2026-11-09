@@ -18,7 +18,8 @@ def test_full_backup_restores_history_tasks_and_memory_on_existing_connection(tm
     append_turn(store, "c", "hello", "world")
     store.put("task:t", {"task_id": "t", "status": "running"})
     snapshot = create_backup(store, tmp_path / "backup.db")
-    assert os.stat(snapshot).st_mode & 0o777 == 0o600
+    if os.name == "posix":
+        assert os.stat(snapshot).st_mode & 0o777 == 0o600
     store.delete("p")
     store.delete("chat:history:c")
     store.put("extra", "remove me")
@@ -42,6 +43,20 @@ def test_bad_backup_leaves_live_memory_untouched(tmp_path):
     assert store.get("safe") == "untouched"
     with pytest.raises(ValueError): create_backup(store, store.path)
     store.close()
+
+
+def test_backup_and_restore_release_snapshot_handles(tmp_path):
+    store = SqliteMemoryStore(tmp_path / "live.db")
+    try:
+        store.put("safe", {"value": 1})
+        snapshot = create_backup(store, tmp_path / "snapshot.db")
+        moved = tmp_path / "moved.db"
+        os.replace(snapshot, moved)
+        restore_backup(store, moved)
+        moved.unlink()
+        assert store.get("safe") == {"value": 1}
+    finally:
+        store.close()
 
 
 def test_malformed_json_backup_rejected_before_live_write(tmp_path):

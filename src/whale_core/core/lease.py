@@ -14,6 +14,34 @@ class RuntimeBusy(RuntimeError):
     """Another CLI/API/desktop host owns the same configuration directory."""
 
 
+def lock_descriptor(fd: int) -> None:
+    """Take a nonblocking lock on an already-open file; the owner retains the descriptor."""
+    try:
+        if os.name == "nt":
+            import msvcrt
+            if os.fstat(fd).st_size == 0:
+                os.write(fd, b"\0")
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        if exc.errno in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+            raise RuntimeBusy("another Whale runtime already uses this data directory") from exc
+        raise
+
+
+def unlock_descriptor(fd: int) -> None:
+    if os.name == "nt":
+        import msvcrt
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_UN)
+
+
 class RuntimeLease:
     """Keep the lock descriptor open for the entire service lifetime."""
 
@@ -24,20 +52,10 @@ class RuntimeLease:
             path / ".runtime.lock", os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0), 0o600
         )
         try:
-            if os.name == "nt":
-                import msvcrt
-                if os.fstat(self._fd).st_size == 0:
-                    os.write(self._fd, b"\0")
-                os.lseek(self._fd, 0, os.SEEK_SET)
-                msvcrt.locking(self._fd, msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(self._fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
+            lock_descriptor(self._fd)
+        except BaseException:
             os.close(self._fd)
             self._fd = None
-            if exc.errno in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
-                raise RuntimeBusy("another Whale runtime already uses this data directory") from exc
             raise
 
     def close(self) -> None:
@@ -45,13 +63,7 @@ class RuntimeLease:
             return
         fd, self._fd = self._fd, None
         try:
-            if os.name == "nt":
-                import msvcrt
-                os.lseek(fd, 0, os.SEEK_SET)
-                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(fd, fcntl.LOCK_UN)
+            unlock_descriptor(fd)
         finally:
             os.close(fd)
 

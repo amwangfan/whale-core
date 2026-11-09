@@ -1,4 +1,6 @@
 """Frozen command routing is tested without running a GUI or freezing per test."""
+import pytest
+import os
 import importlib
 import json
 from types import SimpleNamespace
@@ -51,6 +53,7 @@ def test_loopback_serve_lifecycle_and_no_token_output(monkeypatch, tmp_path, cap
     assert json.loads(output)["url"] == server.url
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX shell and filenames")
 def test_frozen_linux_launcher_survives_spaces_and_metacharacters(tmp_path):
     import os
     from pathlib import Path

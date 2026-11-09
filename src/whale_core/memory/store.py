@@ -253,7 +253,7 @@ class InMemoryStore:
                 store._data.pop(key, None)
 
             def get_record(self, key: str):
-                return store._records.get(key)
+                return copy.deepcopy(store._records.get(key))
 
             def put_record(self, record: MemoryRecord) -> None:
                 store.put_record(record)

@@ -105,15 +105,33 @@ def test_default_run_is_not_live(tmp_path, capsys, monkeypatch):
 
 def test_run_lock_conflict_exit_3(tmp_path, capsys):
     """已有实例持有 flock：冲突即退出码 3 + 明确错误（不进入运行器）。"""
-    fcntl = pytest.importorskip("fcntl")
-    fd = os.open(str(qq_cli.LOCK_PATH), os.O_RDWR | os.O_CREAT, 0o600)
+    fd = qq_cli._try_acquire_lock(qq_cli.LOCK_PATH)
+    assert fd is not None
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         rc = cli_main(["qq", *_run_args(tmp_path)])
     finally:
         os.close(fd)
     assert rc == qq_cli.LOCK_CONFLICT_EXIT == 3
     assert "锁" in capsys.readouterr().err
+
+
+def test_runner_failure_releases_lock_for_next_invocation(monkeypatch):
+    from types import SimpleNamespace
+    def fail(*args, **kwargs):
+        raise RuntimeError("runner failed")
+    monkeypatch.setattr(qq_cli, "_load_runner", lambda: SimpleNamespace(main=fail))
+    with pytest.raises(RuntimeError):
+        qq_cli.main(["run"])
+    fd = qq_cli._try_acquire_lock(qq_cli.LOCK_PATH)
+    assert fd is not None and qq_cli._LOCK_FD is None
+    os.close(fd)
+
+
+def test_missing_runner_does_not_keep_lock(monkeypatch):
+    monkeypatch.setattr(qq_cli, "_load_runner", lambda: None)
+    assert qq_cli.main(["run"]) == 2
+    assert qq_cli.main(["run"]) == 2
+    assert qq_cli._LOCK_FD is None
 
 
 def test_run_acquires_lock_before_runner_checks(tmp_path, monkeypatch):

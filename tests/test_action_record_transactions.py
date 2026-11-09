@@ -5,7 +5,7 @@ import pytest
 
 from whale_core.devices.action_records import ActionRecords
 from whale_core.devices.embedded_wss import EmbeddedWssGateway, _Pending
-from whale_core.memory.store import InMemoryStore
+from whale_core.memory.store import InMemoryStore, MemoryKind, MemoryRecord
 from whale_core.memory.sqlite_store import SqliteMemoryStore
 
 
@@ -45,6 +45,18 @@ def test_transaction_results_and_inputs_are_detached(store):
     result = store.transact(lambda tx: tx.get("value"))
     result["nested"].append(3)
     assert store.get("value") == {"nested": [1]}
+
+
+def test_memory_record_nested_edit_rolls_back(store):
+    store.put_record(MemoryRecord(kind=MemoryKind.EPISODE, key="memory-record", content={"nested": [1]}))
+    def fail(tx):
+        record = tx.get_record("memory-record")
+        record.content["nested"].append(2)
+        tx.put_record(record)
+        raise RuntimeError("rollback")
+    with pytest.raises(RuntimeError):
+        store.transact(fail)
+    assert store.get_record("memory-record").content == {"nested": [1]}
 
 
 def test_concurrent_first_terminal_wins_across_record_managers(store):

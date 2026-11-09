@@ -39,6 +39,8 @@ def rig(scopes):
     state.device_id = device_id
     gateway.online = {device_id: state}
     gateway.pending = {}
+    gateway.pending_confirm = {}
+    gateway.stopping = threading.Event()
     sent = []
 
     def send_msg(st, kind, payload):

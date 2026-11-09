@@ -25,12 +25,20 @@ def test_builtin_skill_executes_search_and_reads_real_returned_url():
     assert len(result["tasks"]) == 2
     assert svc.resume_workflow(result["workflow_id"]) == result
 
-def test_skill_path_and_symlink_escape_rejected(tmp_path):
+def test_skill_parent_path_rejected(tmp_path):
     svc = service(tmp_path)
     with pytest.raises(ValueError): svc.run_skill("../escape", "input")
+
+def test_skill_symlink_escape_rejected(tmp_path):
+    svc = service(tmp_path)
     secret = tmp_path.parent / "outside.md"
     secret.write_text("# skill: escape\n## step: x\ntool: x\n")
-    (tmp_path / "escape.md").symlink_to(secret)
+    try:
+        (tmp_path / "escape.md").symlink_to(secret)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) != 1314:
+            raise
+        pytest.skip("Windows account lacks symlink privilege")
     assert svc.list_skills() == []
     with pytest.raises(KeyError): svc.run_skill("escape", "input")
 

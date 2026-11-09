@@ -4,6 +4,7 @@
 （True/False）、开窗失败不阻断、closer 假时钟/跨进程 state_file、env 门禁、
 token 卫生（日志/异常/回执/state_file 一律不含 token）。
 """
+import os
 import json
 import sys
 import time
@@ -147,7 +148,8 @@ def test_open_sequence_login_set_poll_touch(tmp_path):
     assert opener.requests[2]["method"] == "GET" and opener.requests[2]["body"] is None
     assert opener.requests[1]["headers"]["Cookie"] == "weq_session=wxyz"
     assert sf.exists() and sf.read_text().strip().isdigit()
-    assert oct(sf.stat().st_mode & 0o777) == "0o600"  # state_file 0600
+    if os.name == "posix":
+        assert oct(sf.stat().st_mode & 0o777) == "0o600"  # state_file 0600
 
 
 def test_open_relogin_once_on_401(tmp_path):

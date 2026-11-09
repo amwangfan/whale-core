@@ -1,4 +1,5 @@
 """Desktop lifetime and credential handling without a GUI or external services."""
+import os
 import types
 
 import pytest
@@ -48,7 +49,8 @@ def test_native_close_stops_api_and_store(host, monkeypatch, capsys):
     assert state["gui_options"] == {"debug": False, "private_mode": True}
     assert state["token"] in capsys.readouterr().out
     assert state["token"] not in (path / "logs" / "desktop.log").read_text()
-    assert (path / "data").stat().st_mode & 0o777 == 0o700
+    if os.name == "posix":
+        assert (path / "data").stat().st_mode & 0o777 == 0o700
 
 
 @pytest.mark.parametrize("failure", [ImportError("missing"), RuntimeError("private backend details")])
