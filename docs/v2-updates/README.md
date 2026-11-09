@@ -23,6 +23,8 @@
 | 15 | [REST/协议帧/运行时边界](15-rest-wire-and-runtime.md) | Core 参数与编码 + Mobile 门面转发、重绑定与格式兼容 |
 | 16 | [全局运行锁与原子状态](16-global-runtime-and-state.md) | 跨平台运行锁、内存/SQLite事务、回执与清理竞争 |
 | 17 | [全局生命周期与验证](17-global-lifecycle-and-validation.md) | 备份/QQ/录制重绑定、全量回归与可复现JVM入口 |
+| 18 | [严格解析与参数一致性](18-strict-schema-and-options.md) | 参考schema对照、整数/JSON边界、录制选项纯策略 |
+| 19 | [重连与会话归属](19-connection-ownership.md) | 握手确认顺序、等待项归属、旧WebSocket回调隔离 |
 
 每轮说明包含实际改动与验证证据。源码提交与本索引均在 `refactor/v2-integration`，没有直接修改 snow 的主分支。
 
@@ -40,4 +42,6 @@
 
 验证边界：本机已检查 Python V2 链路、跨仓协议与 wheel；没有 Android 真机、Flutter/Android 构建或 Linux/macOS 冻结包的验收结果。本次没有重启用户正在使用的服务，也没有修改其令牌、模型配置或数据。
 
-运行记录集中保存在本机工作区 `logs/12-V2分支初始化` 至 `logs/30-V2第17轮全局迭代`；不将原始运行记录和私人配置提交到源码仓库。本次两轮全局迭代（16–17）已完成，按要求停止。
+第18–19轮最终全量（2026-11-09）：Core **2659 passed / 18 skipped / 69 warnings**，Mobile纯JVM **120/120**（15个测试类），协议 **72/72**，Python工具 **4 passed / 1 skipped**，双仓 **68个契约文件一致**。网页仍使用本批第17轮验证的96项、类型检查和构建结果；18–19轮没有前端变更。最终源码wheel构建、源码外安装及V2契约/网页/带认证API冒烟通过。Core跳过项保留平台/依赖原因，Mobile媒体宿主因缺javac跳过。
+
+运行记录集中保存在本机工作区 `logs/12-V2分支初始化` 至 `logs/32-V2第19轮全局迭代`；不将原始运行记录和私人配置提交到源码仓库。原定16–17轮之后，按用户追加要求完成18–19轮，本次到第19轮停止。

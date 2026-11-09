@@ -12,6 +12,7 @@ additionalProperties（false 或子 schema）/ maxProperties。
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import re
@@ -217,9 +218,15 @@ class ContractValidator:
             if msg_type:
                 self.validators[msg_type] = validator
             elif schema.get("title") == "envelope":
-                self.envelope = validator
+                # Unknown future message types still obey the common envelope.
+                common = copy.deepcopy(schema)
+                common["properties"]["type"].pop("enum", None)
+                common["properties"]["type"]["minLength"] = 1
+                self.envelope = _Validator(common)
         if not self.validators:
             raise ValueError(f"没有可用的消息 schema: {directory}")
+        if self.envelope is None:
+            raise SchemaUnsupported("缺少 envelope schema")
 
     def validate(self, msg_type: str, message: Any) -> str | None:
         """校验完整信封帧；未知 type 返回 None（由调用方决定忽略/拒绝）。"""

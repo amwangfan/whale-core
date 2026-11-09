@@ -68,7 +68,7 @@ def test_duplicate_challenge_cannot_replace_original_waiter(gateway, second_devi
         assert error.value.code == "invalid_message"
         assert gateway.pending_confirm[body["challenge_id"]] is original
         assert len(sent_payloads) == 1
-        gateway._on_device_confirm_response(SimpleNamespace(device_id=DEVICE), {"payload": {
+        gateway._on_device_confirm_response(gateway.online[DEVICE], {"payload": {
             "challenge_id": body["challenge_id"], "approved": False, "reason": "declined"}})
         thread.join(2)
         assert not thread.is_alive()

@@ -417,18 +417,23 @@ class EmbeddedWssGateway:
         st.app_version = str(p["app_version"])
         st.app_flavor = str(p["app_flavor"])
         with self.lock:
+            if self.stopping.is_set():
+                return False
+            # Publish only after ack succeeds. Failed reconnects must not evict
+            # a healthy session, and API sends must never overtake the ack.
+            self.send_msg(st, "device.hello_ack", {
+                "session_id": st.session_id,
+                "server_time": now_ms(),
+                "heartbeat_interval": self.heartbeat_interval,
+                "accepted_capabilities": list(accepted),
+            })
             old = self.online.get(st.device_id)
             self.online[st.device_id] = st
         if old is not None:  # 同设备新连顶替旧连接
+            self._finish_session(old)
             self._safe_close(old.ws, 1000)
         self._audit("device.hello", device_id=st.device_id)
         self._emit("device:online", st.device_id)
-        self.send_msg(st, "device.hello_ack", {
-            "session_id": st.session_id,
-            "server_time": now_ms(),
-            "heartbeat_interval": self.heartbeat_interval,
-            "accepted_capabilities": list(accepted),
-        })
         return True
 
     @staticmethod
@@ -457,6 +462,14 @@ class EmbeddedWssGateway:
             return True
         if isinstance(msg.get("id"), str):
             ref_id = msg["id"]
+        # Only the current connection may start dispatch. Response handlers
+        # also bind waiters to a connection across concurrent replacement.
+        with self.lock:
+            if self.stopping.is_set() or self.online.get(st.device_id) is not st:
+                return False
+        return self._dispatch_frame(st, msg, ref_id)
+
+    def _dispatch_frame(self, st: ConnectionState, msg: dict, ref_id: str) -> bool:
         major = parse_major(msg.get("v"))
         if major is not None and major != SUPPORTED_MAJOR:
             # §2：未知 major 拒绝并回 error.protocol_version 后关闭
@@ -468,6 +481,11 @@ class EmbeddedWssGateway:
             self.send_error(st, ref_id, "device_revoked", "device has been revoked")
             return False
         msg_type = msg.get("type")
+        err = self.contracts.envelope.validate(msg)
+        if err or msg.get("dir") != "uplink":
+            self.send_error(st, ref_id, "invalid_message",
+                            f"invalid uplink envelope: {err or 'bad dir'}"[:500])
+            return True
         if not isinstance(msg_type, str) or msg_type not in self.contracts.validators:
             # §4：未知消息类型静默忽略（前向兼容）
             log.warning("忽略未知消息类型: %r", msg_type)
@@ -551,7 +569,8 @@ class EmbeddedWssGateway:
         with self.lock:
             pend = self.pending.get(request_id)
             if pend is not None and (pend.device_id != st.device_id
-                                     or pend.response_type != "sensor.result"):
+                                     or pend.response_type != "sensor.result"
+                                     or pend.connection is not None and pend.connection is not st):
                 mismatch = True
             else:
                 mismatch = False
@@ -584,7 +603,8 @@ class EmbeddedWssGateway:
             with self.lock:
                 pend = self.pending.get(action_id)
                 if pend is not None and (pend.device_id != st.device_id
-                                         or pend.response_type != "action.receipt"):
+                                         or pend.response_type != "action.receipt"
+                                         or pend.connection is not None and pend.connection is not st):
                     mismatch = True
                 else:
                     mismatch = False
@@ -689,7 +709,8 @@ class EmbeddedWssGateway:
         challenge_id = str(p["challenge_id"])
         with self.lock:
             pend = self.pending_confirm.get(challenge_id)
-            if pend is not None and pend.device_id != st.device_id:
+            if pend is not None and (pend.device_id != st.device_id
+                                     or pend.connection is not None and pend.connection is not st):
                 mismatch = True
             else:
                 mismatch = False
