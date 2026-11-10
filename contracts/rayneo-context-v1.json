@@ -1,0 +1,48 @@
+{
+  "id": "rayneo-context/v1",
+  "x-whale": {
+    "extends": "b-rayneo-context-v1",
+    "notes": "whale-core ingest batch envelope and origin/kind extensions; query_disabled is an env flag."
+  },
+  "ingest_envelope": {
+    "contract_version": "rayneo-context/v1",
+    "source": "rayneo",
+    "source_instance": "rayneo-android-3f2c",
+    "batch_id": "b-20261110-0001",
+    "items": [
+      {
+        "client_seq": 1201,
+        "dedup_key": "rayneo:rayneo-android-3f2c:s-ab12:r-7:user",
+        "kind": "transcript",
+        "origin": "live",
+        "revision": 1,
+        "segment_id": "s-ab12:r-7:user",
+        "text": "example",
+        "content_hash": "sha256:placeholder",
+        "source_time": null,
+        "source_time_unknown": true,
+        "received_at": "2026-11-10T02:15:00.123Z"
+      }
+    ]
+  },
+  "query_request": {
+    "source": "rayneo",
+    "topic": "",
+    "segment_id": null,
+    "from": null,
+    "to": null,
+    "limit": 20,
+    "max_text_chars": 4000,
+    "max_total_tokens": 8000,
+    "include_derived": true
+  },
+  "query_response": {
+    "ok": true,
+    "source": "rayneo",
+    "instruction_eligible": false,
+    "query_disabled": false,
+    "items": [],
+    "derived": []
+  },
+  "effects": ["ingested", "revision_applied", "replay_idempotent", "stale_ignored", "rejected"]
+}

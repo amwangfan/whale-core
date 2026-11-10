@@ -80,3 +80,21 @@
 
 Owner 2026-11-05：主动问候/主动发言**不设每日条数上限** → 生产将上述日限置 `0`；冷却、quiet hours、dry-run 可保留。
 
+
+
+## 雷鸟眼镜全天转写（脱敏，仅变量名）
+| 变量 | 说明 |
+|------|------|
+| `WHALE_RAYNEO_INGEST` | 默认 `1`；`0` 时 ingest 返回 503 `ingest_disabled` |
+| `WHALE_RAYNEO_QUERY` | 默认 `1`；`0` 时 query 返回 200 且 `query_disabled=true`、空 items |
+| `WHALE_RAYNEO_STORE` | 可选；默认 `<dirname(WHALE_GLASSES_STORE)>/rayneo_context.sqlite3` |
+| `WHALE_RAYNEO_RAW_TTL_DAYS` | 原文保留天数，默认 `90`；`0`=不过期（到期清文本，不是删除） |
+| `WHALE_RAYNEO_SUMMARY` | 总结后台线程；默认 `0`，观察 ingest/query 后再置 `1` |
+| `WHALE_RAYNEO_SUMMARY_INTERVAL_S` | 扫描间隔秒，默认 120 |
+| `WHALE_RAYNEO_SUMMARY_MIN_GAP_S` | 两次模型调用最小间隔秒，默认 20 |
+| `WHALE_RAYNEO_SUMMARY_DAILY_MAX` | **`0`=不限**（默认）。正整数才启用独立日配额；**不占用**共享 `model_calls` |
+| `WHALE_RAYNEO_OFFICIAL_LLM` | 默认 `1`；官方总结 ≥400 字才压缩，短文本直接入库 |
+| `WHALE_RAYNEO_SUMMARY_MODEL` | 可选；缺省回落 `WHALE_GLASSES_INTENT_MODEL` → `QQ_INTENT_MODEL` |
+| `QQ_INTENT_BASE_URL` / `QQ_INTENT_API_KEY` | 总结用意图模型端点/密钥（只放 N100 env） |
+
+备份：`rayneo_context.sqlite3` **不**走 `memory/backup.py`（schema 不同）。用 `RayneoContextStore.backup_to` 或同权限 `0600` 的 sqlite backup / 文件系统快照，与主库分开存放。不要把原文库打进普通记忆导出。
