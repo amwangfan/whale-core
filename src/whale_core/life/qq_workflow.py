@@ -191,6 +191,11 @@ class QqInboundWorkflow:
           机器人自己的消息时回退到最近一条助手回复；
         - 被引用消息带图且已持久化（msgimg:*）→ 一并读出让模型真看到图。
 
+        2026-11-10 实证：reply 元素的 origMsgId 与 SSE 推送的 message_id
+        是**两套编号**（如 72057595… vs 77065261…），直接按 id 查必落空——
+        id 命中失败时按「被引用者 uin + 时间线最近一条」回落（引用几乎都
+        指向对方很近的一条消息）；图片同理按「被引用者最近一条带图消息」回落。
+
         返回 (note, images)；查不到 → ("", ())，静默降级不阻断。
         """
         reply_to = tuple(getattr(event, "reply_to", ()) or ())
@@ -198,27 +203,43 @@ class QqInboundWorkflow:
             return "", ()
         orig_uin = str(reply_to[0] or "")
         orig_mid = str(reply_to[2] or "")
-        if not orig_mid:
-            return "", ()
         conv = str(getattr(event, "conversation", "") or "")
         sender = str(getattr(event, "sender_id", "") or getattr(event, "account", "")
                      or getattr(event, "owner_id", "") or "")
-        label, qtext = "", ""
+        label, qtext, mid_hit = "", "", ""
         if conv.startswith("group:"):
             from whale_core.memory.timeline import GroupTimelineStore
-            for e in GroupTimelineStore(self.store).recent(conv, limit=200):
-                if str(e.get("message_id") or "") == orig_mid:
+            entries = GroupTimelineStore(self.store).recent(conv, limit=200)
+            for e in entries:  # 直接 id 命中（编号空间一致时）
+                if orig_mid and str(e.get("message_id") or "") == orig_mid:
                     qtext = " ".join(str(e.get("text") or "").split())[:120]
                     label = self._name_for_group_uin(
                         conv, str(e.get("sender_id") or "") or orig_uin)
+                    mid_hit = orig_mid
                     break
+            if not mid_hit and orig_uin:
+                for e in reversed(entries):  # uin+就近 回落
+                    if str(e.get("sender_id") or "") == orig_uin:
+                        qtext = " ".join(str(e.get("text") or "").split())[:120]
+                        label = self._name_for_group_uin(conv, orig_uin)
+                        mid_hit = str(e.get("message_id") or "")
+                        break
         else:
             ring = self.store.get(f"recentmsg:{conv}")
-            if isinstance(ring, list):
-                for item in reversed(ring):
-                    if isinstance(item, dict) and str(item.get("mid") or "") == orig_mid:
+            items = [x for x in (ring if isinstance(ring, list) else [])
+                     if isinstance(x, dict)]
+            for item in reversed(items):  # 直接 id 命中
+                if orig_mid and str(item.get("mid") or "") == orig_mid:
+                    qtext = " ".join(str(item.get("text") or "").split())[:120]
+                    label = "你" if str(item.get("sender") or "") == sender else "我"
+                    mid_hit = orig_mid
+                    break
+            if not mid_hit and orig_uin:
+                for item in reversed(items):  # uin+就近 回落
+                    if str(item.get("sender") or "") == orig_uin:
                         qtext = " ".join(str(item.get("text") or "").split())[:120]
-                        label = "你" if str(item.get("sender") or "") == sender else "我"
+                        label = "你" if orig_uin == sender else "我"
+                        mid_hit = str(item.get("mid") or "")
                         break
             if not qtext and orig_uin and orig_uin != sender:
                 # 引用的是机器人自己的消息：回退最近一条助手回复
@@ -233,11 +254,41 @@ class QqInboundWorkflow:
                         qtext = " ".join(str(h["content"]).split())[:120]
                         label = "我"
                         break
-        images = self._read_msgimg(orig_mid)
+        # 图片：id 命中的消息优先；否则「被引用者在本会话最近一条带图消息」
+        images = self._read_msgimg(mid_hit) if mid_hit else ()
+        if not images and orig_uin:
+            images = self._latest_msgimg_from(conv, orig_uin)
         if not qtext and not images:
             return "", ()
-        note = f"（引用了{label or '对方'}的消息：「{qtext or '图片'}」）"
+        if qtext:
+            note = f"（引用了{label or '对方'}的消息：「{qtext}」）"
+        else:
+            note = f"（引用了{label or '对方'}发来的一张图片）"
         return note, images
+
+    def _latest_msgimg_from(self, conversation: str, sender_uin: str) -> tuple:
+        """该发送者在本会话最近一条已持久化的带图消息的图片（引用 id 编号
+        空间不一致时的图片回落）。"""
+        best = None
+        try:
+            keys = self.store.keys()
+        except Exception:
+            return ()
+        for key in keys:
+            k = str(key)
+            if not k.startswith("msgimg:"):
+                continue
+            rec = self.store.get(k)
+            if not isinstance(rec, dict):
+                continue
+            if str(rec.get("conv") or "") != conversation:
+                continue
+            if str(rec.get("sender") or "") != sender_uin:
+                continue
+            at = float(rec.get("at") or 0)
+            if best is None or at > best[0]:
+                best = (at, k.split(":", 1)[1])
+        return self._read_msgimg(best[1]) if best else ()
 
     def _recent_peer_image(self, event, *, window_s: float = 180.0) -> tuple:
         """无引用时的看图兜底：同一发送者 3 分钟内的上一条带图消息

@@ -1329,8 +1329,9 @@ def cmd_run(args) -> int:
                     "sender": str(getattr(event, "sender_id", "")
                                   or getattr(event, "account", "") or ""),
                     "at": time.time()})
-        except Exception:
-            pass
+                print(f"  [图片留存] {mid} → 工件 {str(aid)[:8]}（引用/回看可见）")
+        except Exception as exc:
+            print(f"  [图片留存] fail-soft：{type(exc).__name__}")
 
     def _record_private_recent(event) -> None:
         """2026-11-10：私聊近期消息环 recentmsg:{conv}（最近 20 条），
@@ -1341,8 +1342,10 @@ def cmd_run(args) -> int:
                 return
             mid = str(getattr(event, "message_id", "") or "")
             text = str(getattr(event, "text", "") or "").strip()
-            if not mid or not text:
-                return
+            has_pic = any(isinstance(a, dict) and a.get("kind") == "pic"
+                          for a in (getattr(event, "attachments", None) or ()))
+            if not mid or not (text or has_pic):
+                return  # 纯图消息也入环（引用一张图是常见形态）
             ring = store.get(f"recentmsg:{conv}")
             ring = list(ring) if isinstance(ring, list) else []
             if any(isinstance(x, dict) and x.get("mid") == mid for x in ring):
@@ -1350,7 +1353,8 @@ def cmd_run(args) -> int:
             ring.append({"mid": mid,
                          "sender": str(getattr(event, "sender_id", "")
                                        or getattr(event, "account", "") or ""),
-                         "text": text[:500], "ts": time.time()})
+                         "text": (text or "[图片]")[:500], "ts": time.time(),
+                         "has_img": bool(has_pic)})
             store.put(f"recentmsg:{conv}", ring[-20:])
         except Exception:
             pass
@@ -1633,6 +1637,11 @@ def cmd_run(args) -> int:
     stranger_chat = os.environ.get("WHALE_QQ_STRANGER_CHAT", "").strip() == "1"
 
     def on_unpaired(incoming):
+        # 2026-11-10 实证修复：这才是监听器实际注册的回调——入站图片持久化
+        # 与私聊近期环必须挂在这里（此前误挂在未被注册的 on_unpaired_buffered，
+        # msgimg 一个都没写下来）。
+        _persist_msg_media(incoming)
+        _record_private_recent(incoming)
         batcher.offer(incoming)
 
     def _dispatch_unpaired(incoming, *, epoch: int = 0):

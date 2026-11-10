@@ -139,3 +139,48 @@ def test_no_artifact_reader_degrades_silently():
     note, images = wf._quoted_context(_ev(reply_to=("10002", "u", "m-old", "1")))
     assert "原文" in note and images == ()
     assert wf._recent_peer_image(_ev()) == ()
+
+
+def test_quote_id_space_mismatch_falls_back_to_sender_recency():
+    """2026-11-10 实证：reply 元素 origMsgId 与 SSE message_id 是两套编号
+    （72057595837904458 vs 7706526182405080679）——id 查不到时按
+    「被引用者 uin + 最近一条」回落，图片同回落。"""
+    store = InMemoryStore()
+    tl = GroupTimelineStore(store)
+    _plant_image(store, "7706525627976383913")  # SSE 侧 id
+    tl.append(GROUP, message_id="7706525627976383913", sender_id="3510294135",
+              text="[pic]", send_time=str(time.time() - 30))
+    store.put("namecache:g1124744261:3510294135", {"name": "霜桐", "at": time.time()})
+    wf = _wf(store)
+    # reply_to 带的是另一套编号 → 直接 id 查不到 → uin+就近回落命中
+    ev = _ev(reply_to=("3510294135", "u_iZ8", "72057595837904458", "11805"))
+    note, images = wf._quoted_context(ev)
+    assert "霜桐" in note and images == ((PNG, "image/png"),)
+
+
+def test_quote_fallback_picks_latest_image_from_quoted_sender():
+    """被引用者发过多张图：回落取最近的一张。"""
+    store = InMemoryStore()
+    _plant_image(store, "m-a")
+    _plant_image(store, "m-b")
+    store.put("msgimg:m-a", {"artifact": "a-m-a", "mime": "image/png",
+                             "conv": GROUP, "sender": "10002", "at": time.time() - 50})
+    store.put("msgimg:m-b", {"artifact": "a-m-b", "mime": "image/png",
+                             "conv": GROUP, "sender": "10002", "at": time.time() - 10})
+    # 另一个会话的图不混进来
+    store.put("msgimg:m-c", {"artifact": "a-m-c", "mime": "image/png",
+                             "conv": "group:999", "sender": "10002",
+                             "at": time.time()})
+    tl = GroupTimelineStore(store)
+    tl.append(GROUP, message_id="m-a", sender_id="10002", text="[pic]",
+              send_time=str(time.time() - 50))
+    tl.append(GROUP, message_id="m-b", sender_id="10002", text="[pic]",
+              send_time=str(time.time() - 10))
+    store.put("blob:a-m-a", b"OLD")
+    store.put("blob:a-m-b", b"NEW")
+    store.put("blob:a-m-c", b"OTHER")
+    wf = _wf(store)
+    note, images = wf._quoted_context(
+        _ev(reply_to=("10002", "u_b", "72057000000000001", "1")))
+    assert images == ((b"NEW", "image/png"),)
+    assert "[pic]" in note or "图片" in note  # 文本回落命中原文占位即可
