@@ -576,8 +576,12 @@ def cmd_run(args) -> int:
             for k in list(turn_epoch_by_msg)[:250]:
                 turn_epoch_by_msg.pop(k, None)
 
-    def _send_completion(event, reply: str, audio_ids=(), image_ids=()) -> None:
-        """两段式补发：草稿+审批+网关发送（与主回复同一条发送链）。"""
+    def _send_completion(event, reply: str, audio_ids=(), image_ids=(),
+                         file_ids=()) -> None:
+        """两段式补发：草稿+审批+网关发送（与主回复同一条发送链）。
+
+        2026-11-10：file_ids = 长文/调研结局的临时文件（1 天期）——
+        按来件会话以真实文件消息发出（send_file_to）。"""
         if not live_auto:
             return
         # 顺序门闩：主流程（ack）还在开窗/发送时等它收尾，补发不抢跑
@@ -603,6 +607,25 @@ def cmd_run(args) -> int:
         # 发 owner 私聊，群/陌生人请求的语音串到了 owner 那边）。
         _note_self_media("语音", _send_audio_artifacts(
             audio_ids, peer_type=peer_type, target=target))
+        # 2026-11-10：长文/调研的临时文件产物（1 天期）——真实文件消息发出
+        if file_ids and cap.artifacts is not None:
+            _file_sent = 0
+            for aid in file_ids[:2]:
+                try:
+                    from whale_core.plugins.artifacts import _TYPES as _ATYPES
+                    item = cap.artifacts.get(aid)
+                    ext = _ATYPES.get(item.content_type, ".md")
+                    path = cap.artifacts.directory / (item.artifact_id + ext)
+                    ok = send_port.send_file_to(
+                        peer_type, target, str(path),
+                        filename="全文" + ext) \
+                        if hasattr(send_port, "send_file_to") else False
+                    print(f"  [补发文件] {aid[:8]} → {peer_type}:{target[:12]}… "
+                          f"{'已发' if ok else '发送失败'}")
+                    _file_sent += 1 if ok else 0
+                except Exception as exc:
+                    print(f"  [补发文件] {aid[:8]} 读取失败：{type(exc).__name__}")
+            _note_self_media("文件", _file_sent)
         # 图片产物：真实图片消息发到补发会话（2026-11-01 修复：此前补发只带
         # 文本里的 /api/v1/artifacts/ 本地路径，群/私聊外部根本打不开）。
         if image_ids and cap.artifacts is not None:
@@ -838,7 +861,13 @@ def cmd_run(args) -> int:
                 model=intent_brain, enable_llm=True, tools=tools,
                 skip_clear_chitchat=intent_skip_chitchat(os.environ)),
             tools=tools, context_resolver=context_resolver,
-            grant_gate=_grant_gate, heavy_companion=_heavy_companion)
+            grant_gate=_grant_gate, heavy_companion=_heavy_companion,
+            artifact_store=cap.artifacts,
+            # 2026-11-10 owner 决策：授权级任务（调研/落文件/shell/高成本）
+            # 只许主人本人（任何会话）或授权白名单群；陌生人私聊不行。
+            task_auth_gate=lambda cid, oid: bool(oid) or (
+                isinstance(cid, str) and cid.startswith("group:")
+                and cid.split(":", 1)[1] in group_allow))
         apply_parallel_env(workflow.orchestrator, os.environ)
         print(f"[意图] 模型={intent_model_id}（显式指令规则直达零LLM；其余一律由意图模型判断 chat/task；{tool_note}）")
 

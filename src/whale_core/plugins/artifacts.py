@@ -23,7 +23,9 @@ from search_web.web_fetch import WebFetcher, _get_header, _read_limited
 _TYPES = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp",
           "image/gif": ".gif", "audio/mpeg": ".mp3", "audio/wav": ".wav",
           "audio/x-wav": ".wav", "audio/ogg": ".ogg", "video/mp4": ".mp4",
-          "audio/webm": ".webm"}
+          "audio/webm": ".webm",
+          # 2026-11-10：长文/调研结局的文本附件（owner 决策：临时文件 1 天期）
+          "text/markdown": ".md", "text/plain": ".txt"}
 _ID = re.compile(r"^[a-f0-9]{32}$")
 
 

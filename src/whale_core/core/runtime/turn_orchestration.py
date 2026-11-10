@@ -323,10 +323,63 @@ class TurnOrchestrationMixin:
                 decision = _Decision(route="chat", receipt="intent:error→no-followup")
             intent_ms = int(box.get("intent_ms", 0) or 0)
             if decision.route != "task" or decision.plan is None:
+                # 2026-11-10：heavy chat（复杂创作/长文，无工具）由重模型
+                # 跟进第二条——第一条快回复先垫场，全文随后（超长落文件）。
+                if decision.route == "chat" and decision.plan is not None \
+                        and getattr(decision.plan, "heavy", False) \
+                        and getattr(self, "heavy_companion", None) is not None \
+                        and on_followup is not None:
+                    try:
+                        reply2 = self.heavy_companion.chat(
+                            text, conversation_id=env.conversation_id,
+                            images=env.images, context=env.context,
+                            turn_key=decision.plan.intent_id)
+                        reply2, file_ids = self._attach_long_file(
+                            reply2, decision.plan)
+                        fup = TurnResult(reply=reply2, status="answered",
+                                         plan=decision.plan,
+                                         file_ids=file_ids,
+                                         task_id=decision.plan.intent_id)
+                        self._log_parallel(env, route="heavy-chat",
+                                           reply_ms=reply_ms, intent_ms=intent_ms)
+                        on_followup(fup)
+                        return "heavy-chat", fup
+                    except Exception:
+                        self._log_parallel(env, route="heavy-chat-error",
+                                           reply_ms=reply_ms, intent_ms=intent_ms)
+                        return "heavy-chat-error", None
                 self._log_parallel(env, route=decision.route, reply_ms=reply_ms,
                                    intent_ms=intent_ms, receipt=decision.receipt)
                 return decision.route, None
             plan = decision.plan
+            # 2026-11-10：授权级任务三级制——主人直执；授权会话先审核；其余拒。
+            if getattr(plan, "auth_level", "") == "owner" \
+                    and not env.owner_id:
+                _deny_note = ""
+                if not self._task_authz_ok(plan,
+                                           conversation_id=env.conversation_id,
+                                           owner_id=env.owner_id):
+                    _deny_note = ("用户请求的是授权级任务（调研/落文件/高成本操作），"
+                                  "这类活儿只在主人本人或主人授权的会话里开工；"
+                                  "本次没有执行任何工具。用你的人格简短说明，"
+                                  "别声称查过资料。")
+                else:
+                    concern = self._review_restricted(plan, text)
+                    if concern:
+                        _deny_note = (f"这个授权级任务经审核没通过：{concern}。"
+                                      "本次没有执行任何工具。用你的人格如实简短说明，"
+                                      "别硬做。")
+                if _deny_note:
+                    reply2 = self._voiced(env.conversation_id, text, _deny_note)
+                    fup = TurnResult(reply=reply2, status="answered", plan=plan)
+                    self._log_parallel(env, route="task-denied", reply_ms=reply_ms,
+                                       intent_ms=intent_ms,
+                                       receipt="authz:owner-only")
+                    try:
+                        on_followup(fup)
+                    except Exception:
+                        pass
+                    return "task-denied", fup
             if decision.slow:
                 plan = replace(plan, timeout_s=max(plan.timeout_s, 240.0))
             t2 = time.perf_counter()
@@ -513,20 +566,24 @@ class TurnOrchestrationMixin:
         if decision.route == "chat":
             receipts = (decision.receipt,) if decision.receipt else ()
             plan = decision.plan
-            # 2026-11-10：heavy 计划（长文写作/复杂创作）由重模型陪伴作答
+            # 2026-11-10：heavy 计划（长文写作/复杂创作）由重模型陪伴作答；
+            # 超长结局落 1 天期附件文件（正文只留引子）
             comp = self.companion
             if plan is not None and getattr(plan, "heavy", False) \
                     and getattr(self, "heavy_companion", None) is not None:
                 comp = self.heavy_companion
+            reply = comp.chat(text, conversation_id=env.conversation_id,
+                              images=env.images, context=env.context,
+                              on_delta=env.on_delta,
+                              should_stop=env.should_stop,
+                              metrics=env.metrics,
+                              on_phase=env.on_phase)
+            reply, file_ids = self._attach_long_file(reply, plan)
             return TurnResult(
-                reply=comp.chat(text, conversation_id=env.conversation_id,
-                                images=env.images, context=env.context,
-                                on_delta=env.on_delta,
-                                should_stop=env.should_stop,
-                                metrics=env.metrics,
-                                on_phase=env.on_phase),
+                reply=reply,
                 status="answered", plan=plan, receipts=receipts,
-                task_id=(plan.task_id or plan.intent_id) if plan else "")
+                task_id=(plan.task_id or plan.intent_id) if plan else "",
+                file_ids=file_ids)
         if decision.route == "clarify":
             plan = decision.plan
             ask = plan.clarification_question or "还需要更多信息"

@@ -98,9 +98,71 @@ class PersistenceMixin:
             journal["plan"] = persisted_plan
             self.store.put(f"runtime:task:{task_id}", journal)
 
+    def _task_authz_ok(self, plan: IntentPlan, *, conversation_id: str,
+                       owner_id: str) -> bool:
+        """授权级任务（auth_level="owner"：调研/落文件/shell/高成本）闸门。
+
+        2026-11-10 owner 决策（三级授权）：
+        - 开放级（无 auth_level）：生图/生视频/对话/长文写作——所有人所有群；
+        - 授权级：主人本人**直接执行**（意图模型只负责怎么操作，不审核）；
+          主人授权的会话（task_auth_gate，如白名单群）→ 先经意图模型
+          审核安全性与必要性（_review_restricted）才执行；
+        - 其余一律拒绝。门故障 fail closed。
+        """
+        if getattr(plan, "auth_level", "") != "owner":
+            return True
+        if owner_id:
+            return True  # 主人本人：不审核（怎么操作由意图模型规划）
+        gate = getattr(self, "task_auth_gate", None)
+        if gate is not None:
+            try:
+                return bool(gate(conversation_id, owner_id))
+            except Exception:
+                return False
+        return False
+
+    def _review_restricted(self, plan: IntentPlan, text: str) -> str:
+        """授权会话里非主人的授权级任务：意图模型审核安全性与必要性。
+
+        返回 "" = 通过；非空 = 驳回理由。审核模型不可用 → fail closed
+        （审核是授权级任务的必要环节，不是增强）。
+        """
+        brain = getattr(getattr(self, "intent_model", None), "model", None)
+        if brain is None:
+            return "审核模型不可用"
+        prompt = (
+            "你是任务审核员。这是一个授权级任务请求（调研/落文件/高成本操作），"
+            "来自主人授权的群聊成员。只审两点：安不安全（会不会伤人/泄密/违规/"
+            "浪费明显异常的资源）、有没有必要（是不是正常合理的请求）。"
+            "安全且必要 → 只回答 OK；否则一句话说理由。\n\n"
+            f"请求：{text[:300]}\n任务计划：{plan.goal[:200]}")
+        try:
+            answer = brain.reply(prompt).strip()
+        except Exception:
+            return "审核模型调用失败"
+        return "" if answer.upper().startswith("OK") else (answer[:120] or "未通过")
+
     def _start_plan(self, plan: IntentPlan, conversation_id: str, text: str, *,
                     source: str, tool_name: str = "", channel: str = "",
                     owner_id: str = "", context=None) -> TurnResult:
+        if getattr(plan, "auth_level", "") == "owner" and not owner_id:
+            # 非主人的授权级任务：先过授权闸门，再过意图模型审核
+            if not self._task_authz_ok(plan, conversation_id=conversation_id,
+                                       owner_id=owner_id):
+                note = ("用户请求的是授权级任务（调研/落文件/高成本操作），这类活儿"
+                        "只在主人本人或主人授权的会话里开工；本次没有执行任何工具。"
+                        "用你的人格简短说明这点，可以凭印象随便聊两句，"
+                        "但不许声称查过资料。")
+                reply = self._voiced(conversation_id, text, note)
+                return TurnResult(reply=reply, status="answered", plan=plan,
+                                  receipts=("authz:owner-only",))
+            concern = self._review_restricted(plan, text)
+            if concern:
+                note = (f"这个授权级任务（调研/落文件/高成本）经审核没通过：{concern}。"
+                        "本次没有执行任何工具。用你的人格如实简短说明，别硬做。")
+                reply = self._voiced(conversation_id, text, note)
+                return TurnResult(reply=reply, status="answered", plan=plan,
+                                  receipts=("authz:review-declined",))
         task_id, _plan = self._persist_task(
             plan, conversation_id=conversation_id, text=text, source=source,
             channel=channel, owner_id=owner_id, tool_name=tool_name,

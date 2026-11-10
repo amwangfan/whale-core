@@ -27,6 +27,30 @@ def _scrub_untrusted(text: str) -> str:
 class ResponseAssemblyMixin:
     """回复组装职责（编排器 mixin；状态由 ConversationOrchestrator 提供）。"""
 
+    # 长文落文件阈值：超过即转附件（QQ 群不适合整段长文刷屏）
+    LONG_REPLY_FILE_CHARS = 600
+
+    def _attach_long_file(self, reply: str, plan=None):
+        """2026-11-10 owner 决策：heavy（长文/调研）结局超长 → 全文落临时
+        文件（text/markdown，1 天期），正文只留引子 + 一句说明。
+
+        返回 (外发文本, file_ids)；未启用/不够长 → 原样返回。
+        """
+        if plan is None or not getattr(plan, "heavy", False):
+            return reply, ()
+        store = getattr(self, "artifact_store", None)
+        if store is None or len(reply or "") <= self.LONG_REPLY_FILE_CHARS:
+            return reply, ()
+        try:
+            artifact = store.save_bytes(reply.encode("utf-8"), "text/markdown",
+                                        retention_s=86400)
+        except Exception:
+            return reply, ()
+        first_para = (reply.split("\n\n", 1)[0] or "").strip()
+        intro = first_para if 0 < len(first_para) <= 80 else "写好了——"
+        return (intro + "\n（全文有点长，放在文件里了，附件一天后自动失效）",
+                (artifact.artifact_id,))
+
     def _assemble_turn_reply(self, task_id: str, plan: IntentPlan, journal: dict,
                              text: str, cid: str, status: str, receipts: list,
                              results: list, saved: dict) -> TurnResult:
@@ -86,6 +110,7 @@ class ResponseAssemblyMixin:
         except Exception:
             # Journal survives even if the response model fails after an action.
             reply = note
+        reply, file_ids = self._attach_long_file(reply, plan)
         if first:
             try:
                 self._followup_ms[task_id] = int(
@@ -106,7 +131,8 @@ class ResponseAssemblyMixin:
                         "attempts": 0, "last_error": ""}
                 self.store.put(f"task:{task_id}", record)
         return TurnResult(reply=reply, status=status, plan=plan,
-                          receipts=tuple(receipts), task_id=task_id)
+                          receipts=tuple(receipts), task_id=task_id,
+                          file_ids=file_ids)
 
     def _judge_failure(self, receipts: list) -> str:
         """意图模型把回执链判读成一句短结论（≤40 字）；模型不可用时规则兜底。"""

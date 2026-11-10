@@ -425,7 +425,14 @@ class QqInboundWorkflow:
                 return
         if self._completion_sender is not None:
             try:
-                self._completion_sender(event, reply, audio_ids, image_ids)
+                # 2026-11-10：长文/调研结局的附件文件一并下发（TurnResult.file_ids）。
+                # 仅在有文件时传第 5 参——旧签名（4 参）的测试/宿主回调不受影响。
+                file_ids = tuple(getattr(result, "file_ids", ()) or ())
+                if file_ids:
+                    self._completion_sender(event, reply, audio_ids, image_ids,
+                                            file_ids)
+                else:
+                    self._completion_sender(event, reply, audio_ids, image_ids)
             except Exception:
                 if self.orchestrator is not None and task_id:
                     self.orchestrator.mark_delivery_failed(

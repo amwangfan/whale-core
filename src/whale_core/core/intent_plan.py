@@ -87,6 +87,10 @@ class IntentPlan:
     # 答复由重模型（kimi）而不是快模型（deepseek-flash）产出。
     # 只是模型路由提示，无授权语义。
     heavy: bool = False
+    # 同日：auth_level="owner" = 授权级任务（调研/落文件/shell/高成本）——
+    # 只有主人本人或主人授权的会话才执行；长文写作等创作类保持开放。
+    # 模型只能加严不能放宽（核心另有 ACL/Shell 硬闸门兜底）。
+    auth_level: str = ""
 
 
 def _coerce_str(value: Any, *, limit: int) -> str:
@@ -177,6 +181,8 @@ def parse_intent_plan(data: Mapping[str, Any]) -> IntentPlan:
         task_id=_coerce_str(data.get("task_id", ""), limit=TASK_ID_MAX_CHARS),
         timeout_s=_timeout(data.get("timeout_s", TIMEOUT_DEFAULT_S)),
         heavy=bool(data.get("heavy", False)),
+        auth_level=(lambda v: v if v in ("owner",) else "")(
+            str(data.get("auth_level") or "").strip()),
     )
 
 

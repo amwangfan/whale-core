@@ -29,6 +29,9 @@ class TurnResult:
     plan: IntentPlan | None = None
     receipts: tuple[str, ...] = ()
     task_id: str = ""
+    # 2026-11-10：长文/调研类结局的附件文件（artifact id；宿主按会话定向
+    # 发文件，正文只留引子）。临时产物保留 1 天由 ArtifactStore 清理。
+    file_ids: tuple[str, ...] = ()
     # 分阶段耗时（毫秒；宿主可观测。规则闲聊时 intent 通常 <5ms）
     intent_ms: int = 0
     tool_ms: int = 0
