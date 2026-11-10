@@ -114,6 +114,10 @@ def accept_send_outcome(outcome: dict | None, *, peer_type: str) -> dict:
     if not isinstance(outcome, dict):
         return {"ok": False, "error": "invalid-outcome"}
     out = dict(outcome)
+    # 2026-11-11 实证：群文件发送的回执形状是 fileId+sent（无 groupSequence）——
+    # 文件已上传并发布即算成功，不套消息序列号门闩。
+    if out.get("ok") and out.get("sent") and out.get("fileId"):
+        return out
     if not out.get("ok"):
         return out
     pt = str(peer_type or out.get("peerType") or "").strip().lower()

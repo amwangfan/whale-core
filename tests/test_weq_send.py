@@ -382,3 +382,17 @@ def test_accept_send_outcome_helper():
     assert accept_send_outcome({"ok": True, "groupSequence": 0}, peer_type="group")["ok"] is False
     assert accept_send_outcome({"ok": True, "privateSequence": 5}, peer_type="c2c")["ok"]
     assert accept_send_outcome({"ok": True, "privateSequence": 0}, peer_type="c2c")["ok"] is False
+
+
+def test_file_outcome_with_fileid_accepted():
+    """2026-11-11 实证：群文件回执是 fileId+sent 形状（无 groupSequence），
+    此前被误判 groupSequence-missing（实际已发布）。"""
+    from weq_channel.weq_send import accept_send_outcome
+    out = accept_send_outcome(
+        {"ok": True, "sent": True, "fileId": "/2b77d6a6-xxx",
+         "fileName": "a.md", "fileSize": 100},
+        peer_type="group")
+    assert out["ok"] is True
+    # 消息形状仍走序列号门闩（防假成功）
+    bad = accept_send_outcome({"ok": True}, peer_type="group")
+    assert bad["ok"] is False
