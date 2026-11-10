@@ -823,6 +823,7 @@ def cmd_run(args) -> int:
             tool_note += "；和风未挂载（缺 QWEATHER_API_KEY/HOST，天气回落搜索）"
         # 2026-11-10 owner 决策：长文写作/复杂创作由重模型（kimi）作答——
         # 人格与记忆同库共享，只换回答模型（deepseek-flash → kimi-k3）。
+        from whale_core.core.companion import WhaleCompanion
         _heavy_brain = DeepSeekCompanion(
             model=intent_model_id,
             base_url=os.environ.get("QQ_INTENT_BASE_URL") or None,
