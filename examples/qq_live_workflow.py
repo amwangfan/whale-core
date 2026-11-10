@@ -451,6 +451,12 @@ def cmd_run(args) -> int:
     group_allow = tuple(
         g.strip() for g in os.environ.get("WHALE_QQ_GROUP_ALLOW", "").split(",")
         if g.strip()) or None
+    # 2026-11-11 owner 决策：授权分级显式化——2 级授权群（可触发授权级任务：
+    # 调研/落文件/shell 等，非主人需过意图模型审核）。缺省 = 消息白名单；
+    # 可用 WHALE_QQ_GROUP_AUTH2 单独收紧（子集生效）。
+    group_auth2 = tuple(
+        g.strip() for g in os.environ.get("WHALE_QQ_GROUP_AUTH2", "").split(",")
+        if g.strip()) or group_allow
     send_port = build_send_port(live_ok=live_auto, group_allow=group_allow)
 
     # 按需完整模式窗口：启动即关窗定基线（幂等）；closer 只在 runner 主进程起——
@@ -863,11 +869,13 @@ def cmd_run(args) -> int:
             tools=tools, context_resolver=context_resolver,
             grant_gate=_grant_gate, heavy_companion=_heavy_companion,
             artifact_store=cap.artifacts,
-            # 2026-11-10 owner 决策：授权级任务（调研/落文件/shell/高成本）
-            # 只许主人本人（任何会话）或授权白名单群；陌生人私聊不行。
+            # 2026-11-10/11 owner 决策：授权级任务（调研/落文件/shell/高成本）
+            # 只许主人本人（任何会话）或 2 级授权群（WHALE_QQ_GROUP_AUTH2，
+            # 缺省=消息白名单）；陌生人私聊不行。
             task_auth_gate=lambda cid, oid: bool(oid) or (
                 isinstance(cid, str) and cid.startswith("group:")
-                and cid.split(":", 1)[1] in group_allow))
+                and group_auth2 is not None
+                and cid.split(":", 1)[1] in group_auth2))
         apply_parallel_env(workflow.orchestrator, os.environ)
         print(f"[意图] 模型={intent_model_id}（显式指令规则直达零LLM；其余一律由意图模型判断 chat/task；{tool_note}）")
 
