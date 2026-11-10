@@ -596,7 +596,7 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
         timing["totalMs"] = int((_time.perf_counter() - t_all) * 1000)
         return reply, timing
 
-    def quick_chat(text: str, location: str = "") -> tuple[str, dict]:
+    def quick_chat(text: str, location: str = "", persona: str | None = None) -> tuple[str, dict]:
         import time as _time
         import inspect
         mark_chat()
@@ -609,9 +609,11 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
                 brain.default_location = location or None
             except Exception:
                 pass
-            persona = (
-                "用一两句口语简明回答，不展开、不追问。\n"
-                + _GLASSES_LOCAL_LIFE_HINT)
+            # 2026-11-11：persona 可被调用方覆盖（投递交代用人格卡软提示）
+            if persona is None:
+                persona = (
+                    "用一两句口语简明回答，不展开、不追问。\n"
+                    + _GLASSES_LOCAL_LIFE_HINT)
             kwargs = {"persona": persona}
             try:
                 if "location" in inspect.signature(brain.reply).parameters:
@@ -818,14 +820,14 @@ def _delivery_note(result: dict, items: list, say=None) -> str:
         what, fallback = "", "刚才没发出去——你手机上 QQ 可能不在线，我记着了，等它回来再补给你~"
     if say is not None:
         try:
+            # 2026-11-11 owner 决策：软提示——只陈述事实，口吻由人格卡塑造，
+            # 不在提示词里教语气/给示例句。
             if result.get("ok"):
-                prompt = (f"你是群聊陪伴机器人 Enxi（温柔、软乎乎）。刚才你把{what}"
-                          "发到对方 QQ 了。用一句不超过 18 字的口语交代一声，"
-                          "味道像「说了哦，看看手机~」，别复述内容本身。只回这一句。")
+                prompt = (f"刚才你把{what}发到对方 QQ 了。跟对方交代一声"
+                          "（别复述内容本身）。只回这一句。")
             else:
-                prompt = ("你是群聊陪伴机器人 Enxi（温柔、软乎乎）。刚才要发到对方"
-                          " QQ 的东西没发出去（可能 QQ 不在线）。用一句不超过 24 字的"
-                          "口语如实交代，并说之后会补。只回这一句。")
+                prompt = ("刚才要发到对方 QQ 的东西没发出去（可能 QQ 不在线），"
+                          "之后会补。跟对方交代一声。只回这一句。")
             out = str(say(prompt) or "").strip().strip("「」\"'")
             # 护栏：非空、不超过 40 字、不带引号包裹才用模型的；否则回落
             if out and len(out) <= 40 and "\n" not in out:
