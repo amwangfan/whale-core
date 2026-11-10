@@ -170,6 +170,9 @@ _CLEAR_CHITCHAT = re.compile(
     re.IGNORECASE,
 )
 
+# 链接识别：消息内嵌 http(s) URL（裸链也算——分享链接就是让它看）。
+_URL_RE = re.compile(r"https?://[^\s\"'）)\]>】」』，,。；;！!？?]+", re.IGNORECASE)
+
 # 短句里若已带工具/媒体迹象，禁止当闲聊短路（天气/搜索规则通常已先命中）。
 _CHITCHAT_VETO = re.compile(
     r"(搜索|搜一下|搜搜|查一下|查找|找一下|翻一下|翻翻|"
@@ -263,6 +266,21 @@ class SearchIntentRouter:
                 "reason": "附近/外卖类问题走只读网页搜索（不下单、不支付）",
             }, ensure_ascii=False)
         caps = ({s.capability for s in self.tools.specs()} if self.tools is not None else set())
+        # 2026-11-10 owner 实证：消息带链接应**读链接**（web.fetch），不是搜链接
+        # ——群友发性格测试链接让她做，被路由成 web.search 搜出一堆无关新闻，
+        # 她还谎称「点开白白的没加载出来」。规则直达，零 LLM。
+        if "web.fetch" in caps:
+            m_url = _URL_RE.search(text or "")
+            if m_url:
+                url = m_url.group(0).rstrip(".,;:!?。，；：！？、\"'")
+                return json.dumps({
+                    "goal": "读取这个链接的内容并回应（总结/评价/按对方要求做）："
+                            + url[:200],
+                    "kind": "task",
+                    "slots": {"url": url[:500]},
+                    "capabilities": ["web.fetch"],
+                    "reason": "消息带链接——直接读链接内容（web.fetch），不是搜索",
+                }, ensure_ascii=False)
         if "shell.safe" in caps and _SHELL_EXPLICIT.search(text or ""):
             # 尽量抽出命令：反引号优先，否则整句交给执行器（策略层会截断/拒绝）。
             m = re.search(r"`([^`]+)`", text or "")
@@ -290,7 +308,7 @@ class SearchIntentRouter:
             "web.search": "query: 搜索词, limit: 结果数量。追更（最新话/第几集/什么时候更新）、"
                           "最新动态、事实疑问、自己不知道的知识都走它——不要凭记忆回答",
             "weather.now": "place: 口述城市；location_hint/coords: 无口述时用当前位置；query: 回落搜索词",
-            "web.fetch": "url: 要读取的公开HTTP(S)链接",
+            "web.fetch": "url: 要读取的公开HTTP(S)链接。消息里带链接（让你看/打开/做测试/总结/翻译）用它读原文，不要改用 web.search",
             "media.image.generate": "prompt: 图片描述, size/model: 可选（model 默认 qwen-image-3.0）, reference_query: 仅当主体是已知角色/人物/IP 形象时填参考图搜索词（系统会搜最多3张参考图带图生成）；若 web 搜索已拿到图片链接可用 reference_urls 直接传入；泛化主体不要填",
             "media.video.generate": "prompt: 视频描述, model: 可选（用户指定才填）",
             "tts.synthesize": "text: 要朗读的文字, model/voice: 可选（用户指定才填）",

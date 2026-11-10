@@ -302,3 +302,29 @@ def test_llm_weather_via_search_rewritten_to_qweather():
                                "slots": {"query": "成都 今天 活动"}}, ensure_ascii=False)
     router = SearchIntentRouter(model=_News(), enable_llm=True, tools=_WeatherTools())
     assert json.loads(router.plan("今天成都有什么活动"))["capabilities"] == ["web.search"]
+
+
+def test_url_in_message_routes_to_fetch_not_search():
+    """2026-11-10 生产实证：群友发性格测试链接让她做，被路由成 web.search
+    搜出无关新闻还谎称「没加载出来」。链接应读（web.fetch）不是搜。"""
+    from whale_core.core.runtime import ToolRegistry, ToolSpec
+    tools = ToolRegistry()
+    tools.register(ToolSpec(name="fetch_url", capability="web.fetch",
+                            plugin_id="web_fetch", handler=lambda a: ""))
+    tools.register(ToolSpec(name="search", capability="web.search",
+                            plugin_id="web_search", handler=lambda a: ""))
+    router = SearchIntentRouter(model=_Boom(), enable_llm=True, tools=tools)
+    for text in ("https://exoticflicker.github.io/cati/",
+                 "你去做上面那个测试 https://exoticflicker.github.io/cati/",
+                 "@Enxi 看看这个 https://example.com/a?b=1"):
+        plan = json.loads(router.plan(text))
+        assert plan["kind"] == "task", text
+        assert plan["capabilities"] == ["web.fetch"], text
+        assert plan["slots"]["url"].startswith("http"), text
+    # 无 web.fetch 挂载时不误判（回落 chat，不捏造 fetch 任务）
+    tools2 = ToolRegistry()
+    tools2.register(ToolSpec(name="search", capability="web.search",
+                             plugin_id="web_search", handler=lambda a: ""))
+    router2 = SearchIntentRouter(model=None, enable_llm=False, tools=tools2)
+    plan = json.loads(router2.plan("看看 https://example.com"))
+    assert plan["kind"] == "chat"
