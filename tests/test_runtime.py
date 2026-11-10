@@ -332,10 +332,11 @@ def test_clarify_prompt_guides_defaults():
     # 2026-11-05 起非显式指令一律过意图 LLM（词表闸门已废）；检查提示词内容。
     router.plan("请帮我改一下配置", context="记忆：用户在成都")
     prompt = model.prompts[0]
-    assert "默认用户所在地" in prompt
-    assert "确实无法推断才" in prompt
+    # 2026-11-11 提示词瘦身：规则不堆在提示词里，目录行即文档
+    assert "意图规划器" in prompt
+    assert "当前可用能力目录" in prompt
     assert "用户在成都" in prompt  # 上下文进提示词
-    assert "不要 clarify" in prompt or "clarification_question" in prompt
+    assert "clarification_question" in prompt
 
 
 def test_async_slow_task_ack_then_complete():

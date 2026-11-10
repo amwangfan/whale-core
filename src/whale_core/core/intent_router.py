@@ -322,16 +322,20 @@ class SearchIntentRouter:
         specs = self.tools.specs() if self.tools is not None else []
         capabilities = ({s.capability for s in specs} if self.tools is not None
                         else {"web.search"})
+        # 2026-11-11 owner 决策：意图提示词不堆硬性规则——每个能力的
+        # 「是什么/什么时候用」写进目录行（工具即文档），模型照目录自行决断。
         hints = {
-            "web.search": "query: 搜索词, limit: 结果数量。追更（最新话/第几集/什么时候更新）、"
-                          "最新动态、事实疑问、自己不知道的知识都走它——不要凭记忆回答",
-            "weather.now": "place: 口述城市；location_hint/coords: 无口述时用当前位置；query: 回落搜索词",
-            "web.fetch": "url: 要读取的公开HTTP(S)链接。消息里带链接（让你看/打开/做测试/总结/翻译）用它读原文，不要改用 web.search",
-            "media.image.generate": "prompt: 图片描述, size/model: 可选（model 默认 qwen-image-3.0）, reference_query: 仅当主体是已知角色/人物/IP 形象时填参考图搜索词（系统会搜最多3张参考图带图生成）；若 web 搜索已拿到图片链接可用 reference_urls 直接传入；泛化主体不要填",
-            "media.video.generate": "prompt: 视频描述, model: 可选（用户指定才填）",
-            "tts.synthesize": "text: 要朗读的文字, model/voice: 可选（用户指定才填）",
-            "asr.transcribe": "audio: 已提供的音频数据或资源引用；缺音频时澄清",
-            "shell.safe": "command: 命令字符串；仅主人或有效 sudo shell 租约；执行仍受沙箱限制",
+            "web.search": "搜索对话之外的外部/新鲜信息（新闻、资料、追更、知识查证）。"
+                          "query: 搜索词, limit: 结果数量。答案就在当前聊天里的问题不要用它",
+            "weather.now": "查天气。place: 口述城市；location_hint/coords: 无口述时用当前位置",
+            "web.fetch": "读取一个公开链接的原文。消息里带链接（让你看/打开/做测试/总结/翻译）用它。url: 链接",
+            "media.image.generate": "画图/生成图片。prompt: 描述；主体是已知角色/IP 时填 "
+                                    "reference_query 搜参考图；model 可选（默认 qwen-image-3.0）",
+            "media.video.generate": "生成视频。prompt: 描述, model/duration_s: 可选",
+            "tts.synthesize": "把文字读出来发语音。text: 要朗读的文字, model/voice: 可选",
+            "asr.transcribe": "语音转文字。audio: 已提供的音频数据或引用；缺音频时澄清",
+            "shell.safe": "在本机受控沙箱真实执行命令——实测类请求（ping/延迟/系统状态/"
+                          "本机文件/跑脚本）走它，不是搜索。command: 命令字符串",
         }
         catalog = []
         for capability in sorted(capabilities):
@@ -341,27 +345,19 @@ class SearchIntentRouter:
                 detail += "；" + matching[0].description[:120]
             catalog.append(f"{capability}（{detail}）")
         prompt = (
-            "仅返回一个 JSON 对象，不要代码围栏。你负责建议意图，不能授予权限。"
-            '格式：{"goal":"目标","kind":"chat|task|clarify",'
-            '"slots":{},"capabilities":[],"clarification_question":""}。'
-            "只有确实需要工具且能力已明确时才用 task；普通谈话用 chat。"
-            "2026-11-10 owner 实证收紧：问的是当前聊天里的内容（刚发的图片/引用的"
-            "消息/刚才说的话/对方是谁发的）一律 chat——答案就在对话上下文里，"
-            "搜索纯属浪费还会答非所问；web.search 只用于对话之外的**外部/新鲜**信息"
-            "（追更、天气、新闻、知识查证）。没把握时宁可选 chat。"
-            "不得自行声明审批通过；能力的风险与审批由宿主策略裁决。"
-            "仅可选择以下当前已挂载能力：" + "；".join(catalog) + "。"
-            "写作/创作请求（写X字/同人文/写一篇/写诗）不是搜索——选 chat 并加 "
-            '"heavy":true（由重模型作答）；只有需要先查资料才 web.search。'
-            "梳理/整理/盘点/汇总/考据类请求 → web.search 任务并标 "
-            '"heavy":true（先搜资料，再由重模型总结产出长文，长文会存成文件发出）。'
-            "授权分级：调研/落文件/shell/高成本任务要加 "
-            '"auth_level":"owner"（只有主人本人或主人授权的群才执行，'
-            "外部对话越权会被拒）；普通问答、聊天、长文写作是开放级不用标。"
-            "澄清要克制：能从上下文/记忆合理推断的缺省值就直接默认（如地点类请求"
-            "没明说地点时，默认用户所在地；用户有出行信息时，用行程目的地或出发地）；"
-            "用户说『画个猫』『念这段』这类已够用的媒体请求不要 clarify；"
-            "确实无法推断才 clarify，且 clarification_question 只用一句口语短问。"
+            "你是群聊陪伴机器人的意图规划器：读用户原话与上下文，决定这一轮怎么回应。"
+            "仅返回一个 JSON 对象，不要代码围栏："
+            '{"goal":"目标","kind":"chat|task|clarify","slots":{},'
+            '"capabilities":[],"clarification_question":"","heavy":false,'
+            '"auth_level":""}。'
+            "kind=chat 直接聊；kind=task 需要调用工具（capabilities 从下面目录里选，"
+            "每行括号里写了它是什么、什么时候该用——照目录判断，别猜）；"
+            "kind=clarify 信息不足时追问一句（能推断就别问）。"
+            "heavy=true：回答本身是长文/复杂创作/深度整理，交给更强的模型写。"
+            'auth_level="owner"：任务涉及调研产出文件/高成本/系统级操作，'
+            "标上即可，审不与审由宿主按会话授权决定。"
+            "你只提议不授权；风险与审批由宿主策略裁决。\n"
+            "当前可用能力目录：\n" + "\n".join(catalog)
         )
         if context:
             prompt += f"\n上下文（记忆与近期对话，供推断缺省值）：\n{context[:900]}"

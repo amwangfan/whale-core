@@ -417,6 +417,13 @@ class TurnOrchestrationMixin:
                          name="whale-followup").start()
         return first_result
 
+    # 2026-11-11 实证：「我去 ping 一下 1.1.1.1」这类实测承诺被兜底成
+    # web.search（搜回别人的延迟数据）——实测/本机类承诺不该用搜索兑现，
+    # 返回 None 等意图模型的真实判定（kimi 只是慢，不是不会）。
+    _LOCAL_ACT_RE = re.compile(
+        r"(ping|延迟|网速|带宽|丢包|本机|跑一下|执行|运行|测试一下|"
+        r"测一下|测速|内存|磁盘|CPU|cpu|进程|端口|占用|版本|空间)")
+
     def _promise_fallback_decision(self, env: InputEnvelope, text: str) -> _Decision | None:
         """第一条已答应、意图模型超时：用只读 web.search 兑现（无搜索能力则 None）。"""
         if self.tools is None or not self.tools.for_capability("web.search"):
@@ -424,6 +431,8 @@ class TurnOrchestrationMixin:
         from whale_core.core.intent_router import _looks_like_clear_chitchat
         if _looks_like_clear_chitchat(text):
             return None  # 「晚上好」里顺口提了句「等下」不算要查
+        if self._LOCAL_ACT_RE.search(text or ""):
+            return None  # 实测/本机类承诺：搜索兑不了现，等意图模型的真判定
         from whale_core.core.intent_plan import plan_from_model_text
         import json as _json
         query = re.sub(r"@\S+", " ", text or "").strip()[:400]
