@@ -802,6 +802,33 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
             "env": env}
 
 
+def _persona_card_text(store) -> str:
+    """取当前人格卡文本（软提示用）：绑定优先，回退名字为 Enxi 的卡。"""
+    if store is None:
+        return ""
+    try:
+        for key in store.keys():
+            if str(key).startswith("bind:persona:"):
+                bind = store.get(key)
+                pid = str(bind.get("persona_id") or "") if isinstance(bind, dict) else ""
+                if pid:
+                    card = store.get(f"persona:card:{pid}")
+                    if isinstance(card, dict):
+                        text = str(card.get("external_prompt") or "").strip()
+                        if text:
+                            return text
+        for key in store.keys():
+            if str(key).startswith("persona:card:"):
+                card = store.get(key)
+                if isinstance(card, dict) and str(card.get("name") or "") == "Enxi":
+                    text = str(card.get("external_prompt") or "").strip()
+                    if text:
+                        return text
+    except Exception:
+        pass
+    return ""
+
+
 def _delivery_note(result: dict, items: list, say=None) -> str:
     """投递后的眼镜侧文字交代（2026-11-11 owner 决策：不静默）。
 
@@ -1125,11 +1152,13 @@ def make_handler(delegates):
                     summary=str(body.get("summary") or "")[:200],
                     prefer_owner_dm=prefer)
                 # 2026-11-11 owner 决策：媒体/操作投递后，眼镜侧要给一句
-                # 人格化文字交代——模型自主拟（轻量脑），失败回落固定文案。
+                # 交代——模型自主拟，口吻由人格卡软提示塑造；失败回落固定文案。
+                def _say(prompt, _store=delegates.get("store")):
+                    return delegates["quick_chat"](
+                        prompt, persona=_persona_card_text(_store))[0]
                 result["note"] = _delivery_note(
                     result, items,
-                    say=lambda p: delegates["quick_chat"](p)[0]
-                    if delegates.get("quick_chat") else None)
+                    say=_say if delegates.get("quick_chat") else None)
                 _json_response(self, 200, result)
             except Exception as exc:
                 _json_response(self, 200, {"ok": False, "error": type(exc).__name__})
