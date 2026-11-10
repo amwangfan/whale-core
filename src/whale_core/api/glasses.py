@@ -800,21 +800,39 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
             "env": env}
 
 
-def _delivery_note(result: dict, items: list) -> str:
+def _delivery_note(result: dict, items: list, say=None) -> str:
     """投递后的眼镜侧文字交代（2026-11-11 owner 决策：不静默）。
 
-    按投递结果与内容类型给一句人格化短句；失败如实说没发出去。
+    模型自主拟一句（say=轻量脑 callable），失败/空/超长回落固定文案。
     """
-    if not result.get("ok"):
-        return "刚才没发出去——你手机上 QQ 可能不在线，我记着了，等它回来再补给你~"
     kinds = {str(it.get("kind") or "text") for it in items if isinstance(it, dict)}
     if "audio" in kinds:
-        return "语音发过去啦，听听看~"
-    if "image" in kinds:
-        return "图发你手机上了，看看~"
-    if "file" in kinds:
-        return "文件放你 QQ 上了，回头翻~"
-    return "说了哦，看看手机~"
+        what, fallback = "一段语音", "语音发过去啦，听听看~"
+    elif "image" in kinds:
+        what, fallback = "一张图", "图发你手机上了，看看~"
+    elif "file" in kinds:
+        what, fallback = "一个文件", "文件放你 QQ 上了，回头翻~"
+    else:
+        what, fallback = "话", "说了哦，看看手机~"
+    if not result.get("ok"):
+        what, fallback = "", "刚才没发出去——你手机上 QQ 可能不在线，我记着了，等它回来再补给你~"
+    if say is not None:
+        try:
+            if result.get("ok"):
+                prompt = (f"你是群聊陪伴机器人 Enxi（温柔、软乎乎）。刚才你把{what}"
+                          "发到对方 QQ 了。用一句不超过 18 字的口语交代一声，"
+                          "味道像「说了哦，看看手机~」，别复述内容本身。只回这一句。")
+            else:
+                prompt = ("你是群聊陪伴机器人 Enxi（温柔、软乎乎）。刚才要发到对方"
+                          " QQ 的东西没发出去（可能 QQ 不在线）。用一句不超过 24 字的"
+                          "口语如实交代，并说之后会补。只回这一句。")
+            out = str(say(prompt) or "").strip().strip("「」\"'")
+            # 护栏：非空、不超过 40 字、不带引号包裹才用模型的；否则回落
+            if out and len(out) <= 40 and "\n" not in out:
+                return out
+        except Exception:
+            pass
+    return fallback
 
 
 def make_handler(delegates):
@@ -1105,8 +1123,11 @@ def make_handler(delegates):
                     summary=str(body.get("summary") or "")[:200],
                     prefer_owner_dm=prefer)
                 # 2026-11-11 owner 决策：媒体/操作投递后，眼镜侧要给一句
-                # 人格化文字交代（「说了哦，看看手机~」），不静默。
-                result["note"] = _delivery_note(result, items)
+                # 人格化文字交代——模型自主拟（轻量脑），失败回落固定文案。
+                result["note"] = _delivery_note(
+                    result, items,
+                    say=lambda p: delegates["quick_chat"](p)[0]
+                    if delegates.get("quick_chat") else None)
                 _json_response(self, 200, result)
             except Exception as exc:
                 _json_response(self, 200, {"ok": False, "error": type(exc).__name__})

@@ -130,3 +130,23 @@ def test_delivery_note_persona_texts():
     assert _delivery_note({"ok": True}, [{"kind": "image"}]) == "图发你手机上了，看看~"
     assert _delivery_note({"ok": True}, [{"kind": "text"}]) == "说了哦，看看手机~"
     assert "没发出去" in _delivery_note({"ok": False}, [{"kind": "text"}])
+
+
+def test_delivery_note_model_first_then_fallback():
+    """owner 决策：note 由模型自主拟，模型失败/空/超长回落固定文案。"""
+    from whale_core.api.glasses import _delivery_note
+    # 模型给出合规短句 → 用模型的
+    out = _delivery_note({"ok": True}, [{"kind": "audio"}],
+                         say=lambda p: "发你 QQ 啦，戳开听听~")
+    assert out == "发你 QQ 啦，戳开听听~"
+    # 模型空返回 → 回落固定文案
+    assert _delivery_note({"ok": True}, [{"kind": "audio"}],
+                          say=lambda p: "") == "语音发过去啦，听听看~"
+    # 模型超长/多行 → 回落
+    assert _delivery_note({"ok": True}, [{"kind": "text"}],
+                          say=lambda p: "长" * 60) == "说了哦，看看手机~"
+    # 模型抛错 → 回落
+    def _boom(p):
+        raise RuntimeError("model down")
+    assert _delivery_note({"ok": False}, [{"kind": "text"}],
+                          say=_boom).startswith("刚才没发出去")

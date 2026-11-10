@@ -86,7 +86,7 @@ class ShellExecutor:
         return self.policy.command_verdict(
             command, is_owner=is_owner, has_shell_grant=has_shell_grant)
 
-    def _sandbox_argv(self, command: str, cwd: str) -> list[str]:
+    def _sandbox_argv(self, command: str, cwd: str, *, share_net: bool = False) -> list[str]:
         bwrap = shutil.which("bwrap")
         if not sys.platform.startswith("linux") or not bwrap:
             raise RuntimeError("sandbox unavailable: Linux bubblewrap is required")
@@ -99,6 +99,14 @@ class ShellExecutor:
                 "--die-with-parent", "--new-session",
                 "--cap-drop", "ALL", "--proc", "/proc", "--dev", "/dev",
                 "--tmpfs", "/tmp", "--dir", "/home", "--dir", "/home/whale"]
+        # 2026-11-11 owner 决策：主人命令放行网络（ping/curl 实测类）——
+        # --unshare-all 之后 --share-net 覆盖回共享网络命名空间；
+        # DNS 走只读 resolv.conf/hosts。成员（sudo 租约）依旧无网络。
+        if share_net:
+            argv.append("--share-net")
+            for path in ("/etc/resolv.conf", "/etc/hosts"):
+                if Path(path).exists():
+                    argv.extend(["--ro-bind", path, path])
         # Runtime libraries only; never bind /, /etc, host /proc, /home or sockets.
         for path in ("/usr", "/bin", "/sbin", "/lib", "/lib64"):
             if Path(path).exists():
@@ -114,8 +122,9 @@ class ShellExecutor:
                      "--", "/bin/sh", "-c", command])
         return argv
 
-    def _argv(self, command: str, cwd: str) -> list[str]:
-        argv = (self._sandbox_argv(command, cwd) if self.sandbox == "bubblewrap"
+    def _argv(self, command: str, cwd: str, *, share_net: bool = False) -> list[str]:
+        argv = (self._sandbox_argv(command, cwd, share_net=share_net)
+                if self.sandbox == "bubblewrap"
                 else ["/bin/sh", "-c", command])
         # Per-process hard limits can safely wrap the namespace launcher. The
         # per-UID process limit belongs inside _sandbox_argv, never around bwrap
@@ -158,7 +167,10 @@ class ShellExecutor:
                         kwargs.update(user=user.pw_uid, group=user.pw_gid, extra_groups=[])
                         if resolved is None and os.geteuid() == 0:
                             os.chown(task_tmp, user.pw_uid, user.pw_gid)
-                argv = self._argv(command, work)
+                # 2026-11-11 owner 决策：主人命令（personal 档）放行网络
+                # （ping/curl 实测类）；成员（sudo 租约）依旧无网络。
+                argv = self._argv(command, work,
+                                  share_net=bool(is_owner))
                 proc = subprocess.Popen(argv, cwd=work, env=_scrub_env(self.env),
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                         start_new_session=True, **kwargs)
