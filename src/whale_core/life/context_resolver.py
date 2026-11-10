@@ -41,6 +41,16 @@ from whale_core.life.conversation_context import (
 #: 群会话上限：任何成员（含主人本人）在群里都不超过这个集合。
 GROUP_CEILING: Tuple[str, ...] = (SCOPE_CHAT_BASIC, SCOPE_TOOL_WEB_SEARCH, SCOPE_TOOL_WEATHER_NOW)
 
+#: 主人在群内的追加能力（2026-11-11 owner 决策：三级制「主人在任何会话
+#: 直执」——主人在群里问系统问题不该被群上限拦住。scope 按发送者逐轮
+#: 解析，其他成员的回合不受影响；INV-03 的记忆空间隔离不变）。
+GROUP_OWNER_EXTRA: Tuple[str, ...] = (
+    "tool.web.fetch",
+    SCOPE_TOOL_SHELL_SAFE,
+    SCOPE_OUTBOX_SUBMIT,
+    SCOPE_TASK_READ_SELF,
+)
+
 #: 未配对私聊：仅对话。
 PRIVATE_ANON: Tuple[str, ...] = (SCOPE_CHAT_BASIC,)
 
@@ -207,7 +217,10 @@ class ConversationContextResolver:
                 if not g.revoked and g.expires_at > now and g.used_count < g.max_uses
             )
             # 租约 scope 也不能突破会话类型上限（群里租约不提权）。
-            ceiling = GROUP_CEILING if _is_group(kind) else None
+            # 2026-11-11：主人在群内的上限 = 群上限 + 主人追加能力。
+            ceiling = (GROUP_CEILING + GROUP_OWNER_EXTRA
+                       if (_is_group(kind) and principal.is_owner)
+                       else GROUP_CEILING if _is_group(kind) else None)
             for g in grant_refs:
                 for s in g.scopes:
                     if ceiling is not None and s not in ceiling:
@@ -317,8 +330,11 @@ class ConversationContextResolver:
         self, kind: ConversationKind, principal: Principal
     ) -> Tuple[str, ...]:
         if _is_group(kind):
-            # INV-03：主人在群里同样受限；测试期媒体生成对全群开放（含主人）。
+            # 群上限对所有成员生效；2026-11-11 起主人在群内有追加能力
+            # （GROUP_OWNER_EXTRA：shell/fetch 等——主人在任何会话直执）。
             base = GROUP_CEILING
+            if principal.is_owner:
+                base = base + GROUP_OWNER_EXTRA
             return base + (MEDIA_GENERATION_SCOPES if _media_open_test() else ())
         if kind is ConversationKind.API:
             base = API_OWNER if principal.is_owner else PRIVATE_ANON

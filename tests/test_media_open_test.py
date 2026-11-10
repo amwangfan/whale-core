@@ -56,12 +56,18 @@ def test_open_stranger_private_gets_media(monkeypatch):
 
 def test_open_group_ceiling_gets_media(monkeypatch):
     monkeypatch.setenv("WHALE_MEDIA_OPEN_TEST", "1")
-    for sender in ("member-1", OWNER_QQ):  # 群里含主人也按同一上限
+    for sender in ("member-1", OWNER_QQ):  # 群里含主人也获得媒体组
         ctx = make_resolver().resolve(
             channel="qq", sender_id=sender, conversation_id="group:1124744261")
         for s in MEDIA_GENERATION_SCOPES:
             assert s in ctx.capability_scopes
-        assert "outbox.submit" not in ctx.capability_scopes
+    # 2026-11-11：主人有追加能力，成员没有
+    ctx_m = make_resolver().resolve(
+        channel="qq", sender_id="member-1", conversation_id="group:1124744261")
+    assert "outbox.submit" not in ctx_m.capability_scopes
+    ctx_o = make_resolver().resolve(
+        channel="qq", sender_id=OWNER_QQ, conversation_id="group:1124744261")
+    assert "outbox.submit" in ctx_o.capability_scopes
 
 
 def test_open_owner_private_unchanged(monkeypatch):

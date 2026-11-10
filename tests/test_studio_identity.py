@@ -105,14 +105,16 @@ def test_paired_owner_private_gets_owner_scopes():
     assert SCOPE_OUTBOX_SUBMIT in ctx.capability_scopes
 
 
-def test_owner_in_group_gets_group_ceiling_only():
-    """INV-03：主人在群里不获得私聊级能力。"""
+def test_owner_in_group_gets_ceiling_plus_owner_extra():
+    """2026-11-11 三级制：主人在群内 = 群上限 + 主人追加（shell/fetch/提交）；
+    记忆空间隔离（INV-03）不受影响。"""
+    from whale_core.life.context_resolver import GROUP_OWNER_EXTRA
     ctx = make_resolver().resolve(
         channel="qq", sender_id=OWNER_QQ, conversation_id="group:123")
     assert ctx.principal.is_owner  # 身份仍被识别
-    assert ctx.capability_scopes == GROUP_CEILING  # 但能力按群上限
-    assert SCOPE_OUTBOX_SUBMIT not in ctx.capability_scopes
-    assert SCOPE_TASK_READ_SELF not in ctx.capability_scopes
+    assert ctx.capability_scopes == GROUP_CEILING + GROUP_OWNER_EXTRA
+    assert SCOPE_OUTBOX_SUBMIT in ctx.capability_scopes
+    assert SCOPE_TASK_READ_SELF in ctx.capability_scopes
 
 
 def test_group_member_is_plain_principal():
@@ -135,7 +137,9 @@ def test_explicit_kind_overrides_prefix():
         channel="qq", sender_id=OWNER_QQ, conversation_id="weird-format",
         conversation_kind=ConversationKind.QQ_GROUP)
     assert ctx.conversation.kind is ConversationKind.QQ_GROUP
-    assert ctx.capability_scopes == GROUP_CEILING
+    # 主人在群内 = 群上限 + 主人追加（2026-11-11）
+    from whale_core.life.context_resolver import GROUP_OWNER_EXTRA
+    assert ctx.capability_scopes == GROUP_CEILING + GROUP_OWNER_EXTRA
 
 
 # ---------------------------------------------------------------------------

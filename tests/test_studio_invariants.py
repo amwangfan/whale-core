@@ -166,7 +166,9 @@ def test_inv03_resolver_group_owner_matrix():
     ctx = r.resolve(channel="qq", sender_id="10001", conversation_id="group:9")
     assert ctx.principal.is_owner  # 身份识别正常
     assert [s.space_id for s in ctx.allowed_memory_spaces] == ["g-space-a"]
-    assert "outbox.submit" not in ctx.capability_scopes
+    # 2026-11-11：主人在群内有追加能力（三级制「任何会话直执」）；
+    # INV-03 守住的是记忆空间隔离（上一行），不是能力上限。
+    assert "outbox.submit" in ctx.capability_scopes
 
 
 # ---------------------------------------------------------------------------

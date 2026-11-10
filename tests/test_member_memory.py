@@ -912,3 +912,21 @@ def test_optin_regrants_consent_evidence(env):
     assert consents.has_valid(A_PRINCIPAL)      # 重新授权
     versions = [c.version for c in consents.list_for(A_PRINCIPAL)]
     assert max(versions) >= 2                   # 证据链版本递增
+
+
+def test_owner_in_group_gets_owner_extra_scopes():
+    """2026-11-11 owner 实证：主人在群里问系统问题被拒（群上限剥掉 shell）。
+    三级制：主人在任何会话直执——群内主人追加 GROUP_OWNER_EXTRA；
+    其他成员不受影响。"""
+    from whale_core.life.context_resolver import (
+        ConversationContextResolver, pairing_lookup_from_mapping)
+    resolver = ConversationContextResolver(
+        pairing_lookup=pairing_lookup_from_mapping({("qq", "3563425362"): "owner"}))
+    ctx_owner = resolver.resolve(channel="qq", sender_id="3563425362",
+                                 conversation_id="group:1124744261")
+    assert "tool.shell.safe" in ctx_owner.capability_scopes
+    assert "tool.web.fetch" in ctx_owner.capability_scopes
+    ctx_member = resolver.resolve(channel="qq", sender_id="3510294135",
+                                  conversation_id="group:1124744261")
+    assert "tool.shell.safe" not in ctx_member.capability_scopes
+    assert "tool.web.fetch" not in ctx_member.capability_scopes
