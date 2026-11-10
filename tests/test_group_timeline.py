@@ -308,6 +308,22 @@ def test_render_marks_reply_target_and_at_me():
     assert "@我" not in tl.render_for_model(conv)
 
 
+def test_render_reply_marks_no_ghost_marks_from_4tuple():
+    """2026-11-10 生产实证：扁平四元组（uin/uid/msgid/seq）曾被逐个渲染
+    成 4 个幽灵「↩回复#」标。只应取 msgid 一个。"""
+    store = InMemoryStore()
+    tl = GroupTimelineStore(store)
+    conv = "group:ghost"
+    tl.append(conv, message_id="7706aa01", sender_id="10001", text="看图")
+    tl.append(conv, message_id="7706bb02", sender_id="10002", text="这是啥",
+              reply_to=("10001", "u_abc", "7706aa01", "11805"))
+    rendered = tl.render_for_model(conv)
+    line2 = rendered.splitlines()[1]
+    assert rendered.count("↩回复#") == 1      # 一个标记，不是四个
+    assert "↩回复#aa01" in line2              # 取 msgid 尾号
+    assert "1805" not in line2                # seq 不被当成消息引用
+
+
 def test_labels_do_not_leak_uin():
     """模型可见文本不含完整 QQ 号/UIN。"""
     store = InMemoryStore()

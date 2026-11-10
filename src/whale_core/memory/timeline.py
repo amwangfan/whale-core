@@ -105,10 +105,24 @@ class GroupTimelineStore:
             只标注两类确定性事实：reply_to 的消息尾号、是否 @ 了鲸鱼自己
             （self_uid 命中 mentions）。被 @ 的第三方 uid 不做猜测性归属，
             避免把错误身份喂给模型。
+
+            2026-11-10 修复：reply_to 是扁平四元组（origUin, origUid,
+            origMsgId, origMsgSeq），不是引用列表——此前逐个渲染出一条消息
+            挂 4 个幽灵「↩回复#」标（uin/uid/msgid/seq 各一）。只取 [2]。
+            注意 origMsgId 与 SSE message_id 编号空间不同（生产实证），
+            尾号未必能对上时间线行；引用正文由 qq_workflow._quoted_context
+            按 uin+就近回落标注，两层互补。
             """
             marks = []
-            for ref in e.get("reply_to") or ():
-                tail = msg_label.get(ref) or str(ref)[-4:]
+            refs = e.get("reply_to") or ()
+            ref_mid = ""
+            if isinstance(refs, (list, tuple)):
+                if len(refs) >= 3 and refs[2]:
+                    ref_mid = str(refs[2])   # 四元组（uin, uid, msgid, seq）
+                elif len(refs) == 1 and refs[0]:
+                    ref_mid = str(refs[0])   # 单元素旧形状：直接是 msgid
+            if ref_mid:
+                tail = msg_label.get(ref_mid) or ref_mid[-4:]
                 marks.append(f"↩回复#{tail}")
             if self_uid and self_uid in (e.get("mentions") or ()):
                 marks.append("@我")
