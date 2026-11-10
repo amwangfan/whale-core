@@ -96,6 +96,9 @@ class QqInboundWorkflow:
         self._stranger_daily_limit = (int(stranger_daily_limit)
                                       if stranger_daily_limit is not None
                                       else self.STRANGER_DAILY_LIMIT)
+        # 宿主注入（可选）：artifact 读取器 callable(aid) -> (Artifact, bytes)，
+        # 供「引用/近期图」解析读取入站时持久化的消息图片（msgimg:* 索引）。
+        self._artifact_reader = None
         # S4：临时授权服务（一次性口令 sudo）；None = 未启用，口令消息按
         # 普通文本处理。
         self._auth_service = auth_service
@@ -153,6 +156,137 @@ class QqInboundWorkflow:
             if image is not None:
                 out.append((image.data, image.mime))
         return tuple(out)
+
+    # ---- 2026-11-10：引用/近期图可见性（owner 实证「看不到我引用的是哪句」） ----
+
+    def _name_for_group_uin(self, conversation: str, uin: str) -> str:
+        """群昵称目录缓存（namecache:g<群>:<uin>）查展示名；查不到回退尾号。"""
+        gid = str(conversation).split(":", 1)[-1]
+        rec = self.store.get(f"namecache:g{gid}:{uin}")
+        name = str(rec.get("name") or "").strip() if isinstance(rec, dict) else ""
+        return name or f"群友{str(uin)[-4:]}"
+
+    def _read_msgimg(self, message_id: str) -> tuple:
+        """msgimg:{msgid} → 入站持久化的图片 (bytes, mime)；无则空。"""
+        if self._artifact_reader is None or not message_id:
+            return ()
+        rec = self.store.get(f"msgimg:{message_id}")
+        if not isinstance(rec, dict) or not rec.get("artifact"):
+            return ()
+        try:
+            blob = self._artifact_reader(str(rec["artifact"]))
+        except Exception:
+            return ()
+        if isinstance(blob, tuple) and len(blob) == 2:
+            artifact, data = blob
+            mime = str(getattr(artifact, "content_type", "") or rec.get("mime") or "image/jpeg")
+            return ((bytes(data), mime),)
+        return ()
+
+    def _quoted_context(self, event) -> tuple[str, tuple]:
+        """解析「引用/回复」指向的消息：标注文本 + 被引用消息的图片。
+
+        - 群：群时间线（真实 message_id 索引）找原文；昵称走 namecache；
+        - 私聊：宿主维护的 recentmsg:{conv} 轻量近期消息环；引用的是
+          机器人自己的消息时回退到最近一条助手回复；
+        - 被引用消息带图且已持久化（msgimg:*）→ 一并读出让模型真看到图。
+
+        返回 (note, images)；查不到 → ("", ())，静默降级不阻断。
+        """
+        reply_to = tuple(getattr(event, "reply_to", ()) or ())
+        if len(reply_to) < 3:
+            return "", ()
+        orig_uin = str(reply_to[0] or "")
+        orig_mid = str(reply_to[2] or "")
+        if not orig_mid:
+            return "", ()
+        conv = str(getattr(event, "conversation", "") or "")
+        sender = str(getattr(event, "sender_id", "") or getattr(event, "account", "")
+                     or getattr(event, "owner_id", "") or "")
+        label, qtext = "", ""
+        if conv.startswith("group:"):
+            from whale_core.memory.timeline import GroupTimelineStore
+            for e in GroupTimelineStore(self.store).recent(conv, limit=200):
+                if str(e.get("message_id") or "") == orig_mid:
+                    qtext = " ".join(str(e.get("text") or "").split())[:120]
+                    label = self._name_for_group_uin(
+                        conv, str(e.get("sender_id") or "") or orig_uin)
+                    break
+        else:
+            ring = self.store.get(f"recentmsg:{conv}")
+            if isinstance(ring, list):
+                for item in reversed(ring):
+                    if isinstance(item, dict) and str(item.get("mid") or "") == orig_mid:
+                        qtext = " ".join(str(item.get("text") or "").split())[:120]
+                        label = "你" if str(item.get("sender") or "") == sender else "我"
+                        break
+            if not qtext and orig_uin and orig_uin != sender:
+                # 引用的是机器人自己的消息：回退最近一条助手回复
+                try:
+                    from whale_core.memory.history import load_history
+                    hist = load_history(self.store, conv)
+                except Exception:
+                    hist = ()
+                for h in reversed(list(hist or ())):
+                    if isinstance(h, dict) and h.get("role") == "assistant" \
+                            and str(h.get("content") or "").strip():
+                        qtext = " ".join(str(h["content"]).split())[:120]
+                        label = "我"
+                        break
+        images = self._read_msgimg(orig_mid)
+        if not qtext and not images:
+            return "", ()
+        note = f"（引用了{label or '对方'}的消息：「{qtext or '图片'}」）"
+        return note, images
+
+    def _recent_peer_image(self, event, *, window_s: float = 180.0) -> tuple:
+        """无引用时的看图兜底：同一发送者 3 分钟内的上一条带图消息
+        （「看看这个」式指代不带引用）。当前消息自带图则不补。"""
+        if getattr(event, "attachments", None) or self._artifact_reader is None:
+            return ()
+        import time as _t
+        now = _t.time()
+        conv = str(getattr(event, "conversation", "") or "")
+        sender = str(getattr(event, "sender_id", "") or getattr(event, "account", "")
+                     or getattr(event, "owner_id", "") or "")
+        if not sender:
+            return ()
+        mids: list[str] = []
+        if conv.startswith("group:"):
+            from whale_core.memory.timeline import GroupTimelineStore
+            for e in reversed(GroupTimelineStore(self.store).recent(conv, limit=8)):
+                if str(e.get("sender_id") or "") != sender:
+                    continue
+                try:
+                    ts = float(e.get("send_time") or 0)
+                except (TypeError, ValueError):
+                    ts = 0
+                if ts and now - ts > window_s:
+                    break
+                mid = str(e.get("message_id") or "")
+                if mid and self.store.get(f"msgimg:{mid}"):
+                    mids.append(mid)
+                    break
+        else:
+            ring = self.store.get(f"recentmsg:{conv}")
+            if isinstance(ring, list):
+                for item in reversed(ring):
+                    if not isinstance(item, dict):
+                        continue
+                    if str(item.get("sender") or "") != sender:
+                        continue
+                    ts = float(item.get("ts") or 0)
+                    if ts and now - ts > window_s:
+                        break
+                    mid = str(item.get("mid") or "")
+                    if mid and self.store.get(f"msgimg:{mid}"):
+                        mids.append(mid)
+                        break
+        for mid in mids:
+            got = self._read_msgimg(mid)
+            if got:
+                return got
+        return ()
 
     def _topic_open_pending(self, event: OwnerEvent, text: str) -> None:
         """慢任务 ack → 该会话挂一条未完话题（issue #54 写路径：真实互动）。
@@ -337,6 +471,14 @@ class QqInboundWorkflow:
                 from whale_core.core.runtime import InputEnvelope
 
                 images = self._attachment_images(event) if event.attachments else ()
+                # 2026-11-10：引用/近期图可见性——引用标注进文本，被引用/
+                # 上一条带图消息的图片进 images（模型真能看见，不再只有 [pic]）
+                note, qimages = self._quoted_context(event)
+                if not qimages:
+                    qimages = self._recent_peer_image(event)
+                if note:
+                    text = text + "\n" + note
+                images = tuple(images) + tuple(qimages)
                 envelope = InputEnvelope(
                     conversation_id=event.conversation, text=text, source="qq:owner",
                     channel="qq", owner_id=event.owner_id, images=images,
@@ -689,6 +831,13 @@ class QqInboundWorkflow:
         # 陌生人发的图可读，但不写入任何记忆（写作仍受空间纪律约束）。
         images = self._attachment_images(event) if getattr(
             event, "attachments", None) else ()
+        # 2026-11-10：引用/近期图可见性（同 owner 路径）
+        note, qimages = self._quoted_context(event)
+        if not qimages:
+            qimages = self._recent_peer_image(event)
+        if note:
+            text = text + "\n" + note
+        images = tuple(images) + tuple(qimages)
         envelope = InputEnvelope(
             conversation_id=event.conversation, text=text, source="qq:stranger",
             channel=channel, sender_id=sender, images=images)

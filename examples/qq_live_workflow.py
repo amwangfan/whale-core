@@ -1300,10 +1300,69 @@ def cmd_run(args) -> int:
     from whale_core.life.batching import (
         MessageBatcher, epoch_fresh)
 
+    def _persist_msg_media(event) -> None:
+        """2026-11-10：入站图片即持久化——msgimg:<msgid> → artifact id，
+        供「引用/上一条带图」后续回合解析（owner 实证：机器人对没进上下文的
+        图只能说「[pic]」）。群聊私聊都记；内容 md5 去重；全 fail-soft。"""
+        try:
+            if cap.artifacts is None:
+                return
+            atts = [a for a in (getattr(event, "attachments", None) or ())
+                    if isinstance(a, dict) and a.get("kind") == "pic"]
+            if not atts:
+                return
+            images = workflow._attachment_images(event)
+            if not images:
+                return
+            data, mime = images[0]
+            import hashlib as _hl
+            sha = _hl.sha256(data).hexdigest()
+            aid = store.get(f"msgimg-md5:{sha}")
+            if not aid:
+                aid = cap.artifacts.save_bytes(data, mime).artifact_id
+                store.put(f"msgimg-md5:{sha}", aid)
+            mid = str(getattr(event, "message_id", "") or "")
+            if mid:
+                store.put(f"msgimg:{mid}", {
+                    "artifact": aid, "mime": mime,
+                    "conv": str(getattr(event, "conversation", "") or ""),
+                    "sender": str(getattr(event, "sender_id", "")
+                                  or getattr(event, "account", "") or ""),
+                    "at": time.time()})
+        except Exception:
+            pass
+
+    def _record_private_recent(event) -> None:
+        """2026-11-10：私聊近期消息环 recentmsg:{conv}（最近 20 条），
+        供私聊引用解析（群聊引用走群时间线）。全 fail-soft。"""
+        try:
+            conv = str(getattr(event, "conversation", "") or "")
+            if not conv.startswith("private:"):
+                return
+            mid = str(getattr(event, "message_id", "") or "")
+            text = str(getattr(event, "text", "") or "").strip()
+            if not mid or not text:
+                return
+            ring = store.get(f"recentmsg:{conv}")
+            ring = list(ring) if isinstance(ring, list) else []
+            if any(isinstance(x, dict) and x.get("mid") == mid for x in ring):
+                return
+            ring.append({"mid": mid,
+                         "sender": str(getattr(event, "sender_id", "")
+                                       or getattr(event, "account", "") or ""),
+                         "text": text[:500], "ts": time.time()})
+            store.put(f"recentmsg:{conv}", ring[-20:])
+        except Exception:
+            pass
+
     def on_owner(event):
+        _persist_msg_media(event)
+        _record_private_recent(event)
         batcher.offer(event)
 
     def on_unpaired_buffered(incoming):
+        _persist_msg_media(incoming)
+        _record_private_recent(incoming)
         batcher.offer(incoming)
 
     def _flush_batch(batch):
@@ -1344,27 +1403,9 @@ def cmd_run(args) -> int:
         window_group_s=float(os.environ.get("QQ_BATCH_GROUP_S", "0.9") or "0.9"),
         window_private_s=float(os.environ.get("QQ_BATCH_PRIVATE_S", "0.9") or "0.9"))
 
-    def _prime_at_if_mentioned(decision, *, conversation: str,
-                                 sender_id: str = "", sender_uid: str = "") -> None:
-        """被 @ 时标记下一次群发送前置 at 对方（仅 at_bot；引用回复不强制 at）。"""
-        if getattr(decision, "reason_code", "") != "at_bot":
-            return
-        if not hasattr(send_port, "prime_group_at"):
-            return
-        uin = str(sender_id or "").strip()
-        uid = str(sender_uid or "").strip()
-        name = ""
-        try:
-            # 昵称目录若已装配，尽量带群名片（展示用，非身份）
-            nd = globals().get("_name_directory_ref")
-            if nd is not None and conversation.startswith("group:") and uin.isdigit():
-                gc = conversation.split(":", 1)[1]
-                resolved = nd.resolve_group(gc, [(uin, uid)])
-                name = str((resolved or {}).get(uin) or "")
-        except Exception:
-            name = ""
-        send_port.prime_group_at(conversation, uid=uid, uin=uin if uin.isdigit() else 0,
-                                 name=name)
+    # 2026-11-10 owner 决策：回复不再回 @（QQ 群惯例——回复自带上下文，
+    # 回 @ 反而机械刷屏）。发送层 prime_group_at 机制保留备用（需要主动
+    # 点名未被提及者时可显式调用）。
 
     def _dispatch_owner(event, *, epoch: int = 0):
         _note_turn_epoch(str(getattr(event, "message_id", "") or ""), epoch)
@@ -1412,9 +1453,7 @@ def cmd_run(args) -> int:
                 message_id=event.message_id, mentions=event.mentions,
                 reply_to=event.reply_to, sender_uid=event.sender_uid)
             if decision.action == "reply":
-                _prime_at_if_mentioned(
-                    decision, conversation=event.conversation,
-                    sender_id=event.sender_id, sender_uid=event.sender_uid)
+                # 2026-11-10：不回 @（prime_group_at 调用已移除）
                 _tspan(_tid, "decide", "ok", reason_code=decision.reason_code)
             else:
                 # issue #18：quiet/balanced/lively 主动参与裁决（规则先行）。
@@ -1616,11 +1655,6 @@ def cmd_run(args) -> int:
                 conversation=incoming.conversation, sender_id=incoming.account,
                 message_id=incoming.message_id, mentions=incoming.mentions,
                 reply_to=incoming.reply_to, sender_uid=incoming.sender_uid)
-            if decision.action == "reply":
-                _prime_at_if_mentioned(
-                    decision, conversation=incoming.conversation,
-                    sender_id=incoming.account,
-                    sender_uid=getattr(incoming, "sender_uid", "") or "")
             if decision.action != "reply":
                 from whale_core.life.rhythm import (
                     RhythmStore as _RS2, rhythm_key_for as _rkf2)
@@ -1994,6 +2028,8 @@ def cmd_run(args) -> int:
             print(f"  [成员回填] 失败 fail-soft: {type(exc).__name__}")
 
     workflow._on_member_provisioned = _on_member_provisioned
+    # 2026-11-10：引用/近期图解析需要读入站持久化的消息图片（msgimg:*）
+    workflow._artifact_reader = cap.artifacts.read if cap.artifacts else None
 
     listener = WeQSsePushListener(
         registry, expected_token=token, self_uin=self_uin,
