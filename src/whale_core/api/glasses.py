@@ -18,6 +18,8 @@
 - ``POST /v1/result/deliver``：统一结果投递（ResultDelivery）——QQ 在线优先；
   QQ 离线走 Whale 原生通知（在线直发/离线补传），图片可继续回落手机图库。
   ``/v1/chat`` 请求体 ``deliverResult=true`` 时也会在回复后走同一路由。
+- ``POST /v1/rayneo/ingest|query|control``：雷鸟眼镜全天转写上传 / 查询 / 删除。
+  鉴权同 ``WHALE_GLASSES_TOKEN``。ingest 体上限 320 KiB，query/control 64 KiB。
 
 鉴权：``Authorization: Bearer <WHALE_GLASSES_TOKEN>``（phone 角色专用令牌，
 与管理面 token 分离；常量时间比较）。无/错 token → 401。
@@ -40,6 +42,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 MAX_BODY_BYTES = 64 * 1024
+RAYNEO_INGEST_MAX_BYTES = 320 * 1024
 
 def _load_env_file(path) -> dict:
     """解析 KEY=VALUE env 文件（# 注释/空行跳过；值可带引号）。"""
@@ -347,6 +350,23 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
     _cached: dict = {"companion": None, "orch": None, "quick": None}
     # 当前请求位置：由 companion_chat 每轮写入；intent 包装只装一次并读取此状态。
     _request_location: dict = {"value": ""}
+    _last_chat_ms = {"value": 0}
+
+    def mark_chat(now_ms: int | None = None) -> None:
+        import time as _time
+        _last_chat_ms["value"] = int(now_ms if now_ms is not None else _time.time() * 1000)
+
+    def last_chat_ms() -> int:
+        return int(_last_chat_ms["value"] or 0)
+
+    rayneo_store = None
+    try:
+        from whale_core.api.rayneo_http import raw_ttl_days, rayneo_store_path
+        from whale_core.memory.rayneo_context import RayneoContextStore
+        rayneo_store = RayneoContextStore(
+            rayneo_store_path(env), raw_ttl_days=raw_ttl_days(env))
+    except Exception as exc:  # noqa: BLE001 — 转写库失败不阻止主对话
+        print(f"[rayneo] store not opened: {type(exc).__name__}", flush=True)
 
     def _build_search_orchestrator(companion):
         """与 QQ runner 同款：搜索 +（可选）主人 shell + IntentRouter。
@@ -473,6 +493,7 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
         """返回 (reply, timing)；timing 含 intentMs/toolMs/replyMs/totalMs。"""
         from whale_core.core.runtime import InputEnvelope
         import time as _time
+        mark_chat()
         t_all = _time.perf_counter()
         # 眼镜侧「做一张简单结果图发我」：规则短路 → 本地图 → ResultDelivery。
         try:
@@ -578,6 +599,7 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
     def quick_chat(text: str, location: str = "") -> tuple[str, dict]:
         import time as _time
         import inspect
+        mark_chat()
         t0 = _time.perf_counter()
         with _orch_lock:
             if _cached["quick"] is None:
@@ -760,7 +782,10 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
     return {"companion_chat": companion_chat, "quick_chat": quick_chat,
             "followup_poll": followup_poll,
             "qq_send": qq_send, "deliver_result": deliver_result,
-            "prefs": prefs, "store": store}
+            "prefs": prefs, "store": store,
+            "rayneo_store": rayneo_store,
+            "last_chat_ms": last_chat_ms, "mark_chat": mark_chat,
+            "env": env}
 
 
 def make_handler(delegates):
@@ -779,7 +804,9 @@ def make_handler(delegates):
             return (header.startswith("Bearer ")
                     and secrets.compare_digest(header[7:].strip(), token))
 
-        def _read_json(self) -> dict | None:
+        def _read_json(self, max_bytes: int = MAX_BODY_BYTES) -> dict | None:
+            self._body_too_large = False
+            self._body_nbytes = 0
             lengths = self.headers.get_all("Content-Length", [])
             try:
                 # No chunk decoder: reject ambiguous framing without reading it.
@@ -789,8 +816,13 @@ def make_handler(delegates):
                         or not lengths[0].isdigit()):
                     raise ValueError("invalid body framing")
                 length = int(lengths[0])
-                if length <= 0 or length > MAX_BODY_BYTES:
+                self._body_nbytes = length
+                if length <= 0:
                     raise ValueError("invalid body length")
+                if length > max_bytes:
+                    self._body_too_large = True
+                    self.close_connection = True
+                    return None
                 raw = self.rfile.read(length)
                 if len(raw) != length:
                     raise ValueError("incomplete body")
@@ -806,7 +838,8 @@ def make_handler(delegates):
         def do_GET(self):
             if self.path == "/v1/health":
                 _json_response(self, 200, {"ok": True,
-                                           "capabilities": ["/v1/chat", "/v1/chat/followup", "/v1/qq/reply", "/v1/result/deliver"]})
+                                           "capabilities": ["/v1/chat", "/v1/chat/followup", "/v1/qq/reply", "/v1/result/deliver",
+                                                            "/v1/rayneo/ingest", "/v1/rayneo/query", "/v1/rayneo/control"]})
                 return
             if self.path == "/openapi.json":
                 _json_response(self, 200, _openapi())
@@ -830,6 +863,15 @@ def make_handler(delegates):
                 return
             if self.path == "/v1/result/deliver":
                 self._result_deliver()
+                return
+            if self.path == "/v1/rayneo/ingest":
+                self._rayneo_ingest()
+                return
+            if self.path == "/v1/rayneo/query":
+                self._rayneo_query()
+                return
+            if self.path == "/v1/rayneo/control":
+                self._rayneo_control()
                 return
             self.close_connection = True
             _json_response(self, 404, {"error": "not found"})
@@ -1023,6 +1065,73 @@ def make_handler(delegates):
             except Exception as exc:
                 _json_response(self, 200, {"ok": False, "error": type(exc).__name__})
 
+        def _rayneo_read(self, max_bytes: int):
+            body = self._read_json(max_bytes=max_bytes)
+            if body is None:
+                if getattr(self, "_body_too_large", False):
+                    _json_response(self, 413, {"error": "body too large"})
+                else:
+                    _json_response(self, 400, {"error": "invalid request"})
+                return None
+            return body
+
+        def _rayneo_ingest(self):
+            from whale_core.api.rayneo_http import INGEST_MAX_BYTES, handle_ingest
+            body = self._rayneo_read(INGEST_MAX_BYTES)
+            if body is None:
+                return
+            store = delegates.get("rayneo_store")
+            if store is None:
+                _json_response(self, 503, {"error": "store_unavailable"})
+                return
+            env = delegates.get("env") or getattr(self.server, "glasses_env", {}) or {}
+            try:
+                status, payload = handle_ingest(
+                    body, store=store, env=env,
+                    body_bytes=int(getattr(self, "_body_nbytes", 0) or 0))
+            except Exception:
+                _json_response(self, 503, {"error": "store_unavailable"})
+                return
+            _json_response(self, status, payload)
+
+        def _rayneo_query(self):
+            from whale_core.api.rayneo_http import QUERY_MAX_BYTES, handle_query
+            body = self._rayneo_read(QUERY_MAX_BYTES)
+            if body is None:
+                return
+            env = delegates.get("env") or getattr(self.server, "glasses_env", {}) or {}
+            try:
+                status, payload = handle_query(
+                    body, rayneo_store=delegates.get("rayneo_store"),
+                    memory_store=delegates.get("store"), env=env,
+                    body_bytes=int(getattr(self, "_body_nbytes", 0) or 0))
+            except Exception:
+                _json_response(self, 200, {
+                    "ok": True, "source": "rayneo", "instruction_eligible": False,
+                    "query_disabled": False, "items": [], "derived": [],
+                    "error_class": "timeout"})
+                return
+            _json_response(self, status, payload)
+
+        def _rayneo_control(self):
+            from whale_core.api.rayneo_http import CONTROL_MAX_BYTES, handle_control
+            body = self._rayneo_read(CONTROL_MAX_BYTES)
+            if body is None:
+                return
+            env = delegates.get("env") or getattr(self.server, "glasses_env", {}) or {}
+            store = delegates.get("rayneo_store")
+            if store is None:
+                _json_response(self, 503, {"error": "store_unavailable"})
+                return
+            try:
+                status, payload = handle_control(
+                    body, rayneo_store=store,
+                    memory_store=delegates.get("store"), env=env)
+            except Exception:
+                _json_response(self, 503, {"error": "store_unavailable"})
+                return
+            _json_response(self, status, payload)
+
     class _DirectPort:
         def __init__(self, send):
             self._send = send
@@ -1056,6 +1165,12 @@ def _openapi() -> dict:
                 "summary": "统一结果投递（QQ online / Whale 原生通知 / 手机图库）",
                 "responses": {"200": {"description": "delivery receipts"}},
                 "security": [{"bearerAuth": []}]}},
+            "/v1/rayneo/ingest": {"post": {"summary": "雷鸟转写批量上传",
+                                           "security": [{"bearerAuth": []}]}},
+            "/v1/rayneo/query": {"post": {"summary": "雷鸟转写与记忆查询",
+                                          "security": [{"bearerAuth": []}]}},
+            "/v1/rayneo/control": {"post": {"summary": "雷鸟转写删除/开关",
+                                            "security": [{"bearerAuth": []}]}},
             "/v1/health": {"get": {"summary": "存活与能力"}},
         },
         "components": {"securitySchemes": {
@@ -1140,8 +1255,22 @@ def main(argv=None) -> int:
     except Exception as exc:  # noqa: BLE001 — 问候循环失败不阻止主服务
         print(f"[proactive] not started: {type(exc).__name__}", flush=True)
 
+    summarizer = None
+    try:
+        from whale_core.api.rayneo_http import env_flag
+        if env_flag(env, "WHALE_RAYNEO_SUMMARY", False) and delegates.get("rayneo_store") is not None:
+            from whale_core.life.rayneo_summarizer import RayneoSummarizer
+            summarizer = RayneoSummarizer.from_env(
+                env, delegates["rayneo_store"], delegates["store"],
+                last_chat_ms=delegates.get("last_chat_ms"))
+            if summarizer.start_background():
+                print("[rayneo] summarizer started", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[rayneo] summarizer not started: {type(exc).__name__}", flush=True)
+
     print(f"whale-glasses-api 监听 http://{args.host}:{args.port}"
-          f"（/v1/chat /v1/chat/followup /v1/qq/reply /v1/result/deliver /v1/health /openapi.json）")
+          f"（/v1/chat /v1/chat/followup /v1/qq/reply /v1/result/deliver "
+          f"/v1/rayneo/ingest /v1/rayneo/query /v1/rayneo/control /v1/health /openapi.json）")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -1149,6 +1278,14 @@ def main(argv=None) -> int:
     finally:
         if greeting_loop is not None:
             greeting_loop.stop_background()
+        if summarizer is not None:
+            summarizer.stop_background()
+        try:
+            rs = delegates.get("rayneo_store")
+            if rs is not None:
+                rs.close()
+        except Exception:
+            pass
         server.server_close()
     return 0
 
