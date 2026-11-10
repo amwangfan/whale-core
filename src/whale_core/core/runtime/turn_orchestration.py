@@ -30,6 +30,8 @@ DEFAULT_FIRST_REPLY_NOTE = (
     "本条新消息涉及的实时信息（天气、新闻、网页等）还没查——你是能查的，"
     "后台工具会稍后把结果补给你；如果确实要查，先自然说一声正在找就行，"
     "不用问要不要查、也别让对方自己去看，别编具体数据。"
+    "要跑命令/实测的请求（ping、延迟、系统状态等）也还没跑——别声称"
+    "试过、测过或查过，等后台结果。"
     "之前对话里已经查到说过的结果照常可信。普通聊天照常回。")
 
 
@@ -422,7 +424,7 @@ class TurnOrchestrationMixin:
     # 返回 None 等意图模型的真实判定（kimi 只是慢，不是不会）。
     _LOCAL_ACT_RE = re.compile(
         r"(ping|延迟|网速|带宽|丢包|本机|跑一下|执行|运行|测试一下|"
-        r"测一下|测速|内存|磁盘|CPU|cpu|进程|端口|占用|版本|空间)")
+        r"测一下|测下|测速|试一?试|内存|磁盘|CPU|cpu|进程|端口|占用|版本|空间)")
 
     def _promise_fallback_decision(self, env: InputEnvelope, text: str) -> _Decision | None:
         """第一条已答应、意图模型超时：用只读 web.search 兑现（无搜索能力则 None）。"""
@@ -439,7 +441,10 @@ class TurnOrchestrationMixin:
         loc = ""
         if not str(env.conversation_id or "").startswith("group:"):
             loc = (self._default_location_summary() or "").split("；")[0].strip()
-        if loc and loc[:2] not in query:
+        # 2026-11-11 实证：位置前缀只该贴在天气/附近/活动类查询上——
+        # 「试试到deepseek的」被贴成「成都郫都 电子科技大学 试试到…」全跑偏。
+        if (loc and loc[:2] not in query
+                and re.search(r"天气|下雨|附近|活动|冷不|热不|几点|穿什么", text or "")):
             query = f"{loc} {query}"[:500]
         raw = _json.dumps({"goal": "搜索并回答：" + query[:300], "kind": "task",
                            "slots": {"query": query, "limit": 5},

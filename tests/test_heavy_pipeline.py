@@ -242,3 +242,21 @@ def test_search_handler_retries_transient_once():
     with pytest.raises(SearchError):
         tools2.get("search_web").handler({"query": "x"})
     assert hard.calls == 1  # 硬错不重试
+
+
+def test_promise_fallback_waits_for_local_act_promises():
+    """实测类承诺（试试到X/ping/延迟）不该兜底成搜索——返回 None 等 kimi 真判定。"""
+    from whale_core.core.runtime import ConversationOrchestrator
+    store = InMemoryStore()
+    orch = ConversationOrchestrator(store, WhaleCompanion(store, _B("好")))
+    orch.tools = _SpyToolsForSearch()
+    env = _env("试试到deepseek的")
+    assert orch._promise_fallback_decision(env, "试试到deepseek的") is None
+    assert orch._promise_fallback_decision(env, "ping 一下 1.1.1.1") is None
+    # 地点只贴天气/附近类：「试试到deepseek的」不应贴位置
+    assert orch._promise_fallback_decision(env, "最近有什么新闻") is not None
+
+
+class _SpyToolsForSearch:
+    def for_capability(self, cap):
+        return [object()] if cap == "web.search" else []
