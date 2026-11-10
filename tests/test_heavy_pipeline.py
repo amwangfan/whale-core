@@ -200,3 +200,45 @@ def test_open_heavy_writing_stays_open_for_strangers(tmp_path):
     result = orch._finish_decision(
         _env(), _Decision(route="chat", plan=_HeavyPlan()))
     assert result.file_ids  # 创作类开放，文件照落
+
+
+def test_search_handler_retries_transient_once():
+    """调研链路韧性：搜索瞬时错误（network/blocked）自动重试一次；
+    硬错（quota/auth）不重试。"""
+    from search_web.web_search import register_web_search, SearchError
+    from whale_core.plugins.registry import PluginRegistry
+    from whale_core.core.runtime import ToolRegistry
+
+    class _Flaky:
+        def __init__(self):
+            self.calls = 0
+
+        def search(self, q, *, limit=5):
+            self.calls += 1
+            if self.calls == 1:
+                raise SearchError("network", "blip")
+            from search_web.web_search import SearchResult
+            return [SearchResult(title="t", url="https://x", snippet="s",
+                                 source="tavily")]
+
+    registry, tools = PluginRegistry(), ToolRegistry()
+    flaky = _Flaky()
+    register_web_search(registry, tools, provider=flaky)
+    out = tools.get("search_web").handler({"query": "元白唱和"})
+    assert flaky.calls == 2 and "x" in out
+
+    class _Hard:
+        def __init__(self):
+            self.calls = 0
+
+        def search(self, q, *, limit=5):
+            self.calls += 1
+            raise SearchError("quota", "balance exhausted")
+
+    registry2, tools2 = PluginRegistry(), ToolRegistry()
+    hard = _Hard()
+    register_web_search(registry2, tools2, provider=hard)
+    import pytest
+    with pytest.raises(SearchError):
+        tools2.get("search_web").handler({"query": "x"})
+    assert hard.calls == 1  # 硬错不重试

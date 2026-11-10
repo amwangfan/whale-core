@@ -492,7 +492,18 @@ def register_web_search(
     provider = provider if provider is not None else select_provider()
 
     def _handler(args: Mapping[str, Any]) -> str:
-        results = provider.search(str(args.get("query") or ""), limit=int(args.get("limit", 5) or 5))
+        """2026-11-10 生产实证：调研任务因 Tavily 瞬时抖动直接整任务失败。
+        瞬时段（network/blocked）自动重试一次；quota/auth 等硬错不重试。"""
+        q = str(args.get("query") or "")
+        limit = int(args.get("limit", 5) or 5)
+        try:
+            results = provider.search(q, limit=limit)
+        except SearchError as exc:
+            if exc.kind not in ("network", "blocked"):
+                raise
+            import time as _t
+            _t.sleep(2)
+            results = provider.search(q, limit=limit)  # 瞬时抖动重试一次
         if not results:
             return "没有找到结果"
         lines = [f"{r.title} — {r.snippet}（{r.url}）" for r in results[:5]]

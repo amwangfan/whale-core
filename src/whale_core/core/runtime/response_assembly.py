@@ -70,6 +70,14 @@ class ResponseAssemblyMixin:
             if any("budget-exhausted" in r for r in receipts):
                 note = ("今日预算已用完（媒体生成次数达到限额），这一步没有执行；"
                         "可在设置页提高请求预算限额，明天会自动恢复。请如实说明，别假装成功了。")
+            elif any("tool-fail:search_web" in r or "tool-fail:fetch" in r
+                     for r in receipts):
+                # 2026-11-10 owner 反馈：调研类失败补发要像「我正在找…」的
+                # 进度交代，而不是干巴巴的报错。
+                note = ("资料搜集这一步失败了（上游搜索/抓取卡了，已自动重试过仍没成），"
+                        "本次没有拿到任何资料。用你的人格如实说正在找但卡了一下，"
+                        "并自然表示对方再提一句你就重新查——别假装搜过了，"
+                        "也别甩技术名词。")
             else:
                 note = "工具当前不可用或执行失败；请如实说明，别假装成功了。"
         else:
