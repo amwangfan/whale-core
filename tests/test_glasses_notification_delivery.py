@@ -121,3 +121,12 @@ def test_delivery_audio_empty_rejected():
     d = ResultDelivery(port, owner_uid="o", online_probe=lambda: True)
     receipts = d.deliver([DeliveryItem(kind="audio", audio_bytes=b"")])
     assert receipts[0].ok is False and receipts[0].detail == "empty-audio"
+
+
+def test_delivery_note_persona_texts():
+    """投递后眼镜侧的文字交代（2026-11-11 owner 决策）。"""
+    from whale_core.api.glasses import _delivery_note
+    assert _delivery_note({"ok": True}, [{"kind": "audio"}]) == "语音发过去啦，听听看~"
+    assert _delivery_note({"ok": True}, [{"kind": "image"}]) == "图发你手机上了，看看~"
+    assert _delivery_note({"ok": True}, [{"kind": "text"}]) == "说了哦，看看手机~"
+    assert "没发出去" in _delivery_note({"ok": False}, [{"kind": "text"}])

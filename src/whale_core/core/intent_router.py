@@ -334,8 +334,10 @@ class SearchIntentRouter:
             "media.video.generate": "生成视频。prompt: 描述, model/duration_s: 可选",
             "tts.synthesize": "把文字读出来发语音。text: 要朗读的文字, model/voice: 可选",
             "asr.transcribe": "语音转文字。audio: 已提供的音频数据或引用；缺音频时澄清",
-            "shell.safe": "在本机受控沙箱真实执行命令——实测类请求（ping/延迟/系统状态/"
-                          "本机文件/跑脚本）走它，不是搜索。command: 命令字符串",
+            "shell.safe": "在本机受控沙箱真实执行命令——实测类请求（延迟/网速/系统状态/"
+                          "本机文件/跑脚本）走它，不是搜索。沙箱无 raw socket，ping 不可用；"
+                          "测延迟用 curl 计时（curl -o /dev/null -s -w 格式化计时 https://目标）。"
+                          "command: 命令字符串",
         }
         catalog = []
         for capability in sorted(capabilities):

@@ -43,4 +43,4 @@ def register_shell(registry, tools, workspace: Path, *, env=None):
     # capability=shell.safe → 执行端 required scope = tool.shell.safe（与 SCOPE_TOOL_SHELL_SAFE 对齐）
     tools.register(ToolSpec(name='run_shell', capability='shell.safe', plugin_id=SHELL_PLUGIN_ID,
                            action=SHELL_RUN_ACTION, risk_class='communicate',
-                           description='在专用工作目录内执行command；系统沙箱隔离，personal档可免逐次审批'))
+                           description='在专用工作目录内执行command；系统沙箱隔离，personal档可免逐次审批。沙箱无 raw socket（ping 不可用）；测网络延迟改用 curl 计时（curl -o /dev/null -s -w 格式化计时 https://目标）'))

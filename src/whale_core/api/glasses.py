@@ -800,6 +800,23 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
             "env": env}
 
 
+def _delivery_note(result: dict, items: list) -> str:
+    """投递后的眼镜侧文字交代（2026-11-11 owner 决策：不静默）。
+
+    按投递结果与内容类型给一句人格化短句；失败如实说没发出去。
+    """
+    if not result.get("ok"):
+        return "刚才没发出去——你手机上 QQ 可能不在线，我记着了，等它回来再补给你~"
+    kinds = {str(it.get("kind") or "text") for it in items if isinstance(it, dict)}
+    if "audio" in kinds:
+        return "语音发过去啦，听听看~"
+    if "image" in kinds:
+        return "图发你手机上了，看看~"
+    if "file" in kinds:
+        return "文件放你 QQ 上了，回头翻~"
+    return "说了哦，看看手机~"
+
+
 def make_handler(delegates):
     from whale_core.life.initiative import ProactiveDraft, ProactiveOutbox
 
@@ -1087,6 +1104,9 @@ def make_handler(delegates):
                     conversation=str(body.get("conversation") or ""),
                     summary=str(body.get("summary") or "")[:200],
                     prefer_owner_dm=prefer)
+                # 2026-11-11 owner 决策：媒体/操作投递后，眼镜侧要给一句
+                # 人格化文字交代（「说了哦，看看手机~」），不静默。
+                result["note"] = _delivery_note(result, items)
                 _json_response(self, 200, result)
             except Exception as exc:
                 _json_response(self, 200, {"ok": False, "error": type(exc).__name__})
