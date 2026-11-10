@@ -513,13 +513,18 @@ class TurnOrchestrationMixin:
         if decision.route == "chat":
             receipts = (decision.receipt,) if decision.receipt else ()
             plan = decision.plan
+            # 2026-11-10：heavy 计划（长文写作/复杂创作）由重模型陪伴作答
+            comp = self.companion
+            if plan is not None and getattr(plan, "heavy", False) \
+                    and getattr(self, "heavy_companion", None) is not None:
+                comp = self.heavy_companion
             return TurnResult(
-                reply=self.companion.chat(text, conversation_id=env.conversation_id,
-                                          images=env.images, context=env.context,
-                                          on_delta=env.on_delta,
-                                          should_stop=env.should_stop,
-                                          metrics=env.metrics,
-                                          on_phase=env.on_phase),
+                reply=comp.chat(text, conversation_id=env.conversation_id,
+                                images=env.images, context=env.context,
+                                on_delta=env.on_delta,
+                                should_stop=env.should_stop,
+                                metrics=env.metrics,
+                                on_phase=env.on_phase),
                 status="answered", plan=plan, receipts=receipts,
                 task_id=(plan.task_id or plan.intent_id) if plan else "")
         if decision.route == "clarify":

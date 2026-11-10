@@ -49,9 +49,12 @@ class ConversationOrchestrator(
         executor_model=None,  # G1-C：可选多轮工具执行模型（llm.tool_executor 角色）
         context_resolver=None,  # S1：服务端会话上下文解析器（life.context_resolver）
         grant_gate=None,  # S4：callable(grant_ids, fingerprint) -> bool；租约重验
+        heavy_companion=None,  # 2026-11-10：可选重模型陪伴（plan.heavy 时作答）
     ) -> None:
         self.store = store
         self.companion = companion
+        # 长文写作/复杂创作的作答模型（kimi 等重模型）；缺省回落快模型。
+        self.heavy_companion = heavy_companion
         self.intent_model = intent_model
         self.context_resolver = context_resolver
         self.grant_gate = grant_gate

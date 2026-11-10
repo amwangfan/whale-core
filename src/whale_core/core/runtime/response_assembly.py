@@ -72,12 +72,17 @@ class ResponseAssemblyMixin:
         _t_followup = _time.perf_counter()
         try:
             extra = {"followup": True} if first else {}
-            reply = self.companion.chat(augmented, conversation_id=cid, user_text=text,
-                                        turn_key=task_id, **extra,
-                                        allowed_spaces=(authz.get("memory_spaces")
-                                                        if authz else None),
-                                        write_space=(authz.get("write_space")
-                                                     if authz else None))
+            # 2026-11-10：heavy 计划（长文写作/复杂创作+工具混合）由重模型组装结局
+            comp = self.companion
+            if getattr(plan, "heavy", False) \
+                    and getattr(self, "heavy_companion", None) is not None:
+                comp = self.heavy_companion
+            reply = comp.chat(augmented, conversation_id=cid, user_text=text,
+                              turn_key=task_id, **extra,
+                              allowed_spaces=(authz.get("memory_spaces")
+                                              if authz else None),
+                              write_space=(authz.get("write_space")
+                                           if authz else None))
         except Exception:
             # Journal survives even if the response model fails after an action.
             reply = note

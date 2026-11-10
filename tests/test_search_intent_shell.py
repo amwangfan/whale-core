@@ -328,3 +328,59 @@ def test_url_in_message_routes_to_fetch_not_search():
     router2 = SearchIntentRouter(model=None, enable_llm=False, tools=tools2)
     plan = json.loads(router2.plan("看看 https://example.com"))
     assert plan["kind"] == "chat"
+
+
+def test_heavy_writing_routes_chat_heavy_not_search():
+    """2026-11-10 owner 实证：「给我写2000字卢唐同人文」被 kimi 路由成
+    web.search（搜出一堆推荐链接）。写作请求 → chat + heavy，重模型作答。"""
+    router = SearchIntentRouter(model=_Boom(), enable_llm=True, tools=None)
+    for text in ("给我写2000字卢唐同人文", "写一篇关于鲸鱼的短诗",
+                 "帮我写一封信", "扩写这段话"):
+        plan = json.loads(router.plan(text))
+        assert plan["kind"] == "chat", text
+        assert plan.get("heavy") is True, text
+        assert not plan.get("capabilities"), text
+
+
+def test_intent_plan_heavy_field_parsed():
+    from whale_core.core.intent_plan import plan_from_model_text
+    p = plan_from_model_text('{"goal":"写文","kind":"chat","heavy":true}')
+    assert p.heavy is True
+    p2 = plan_from_model_text('{"goal":"聊","kind":"chat"}')
+    assert p2.heavy is False
+
+
+def test_orchestrator_chat_route_uses_heavy_companion():
+    """heavy 计划 → 重模型陪伴作答；普通 chat 仍走快模型。"""
+    from whale_core.core.companion import WhaleCompanion
+    from whale_core.core.runtime import ConversationOrchestrator
+    from whale_core.memory.store import InMemoryStore
+
+    class _B:
+        def __init__(self, tag): self.tag = tag
+        def reply(self, text, **kw): return self.tag
+
+    orch = ConversationOrchestrator(
+        InMemoryStore(), WhaleCompanion(InMemoryStore(), _B("fast")),
+        heavy_companion=WhaleCompanion(InMemoryStore(), _B("KIMI")))
+
+    class _HeavyPlan:
+        kind = "chat"; heavy = True; task_id = ""; intent_id = "h1"
+    d = orch._finish_decision(
+        _env("给我写2000字卢唐同人文"),
+        __import__("whale_core.core.runtime.turn_orchestration", fromlist=["_Decision"])._Decision(
+            route="chat", plan=_HeavyPlan()))
+    assert d.reply == "KIMI"
+
+    class _LightPlan:
+        kind = "chat"; heavy = False; task_id = ""; intent_id = "l1"
+    d2 = orch._finish_decision(
+        _env("你好"),
+        __import__("whale_core.core.runtime.turn_orchestration", fromlist=["_Decision"])._Decision(
+            route="chat", plan=_LightPlan()))
+    assert d2.reply == "fast"
+
+
+def _env(text):
+    from whale_core.core.runtime import InputEnvelope
+    return InputEnvelope(conversation_id="c1", text=text, source="test")

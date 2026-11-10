@@ -821,13 +821,23 @@ def cmd_run(args) -> int:
             tool_note += "；和风天气已挂载"
         else:
             tool_note += "；和风未挂载（缺 QWEATHER_API_KEY/HOST，天气回落搜索）"
+        # 2026-11-10 owner 决策：长文写作/复杂创作由重模型（kimi）作答——
+        # 人格与记忆同库共享，只换回答模型（deepseek-flash → kimi-k3）。
+        _heavy_brain = DeepSeekCompanion(
+            model=intent_model_id,
+            base_url=os.environ.get("QQ_INTENT_BASE_URL") or None,
+            api_key=os.environ.get("QQ_INTENT_API_KEY") or None)
+        _heavy_companion = WhaleCompanion(
+            store, _heavy_brain, curator=workflow.companion.curator)
+        # 注意：companion 的 timeline/self_uid/planning_hint 在后方才接线——
+        # 这里只建对象，属性镜像在接线处同步（见下方 timeline 装配段）。
         workflow.orchestrator = ConversationOrchestrator(
             store, workflow.companion,
             intent_model=SearchIntentRouter(
                 model=intent_brain, enable_llm=True, tools=tools,
                 skip_clear_chitchat=intent_skip_chitchat(os.environ)),
             tools=tools, context_resolver=context_resolver,
-            grant_gate=_grant_gate)
+            grant_gate=_grant_gate, heavy_companion=_heavy_companion)
         apply_parallel_env(workflow.orchestrator, os.environ)
         print(f"[意图] 模型={intent_model_id}（显式指令规则直达零LLM；其余一律由意图模型判断 chat/task；{tool_note}）")
 
@@ -1905,6 +1915,13 @@ def cmd_run(args) -> int:
         return hint
 
     workflow.companion.planning_hint = _dynamic_planning_hint
+    # 2026-11-10：重模型陪伴镜像人格关键接线（对象早已挂进编排器，
+    # 此处同步属性——timeline/self_uid/planning_hint）
+    _hc = getattr(workflow.orchestrator, "heavy_companion", None)
+    if _hc is not None:
+        _hc.timeline = workflow.companion.timeline
+        _hc.self_uid = workflow.companion.self_uid
+        _hc.planning_hint = _dynamic_planning_hint
     if not self_uid:
         try:
             import glob as _glob, json as _json

@@ -83,6 +83,10 @@ class IntentPlan:
     risk_hint: str = ""  # 模型自评风险——仅参考，永不作为授权依据
     task_id: str = ""
     timeout_s: float = 60.0
+    # 2026-11-10 owner 决策：长文写作/复杂创作类请求标 heavy=true——
+    # 答复由重模型（kimi）而不是快模型（deepseek-flash）产出。
+    # 只是模型路由提示，无授权语义。
+    heavy: bool = False
 
 
 def _coerce_str(value: Any, *, limit: int) -> str:
@@ -172,6 +176,7 @@ def parse_intent_plan(data: Mapping[str, Any]) -> IntentPlan:
         risk_hint=_coerce_str(data.get("risk_hint", ""), limit=RISK_HINT_MAX_CHARS),
         task_id=_coerce_str(data.get("task_id", ""), limit=TASK_ID_MAX_CHARS),
         timeout_s=_timeout(data.get("timeout_s", TIMEOUT_DEFAULT_S)),
+        heavy=bool(data.get("heavy", False)),
     )
 
 

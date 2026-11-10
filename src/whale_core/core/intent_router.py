@@ -173,6 +173,16 @@ _CLEAR_CHITCHAT = re.compile(
 # 链接识别：消息内嵌 http(s) URL（裸链也算——分享链接就是让它看）。
 _URL_RE = re.compile(r"https?://[^\s\"'）)\]>】」』，,。；;！!？?]+", re.IGNORECASE)
 
+# 2026-11-10 owner 决策：长文写作/复杂创作 → chat + heavy=true（重模型作答）。
+# 绝不是搜索——实证：「给我写2000字卢唐同人文」被 kimi 路由成 web.search，
+# 搜出一堆同人推荐链接而不是写文。
+_HEAVY_WRITING = re.compile(
+    r"同人文|写.{0,4}同人|"
+    r"(写|创作|润色|扩写|续写|来一?[篇段首]).{0,24}"
+    r"(字|文|篇|章|诗|歌|信|故事|小说|文案|段子|剧|同人|话|句)|"
+    r"写一?[篇段首]",
+    re.IGNORECASE)
+
 # 短句里若已带工具/媒体迹象，禁止当闲聊短路（天气/搜索规则通常已先命中）。
 _CHITCHAT_VETO = re.compile(
     r"(搜索|搜一下|搜搜|查一下|查找|找一下|翻一下|翻翻|"
@@ -266,6 +276,14 @@ class SearchIntentRouter:
                 "reason": "附近/外卖类问题走只读网页搜索（不下单、不支付）",
             }, ensure_ascii=False)
         caps = ({s.capability for s in self.tools.specs()} if self.tools is not None else set())
+        # 2026-11-10 owner 决策：长文写作/复杂创作（写X字/同人文/写一篇…）
+        # → chat + heavy=true（重模型 kimi 作答），规则直达零 LLM。
+        if _HEAVY_WRITING.search(text or ""):
+            return json.dumps({
+                "goal": (text or "").strip()[:300],
+                "kind": "chat", "heavy": True,
+                "reason": "长文写作/复杂创作——重模型作答（owner 2026-11-10）",
+            }, ensure_ascii=False)
         # 2026-11-10 owner 实证：消息带链接应**读链接**（web.fetch），不是搜链接
         # ——群友发性格测试链接让她做，被路由成 web.search 搜出一堆无关新闻，
         # 她还谎称「点开白白的没加载出来」。规则直达，零 LLM。
@@ -333,6 +351,8 @@ class SearchIntentRouter:
             "（追更、天气、新闻、知识查证）。没把握时宁可选 chat。"
             "不得自行声明审批通过；能力的风险与审批由宿主策略裁决。"
             "仅可选择以下当前已挂载能力：" + "；".join(catalog) + "。"
+            "写作/创作请求（写X字/同人文/写一篇/写诗）不是搜索——选 chat 并加 "
+            '"heavy":true（由重模型作答）；只有需要先查资料才 web.search。'
             "澄清要克制：能从上下文/记忆合理推断的缺省值就直接默认（如地点类请求"
             "没明说地点时，默认用户所在地；用户有出行信息时，用行程目的地或出发地）；"
             "用户说『画个猫』『念这段』这类已够用的媒体请求不要 clarify；"
