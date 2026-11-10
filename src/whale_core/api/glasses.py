@@ -762,6 +762,18 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
                 norm.append(DeliveryItem(
                     kind="image", image_bytes=raw,
                     filename=str(it.get("filename") or "result.png")[:80]))
+            elif kind == "audio":
+                # 2026-11-11：语音产物投递（WAV 字节 → send_voice_to）
+                raw = it.get("audio_bytes") or b""
+                if isinstance(raw, str):
+                    import base64
+                    try:
+                        raw = base64.b64decode(raw)
+                    except Exception:
+                        raw = b""
+                norm.append(DeliveryItem(
+                    kind="audio", audio_bytes=raw,
+                    filename=str(it.get("filename") or "voice.wav")[:80]))
             else:
                 norm.append(DeliveryItem(kind="text", text=str(it.get("text") or "")))
         receipts = delivery.deliver(
@@ -1019,6 +1031,7 @@ def make_handler(delegates):
               text?: str,
               summary?: str,
               images?: [{filename, data_base64}],
+              audio?: {filename, data_base64},   # 2026-11-11：语音（WAV）投递
               conversation?: "private:uid"|"group:code",  # 默认 owner 私聊
               preferOwnerDm?: bool  # 默认 true
             }
@@ -1047,8 +1060,21 @@ def make_handler(delegates):
                     "image_bytes": raw,
                     "filename": str(img.get("filename") or "result.png")[:80],
                 })
+            aud = body.get("audio")
+            if isinstance(aud, dict):
+                raw_b64 = str(aud.get("data_base64") or "")
+                try:
+                    raw = base64.b64decode(raw_b64) if raw_b64 else b""
+                except Exception:
+                    raw = b""
+                if raw:
+                    items.append({
+                        "kind": "audio",
+                        "audio_bytes": raw,
+                        "filename": str(aud.get("filename") or "voice.wav")[:80],
+                    })
             if not items:
-                _json_response(self, 400, {"error": "text or images required"})
+                _json_response(self, 400, {"error": "text, images or audio required"})
                 return
             prefer = body.get("preferOwnerDm", True)
             if prefer in (False, 0, "0", "false", "no"):

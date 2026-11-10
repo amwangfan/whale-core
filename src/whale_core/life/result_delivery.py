@@ -18,10 +18,12 @@ log = logging.getLogger("whale_core.result_delivery")
 
 @dataclass(frozen=True)
 class DeliveryItem:
-    kind: str  # text | image
+    kind: str  # text | image | audio
     text: str = ""
     image_bytes: bytes | None = None
     filename: str = "result.png"
+    # 2026-11-11：语音产物（WAV 字节）——kind="audio" 时经 send_voice_to 投递
+    audio_bytes: bytes | None = None
 
 
 @dataclass
@@ -241,6 +243,35 @@ class ResultDelivery:
                             data, filename=item.filename or "result.png"))
                     else:
                         detail = "no-send-image"
+                    weq = getattr(_unwrap_send_port(self.port), "last_receipt", None)
+                    if not detail:
+                        detail = "sent" if ok else "send_failed"
+                except Exception as exc:
+                    detail = f"{type(exc).__name__}"
+                    ok = False
+                receipts.append(DeliveryReceipt(
+                    channel=("qq_group" if peer_type == "group" else "qq_c2c"),
+                    ok=ok, detail=detail, qq_online=True,
+                    weq_receipt=weq if isinstance(weq, dict) else None))
+                continue
+
+            if item.kind == "audio":
+                data = item.audio_bytes or b""
+                if not data:
+                    receipts.append(DeliveryReceipt(
+                        channel=("qq_group" if peer_type == "group" else "qq_c2c"),
+                        ok=False, detail="empty-audio", qq_online=True))
+                    continue
+                ok = False
+                detail = ""
+                weq = None
+                try:
+                    if hasattr(self.port, "send_voice_to"):
+                        ok = bool(self.port.send_voice_to(
+                            peer_type, target, data,
+                            filename=item.filename or "voice.wav"))
+                    else:
+                        detail = "no-send-voice"
                     weq = getattr(_unwrap_send_port(self.port), "last_receipt", None)
                     if not detail:
                         detail = "sent" if ok else "send_failed"
