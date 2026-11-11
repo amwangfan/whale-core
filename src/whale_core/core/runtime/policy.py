@@ -51,11 +51,27 @@ def runtime_owner_verifier(store: MemoryStore) -> Callable[[ActionIntent], bool]
     return verify
 
 
-def runtime_shell_grant_verifier(store: MemoryStore) -> Callable[[ActionIntent], bool]:
-    """QQ 非主人：仅当授权快照含 ``tool.shell.safe`` 租约 scope 时，放行 shell 插件动作。
+def _reviewed_shell_authorized(journal: dict, task_id: str, plan=None) -> bool:
+    """Read only core-owned, task-bound review evidence (never plan slots)."""
+    evidence = journal.get("review_approval")
+    saved = journal.get("plan") or {}
+    return bool(
+        isinstance(evidence, dict)
+        and evidence.get("task_id") == task_id == saved.get("task_id")
+        and evidence.get("conversation_id") == journal.get("conversation_id")
+        and evidence.get("scope") == "tool.shell.safe"
+        and saved.get("auth_level") == "owner"
+        and "shell.safe" in saved.get("capabilities", ())
+        and (plan is None or (plan.task_id == task_id
+                             and plan.auth_level == "owner"
+                             and "shell.safe" in plan.capabilities)))
 
-    与 ``runtime_owner_verifier`` 并列；调用方（PluginGateway）在非 owner 时查询。
-    租约次数消耗仍由编排器 ``grant_gate`` 在派发前完成。
+
+def runtime_shell_grant_verifier(store: MemoryStore) -> Callable[[ActionIntent], bool]:
+    """Accept shell-only leases or this task's core-owned successful review.
+
+    PluginGateway still applies its normal policy. Explicit lease uses are consumed
+    by the orchestrator before dispatch; review never authorizes another plugin.
     """
     def verify(intent: ActionIntent) -> bool:
         parts = intent.reason.split(":")
@@ -77,7 +93,8 @@ def runtime_shell_grant_verifier(store: MemoryStore) -> Callable[[ActionIntent],
         if not isinstance(authz, dict):
             return False
         grant_scopes = set(authz.get("grant_scopes") or ())
-        return "tool.shell.safe" in grant_scopes
+        return ("tool.shell.safe" in grant_scopes
+                or _reviewed_shell_authorized(journal, parts[1]))
     return verify
 
 

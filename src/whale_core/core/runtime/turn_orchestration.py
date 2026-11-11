@@ -62,11 +62,6 @@ def apply_parallel_env(orch, env) -> None:
             orch.PARALLEL_INTENT_TIMEOUT_S = timeout
     except (TypeError, ValueError):
         pass
-    try:
-        grace = float((env or {}).get("WHALE_PROMISE_FALLBACK_S") or 8)
-        orch.PROMISE_FALLBACK_S = grace if grace > 0 else 0.0
-    except (TypeError, ValueError):
-        pass
 
 
 def intent_brain_max_tokens(env) -> int | None:
@@ -158,11 +153,24 @@ class TurnOrchestrationMixin:
             # 异步后台路径需要覆盖供应商真实执行时长才有意义。
             plan = replace(decision.plan,
                            timeout_s=max(decision.plan.timeout_s, 240.0))
+            review_approved = False
+            if plan.auth_level == "owner" and not env.owner_id:
+                if not self._task_authz_ok(plan, conversation_id=env.conversation_id,
+                                           owner_id=env.owner_id):
+                    return TurnResult(reply=self._voiced(env.conversation_id, env.text,
+                        "本会话没有执行该任务的授权，本次未执行。"), status="answered",
+                        plan=plan, receipts=("authz:owner-only",))
+                concern = self._review_restricted(plan, env.text)
+                if concern:
+                    return TurnResult(reply=self._voiced(env.conversation_id, env.text,
+                        f"任务审核未通过：{concern}。本次未执行。"), status="answered",
+                        plan=plan, receipts=("authz:review-declined",))
+                review_approved = True
             # G1-B：先持久化台账（pending）再 ack——ack 不得先于持久任务创建。
             task_id, plan = self._persist_task(
                 plan, conversation_id=env.conversation_id, text=env.text,
                 source=env.source, channel=env.channel, owner_id=env.owner_id,
-                async_delivery=True, context=env.context)
+                async_delivery=True, context=env.context, review_approved=review_approved)
             try:
                 attach_note = (
                     "用户的消息带有图片附件且已成功读取（你在生成这句占位回复时"
@@ -230,9 +238,6 @@ class TurnOrchestrationMixin:
     FIRST_REPLY_NOTE = ""
     #: 后台意图等待上限（秒）；超时视为不需要工具（记日志）。
     PARALLEL_INTENT_TIMEOUT_S = 30.0
-    #: 第一条已「先答应待会儿」而意图模型迟迟不回（AgentScope kimi 实测 5–45s 抖动）：
-    #: 等这么多秒后改用只读搜索兑现承诺（意图晚到的结果丢弃）。0 = 关闭。
-    PROMISE_FALLBACK_S = 8.0
 
     def handle_envelope_parallel(self, env: InputEnvelope, *, on_followup=None,
                                  on_settled=None,
@@ -303,22 +308,12 @@ class TurnOrchestrationMixin:
                     except Exception:
                         pass
 
-        promised = reply_promises_followup(first)
-        grace = float(self.PROMISE_FALLBACK_S or 0)
-
         def _follow_inner():
             try:
-                if promised and grace > 0 and grace < timeout_s:
-                    try:
-                        decision = fut.result(timeout=grace)
-                    except _cf.TimeoutError:
-                        decision = self._promise_fallback_decision(env, text)
-                        if decision is None:
-                            decision = fut.result(timeout=max(0.0, timeout_s - grace))
-                        else:
-                            box["intent_ms"] = int((time.perf_counter() - t1) * 1000)
-                else:
-                    decision = fut.result(timeout=timeout_s)
+                # 2026-11-11 owner 决策：废除「承诺→兜底搜索」——是否搜索必须由
+                # 意图模型自己判断，系统不得替它拍板（实证：闲聊被兜底成搜索，
+                # 搜回同名小说）。慢就等到 timeout；超时就不补发，不编决策。
+                decision = fut.result(timeout=timeout_s)
             except _cf.TimeoutError:
                 decision = _Decision(route="chat", receipt="intent:timeout→no-followup")
                 box.setdefault("intent_ms", int((time.perf_counter() - t1) * 1000))
@@ -355,6 +350,7 @@ class TurnOrchestrationMixin:
                                    intent_ms=intent_ms, receipt=decision.receipt)
                 return decision.route, None
             plan = decision.plan
+            review_approved = False
             # 2026-11-10：授权级任务三级制——主人直执；授权会话先审核；其余拒。
             if getattr(plan, "auth_level", "") == "owner" \
                     and not env.owner_id:
@@ -383,6 +379,7 @@ class TurnOrchestrationMixin:
                     except Exception:
                         pass
                     return "task-denied", fup
+                review_approved = True
             if decision.slow:
                 plan = replace(plan, timeout_s=max(plan.timeout_s, 240.0))
             t2 = time.perf_counter()
@@ -390,7 +387,8 @@ class TurnOrchestrationMixin:
                 task_id, plan = self._persist_task(
                     plan, conversation_id=env.conversation_id, text=text,
                     source=env.source, channel=env.channel, owner_id=env.owner_id,
-                    async_delivery=on_followup is not None, context=env.context)
+                    async_delivery=on_followup is not None, context=env.context,
+                    review_approved=review_approved)
                 self._mark_followup(task_id, first)
                 result = self._execute_task(task_id)
             except Exception as exc:
@@ -419,44 +417,6 @@ class TurnOrchestrationMixin:
         threading.Thread(target=contextvars.copy_context().run, args=(_follow,), daemon=True,
                          name="whale-followup").start()
         return first_result
-
-    # 2026-11-11 实证：「我去 ping 一下 1.1.1.1」这类实测承诺被兜底成
-    # web.search（搜回别人的延迟数据）——实测/本机类承诺不该用搜索兑现，
-    # 返回 None 等意图模型的真实判定（kimi 只是慢，不是不会）。
-    _LOCAL_ACT_RE = re.compile(
-        r"(ping|延迟|网速|带宽|丢包|本机|跑一下|执行|运行|测试一下|"
-        r"测一下|测下|测速|试一?试|内存|磁盘|CPU|cpu|进程|端口|占用|版本|空间)")
-
-    def _promise_fallback_decision(self, env: InputEnvelope, text: str) -> _Decision | None:
-        """第一条已答应、意图模型超时：用只读 web.search 兑现（无搜索能力则 None）。"""
-        if self.tools is None or not self.tools.for_capability("web.search"):
-            return None
-        from whale_core.core.intent_router import _looks_like_clear_chitchat
-        if _looks_like_clear_chitchat(text):
-            return None  # 「晚上好」里顺口提了句「等下」不算要查
-        if self._LOCAL_ACT_RE.search(text or ""):
-            return None  # 实测/本机类承诺：搜索兑不了现，等意图模型的真判定
-        from whale_core.core.intent_plan import plan_from_model_text
-        import json as _json
-        query = re.sub(r"@\S+", " ", text or "").strip()[:400]
-        loc = ""
-        if not str(env.conversation_id or "").startswith("group:"):
-            loc = (self._default_location_summary() or "").split("；")[0].strip()
-        # 2026-11-11 实证：位置前缀只该贴在天气/附近/活动类查询上——
-        # 「试试到deepseek的」被贴成「成都郫都 电子科技大学 试试到…」全跑偏。
-        if (loc and loc[:2] not in query
-                and re.search(r"天气|下雨|附近|活动|冷不|热不|几点|穿什么", text or "")):
-            query = f"{loc} {query}"[:500]
-        raw = _json.dumps({"goal": "搜索并回答：" + query[:300], "kind": "task",
-                           "slots": {"query": query, "limit": 5},
-                           "capabilities": ["web.search"],
-                           "reason": "第一条已答应去查、意图模型超时 → 只读搜索兑现"},
-                          ensure_ascii=False)
-        try:
-            plan = plan_from_model_text(raw)
-        except Exception:
-            return None
-        return _Decision(route="task", plan=plan, receipt="intent:slow→promise-search")
 
     def _first_reply(self, env: InputEnvelope, text: str, note: str) -> str:
         """第一条：回复模型直接回答（不等意图）；可选附一句中性系统说明。"""

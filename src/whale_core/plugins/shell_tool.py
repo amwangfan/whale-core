@@ -20,6 +20,28 @@ SHELL_RUN_ACTION = "run_command"
 SHELL_AUTO_PAIR = f"{SHELL_PLUGIN_ID}.{SHELL_RUN_ACTION}"
 
 
+def _receipt(result) -> str:
+    """回执保留 status/exit_code，模型可据此判断 partial/nonzero。"""
+    body = result.stdout + '\n' + result.stderr + '\n' + result.verdict_reason
+    return f"[status={result.status} exit={result.exit_code}]\n{body}"[:4000]
+
+
+def _classify(result):
+    """把 ExecutionResult 分类为 (ok, receipt)。
+
+    success 恒为 ok；failed 且带 exit_code、stdout 非空也视为拿到结果
+    （如 curl 计时探针退出码非零但已输出数据）。failed 空 stdout、
+    timeout / output_limit / denied / error 即使带残留 stdout 也不伪称完成。
+    """
+    if result.status == 'success':
+        return True, _receipt(result)
+    if (result.status == 'failed' and result.exit_code is not None
+            and result.stdout.strip()):
+        return True, _receipt(result)
+    # failed 无 stdout、timeout / output_limit / denied / error：不伪称完成
+    return False, _receipt(result)
+
+
 def register_shell(registry, tools, workspace: Path, *, env=None):
     workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
     import os as _os
@@ -36,7 +58,7 @@ def register_shell(registry, tools, workspace: Path, *, env=None):
             has_grant = bool(args.get('_whale_shell_grant'))
             result = executor.run(
                 command, cwd=str(workspace), is_owner=is_owner, has_shell_grant=has_grant)
-            return result.status == 'success', (result.stdout + '\n' + result.stderr + '\n' + result.verdict_reason)[:4000]
+            return _classify(result)
     registry.register(PluginManifest(plugin_id=SHELL_PLUGIN_ID, name='受控终端', version='1.0.0', kind='output',
                       actions=(SHELL_RUN_ACTION,), action_risk={SHELL_RUN_ACTION: 'communicate'},
                       description='在Linux bubblewrap隔离工作目录执行；沙箱不可用时拒绝。personal档可由宿主配置免逐次审批'), executor=Adapter())
