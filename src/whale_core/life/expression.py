@@ -16,8 +16,7 @@
 问题或步骤、不机械复读安慰、危及数据的操作先确认风险。「表白不认领」
 只在群聊生效（issue #59）：群里的「我爱你」没有 @/引用证据时不冒认；
 私聊是一对一场景，亲密表达就是发给鲸鱼的，不套用群聊防误认规则。
-群侧基调（owner 2026-11-05 选 B）：温柔体贴、少攻击性；生病等继续关心；
-去客服腔与破折号 AI 腔；私聊可略亲密但仍偏温柔。
+群聊长度只提供近期发言统计，不覆盖角色卡的气质、亲密程度或标点习惯。
 """
 
 from __future__ import annotations
@@ -112,29 +111,13 @@ class ExpressionPolicy:
         if self.care_health:
             lines.append(
                 "对方提到身体不适：先轻轻关心一两句，别急着塞一堆建议或追问。")
-        # 群侧基调（owner 2026-11-05 选 B）：温柔体贴、少攻击性；
-        # 长度仍贴合 peer 中位；去客服腔与破折号作文腔。
+        # 提供真实场合与节奏参考，表达方式仍来自角色卡。
         if self.is_group:
-            lines.append(
-                "群里语气偏温柔体贴：少攻击性，不抬杠、不阴阳、不互损；"
-                "接话自然关心就好。")
-            lines.append(
-                "别用客服腔，也别用破折号（——）串成长句；像平时打字一样短句。")
-            if not self.anxious and not self.one_step_at_a_time:
-                if self.peer_median > 0:
-                    lines.append(
-                        f"这群近期群友发言中位大约 {self.peer_median} 字："
-                        "接话贴近这个长度与语气，别写长段落或列表，也别故意碎成一两字。")
-                elif self.length == "short":
-                    lines.append(
-                        "群里接话贴近大家平时的长度：一两句即可，别写长文，也别刻意碎句。")
+            if self.peer_median > 0:
+                lines.append(
+                    f"这群近期群友发言中位大约 {self.peer_median} 字，作为接话节奏参考。")
         elif self.length == "short" and not self.anxious and not self.one_step_at_a_time:
-            lines.append("回复保持简短。")
-        # 私聊：可略亲密，但仍偏温柔（不客服、不作文腔）。
-        if (not self.is_group) and (
-                self.anxious or self.care_health or self.one_step_at_a_time):
-            lines.append(
-                "私聊可以稍亲近一点，但仍偏温柔体贴；别客服腔，也别用破折号串长句。")
+            lines.append("当前适合简短回应。")
         if not lines:
             return ""
         return "表达提示：\n" + "\n".join(lines)

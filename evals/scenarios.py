@@ -334,8 +334,8 @@ S05_HEX_CONFESSION = Scenario(
             familiarity="acquainted",
             exact_interaction_count=1,
             policy_flags=(("confession_unclaimed", False), ("anxious", False)),
-            # 十六进制串不触发焦虑/表白模板；群侧长度引导（2026-11-05 温柔体贴基调文案）
-            policy_render_include=("别写长文",),
+            # 无情境信号时不注入固定群聊话术。
+            policy_render_empty=True,
             policy_render_exclude=("表白", "深呼吸"),
             no_intimacy=True,
         ),
@@ -389,8 +389,8 @@ S06_TOPIC_SWITCH = Scenario(
             familiarity="acquainted",
             exact_interaction_count=1,
             label_distinct_from=("m-s06-a1",),  # B 不并入 A
-            # 旁观插话只带群侧长度引导，不触发焦虑/数据风险模板
-            policy_render_include=("别写长文",),
+            # 旁观插话无情境信号，不覆盖人物表达。
+            policy_render_empty=True,
             policy_render_exclude=("保存", "深呼吸"),
             no_intimacy=True,
         ),

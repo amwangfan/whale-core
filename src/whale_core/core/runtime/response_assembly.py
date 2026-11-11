@@ -104,6 +104,8 @@ class ResponseAssemblyMixin:
         _t_followup = _time.perf_counter()
         try:
             extra = {"followup": True} if first else {}
+            if authz.get("persona_id"):
+                extra["persona_id"] = authz["persona_id"]
             # 2026-11-10：heavy 计划（长文写作/复杂创作+工具混合）由重模型组装结局
             comp = self.companion
             if getattr(plan, "heavy", False) \
