@@ -2,7 +2,8 @@
 
 全部离线：纯函数直接测；delegates 用 FakeBrain + 临时目录真实 sqlite。
 覆盖：legacy 前缀+[用户] 分离、普通/部分文本不误剥、structured calendar、
-快照 replace/[]/null、跨日期不过夜、request 覆盖 snapshot、ContextVar 并发隔离、
+快照 replace/[]/null、跨日期不过夜、request 覆盖 snapshot（calendar 按日期合并，
+仅替换同日期；空 calendar 不清快照；快照不被写改）、ContextVar 并发隔离、
 companion 用户话/历史不含 facts、quick 不写历史。
 """
 from __future__ import annotations
@@ -27,6 +28,10 @@ TOMORROW = "2026-11-12"
 def _server_today() -> str:
     """request_context_hint 以服务端真实时间为准：测试日期跟随服务端时钟。"""
     return datetime.now(SHANGHAI).date().isoformat()
+
+
+def _server_tomorrow() -> str:
+    return (datetime.now(SHANGHAI) + timedelta(days=1)).date().isoformat()
 
 LEGACY_BLOCK = (
     "[现在] 2026-11-11 周三 10:00\n"
@@ -199,6 +204,86 @@ def test_snapshot_only_renders_without_request_facts(store):
         {"title": "同步会", "start": "09:00"}]}})
     hint = request_context_hint(store)
     assert "同步会" in hint
+
+
+# ---------- request_context_hint：calendar 按日期合并（PR#83 评论） ----------
+
+@pytest.mark.parametrize("override,expected", [
+    ([{"title": "请求会", "start": "20:00"}], "20:00 请求会"),  # 普通事件
+    ([], "（无）"),                                             # 空数组覆盖该日期
+    (None, "未能读取"),                                         # null 覆盖该日期
+])
+def test_request_calendar_tomorrow_only_keeps_today(store, override, expected):
+    """请求只带明天的 structured calendar：仅替换明天，快照的今天保留。"""
+    today, tomorrow = _server_today(), _server_tomorrow()
+    save_context_snapshot(store, {"calendar": {
+        today: [{"title": "同步会", "start": "09:00"}],
+        tomorrow: [{"title": "旧明日会", "start": "08:00"}],
+    }})
+    token = REQUEST_FACTS.set({"calendar": {tomorrow: override}})
+    try:
+        hint = request_context_hint(store)
+    finally:
+        REQUEST_FACTS.reset(token)
+    assert f"[今日日程 {today}] 09:00 同步会" in hint  # 今天不被整窗覆盖掉
+    assert expected in hint                            # 明天按请求覆盖
+    assert "旧明日会" not in hint                      # 同日期被替换
+    # 原快照未被写改：仍是同步时的整窗内容（整窗替换只属于 save_context_snapshot）
+    stored = store.get(SNAPSHOT_KEY)["calendar"]
+    assert stored[today][0]["title"] == "同步会"
+    assert stored[tomorrow][0]["title"] == "旧明日会"
+
+
+@pytest.mark.parametrize("calendar", [{}, None])
+def test_empty_request_calendar_does_not_clear_snapshot(store, calendar):
+    """空 context.calendar 不是清快照：显式清快照只走 POST sync。"""
+    today = _server_today()
+    save_context_snapshot(store, {"calendar": {today: [
+        {"title": "同步会", "start": "09:00"}]}})
+    token = REQUEST_FACTS.set({"calendar": calendar})
+    try:
+        hint = request_context_hint(store)
+    finally:
+        REQUEST_FACTS.reset(token)
+    assert "09:00 同步会" in hint
+    assert store.get(SNAPSHOT_KEY)["calendar"][today][0]["title"] == "同步会"
+
+
+def test_request_weather_leaves_snapshot_calendar(store):
+    """请求只带天气等其它 context：calendar 窗口完整来自快照，不受影响。"""
+    today, tomorrow = _server_today(), _server_tomorrow()
+    save_context_snapshot(store, {"calendar": {
+        today: [{"title": "同步会", "start": "09:00"}],
+        tomorrow: [{"title": "同步明日会", "start": "08:00"}],
+    }})
+    token = REQUEST_FACTS.set({"weather": "上海 晴 18°C"})
+    try:
+        hint = request_context_hint(store)
+    finally:
+        REQUEST_FACTS.reset(token)
+    assert "[天气] 上海 晴 18°C" in hint
+    assert f"[今日日程 {today}] 09:00 同步会" in hint
+    assert f"[明日日程 {tomorrow}] 08:00 同步明日会" in hint
+
+
+def test_request_calendar_merge_does_not_mutate_snapshot(store):
+    """按日期合并只作用于当轮渲染：快照内容前后完全一致，不被写改。"""
+    today, tomorrow = _server_today(), _server_tomorrow()
+    save_context_snapshot(store, {"calendar": {
+        today: [{"title": "同步会", "start": "09:00"}],
+        tomorrow: [{"title": "旧明日会", "start": "08:00"}],
+    }})
+    before = store.get(SNAPSHOT_KEY)
+    token = REQUEST_FACTS.set({
+        "calendar": {tomorrow: [{"title": "请求会", "start": "20:00"}]}})
+    try:
+        hint = request_context_hint(store)
+    finally:
+        REQUEST_FACTS.reset(token)
+    assert "请求会" in hint
+    assert store.get(SNAPSHOT_KEY) == before
+    # 请求结束后的下一轮仍看到原快照
+    assert "旧明日会" in request_context_hint(store)
 
 
 # ---------- ContextVar 并发隔离 ----------

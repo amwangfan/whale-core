@@ -67,5 +67,5 @@ Proactive greeting decisions and text generation share the active persona and au
 
 - No `/v1/agent` alias or high-privilege executor is added. The separate client/server agent contract must be reconciled with the service that actually owns that route.
 - Firmware images, sticker display, ASR routing, calendar permission handling and APK installation belong to the glasses client integration.
-- Full backend regression: 2821 passed, 1 skipped in the joint-integration test run.
+- Full **local** backend regression for the initial integration: 2821 passed, 1 skipped. This is not an Actions result; GitHub CI results are recorded separately on the PR, with their run URLs and exact head SHA.
 - Dedicated tests cover prefix/structured context, local HTTP synchronization, concurrent first/followup snapshots, bound persona continuity, TTS-to-QQ fake delivery, legacy memory migration, historical episode recall and proactive scope boundaries.

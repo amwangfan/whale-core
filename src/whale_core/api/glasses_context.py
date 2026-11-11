@@ -112,6 +112,18 @@ def request_context_hint(store) -> str:
     # Explicit current facts override synchronized facts, never modify the snapshot.
     merged = dict(snapshot)
     merged.update(current)
+    current_calendar = current.get("calendar")
+    if isinstance(current_calendar, dict):
+        # Calendar overrides are per-date: a request carrying only tomorrow must
+        # keep the snapshot's today; [] / null still cover their own date.
+        snapshot_calendar = snapshot.get("calendar")
+        calendar = dict(snapshot_calendar) if isinstance(snapshot_calendar, dict) else {}
+        calendar.update(current_calendar)
+        merged["calendar"] = calendar
+    elif "calendar" in current:
+        # An empty request calendar is not an explicit clear (POST sync only):
+        # the synced window stays visible for this turn.
+        merged["calendar"] = snapshot.get("calendar")
     anchor = str(current.get("现在") or "")[:10]
     today = datetime.now(SHANGHAI).date()
     legacy_current = not anchor or anchor == today.isoformat()
