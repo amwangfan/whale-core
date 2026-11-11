@@ -47,7 +47,7 @@ class PersistenceMixin:
                       source: str, channel: str = "", owner_id: str = "",
                       tool_name: str = "",
                       async_delivery: bool = False,
-                      context=None) -> tuple[str, IntentPlan]:
+                      context=None, review_approved: bool = False) -> tuple[str, IntentPlan]:
         """G1-B：在任何外部效果（含 ack）之前持久化任务台账。
 
         返回 (task_id, 带 task_id 的 plan)。台账 phase=pending，
@@ -64,6 +64,16 @@ class PersistenceMixin:
             if self.store.get(f"task:{task_id}") is not None:
                 task_id = uuid4().hex
             plan = replace(plan, task_id=task_id)
+            review_evidence = None
+            if (review_approved is True and plan.auth_level == "owner"
+                    and "shell.safe" in plan.capabilities and not owner_id):
+                # Legacy hosts have no resolver: create a restrictive snapshot,
+                # not an absent snapshot that would bypass all capability checks.
+                authz = dict(authz or {"principal_id": "", "scopes": [],
+                                      "grant_scopes": [], "grant_ids": []})
+                review_evidence = {"task_id": task_id,
+                                   "conversation_id": conversation_id,
+                                   "scope": "tool.shell.safe"}
             transient_keys = {k for k in plan.slots if k.lower() in {
                 "audio_base64", "audio", "audio_bytes", "file_base64", "image_base64"}}
             persisted_plan = asdict(plan)
@@ -77,6 +87,7 @@ class PersistenceMixin:
                 "text": text, "next_step": 0, "results": [],
                 "receipts": [], "tool_name": tool_name, "async": async_delivery,
                 **({"authz": authz} if authz else {}),
+                **({"review_approval": review_evidence} if review_evidence else {}),
             })
             self._save_task(task_id, plan, "pending", (), owner_id=owner_id)
             self._append_event(task_id, "planned",
@@ -145,6 +156,7 @@ class PersistenceMixin:
     def _start_plan(self, plan: IntentPlan, conversation_id: str, text: str, *,
                     source: str, tool_name: str = "", channel: str = "",
                     owner_id: str = "", context=None) -> TurnResult:
+        review_approved = False
         if getattr(plan, "auth_level", "") == "owner" and not owner_id:
             # 非主人的授权级任务：先过授权闸门，再过意图模型审核
             if not self._task_authz_ok(plan, conversation_id=conversation_id,
@@ -163,10 +175,11 @@ class PersistenceMixin:
                 reply = self._voiced(conversation_id, text, note)
                 return TurnResult(reply=reply, status="answered", plan=plan,
                                   receipts=("authz:review-declined",))
+            review_approved = True
         task_id, _plan = self._persist_task(
             plan, conversation_id=conversation_id, text=text, source=source,
             channel=channel, owner_id=owner_id, tool_name=tool_name,
-            context=context)
+            context=context, review_approved=review_approved)
         return self._execute_task(task_id)
 
     # ---- G1-B：phase 状态机、事件流水与送达回执 ----

@@ -176,13 +176,18 @@ class ToolExecutionMixin:
         # 工具能力与快照 scope 必须匹配（陌生人/群上限/会话收窄在此生效）。
         # 快照缺失时（S4 租约）可尝试用租约补 scope：租约须覆盖该能力并
         # 原子消耗操作次数；过期/撤销/用尽/参数指纹不符即拒（INV-06/09）。
-        authz = (self.store.get(f"runtime:task:{task_id}") or {}).get("authz") or {}
+        from whale_core.core.runtime.policy import _reviewed_shell_authorized
+        journal = self.store.get(f"runtime:task:{task_id}") or {}
+        authz = journal.get("authz") or {}
         if authz:
             required = f"tool.{spec.capability}"
             base_scopes = set(authz.get("scopes") or ())
             grant_scopes = set(authz.get("grant_scopes") or ())
             grant_ids = tuple(authz.get("grant_ids") or ())
-            if required not in base_scopes:
+            reviewed_shell = (required == "tool.shell.safe"
+                              and (required not in grant_scopes or not grant_ids)
+                              and _reviewed_shell_authorized(journal, task_id, plan))
+            if required not in base_scopes and not reviewed_shell:
                 # 租约贡献的能力：每次执行都要经 grant_gate 原子消耗次数
                 if (required not in grant_scopes
                         or not grant_ids
