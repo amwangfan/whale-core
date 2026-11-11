@@ -296,6 +296,18 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
 
     cfg = GlassesConfig(env)
     store = SqliteMemoryStore(cfg.store_path)
+    from whale_core.api.glasses_identity import (
+        build_glasses_context_resolver, migrate_legacy_glasses_episodes)
+    from whale_core.api.glasses_context import (
+        REQUEST_FACTS, request_context_hint, split_chat_context, save_context_snapshot)
+    migrated = migrate_legacy_glasses_episodes(store)
+    if migrated:
+        print(f"[glasses] migrated legacy chat episodes={migrated}", flush=True)
+    context_resolver = build_glasses_context_resolver(store, owner_qq_uid=cfg.owner_uid)
+
+    def _planning_hint():
+        return "\n\n".join(filter(None, (
+            _GLASSES_LOCAL_LIFE_HINT, request_context_hint(store))))
 
     if brain_factory is None:
         from whale_core.core.deepseek import DeepSeekCompanion
@@ -382,8 +394,6 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
             (env.get("QWEATHER_API_KEY") or "").strip()
             and (env.get("QWEATHER_API_HOST") or "").strip())
         shell_on = env.get("WHALE_SHELL_ENABLED", "").strip() == "1"
-        if not has_search and not has_weather and not shell_on:
-            return None
         from whale_core.core.intent_router import SearchIntentRouter
         from whale_core.core.runtime import (
             ConversationOrchestrator, ToolRegistry, runtime_shell_grant_verifier)
@@ -396,6 +406,12 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
 
         plugin_registry = PluginRegistry()
         tools = ToolRegistry()
+        from pathlib import Path
+        from whale_core.api.glasses_media import install_media_capabilities
+        media = install_media_capabilities(
+            store, env=env, registry=plugin_registry, tools=tools,
+            artifact_dir=Path(cfg.store_path).parent / "artifacts")
+        _cached["media"] = media
         fallback_search = None
         if has_search:
             from search_web.web_fetch import register_web_fetch
@@ -427,6 +443,8 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
             if ShellPolicy.from_env(env).tier is ShellTier.PERSONAL:
                 shell_auto_actions = frozenset({SHELL_AUTO_PAIR})
 
+        if not tools.specs():
+            return None
         gateway = PluginGateway(
             plugin_registry,
             PluginActionPolicy(plugin_registry, auto_approve_actions=shell_auto_actions),
@@ -460,7 +478,8 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
             model=intent_brain, enable_llm=enable_llm, tools=tools,
             skip_clear_chitchat=intent_skip_chitchat(env))
         orch = ConversationOrchestrator(
-            store, companion, intent_model=intent, tools=tools, gateway=gateway)
+            store, companion, intent_model=intent, tools=tools, gateway=gateway,
+            context_resolver=context_resolver)
         apply_parallel_env(orch, env)
         return orch
 
@@ -522,7 +541,7 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
         with _orch_lock:
             if _cached["companion"] is None:
                 companion = _make_companion()
-                companion.planning_hint = _GLASSES_LOCAL_LIFE_HINT
+                companion.planning_hint = _planning_hint
                 _cached["companion"] = companion
                 _cached["orch"] = _build_search_orchestrator(companion)
             companion = _cached["companion"]
@@ -538,30 +557,76 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
             pass
         if orch is None:
             reply = companion.chat(
-                text, conversation_id=conversation_id, location=location or None)
+                text, conversation_id=conversation_id, location=location or None,
+                context=context_resolver.resolve(channel="phone", sender_id="phone",
+                                                 conversation_id=conversation_id))
             total = int((_time.perf_counter() - t_all) * 1000)
             return reply, {"intentMs": 0, "toolMs": 0, "replyMs": total,
                            "totalMs": total}
+        turn_delivered = set()
+
+        def _finish_audio(result):
+            from whale_core.api.glasses_media import deliver_audio_from_receipts
+            media = _cached.get("media")
+            delivery = deliver_audio_from_receipts(
+                getattr(result, "receipts", ()),
+                artifacts=media.artifacts if media else None,
+                deliver_result=deliver_result, delivered=turn_delivered)
+            reply = result.reply
+            if delivery["audio_ids"]:
+                resolved = context_resolver.resolve(
+                    channel="phone", sender_id="phone", conversation_id=conversation_id)
+                reply = _delivery_note(delivery, [{"kind": "audio"}], say=lambda prompt:
+                    quick_chat(prompt, persona=_persona_card_text(store, resolved.persona_id))[0])
+                # Replace the pre-delivery wording for this turn, keeping the first reply.
+                from dataclasses import replace
+                from whale_core.memory.history import conversation_lock, load_history
+                with conversation_lock(store, conversation_id):
+                    history = load_history(store, conversation_id)
+                    for i in range(len(history) - 1, 0, -1):
+                        if (history[i]["role"] == "assistant"
+                                and history[i - 1] == {"role": "user", "content": text[:4000]}
+                                and result.reply and history[i]["content"].endswith(result.reply)):
+                            history[i]["content"] = (
+                                history[i]["content"][:-len(result.reply)] + reply)[:4000]
+                            store.put("chat:history:" + conversation_id[:160], history)
+                            break
+                    task_id = getattr(result, "task_id", "")
+                    episode = store.get_record(f"ep:chat:{conversation_id}:{task_id}") if task_id else None
+                    if episode is not None:
+                        content = dict(episode.content)
+                        content["summary"] = f"用户：{text[:500]}\nEnxi：{reply[:500]}"
+                        store.put_record(replace(episode, content=content))
+                    task = store.get("task:" + task_id) if task_id else None
+                    if isinstance(task, dict):
+                        task["result_reply"] = reply
+                        store.put("task:" + task_id, task)
+            return reply, delivery
+
         envelope = InputEnvelope(
             conversation_id=conversation_id, text=text,
-            source="glasses:phone", channel="glasses",
+            source="glasses:phone", channel="phone", sender_id="phone",
             owner_id=cfg.owner_uin or cfg.owner_uid)
         if not (parallel_on and hasattr(orch, "handle_envelope_parallel")):
             result = orch.handle_envelope(envelope)
+            reply, audio_delivery = _finish_audio(result)
             timing = {
+                "audioDelivery": audio_delivery,
                 "intentMs": int(getattr(result, "intent_ms", 0) or 0),
                 "toolMs": int(getattr(result, "tool_ms", 0) or 0),
                 "replyMs": int(getattr(result, "reply_ms", 0) or 0),
                 "totalMs": int((_time.perf_counter() - t_all) * 1000),
             }
-            return result.reply, timing
+            return reply, timing
         # 2026-11-06 并行链路：DS 第一条不等意图；Kimi 后台判定，
         # 需要工具时第二条进 FollowupBoard（轮询取 / 旧客户端同步合并）。
         turn_id = followups.open(conversation_id)
 
         def _settled(route, out, _tid=turn_id):
-            if route == "task" and out is not None and (out.reply or "").strip():
-                followups.settle(_tid, "ready", reply=out.reply, timing={
+            if route == "task" and out is not None:
+                reply, audio_delivery = _finish_audio(out)
+                followups.settle(_tid, "ready", reply=reply, timing={
+                    "audioDelivery": audio_delivery,
                     "intentMs": int(out.intent_ms or 0),
                     "toolMs": int(out.tool_ms or 0),
                     "followupMs": int(out.reply_ms or 0)})
@@ -793,7 +858,27 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
             passive_daily_limit=int(env.get("PASSIVE_DAILY_LIMIT", "200")))
         return load_prefs(store, base)
 
-    return {"companion_chat": companion_chat, "quick_chat": quick_chat,
+    def chat_with_context(text, conversation_id, location="", followup_mode="", context=None):
+        user_text, facts = split_chat_context(text, context)
+        token = REQUEST_FACTS.set(facts)
+        try:
+            return companion_chat(user_text, conversation_id, location, followup_mode)
+        finally:
+            REQUEST_FACTS.reset(token)
+
+    def quick_with_context(text, location="", persona=None, context=None):
+        user_text, facts = split_chat_context(text, context)
+        token = REQUEST_FACTS.set(facts)
+        try:
+            base = persona if persona is not None else "简明回答。"
+            return quick_chat(user_text, location, persona="\n\n".join(
+                filter(None, (base, request_context_hint(store)))))
+        finally:
+            REQUEST_FACTS.reset(token)
+
+    return {"companion_chat": chat_with_context, "quick_chat": quick_with_context,
+            "context_resolver": context_resolver,
+            "sync_context": lambda body: save_context_snapshot(store, body),
             "followup_poll": followup_poll,
             "qq_send": qq_send, "deliver_result": deliver_result,
             "prefs": prefs, "store": store,
@@ -802,31 +887,12 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
             "env": env}
 
 
-def _persona_card_text(store) -> str:
-    """取当前人格卡文本（软提示用）：绑定优先，回退名字为 Enxi 的卡。"""
+def _persona_card_text(store, persona_id=None) -> str:
+    """Use the active effective persona, never an arbitrary conversation binding."""
     if store is None:
         return ""
-    try:
-        for key in store.keys():
-            if str(key).startswith("bind:persona:"):
-                bind = store.get(key)
-                pid = str(bind.get("persona_id") or "") if isinstance(bind, dict) else ""
-                if pid:
-                    card = store.get(f"persona:card:{pid}")
-                    if isinstance(card, dict):
-                        text = str(card.get("external_prompt") or "").strip()
-                        if text:
-                            return text
-        for key in store.keys():
-            if str(key).startswith("persona:card:"):
-                card = store.get(key)
-                if isinstance(card, dict) and str(card.get("name") or "") == "Enxi":
-                    text = str(card.get("external_prompt") or "").strip()
-                    if text:
-                        return text
-    except Exception:
-        pass
-    return ""
+    from whale_core.ui.effective_persona import build_effective_persona
+    return build_effective_persona(store, persona_id=persona_id).model_context
 
 
 def _delivery_note(result: dict, items: list, say=None) -> str:
@@ -844,7 +910,7 @@ def _delivery_note(result: dict, items: list, say=None) -> str:
     else:
         what, fallback = "话", "说了哦，看看手机~"
     if not result.get("ok"):
-        what, fallback = "", "刚才没发出去——你手机上 QQ 可能不在线，我记着了，等它回来再补给你~"
+        what, fallback = "", "刚才没发出去，QQ 投递没有完成。"
     if say is not None:
         try:
             # 2026-11-11 owner 决策：软提示——只陈述事实，口吻由人格卡塑造，
@@ -853,8 +919,7 @@ def _delivery_note(result: dict, items: list, say=None) -> str:
                 prompt = (f"刚才你把{what}发到对方 QQ 了。跟对方交代一声"
                           "（别复述内容本身）。只回这一句。")
             else:
-                prompt = ("刚才要发到对方 QQ 的东西没发出去（可能 QQ 不在线），"
-                          "之后会补。跟对方交代一声。只回这一句。")
+                prompt = "刚才发到 QQ 的投递没有完成。跟对方交代当前结果。"
             out = str(say(prompt) or "").strip().strip("「」\"'")
             # 护栏：非空、不超过 40 字、不带引号包裹才用模型的；否则回落
             if out and len(out) <= 40 and "\n" not in out:
@@ -914,7 +979,7 @@ def make_handler(delegates):
         def do_GET(self):
             if self.path == "/v1/health":
                 _json_response(self, 200, {"ok": True,
-                                           "capabilities": ["/v1/chat", "/v1/chat/followup", "/v1/qq/reply", "/v1/result/deliver",
+                                           "capabilities": ["/v1/chat", "/v1/context/sync", "/v1/chat/followup", "/v1/qq/reply", "/v1/result/deliver",
                                                             "/v1/rayneo/ingest", "/v1/rayneo/query", "/v1/rayneo/control"]})
                 return
             if self.path == "/openapi.json":
@@ -927,6 +992,9 @@ def make_handler(delegates):
             if not self._authorized():
                 self.close_connection = True
                 _json_response(self, 401, {"error": "unauthorized"})
+                return
+            if self.path == "/v1/context/sync":
+                self._context_sync()
                 return
             if self.path == "/v1/chat":
                 self._chat()
@@ -952,13 +1020,32 @@ def make_handler(delegates):
             self.close_connection = True
             _json_response(self, 404, {"error": "not found"})
 
+        def _context_sync(self):
+            body = self._read_json()
+            if body is None:
+                _json_response(self, 400, {"error": "invalid json body"})
+                return
+            try:
+                snapshot = delegates["sync_context"](body)
+            except (ValueError, TypeError) as exc:
+                _json_response(self, 400, {"error": str(exc)})
+                return
+            _json_response(self, 200, {"ok": True, "receivedAt": snapshot["receivedAt"],
+                                      "dates": list(snapshot["calendar"])})
+
         def _chat(self):
+            from whale_core.api.glasses_context import split_chat_context
             body = self._read_json()
             if body is None:
                 _json_response(self, 400, {"error": "invalid json body"})
                 return
             text = str(body.get("text") or "").strip()
-            if not text:
+            context = body.get("context")
+            if context is not None and not isinstance(context, dict):
+                _json_response(self, 400, {"error": "context must be an object"})
+                return
+            user_text, _ = split_chat_context(text, context)
+            if not user_text:
                 _json_response(self, 400, {"error": "text required"})
                 return
             text = text[:MAX_TEXT_CHARS]
@@ -972,10 +1059,10 @@ def make_handler(delegates):
                 getattr(self.server, "glasses_env", {}) or {},
                 delegates["store"], body)
             try:
+                extra = {"context": context} if context else {}
                 if mode == "quick":
-                    reply, timing = delegates["quick_chat"](text, location=location)
+                    reply, timing = delegates["quick_chat"](text, location=location, **extra)
                 else:
-                    extra = {}
                     if body.get("followup") in ("poll", True, 1, "1", "true", "yes"):
                         # 新客户端：第一条立即返回，第二条走 /v1/chat/followup 轮询。
                         extra["followup_mode"] = "poll"
@@ -998,6 +1085,8 @@ def make_handler(delegates):
                 payload["intentMs"] = int(timing.get("intentMs") or 0)
                 payload["toolMs"] = int(timing.get("toolMs") or 0)
                 payload["replyMs"] = int(timing.get("replyMs") or 0)
+                if timing.get("audioDelivery", {}).get("audio_ids"):
+                    payload["audioDelivery"] = timing["audioDelivery"]
                 if "followup" in timing:
                     # 并行链路：第二条状态（pending=后台还在判/查；none=无第二条；
                     # ready+merged=旧客户端已合并进 reply）。
@@ -1246,6 +1335,10 @@ def _openapi() -> dict:
         "openapi": "3.0.0",
         "info": {"title": "whale-glasses", "version": "1.0.0"},
         "paths": {
+            "/v1/context/sync": {"post": {
+                "summary": "替换手机日程快照：calendar按ISO日期映射事件数组；[]空日程，null未知",
+                "responses": {"200": {"description": "ok, receivedAt, dates"}},
+                "security": [{"bearerAuth": []}]}},
             "/v1/chat": {"post": {"summary": "眼镜/手机文字对话（第一条秒回；"
                                              "body.followup=\"poll\" 时第二条走 /v1/chat/followup）",
                                   "parameters": [],
@@ -1342,10 +1435,16 @@ def main(argv=None) -> int:
                 except Exception:
                     return ""
 
+            from whale_core.memory.curation import MemoryCurator
             greeting_loop = ProactiveGreetingLoop(
                 config=gcfg, judge=judge, reply_model=reply_model, send=_send,
                 situation_provider=_situation,
-                store=delegates.get("store"))
+                store=delegates.get("store"),
+                curator=MemoryCurator(delegates["store"]),
+                conversation_id="glasses:proactive",
+                context=lambda: delegates["context_resolver"].resolve(
+                    channel="phone", sender_id="phone",
+                    conversation_id="glasses:proactive"))
             if greeting_loop.start_background():
                 print(f"proactive greeting loop on interval={gcfg.interval_s}s "
                       f"dry_run={gcfg.dry_run} cooldown={gcfg.cooldown_s}s "

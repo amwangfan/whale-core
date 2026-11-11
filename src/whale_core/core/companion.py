@@ -111,11 +111,11 @@ class WhaleCompanion:
              episodic: bool = True, context=None, allowed_spaces=None,
              write_space: str | None = None, location: str | None = None,
              on_delta=None, should_stop=None, metrics=None, on_phase=None,
-             followup: bool = False) -> str:
+             followup: bool = False, persona_id: str | None = None) -> str:
         # 不把整轮 LLM 包进 conversation_lock：同会话重叠请求要能在 A 还在生成时
         # 读到 A 已落盘的用户原话。历史读写各自短临界区（见 _chat）。
         return self._chat(text, conversation_id=conversation_id, user_text=user_text,
-                          followup=followup,
+                          followup=followup, persona_id=persona_id,
                           images=images, turn_key=turn_key, episodic=episodic,
                           context=context, allowed_spaces=allowed_spaces,
                           write_space=write_space, location=location,
@@ -128,7 +128,7 @@ class WhaleCompanion:
               episodic: bool = True, context=None, allowed_spaces=None,
               write_space: str | None = None, location: str | None = None,
               on_delta=None, should_stop=None, metrics=None, on_phase=None,
-              followup: bool = False) -> str:
+              followup: bool = False, persona_id: str | None = None) -> str:
         original = text if user_text is None else user_text
         # issue #45：真实阶段反馈（接收→上下文/记忆构建→模型请求→整理）；
         # 无回调时零开销。阶段与耗时全部实测，不伪造进度百分比。
@@ -148,7 +148,7 @@ class WhaleCompanion:
         # 极简渲染；绑定失效 fail soft 回退（不影响对话）。persona_id=None →
         # 保持兼容期全局快照行为。卡文本只是表达层数据，不触碰任何权限语义。
         persona_card = None
-        persona_id = getattr(context, "persona_id", None) if context is not None else None
+        persona_id = getattr(context, "persona_id", None) if context is not None else persona_id
         if persona_id:
             from whale_core.ui.persona_resolver import PersonaResolver
 
@@ -217,17 +217,10 @@ class WhaleCompanion:
                 # 可自然提起；状态照实（没成/不确定不装完成），不主动汇报。
                 from whale_core.life.activity import render_activity_hint
                 activity_hint = render_activity_hint(self.store, scope) if scope else ""
-                # 群/私聊通道语气（owner 2026-11-05 选 B）：群温柔体贴少攻击；
-                # 私聊可略亲密仍偏温柔。只作表达层软提示，不堆「像真人」。
-                channel_tone = (
-                    "通道语气：群里温柔体贴、少攻击性；短句贴合群友长度；"
-                    "生病等继续关心；别客服腔、别用破折号串长句。"
-                    if is_group else
-                    "通道语气：私聊可以稍亲近一点，但仍偏温柔体贴；"
-                    "别客服腔、别用破折号串长句。"
-                )
+                # 通道语气固定层已移除（owner 2026-11-11）：宿主不再用固定
+                # 「温柔/禁破折号/别客服腔」话术盖过人格卡表达；表达层提示
+                # 只保留事实驱动的部分（关系/表达策略/InnerState/活动/意图）。
                 hints = [h for h in (rel.render(), policy.render(),
-                                     channel_tone,
                                      "\n".join(state_lines), activity_hint,
                                      intent.hint) if h]
                 if hints:
@@ -266,14 +259,50 @@ class WhaleCompanion:
                     str(hit.record.content.get("summary", "")))
                 if piece:
                     memories.append(piece)
+            seen_norm = {_norm_mem(m) for m in memories}
+            injected_keys: set[str] = set()
+            # 召回断层修复（2026-11-11）：30 轮后旧经历（宠物名字/生日）掉出
+            # 近期时间窗，curator 又只收 curated——按相关性补召本会话 chat 情节
+            # （词项 IDF 统计，无额外模型/关键词白名单；只读，不晋升稳定事实）。
+            # 排在无关近期情节**之前**：curated 5 + recent 3 会吃满 [:8] 预算，
+            # 真正被「回忆起来」的相关内容不能被截掉；近期窗只补剩余名额。
+            # 检索故障 fail soft（不阻塞聊天）。
+            from whale_core.memory.episode_retrieval import (
+                MAX_SNIPPET_CHARS, retrieve_relevant_episodes)
+            try:
+                related_hits = retrieve_relevant_episodes(
+                    self.store, original,
+                    conversation_id=conversation_id,
+                    allowed_spaces=spaces,
+                    include_protected=_spaces_include_vault(spaces),
+                    exclude_keys=injected_keys)
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception(
+                    "related episode retrieval failed; continuing without")
+                related_hits = ()
+            for hit in related_hits:
+                piece = _injectable_memory(
+                    str(hit.record.content.get("summary", "")))
+                if not piece:
+                    continue
+                piece = piece[:MAX_SNIPPET_CHARS]
+                norm = _normalize_summary(piece)
+                if not norm or norm in seen_norm:
+                    continue
+                seen_norm.add(norm)
+                injected_keys.add(hit.record.key)
+                memories.append(piece)
             # 近期对话情节补充注入的纪律（owner 反馈 2026-10-31「总重复图片的事」）：
             # 1. **只取本会话**的情节——别会话的旧情节会把话题带偏；
-            # 2. 规范化去重（同主题多条情节只留最新一条）；
+            # 2. 规范化去重（同主题多条情节只留最新一条；相关召回已注入的
+            #    记录按键跳过，不占近期名额）；
             # 3. 封顶 3 条（情节是背景，不是当前话题）。
-            seen_norm = {_norm_mem(m) for m in memories}
             recent_this_conv = 0
             for record in ctx.recent_episodes:
                 if "chat" not in record.tags:
+                    continue
+                if record.key in injected_keys:
                     continue
                 if str(record.content.get("conversation_id") or "") != conversation_id:
                     continue  # 跨会话旧情节不注入（改由 curator 语义召回负责）

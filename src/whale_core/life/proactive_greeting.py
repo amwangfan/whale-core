@@ -165,6 +165,30 @@ def record_send(store: QuotaStore | None, *, now: float | None = None) -> None:
     store.put(key, used + 1)
 
 
+def _norm_mem(text: str) -> str:
+    """记忆文本的规范化去重键：取情节中用户侧内容，压缩空白与标点。
+
+    与 core.companion._norm_mem 同一规则（那边是私有的，此处自带一份，
+    保持 life 不反向依赖 core 的私有助手）。
+    """
+    import re as _re
+    head = str(text)[:120]
+    m = _re.match(r"^用户：(.+?)(?:\n|$)", str(text), _re.S)
+    if m:
+        head = m.group(1)
+    return _re.sub(r"[\s\W]+", "", head)[:40]
+
+
+def _spaces_include_vault(spaces) -> bool:
+    """授权空间集合里是否含受保护原始库（resolver 已按主人私聊规则过滤）。"""
+    try:
+        from whale_core.memory.types import MemorySpaceType
+        return any(getattr(s, "type", None) is MemorySpaceType.PROTECTED_ORIGINAL
+                   for s in (spaces or ()))
+    except Exception:
+        return False
+
+
 class ProactiveGreetingLoop:
     """可单测的 tick + 可选后台循环；默认 enabled=False。"""
 
@@ -178,28 +202,185 @@ class ProactiveGreetingLoop:
         situation_provider: Callable[[], str] | None = None,
         store: QuotaStore | None = None,
         now_fn: Callable[[], float] | None = None,
+        curator=None,
+        allowed_spaces=None,
+        context=None,
+        conversation_id: str = "",
     ):
+        """全部新参数可选、缺省即旧行为（persona/memories/history 为空注入）。
+
+        - ``store``：生产注入的 MemoryStore 同时充当额度 kv 与记忆源；
+          只有具备 MemoryStore 读接口（get_persona_continuity/list_by_kind）
+          时才用于连续性上下文，否则退化为纯额度 store。
+        - ``curator``：MemoryCurator 实例；提供时记忆召回走与 companion
+          一致的 curated 链路，缺省时回落 recent_episodes（兼容期行为）。
+        - ``allowed_spaces``：服务端已授权的 MemorySpaceRef/space_id 元组；
+          显式给出时优先于 ``context.allowed_memory_spaces``。
+          空元组 = 不注入任何记忆记录与会话历史（fail closed）。
+        - ``context``：ResolvedContext 或返回它的零参 callable（每 tick 现取，
+          绑定/租约变更当轮生效）；提供 ``allowed_memory_spaces``、会话绑定
+          ``persona_id`` 与权威 ``conversation.conversation_id``。授权判定
+          永远发生在宿主侧，本循环只消费解析结果，不自行放宽。
+        - ``conversation_id``：历史快照来源会话（如主人私聊
+          ``private:{uin}``）。context 携带会话时以其 conversation_id 为
+          权威；显式值与之冲突时不注入历史（fail closed）。
+        - 范围纪律：宿主既未给 allowed_spaces 也未给 context 时，只渲染
+          全局人格，不读任何记忆记录/历史（本循环此前为空注入，不存在
+          「兼容期全库列举」旧行为可回落）。
+        """
         self.config = config or ProactiveGreetingConfig()
         self.judge = judge
         self.reply_model = reply_model
         self.send = send
         self.situation_provider = situation_provider
         self.store = store
+        self.curator = curator
+        self.allowed_spaces = allowed_spaces
+        self.context = context
+        self.conversation_id = conversation_id
         self._now = now_fn or time.time
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+
+    def _memory_store(self):
+        """store 同时具备 MemoryStore 读接口时才作记忆源；否则返回 None。"""
+        store = self.store
+        if store is None:
+            return None
+        if (callable(getattr(store, "get_persona_continuity", None))
+                and callable(getattr(store, "list_by_kind", None))):
+            return store
+        return None
+
+    def _brain_context(self, situation: str) -> tuple[str, list[str], tuple]:
+        """与 companion 同一链路的人格 + 授权记忆 + 会话历史快照。
+
+        每 tick 现取（角色卡热切换、记忆新增当轮生效）；无记忆源时返回空，
+        保持旧行为。空间可见域完全由宿主注入的 allowed_spaces/context 决定，
+        本函数不越权解析：
+
+        - 宿主未给 allowed_spaces 且 context 未携带授权空间（None）→ 只渲染
+          全局人格，不读任何记忆记录/历史（本循环此前为空注入，不存在
+          「兼容期全库列举」旧行为可回落）；
+        - 授权空间已解析但为空元组 → fail closed：记忆与历史都不注入；
+        - 历史只在授权空间非空且会话归属一致时注入：context 携带会话时其
+          ``conversation.conversation_id`` 为权威，显式 ``conversation_id``
+          与之冲突则不注入历史。
+        """
+        store = self._memory_store()
+        if store is None:
+            return "", [], ()
+        from whale_core.memory.continuity import build_continuity_context
+        from whale_core.memory.transient import (
+            is_transient_time_only, scrub_episode_summary, scrub_transient_time)
+
+        ctx_obj = self.context() if callable(self.context) else self.context
+        if self.allowed_spaces is not None:
+            spaces = tuple(self.allowed_spaces)
+        else:
+            spaces = getattr(ctx_obj, "allowed_memory_spaces", None)
+        # 会话归属：context 携带会话时其 conversation_id 为权威；显式
+        # conversation_id 与之冲突 → 不注入历史（fail closed）。
+        ctx_cid = ""
+        if ctx_obj is not None:
+            ctx_cid = str(getattr(getattr(ctx_obj, "conversation", None),
+                                  "conversation_id", "") or "").strip()
+        cid = (self.conversation_id or "").strip()
+        if ctx_obj is not None and ctx_cid:
+            if cid and cid != ctx_cid:
+                cid = ""
+            else:
+                cid = ctx_cid
+        # 会话绑定角色卡（context.persona_id）；绑定失效 fail soft 回退全局激活卡。
+        persona_card = None
+        persona_id = getattr(ctx_obj, "persona_id", None) if ctx_obj is not None else None
+        if persona_id:
+            from whale_core.ui.persona_resolver import PersonaResolver
+            persona_card = PersonaResolver(store).card_for(persona_id)
+
+        if spaces is None:
+            # 无可信授权域：只渲染全局人格，不读记录。空元组进
+            # build_continuity_context 即 fail closed（不列举任何空间）。
+            ctx = build_continuity_context(
+                store, allowed_space_ids=(), persona_card=persona_card)
+            return ctx.persona_summary, [], ()
+
+        space_ids = tuple(getattr(s, "space_id", s) for s in spaces)
+        ctx = build_continuity_context(
+            store, allowed_space_ids=space_ids, persona_card=persona_card)
+        persona_text = ctx.persona_summary
+        if not spaces:
+            # 已解析但零授权空间：记忆与历史都不注入（fail closed）。
+            return persona_text, [], ()
+
+        def _injectable(raw: str) -> str:
+            """背景记忆：整段报时丢弃；否则剥报时句，只留有意义事实。"""
+            text_m = str(raw or "").strip()
+            if not text_m or is_transient_time_only(text_m):
+                return ""
+            cleaned = scrub_episode_summary(text_m)
+            if cleaned:
+                return cleaned
+            return scrub_transient_time(text_m)
+
+        memories: list[str] = []
+        if self.curator is not None:
+            # 与 companion._recall 同一纪律：召回限定授权空间；include_protected
+            # 仅在授权集合本身含 vault（resolver 已按主人私聊过滤）时才下传。
+            recall_kwargs: dict = {"limit": 5, "allowed_spaces": spaces}
+            if _spaces_include_vault(spaces):
+                recall_kwargs["include_protected"] = True
+            for hit in self.curator.recall(situation or "", **recall_kwargs):
+                piece = _injectable(str(hit.record.content.get("summary", "")))
+                if piece:
+                    memories.append(piece)
+        # 情节补充（curator 路径的补充 / 无 curator 时的唯一记录来源）：
+        # 与 companion 同一纪律——只取本会话、tags 含 chat 的情节，规范化
+        # 去重、封顶 3 条；跨会话旧情节（含其他成员的会话）不注入。
+        if cid:
+            seen_norm = {_norm_mem(m) for m in memories}
+            added = 0
+            for record in ctx.recent_episodes:
+                if "chat" not in record.tags:
+                    continue
+                if str(record.content.get("conversation_id") or "") != cid:
+                    continue
+                summary = _injectable(str(record.content.get("summary", "")))
+                norm = _norm_mem(summary)
+                if not summary or not norm or norm in seen_norm:
+                    continue
+                seen_norm.add(norm)
+                memories.append(summary)
+                added += 1
+                if added >= 3:
+                    break
+        memories = memories[:8]
+
+        history: tuple = ()
+        if cid:
+            from whale_core.memory.history import conversation_lock, load_history
+            with conversation_lock(store, cid):
+                history = tuple(load_history(store, cid))
+        return persona_text, memories, history
 
     def tick(self, *, situation: str = "") -> ProactiveGreetingTick:
         if not self.config.enabled:
             return ProactiveGreetingTick(False, reason="disabled")
         if self.judge is None:
             return ProactiveGreetingTick(False, reason="no_judge")
+        # 人格/记忆/历史与 Enxi 日常对话同一来源；构建故障 fail soft 为空注入，
+        # 问候循环不因此退出（与 companion 的上下文构建纪律一致）。
+        try:
+            persona, memories, history = self._brain_context(situation)
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("proactive context build failed: %s", type(exc).__name__)
+            persona, memories, history = "", [], ()
         # 判断提示刻意短；真实 system/persona 由宿主拼。
         verdict = (self.judge.reply(
             "判断是否现在主动问候主人一句。只回答 yes 或 no。"
             "默认谨慎：没有明显契机就回答 no。\n"
             f"情境：{(situation or '')[:800]}",
-            persona="", memories=(), history=()) or "").strip().lower()
+            persona=persona, memories=memories, history=history) or "").strip().lower()
         if not (verdict.startswith("y") or verdict.startswith('{"yes')
                 or '"should_speak": true' in verdict
                 or '"should_speak":true' in verdict):
@@ -214,7 +395,7 @@ class ProactiveGreetingLoop:
                 return ProactiveGreetingTick(True, reason=why, draft="", sent=False)
         draft = (self.reply_model.reply(
             "写一句简短自然的主动问候（中文，一两句）。不要提问连环，不要提工具。",
-            persona="", memories=(), history=()) or "").strip()
+            persona=persona, memories=memories, history=history) or "").strip()
         if not draft:
             return ProactiveGreetingTick(True, reason="empty", draft="")
         if self.config.dry_run:

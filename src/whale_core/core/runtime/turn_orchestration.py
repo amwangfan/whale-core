@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import contextvars
 import re
 import threading
 import time
@@ -218,7 +219,7 @@ class TurnOrchestrationMixin:
                         # 宿主补发异常：台账标记送达失败（可见、可人工重发）
                         self.mark_delivery_failed(task_id, error="host-callback-raised")
 
-            threading.Thread(target=_run, daemon=True,
+            threading.Thread(target=contextvars.copy_context().run, args=(_run,), daemon=True,
                              name=f"whale-task-{task_id}").start()
             return TurnResult(reply=ack, status="ack", plan=plan, task_id=task_id)
 
@@ -282,7 +283,7 @@ class TurnOrchestrationMixin:
             except BaseException as exc:  # pragma: no cover - _decide_intent 已兜底
                 fut.set_exception(exc)
 
-        threading.Thread(target=_plan_thread, daemon=True,
+        threading.Thread(target=contextvars.copy_context().run, args=(_plan_thread,), daemon=True,
                          name="whale-intent-bg").start()
         note = self.FIRST_REPLY_NOTE if first_note is None else first_note
         t1 = time.perf_counter()
@@ -415,7 +416,7 @@ class TurnOrchestrationMixin:
                                                   error="host-callback-raised")
             return "task", result
 
-        threading.Thread(target=_follow, daemon=True,
+        threading.Thread(target=contextvars.copy_context().run, args=(_follow,), daemon=True,
                          name="whale-followup").start()
         return first_result
 
