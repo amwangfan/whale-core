@@ -197,8 +197,8 @@ def build_participation_prompt(query: ParticipationQuery, *,
         "- 宁可少说，不乱插话。\n")
     if lines:
         prompt += "\n最近群聊：\n" + "\n".join(lines) + "\n"
-    prompt += (f"\n最新一条（{cur_label}）：{cur_marks.strip() + ' '
-               if cur_marks else ''}{cur_text}\n"
+    current_prefix = cur_marks.strip() + " " if cur_marks else ""
+    prompt += (f"\n最新一条（{cur_label}）：{current_prefix}{cur_text}\n"
                f"{notes}\n\n"
                "只回答一个词：directed / valuable_join / observe。")
     return prompt
