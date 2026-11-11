@@ -356,7 +356,30 @@ def _all_stored_text(store) -> str:
         json.dumps(store.get(k), ensure_ascii=False) for k in store.keys())
 
 
-def test_companion_user_text_and_history_exclude_facts(delegates):
+@pytest.fixture
+def frozen_context_clock(monkeypatch):
+    """仅冻结 whale_core.api.glasses_context 模块的时钟到 NOW（2026-11-11）。
+
+    LEGACY_BLOCK 是固定日期（11-11）的事实块，而 render_context 以真实
+    datetime.now 过滤「跨日期不过夜」——真实时钟走到 11-12 后过滤行为
+    本身正确，但这两例因此丢 facts。冻时只作用于本模块的 datetime 引用
+    （strptime 等 classmethod 经子类继承不受影响），不冻 delegates/全局。
+    """
+    import whale_core.api.glasses_context as gc
+
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return NOW.replace(tzinfo=None)
+            return NOW.astimezone(tz)
+
+    monkeypatch.setattr(gc, "datetime", FixedDateTime)
+    return FixedDateTime
+
+
+def test_companion_user_text_and_history_exclude_facts(delegates,
+                                                       frozen_context_clock):
     reply, _ = delegates["companion_chat"](
         LEGACY_BLOCK + "[用户] 今天有什么安排？",
         conversation_id="glasses:ctx1")
@@ -397,7 +420,8 @@ def test_companion_uses_synced_snapshot_as_background(delegates):
     assert history[0]["content"] == "今天有啥事？"
 
 
-def test_quick_facts_in_persona_and_no_history(delegates):
+def test_quick_facts_in_persona_and_no_history(delegates,
+                                               frozen_context_clock):
     reply, _ = delegates["quick_chat"](LEGACY_BLOCK + "[用户] 你好")
     assert reply
     call = delegates["_quick_brain"].calls[0]

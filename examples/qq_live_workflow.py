@@ -1518,8 +1518,9 @@ def cmd_run(args) -> int:
                 join = group_turn_policy.maybe_join(
                     conversation=event.conversation, text=event.text,
                     activity=rhythm0.activity, dnd=rhythm0.dnd,
-                    timeline_entries=timeline.recent(event.conversation,
-                                                     limit=5))
+                    sender_id=event.sender_id, message_id=event.message_id,
+                    timeline_entries=timeline.recent(
+                        event.conversation, limit=_GROUP_TURN_TIMELINE_FETCH))
                 if join.action != "join":
                     print(f"  [旁观] 群消息未指向鲸鱼"
                           f"（{decision.reason_code}/{join.reason_code}），"
@@ -1529,7 +1530,7 @@ def cmd_run(args) -> int:
                     _tfin(_tid, "silent")
                     return
                 print(f"  [参与] {rhythm0.activity} 档主动接话 ← "
-                      f"{event.sender_id}")
+                      f"{event.sender_id}（{join.reason_code}）")
                 decision = TurnDecision(
                     "reply", f"join:{rhythm0.activity}",
                     target_sender_id=event.sender_id,
@@ -1720,8 +1721,10 @@ def cmd_run(args) -> int:
                 join = group_turn_policy.maybe_join(
                     conversation=incoming.conversation, text=incoming.text,
                     activity=_rhythm2.activity, dnd=_rhythm2.dnd,
-                    timeline_entries=timeline.recent(incoming.conversation,
-                                                     limit=12))
+                    sender_id=str(incoming.account or ""),
+                    message_id=str(incoming.message_id or ""),
+                    timeline_entries=timeline.recent(
+                        incoming.conversation, limit=_GROUP_TURN_TIMELINE_FETCH))
                 if join.action != "join":
                     _tspan(_tid, "decide", "observe",
                            reason_code=join.reason_code or decision.reason_code)
@@ -1982,44 +1985,36 @@ def cmd_run(args) -> int:
         ) if n.strip()
     ))
 
-    # 2026-11-02 owner 决策：规则判不出的「是不是在找鲸鱼」由意图模型兜底
-    # （实证：「说出来各位的名字哦」无「你」无问号被静默压制，其实是对着
-    # 鲸鱼刚发的语音说的）。仅在机器人近窗发过言时调用，调用有界。
-    def _llm_call_bounded(prompt: str, *, default: str = "", timeout_s: float = 6.0) -> str:
-        """意图/判定脑有界调用：超时或异常返回 default，避免拖死入站线程。"""
-        brain = globals().get("_intent_brain_ref")
-        if brain is None:
-            return default
-        from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FutTimeout
-        try:
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                fut = pool.submit(brain.reply, prompt)
-                return str(fut.result(timeout=max(2.0, float(timeout_s))) or "")
-        except _FutTimeout:
-            print(f"  [判定] 意图模型超时 {timeout_s:.0f}s，走默认")
-            return default
-        except Exception:
-            return default
+    # 2026-11-12 reviewer 决策：意图/判定脑调用统一走 BoundedCall——
+    # 单 worker + busy 短路（超时后旧 with-executor 仍阻塞收尾、且每次新建
+    # 线程池；语义审批扩大调用面后必须不并发堆积）。脑对象由宿主注入，
+    # 本路径不读任何密钥。
+    from whale_core.life.bounded_call import BoundedCall
+    _bounded_brain = None
+    if globals().get("_intent_brain_ref") is not None:
+        _bounded_brain = BoundedCall(globals()["_intent_brain_ref"].reply)
 
-    def _llm_directed(text, entries) -> bool:
-        lines = []
-        for e in list(entries or ())[-6:]:
-            if not isinstance(e, dict):
-                continue
-            who = "Enxi" if e.get("is_self") else "群友"
-            body = " ".join(str(e.get("text") or "").split())[:80]
-            if body:
-                lines.append(f"{who}：{body}")
-        name = bot_aliases[0] if bot_aliases else "Enxi"
-        prompt = (
-            f"判断一条群聊消息是不是在对群里名叫「{name}」的机器人说话"
-            "（叫她回应、让她做事、接着她的话头说事都算；群友之间互相聊、"
-            "单纯陈述不算）。\n"
-            + ("群聊最近消息：\n" + "\n".join(lines) + "\n" if lines else "")
-            + f"最新一条：{str(text)[:200]}\n只回答一个字：是 或 否。")
-        ans = _llm_call_bounded(prompt, default="否", timeout_s=float(
-            os.environ.get("QQ_DIRECTED_TIMEOUT_S", "6") or "6"))
-        return str(ans or "").strip().startswith("是")
+    def _llm_call_bounded(prompt: str, *, default: str = "", timeout_s: float = 6.0) -> str:
+        """意图/判定脑有界调用：超时/异常/忙碌返回 default，不拖死入站线程。"""
+        if _bounded_brain is None:
+            return default
+        return str(_bounded_brain(prompt, default=default,
+                                  timeout_s=max(2.0, float(timeout_s)))
+                   or default)
+
+    # 2026-11-12 owner 决策：减少主动回复——规则信号（点名/提问/承接/话题
+    # 滚动）降级为候选，统一由语义审批裁定 directed/valuable_join/observe
+    # （prompt 构建与严格解析在 whale_core.life.group_judge，可测）。
+    # 无意图脑时 judge=None：GroupTurnPolicy 保持纯规则旧行为（离线兼容）。
+    from whale_core.life.group_judge import ParticipationJudge
+    _participation_judge = None
+    if _bounded_brain is not None:
+        _participation_judge = ParticipationJudge(
+            lambda prompt: _llm_call_bounded(
+                prompt, default="observe", timeout_s=float(
+                    os.environ.get("QQ_PARTICIPATE_TIMEOUT_S", "6") or "6")),
+            bot_name=bot_aliases[0] if bot_aliases else "Enxi",
+            name_resolver=timeline.name_resolver, self_uid=self_uid)
 
     # 2026-11-02 owner 决策：复读链命中后由意图模型判断「该不该跟」——
     # 应景/好玩的链跟，无意义/广告/ky 的链不跟。
@@ -2050,11 +2045,22 @@ def cmd_run(args) -> int:
         _topic_prob = float(os.environ.get("WHALE_GROUP_TOPIC_JOIN_PROB", "0.18"))
     except ValueError:
         _topic_prob = 0.18
+    # 两个群入口（owner/未配对）统一的时间线取数（2026-11-12 reviewer 决策：
+    # 此前 5/12 不一致；且合批期间当前消息可能被 ≥12 条未来消息挤出小窗——
+    # 取 store 上限 200 条，由策略层按当前 message_id 定位后再取前窗，
+    # 定位缺失则按空历史保守判定，不喂未来）。
+    _GROUP_TURN_TIMELINE_FETCH = 200
     group_turn_policy = GroupTurnPolicy(
         store, bot_names=bot_aliases, quiet_now=_quiet_now,
-        directed_classifier=_llm_directed, chain_judge=_chain_judge,
+        # judge 存在时取代 directed_classifier（策略内部不双调；不再单独传）
+        participation_judge=_participation_judge,
+        chain_judge=_chain_judge,
         topic_join_prob=_topic_prob,
     )
+    # 启动公示参与审批模式（只含模式与意图脑有无，不含模型配置/正文/密钥）
+    _judge_mode = ("semantic（规则候选+意图脑语义审批）" if _participation_judge
+                   else "legacy_rule（纯规则，无意图脑）")
+    print(f"[参与] 群聊主动参与审批模式={_judge_mode}")
 
     _member_extractor = MemberMemoryExtractor(
         store, timeline, MemberConsentStore(store), _bindings, _spaces)

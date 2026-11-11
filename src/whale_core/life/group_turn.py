@@ -13,8 +13,14 @@
 - 群友之间的互损/争执未点名 → 旁观；纯表情/图片无文 → 旁观。
 - 话题滚动可回（吃/考试/星期等关键词，或近期连续闲聊）且本 bot 近窗
   未发言时，按小概率接 1 条（仍受冷却/日配额约束）；不做隐私审查过滤。
+- 可选 ``participation_judge``（2026-11-12 owner 决策：减少主动插话）：
+  装配后，规则信号（直呼其名/提问/承接/话题滚动）只作为**候选**，统一交由
+  语义审批裁定 directed / valuable_join / observe（固定枚举严格解析，非法
+  输出与异常一律 fail-closed 为 observe）；judge 存在时取代
+  ``directed_classifier``（不双调）。quiet 档与时间静默只允许 directed，
+  valuable_join 不突破。未装配 judge = 旧规则行为完全不变（离线兼容）。
 - 每次决策记录 ``reason_code`` 到 kv（可观测：Studio/日志可查「为何这次
-  没有发言」），只存原因码与时间，不存消息正文等私人内容。
+  没有发言」），只存原因码与时间，不存消息正文/模型自由理由等私人内容。
 - 本策略不拓宽任何 ACL/Shell/设备/sudo 权限（PER-01）。
 
 存储键（kv，双后端一致）：
@@ -77,6 +83,22 @@ REASON_REPEAT_CHAIN = "repeat_chain"        # 复读跟风（群友刷屏链 +1�
 REASON_TOPIC_ROLL = "topic_roll"            # 话题滚动小概率接话
 REASON_MEDIA_ONLY = "media_only"            # 纯表情/图片无文
 REASON_ALREADY_COVERED = "already_covered"  # 刚有人已完整接住
+REASON_JUDGE_OBSERVE = "judge_observe"      # 语义审批否决候选（参与审批判旁观）
+REASON_VALUABLE_JOIN = "valuable_join"      # 语义审批：非定向但明显值得接一句
+
+#: participation_judge 的裁定枚举（固定取值，严格解析；此外一律 observe）。
+VERDICT_DIRECTED = "directed"        # 这条是在找鲸鱼（叫她回应/让她做事/对她跟进）
+VERDICT_VALUABLE = "valuable_join"   # 没人找她，但自然插一句明显有价值
+VERDICT_OBSERVE = "observe"          # 旁观
+
+_VERDICTS = (VERDICT_DIRECTED, VERDICT_VALUABLE, VERDICT_OBSERVE)
+
+
+def parse_participation_verdict(raw) -> str:
+    """严格解析裁定：只认固定枚举（去空白/尾标点、小写归一），其余 fail-closed
+    为 observe。模型自由发挥的理由永不落账、永不放行。"""
+    s = str(raw or "").strip().lower().strip("。．.!！?？,，;；:：\"' ")
+    return s if s in _VERDICTS else VERDICT_OBSERVE
 
 #: 话题滚动关键词（吃/考试/星期等）；命中 + bot 近窗未发言 → 小概率可回。
 _TOPIC_RE = re.compile(
@@ -192,6 +214,57 @@ def _already_covered(text: str, entries) -> bool:
     return False
 
 
+def _split_timeline(entries, message_id: str):
+    """按当前消息 ID 把时间线切成 (history, current_entry)。
+
+    - 命中：history = 当前消息**之前**的条目（其后到达的「未来」条目丢弃，
+      防止合批/并发期间新消息污染规则判定与审批上下文）；
+    - ``message_id`` 为空：history 原样、current None（legacy 调用/测试兼容，
+      调用方保证无未来条目）；
+    - 给了 ID 但未命中：history = ()、current None——定位缺失时宁可没有
+      历史，也不把可能是未来的条目喂给 bot_recent/topic/repeat 等规则
+      （2026-11-12 reviewer 决策：不降级尾窗）。
+
+    规则判定一律用 history；复读链用 history + current（当前消息本就是
+    链的一环）；连续发言限制用 history + current（含当前：前一条是机器人
+    自己而当前是群友新消息时，不构成「连发」，judge-directed 承接不被误挡）。
+    """
+    seq = [e for e in (entries or ()) if isinstance(e, dict)]
+    if not message_id:
+        return tuple(seq), None
+    for i, e in enumerate(seq):
+        if str(e.get("message_id") or "") == str(message_id):
+            return tuple(seq[:i]), e
+    return (), None
+
+
+@dataclass(frozen=True)
+class ParticipationQuery:
+    """交给 participation_judge 的一次语义审批请求（宿主据此构造 prompt）。
+
+    ``signals``：命中的规则候选（"named"/"question"/"follow_up"/"topic_roll"），
+    仅供宿主在 prompt 中说明；裁定以语义为准。
+    ``timeline_entries`` 为按 ``message_id`` 截断后的历史 + 当前条目（policy
+    已排未来；宿主构造 prompt 时再截一次是幂等保险）。
+    ``sender_uid``/``mentions``/``reply_to``/``send_time`` 为当前消息的真实
+    元数据（从时间线条目提取；缺失为空）——prompt 据此标注当前消息的
+    回复对象与 @ 关系，不猜、不坍缩。
+    """
+
+    text: str
+    activity: str
+    conversation: str = ""
+    timeline_entries: tuple = ()
+    signals: Tuple[str, ...] = ()
+    bot_spoke_recently: bool = False
+    sender_id: str = ""
+    sender_uid: str = ""
+    message_id: str = ""
+    mentions: Tuple[str, ...] = ()
+    reply_to: Tuple[str, ...] = ()
+    send_time: str = ""
+
+
 @dataclass(frozen=True)
 class JoinDecision:
     """主动参与决策结果。action ∈ {"join", "observe"}。
@@ -213,6 +286,7 @@ class GroupTurnPolicy:
                  now_fn: Optional[Callable[[], datetime]] = None,
                  quiet_now: Optional[Callable[[], bool]] = None,
                  directed_classifier=None, chain_judge=None,
+                 participation_judge=None,
                  topic_join_prob: float = DEFAULT_TOPIC_JOIN_PROB,
                  rng: Optional[Callable[[], float]] = None):
         self.store = store
@@ -229,9 +303,15 @@ class GroupTurnPolicy:
         # 规则全不命中被静默压制）。可调用 (text, timeline_entries) -> bool；
         # 仅在机器人近窗发过言（对话进行中）且规则不命中时调用，调用有界。
         self._directed_classifier = directed_classifier
+        # 2026-11-12 owner 决策：可选语义审批。装配后规则信号降级为候选，
+        # 由 judge 统一裁定 directed/valuable_join/observe（严格解析，异常与
+        # 非法输出 fail-closed 为 observe）；judge 存在时不再调用
+        # directed_classifier（避免双调）。可调用 (ParticipationQuery) -> str。
+        self._participation_judge = participation_judge
         # 2026-11-02 owner 决策：复读链命中后仍要判断「该不该跟」——可调用
         # (chain_text, timeline_entries) -> bool（意图模型）；None = 命中即跟
         # （测试/离线默认）。判定器异常 fail-closed 为不跟（宁可少跟不乱跟）。
+        # 复读跟风不经过 participation_judge：chain_judge 是其唯一判定。
         self._chain_judge = chain_judge
         # 话题滚动小概率；rng 可注入以便测例确定性（返回 [0,1)）。
         self._topic_join_prob = max(0.0, min(1.0, float(topic_join_prob)))
@@ -241,11 +321,14 @@ class GroupTurnPolicy:
 
     def maybe_join(self, *, conversation: str, text: str,
                    activity: str, dnd: bool = False,
-                   timeline_entries=()) -> JoinDecision:
+                   timeline_entries=(),
+                   sender_id: str = "", message_id: str = "") -> JoinDecision:
         """对一条 resolver 判 observe 的群消息，决定是否主动参与。
 
         ``activity`` 来自 ConversationRhythm（quiet/balanced/lively）。
         ``timeline_entries`` 为该群近期时间线（含 is_self 标记）。
+        ``sender_id``/``message_id`` 是当前消息的发送者与 ID（供语义审批
+        标注归属、按当前消息截断时间线）；缺省为空（旧调用兼容）。
         """
         group = str(conversation)
         if activity not in DAILY_QUOTA:
@@ -253,10 +336,21 @@ class GroupTurnPolicy:
         if dnd:
             return self._record(group, JoinDecision("observe", REASON_DND))
 
+        # 2026-11-12 reviewer 决策：入口先按当前 message_id 切快照——
+        # 普通规则只看「当前之前」的历史，未来条目（合批/并发期间到达）
+        # 绝不参与判定；复读链用 历史+当前；连续发言限制用 含当前 的快照。
+        history, current_entry = _split_timeline(timeline_entries, message_id)
+        chain_entries = history + ((current_entry,) if current_entry else ())
+        snapshot_with_current = chain_entries
+
         raw_text = str(text or "")
         if _media_only(raw_text):
             return self._record(group, JoinDecision("observe", REASON_MEDIA_ONLY))
-        if _already_covered(raw_text, timeline_entries):
+        # judge 路径下「刚有人已完整接住」的短句场景交模型语义判定
+        # （短句也可能是明确请求「Enxi帮我」「那你画吧」——硬短句拦截会
+        # 误杀真实请求，2026-11-12 reviewer 决策）；legacy 路径维持硬拦截不变。
+        if self._participation_judge is None \
+                and _already_covered(raw_text, history):
             return self._record(group, JoinDecision("observe", REASON_ALREADY_COVERED))
 
         # 复读链检测（lively 档；非静默时段）：群友刷屏复读时跟风 +1。
@@ -265,36 +359,105 @@ class GroupTurnPolicy:
         repeat_text: "str | None" = None
         chain_rejected = False
         if activity == "lively" and not self._quiet_now():
-            repeat_text = _repeat_chain(timeline_entries)
+            repeat_text = _repeat_chain(chain_entries)
             if repeat_text is not None and self._chain_judge is not None:
                 try:
-                    if not self._chain_judge(repeat_text, timeline_entries):
+                    if not self._chain_judge(repeat_text, chain_entries):
                         repeat_text = None
                         chain_rejected = True
                 except Exception:
                     repeat_text = None  # 判定器故障 = 不跟（宁可少跟）
                     chain_rejected = True
+        if chain_rejected:
+            # 复读链由 chain_judge 唯一决策（2026-11-12 reviewer 决策）：
+            # 否决 = 本轮旁观，不经 topic_roll / 语义审批复活，也不再送审
+            # （不双调）。
+            return self._record(group, JoinDecision("observe", REASON_NOT_DIRECTED))
 
         text = str(text or "")
         named = bool(self._name_re.search(text)) if self._name_re else False
         # 提问信号要有实际内容：光一个「？」不算提问（2026-11-02 生产实证：
         # 单个问号被 lively 当提问接话，还对上了旧话茬，答非所问）。
         question = bool(_QUESTION_RE.search(text)) and _has_content(text)
+        # 机器人近窗（近 5 条历史）发过言 = 对话可能仍在进行（judge/兜底判定/
+        # 承接句式都以它为门槛，保证语义调用有界——不是每条群消息都问模型）。
+        bot_recent = any(isinstance(e, dict) and e.get("is_self")
+                         for e in history[-5:])
         # lively 补充信号：时间线近窗有机器人自己的发言（我刚参与过），
         # 且本条是「你+请求动词」的承接句式 → 视为叫我做事的跟进请求。
         follow_up = (
             activity == "lively"
             and bool(_FOLLOWUP_RE.search(text))
-            and any(isinstance(e, dict) and e.get("is_self")
-                    for e in list(timeline_entries)[-5:])
+            and bot_recent
         )
+
+        # 话题滚动可回：关键词或近窗连续闲聊 + bot 近窗未发言 + 小概率。
+        # 提前到静默判定之前计算：它是 judge 的候选之一（judge 仍可否决）。
+        topic_roll = False
+        if activity in ("balanced", "lively"):
+            topic_hit = (
+                not self._quiet_now()
+                and _bot_silent_recently(history)
+                and _topic_roll_eligible(text, history)
+            )
+            if topic_hit and self._topic_join_prob > 0:
+                try:
+                    topic_roll = bool(self._rng() < self._topic_join_prob)
+                except Exception:
+                    topic_roll = False
+
+        # 2026-11-12 owner 决策：装配 participation_judge 时，规则信号
+        # （named/question/follow_up/topic_roll）只是**候选**，统一交语义审批；
+        # 无字面信号但机器人近窗发过言时同样送审（semantic followup——
+        # 「说出来各位的名字哦」类无「你」无问号的定向跟进不被漏掉）。
+        # 无候选且机器人近期没说话 → 不调用（调用有界）。judge 存在时
+        # directed_classifier 不再调用（避免双调）。复读链命中直发不送审
+        # （chain_judge 已唯一决策，不双调）。
+        verdict: "str | None" = None
+        if self._participation_judge is not None and repeat_text is None:
+            sig = []
+            if named:
+                sig.append("named")
+            if question and activity == "lively":
+                sig.append("question")
+            if follow_up:
+                sig.append("follow_up")
+            if topic_roll:
+                sig.append("topic_roll")
+            if sig or bot_recent:
+                query = ParticipationQuery(
+                    text=text, activity=activity, conversation=group,
+                    timeline_entries=chain_entries,
+                    signals=tuple(sig), bot_spoke_recently=bot_recent,
+                    sender_id=str(
+                        (current_entry or {}).get("sender_id")
+                        or sender_id or ""),
+                    sender_uid=str((current_entry or {}).get("sender_uid")
+                                   or ""),
+                    message_id=str(message_id or ""),
+                    mentions=tuple(str(m) for m in
+                                   ((current_entry or {}).get("mentions")
+                                    or ())),
+                    reply_to=tuple(str(r) for r in
+                                   ((current_entry or {}).get("reply_to")
+                                    or ())),
+                    send_time=str((current_entry or {}).get("send_time")
+                                  or ""))
+                try:
+                    verdict = parse_participation_verdict(
+                        self._participation_judge(query))
+                except Exception:
+                    verdict = VERDICT_OBSERVE  # 审批故障 = 旁观（宁可少说）
+        judge_directed = verdict == VERDICT_DIRECTED
+        judge_valuable = verdict == VERDICT_VALUABLE
 
         # 意图模型兜底定向判定（2026-11-02 owner 决策）：规则全不命中、且
         # 机器人近窗发过言（对话进行中）时，问一句模型「这条是不是在找鲸鱼」。
+        # 仅 legacy 路径（未装配 participation_judge）。
         llm_directed = False
-        if not (named or follow_up) and self._directed_classifier is not None \
-                and any(isinstance(e, dict) and e.get("is_self")
-                        for e in list(timeline_entries)[-5:]):
+        if self._participation_judge is None \
+                and not (named or follow_up) \
+                and self._directed_classifier is not None and bot_recent:
             try:
                 llm_directed = bool(self._directed_classifier(
                     text, timeline_entries))
@@ -304,40 +467,46 @@ class GroupTurnPolicy:
         # 时间静默（2026-11-01 owner 决策修正）：只压制「没人找我」的自主插话；
         # 直呼其名 / 承接请求 / 模型判定定向 = 群里明确在找我，照常回应
         # （且不耗主动配额/冷却——本质是回复而非插话；配额留给真正的主动插话）。
+        # judge 路径：只有 directed 能突破静默；valuable_join 不能（2026-11-12）。
         if self._quiet_now():
+            if self._participation_judge is not None:
+                if judge_directed:
+                    return self._record(
+                        group, JoinDecision("join", REASON_QUIET_DIRECTED))
+                return self._record(
+                    group, JoinDecision("observe", REASON_QUIET_HOURS))
             if not (named or follow_up or llm_directed):
                 return self._record(group, JoinDecision("observe", REASON_QUIET_HOURS))
             return self._record(group, JoinDecision("join", REASON_QUIET_DIRECTED))
 
-        topic_roll = False
         if activity == "quiet":
-            # quiet：只回应直接提及（@/引用已被 resolver 拦截；这里是直呼其名）
-            if not named:
+            # quiet：只回应直接提及（@/引用已被 resolver 拦截；judge 路径下
+            # 仅 directed 放行——valuable_join 不突破 quiet 档）。
+            if self._participation_judge is not None:
+                if not judge_directed:
+                    return self._record(group, JoinDecision(
+                        "observe", REASON_JUDGE_OBSERVE if verdict is not None
+                        else REASON_QUIET_MODE))
+            elif not named:
                 return self._record(group, JoinDecision("observe", REASON_QUIET_MODE))
         else:
-            # 话题滚动可回：关键词或近窗连续闲聊 + bot 近窗未发言 + 小概率
-            # 判定器否决/故障的复读链不得经话题滚动复活（同一句话、同一轮）——
-            # 否则「该不该跟」的门会被 18% 概率旁路（2026-11-05 回归修复）。
-            topic_hit = (
-                activity in ("balanced", "lively")
-                and not chain_rejected
-                and not self._quiet_now()
-                and _bot_silent_recently(timeline_entries)
-                and _topic_roll_eligible(text, timeline_entries)
-            )
-            if topic_hit and self._topic_join_prob > 0:
-                try:
-                    topic_roll = bool(self._rng() < self._topic_join_prob)
-                except Exception:
-                    topic_roll = False
-            if not (named or follow_up or llm_directed or repeat_text is not None
-                    or (activity == "lively" and question) or topic_roll):
+            if self._participation_judge is not None:
+                if not (judge_directed or judge_valuable
+                        or repeat_text is not None):
+                    # 审批否决候选；未送审（无候选且机器人近期未发言）维持原判
+                    return self._record(group, JoinDecision(
+                        "observe", REASON_JUDGE_OBSERVE if verdict is not None
+                        else REASON_NOT_DIRECTED))
+            elif not (named or follow_up or llm_directed or repeat_text is not None
+                      or (activity == "lively" and question) or topic_roll):
                 # balanced：直呼其名/承接/话题滚动；lively：另含提问/复读链
                 return self._record(group, JoinDecision("observe", REASON_NOT_DIRECTED))
 
-        # 连续发言限制：时间线最新一条已是鲸鱼自己 → 不再主动接话
-        if timeline_entries:
-            last = timeline_entries[-1]
+        # 连续发言限制：含当前的截断快照最新一条已是鲸鱼自己 → 不再主动接话。
+        # （当前消息是群友新消息时不构成连发——前一条是机器人、当前有人承接
+        # 的 judge-directed 放行；2026-11-12 reviewer 决策。）
+        if snapshot_with_current:
+            last = snapshot_with_current[-1]
             if isinstance(last, dict) and last.get("is_self"):
                 return self._record(
                     group, JoinDecision("observe", REASON_CONSECUTIVE))
@@ -363,6 +532,8 @@ class GroupTurnPolicy:
         self.store.put(f"life:turncool:{group}", self._now().isoformat())
         if repeat_text:
             reason = REASON_REPEAT_CHAIN
+        elif judge_valuable and not judge_directed:
+            reason = REASON_VALUABLE_JOIN
         elif topic_roll and not (named or follow_up or llm_directed
                                  or (activity == "lively" and question)):
             reason = REASON_TOPIC_ROLL
