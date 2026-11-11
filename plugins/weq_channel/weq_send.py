@@ -354,6 +354,50 @@ class WeQWebSendPort:
             return []
         return [m for m in members if isinstance(m, dict)]
 
+    # ── 媒体 rkey 刷新（2026-11-11 QQ 图 rkey 过期 gap）───────────────────
+    # 背景：QQ 图床 rkey 会过期，SSE 事件里的 fileToken/相对 url 若无新鲜
+    # rkey 则候选被丢弃；weq 侧「立即重新获取 rkey」走的就是这个 tRPC
+    # mutation（account.refreshRkeys），服务端刷新内存并持久化账号，
+    # context.refreshRkeysNow 实际返回 boolean（是否存到新鲜 rkey）。
+    # 本方法只刷新，不发消息、不开 full_mode、不改配置、不自起循环；
+    # 由宿主/workflow 媒体解析路径按需调用。
+
+    def refresh_media_rkeys(self) -> bool:
+        """请求 WeQ 立即重新获取在线 QQ 的媒体 rkey；返回是否真的刷到。
+
+        - 绑定字段：服务端 schema 为
+          ``z.object({expectedAccountUin?, expectedAccountConfigId?}).strict().optional()``，
+          两字段**各自 optional** 且服务端 requireExpectedAccount 逐字段独立
+          校验——只配了哪个就发哪个（半绑定合法，静默丢弃已有 owner 绑定
+          会让服务端漏掉 uin 校验）；一个都没有则发 ``{"json": {}}``（``
+          object.optional`` 只认 undefined 不认 null，送 null 会被 Zod 拒；
+          空对象通过 schema 且跳过全部账号校验，与无 input 语义等价）。
+        - 失败（网络/登录/非 200/形状不符）返回 False，**不触碰**
+          ``last_receipt``（那是发送回执状态，不是刷新状态）。
+        - token/cookie 与返回值都不进日志。
+        """
+        inp: dict = {}
+        if self.expected_account_uin:
+            inp["expectedAccountUin"] = self.expected_account_uin
+        if self.expected_account_config_id:
+            inp["expectedAccountConfigId"] = self.expected_account_config_id
+        payload = {"json": inp}
+        try:
+            if self._cookie is None:
+                self.login()
+            status, body, _ = self._post("/trpc/account.refreshRkeys", payload, auth=True)
+            if status == 401:  # 会话过期：重登一次再试（仅此一次）
+                self.login()
+                status, body, _ = self._post("/trpc/account.refreshRkeys", payload, auth=True)
+        except WeQSendError:
+            return False
+        if status != 200 or not isinstance(body, dict):
+            return False
+        # tRPC + superjson: {"result":{"data":{"json":<boolean>}}}
+        data = (((body.get("result") or {}).get("data") or {}).get("json"))
+        # refreshRkeysNow 实测返回 boolean；非布尔一律按失败处理，不造成功。
+        return data is True
+
     # ── 定向媒体发送（2026-11-01 媒体功能开放测试）─────────────────────
     # 与 send_c2c 同一纪律：c2c 目标强校验 uid 形状（回复语义由宿主保证），
     # 群目标必须在构造期白名单内；消息内容/模型输出永远不能指定发送目标。

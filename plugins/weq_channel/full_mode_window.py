@@ -302,6 +302,19 @@ class WindowedSendPort:
         except Exception:
             return []  # 昵称是增强，查询失败回退代号标签
 
+    def refresh_media_rkeys(self) -> bool:
+        """穿窗的媒体 rkey 刷新：开窗（需要时）→ 内层刷新 → touch 续期。
+
+        2026-11-11 实测：关窗（autoAttachQq=false）态下 account.refreshRkeys
+        HTTP 200 但返回 False——rkey 收割要 attach 在线，与发送同一窗口纪律，
+        故经既有 _through_window 临时开窗（不开新策略、不发消息）。
+        内层返回 False 也照 touch（失败尝试同样算窗口活跃，语义同失败发送）。
+        内层无此方法 → 如实 False，不开窗。
+        """
+        if not hasattr(self._inner, "refresh_media_rkeys"):
+            return False
+        return self._through_window(lambda: self._inner.refresh_media_rkeys())
+
     # ── 窗口管理 ────────────────────────────────────────────────
 
     def _window_open(self) -> bool:

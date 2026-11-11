@@ -59,6 +59,8 @@ class QqInboundWorkflow:
                  safety_reviewer=None,
                  completion_sender=None,
                  media_validator=None,
+                 media_url_resolver=None,
+                 media_refresh=None,
                  auth_service=None,
                  context_resolver=None,
                  on_member_provisioned=None,
@@ -114,6 +116,8 @@ class QqInboundWorkflow:
                 allowed_roots=_default_media_roots()
             )
         self._media_validator = media_validator
+        self._media_url_resolver = media_url_resolver
+        self._media_refresh = media_refresh
 
     def _effective_prefs(self) -> ProactivePrefs:
         """issue #42：kv 覆盖生效视图（单一配置来源——Studio 写入即生效，
@@ -127,7 +131,12 @@ class QqInboundWorkflow:
         单张校验失败只跳过该附件，不阻断整轮对话。"""
         from whale_core.core.media_input import MediaInputError
 
+        cached = (self._read_msgimg(str(getattr(event, "message_id", "") or ""))
+                  if len(event.attachments or ()) == 1 else ())
+        if cached:
+            return cached
         out: list = []
+        refreshed = False
         for att in (event.attachments or ())[:4]:
             if not isinstance(att, dict) or att.get("kind") != "pic":
                 continue
@@ -139,20 +148,27 @@ class QqInboundWorkflow:
                 except MediaInputError as exc:
                     print(f"  [附件] 本地图片被拒：{exc}")
             if image is None:
-                # 候选下载链：attachments 可带 urls 有序列表（QQ CDN 相对路径
-                # 已被渠道适配器补全为多个 rkey 候选），逐个尝试。
-                candidates = att.get("urls") or ()
-                if not candidates:
-                    single = str(att.get("url") or "")
-                    candidates = (single,) if single else ()
-                for url in candidates[:4]:
-                    if not str(url).startswith("https://"):
-                        continue
-                    try:
-                        image = self._media_validator.from_url(str(url))
-                        break
-                    except MediaInputError as exc:
-                        print(f"  [附件] 远端图片被拒：{exc}")
+                def candidates():
+                    current = self._media_url_resolver(att) if self._media_url_resolver else ()
+                    saved = att.get("urls") or ((att["url"],) if att.get("url") else ())
+                    return tuple(dict.fromkeys((*current, *saved)))[:4]
+
+                def download(urls):
+                    for url in urls:
+                        if not str(url).startswith("https://"):
+                            continue
+                        try:
+                            return self._media_validator.from_url(str(url))
+                        except MediaInputError as exc:
+                            print(f"  [附件] 图片下载未完成：{type(exc).__name__}")
+                    return None
+
+                image = download(candidates())
+                if (image is None and not refreshed and self._media_refresh
+                        and (att.get("original_url") or att.get("file_token"))):
+                    refreshed = True
+                    if self._media_refresh():
+                        image = download(candidates())
             if image is not None:
                 out.append((image.data, image.mime))
         return tuple(out)

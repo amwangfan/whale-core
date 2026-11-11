@@ -26,6 +26,7 @@ import sys
 import threading
 from collections.abc import Callable, Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import quote
 
 from whale_core.life.channels import Incoming, OwnerChannelRegistry, OwnerEvent
 from whale_core.life.inbox import SqliteInbox
@@ -112,9 +113,14 @@ def _pic_download_urls(data: Mapping, *, chat_type: str,
                        rkeys: list[tuple[str, str]]) -> tuple[str, ...]:
     """pic 元素 → 候选下载 URL（有序，最坏情况为空 tuple）。
 
-    - 绝对 https URL：直接可用；
+    - 绝对 https URL：直接可用（原样保留为首个候选，不再编码）；其中
+      **QQ 多媒体域的 /download** 还额外用活 rkey 重建候选（缺 rkey 补上、
+      旧 rkey 原位替换）——非 QQ 域绝不追加 rkey；
     - 相对 /download 路径 或仅 fileToken：补多媒体域名 + 按场景匹配 appid
-      的活 rkey（c2c=1406/type10，group=1407/type20；两者都试，场景优先）。
+      的活 rkey（c2c=1406/type10，group=1407/type20；两者都试，场景优先）；
+    - 仅 fileToken 拼路径时对 token 做 percent-encode——签名 token 常含
+      ``+ / =``，裸拼会损坏查询串；QQ 下发的相对路径已自带编码，原样用；
+    - 路径已含 rkey（签发时嵌入的旧值）：原位替换为活 rkey，不重复追加。
     """
     url = str(data.get("originalUrl") or "")
     token = str(data.get("fileToken") or "")
@@ -124,9 +130,14 @@ def _pic_download_urls(data: Mapping, *, chat_type: str,
     path = ""
     if url.startswith("/"):
         path = url
+    elif url.startswith(_QQ_MEDIA_HOST + "/download"):
+        # QQ 多媒体域绝对 /download：缺/旧 rkey 时用当前活 rkey 重建候选；
+        # 原始 URL 已保留在 out 首位，重建仅追加候选，非 QQ 域不会走到这。
+        path = url[len(_QQ_MEDIA_HOST):]
     elif token and not out:
         scene_appid = "1407" if chat_type == "group" else "1406"
-        path = f"/download?appid={scene_appid}&fileid={token}&spec=0"
+        path = (f"/download?appid={scene_appid}"
+                f"&fileid={quote(token, safe='')}&spec=0")
     if path and rkeys:
         import re as _re
 
@@ -138,7 +149,14 @@ def _pic_download_urls(data: Mapping, *, chat_type: str,
             candidate = _QQ_MEDIA_HOST + path
             if "appid=" in candidate:
                 candidate = _re.sub(r"appid=\d+", f"appid={rk_appid}", candidate)
-            out.append((candidate + rk)[:2000])
+            if "rkey=" in candidate:
+                # 已含 rkey（多为过期旧值）：原位换成活值，不追加第二个
+                fresh = rk.removeprefix("&rkey=")
+                candidate = _re.sub(r"rkey=[^&]*", lambda _m: f"rkey={fresh}",
+                                    candidate, count=1)
+            else:
+                candidate += rk
+            out.append(candidate[:2000])
     seen: set[str] = set()
     deduped: list[str] = []
     for u in out:
@@ -146,6 +164,27 @@ def _pic_download_urls(data: Mapping, *, chat_type: str,
             seen.add(u)
             deduped.append(u)
     return tuple(deduped[:4])
+
+
+def resolve_pic_attachment_urls(att: Mapping) -> tuple[str, ...]:
+    """pic 附件保留的原始来源 → 当前候选下载 URL（每次调用现读活 rkey）。
+
+    SSE 入站时 rkey 过期会令 url/urls 为空，但附件保留的 original_url/
+    file_token/chat_type 仍有效：rkey 刷新后据此重建下载链（复用
+    _pic_download_urls，不另造下载器）。无来源或无活 rkey → 空 tuple；
+    fileToken 是签名凭据，值不进任何日志。
+    """
+    if not isinstance(att, Mapping):
+        return ()
+    data = {
+        "originalUrl": str(att.get("original_url") or ""),
+        "fileToken": str(att.get("file_token") or ""),
+    }
+    if not data["originalUrl"] and not data["fileToken"]:
+        return ()
+    return _pic_download_urls(data,
+                              chat_type=str(att.get("chat_type") or "c2c"),
+                              rkeys=_load_weq_rkeys())
 
 
 def sse_message_to_incoming(event: Mapping, *, self_uin: str,
@@ -230,6 +269,14 @@ def sse_message_to_incoming(event: Mapping, *, self_uin: str,
                 "height": int(data.get("imgHeight") or 0),
                 "size": int(data.get("fileSize") or 0),
                 "md5": str(data.get("md5") or "")[:64],
+                # 原始下载来源（2026-11-11 rkey gap 修复）：SSE 时本机 rkey
+                # 过期会令 url/urls 为空，但 originalUrl/fileToken 仍有效——
+                # 保留它们，rkey 刷新后 resolve_pic_attachment_urls(att) 可
+                # 重建下载链。fileToken 是签名凭据：仅存于附件结构，
+                # 绝不打印日志（下方调试输出只含字段名，不含值）。
+                "original_url": str(data.get("originalUrl") or "")[:2000],
+                "file_token": str(data.get("fileToken") or "")[:2000],
+                "chat_type": str(chat_type or "c2c"),
             })
     # 诊断（结构性，不含正文/URL）：图片链路排障用——记录元素类型序列与
     # pic 元素实际携带的字段名，便于确认上游推送是否含附件。

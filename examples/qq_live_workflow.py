@@ -476,7 +476,10 @@ def cmd_run(args) -> int:
     # 陌生人/成员被动回复日额度可用 env 覆盖（默认 20；测试期可调大）
     # 2026-11-05 owner 决策：默认不限（0）；显式设正整数才启用上限
     _stranger_limit = int(os.environ.get("WHALE_QQ_STRANGER_DAILY_LIMIT", "0"))
+    from weq_channel.wq_push import resolve_pic_attachment_urls
     workflow = QqInboundWorkflow(store, build_brain(), prefs=prefs,
+                                 media_url_resolver=resolve_pic_attachment_urls,
+                                 media_refresh=getattr(send_port, "refresh_media_rkeys", None),
                                  auth_service=auth_service,
                                  context_resolver=context_resolver,
                                  stranger_daily_limit=_stranger_limit)
@@ -596,6 +599,11 @@ def cmd_run(args) -> int:
         peer_type = "group" if conv.startswith("group:") else "c2c"
         target = conv.split(":", 1)[1] if ":" in conv else ""
         _is_group = conv.startswith("group:")
+        from whale_core.life.rhythm import RhythmStore, rhythm_key_for
+        rhythm = RhythmStore(store).get(rhythm_key_for("qq", event.conversation) or "")
+        if rhythm.dnd:
+            print("  [节奏] 免打扰开启，任务补发跳过")
+            return
 
         def _note_self_media(kind: str, n: int = 1) -> None:
             """媒体补发也回写群时间线（is_self）——模型随后能在时间线里看到
@@ -672,14 +680,6 @@ def cmd_run(args) -> int:
         # （查不到才回落当前值），不把任务执行期间到达的新消息吞进基线。
         from whale_core.life.segments import split_reply
         from whale_core.life.batching import current_epoch, epoch_fresh
-        from whale_core.life.rhythm import RhythmStore, rhythm_key_for
-        # G4：会话节奏——免打扰开启时压制任务补发（不拦截被动回复）；
-        # 分段上限取节奏卡配置（quiet = 单气泡）。
-        rhythm = RhythmStore(store).get(
-            rhythm_key_for("qq", event.conversation) or "")
-        if rhythm.dnd:
-            print("  [节奏] 免打扰开启，任务补发跳过")
-            return
         ep = turn_epoch_by_msg.get(str(getattr(event, "message_id", "") or "")) \
             or current_epoch(store, event.conversation)
         segments, _plan = _plan_segments(
@@ -986,7 +986,7 @@ def cmd_run(args) -> int:
     def _track_video(event, vtask_id: str) -> None:
         conv = str(getattr(event, "conversation", "") or "")
         if conv and cap.video_manager is not None:
-            _pending_video[str(vtask_id)] = (
+            _pending_videos[str(vtask_id)] = (
                 conv, str(getattr(event, "message_id", "") or ""),
                 time.time() + 3600)  # 1h 死线
             print(f"  [视频跟踪] {str(vtask_id)[:8]}… 挂起轮询 ← {conv}")
@@ -1916,23 +1916,7 @@ def cmd_run(args) -> int:
         _cap_names.append("发语音")
     if _cap_names:
         workflow.companion.planning_hint += (
-            "\n你当前具备这些能力：" + "、".join(_cap_names) +
-            "——对方提出这类需求时会有任务流程接住处理，答应下来即可，"
-            "不要自称做不到或不会。")
-    # 读图能力自述（2026-11-01 生产实证：模型一边真读图一边说「读不了」）——
-    # 诚实口径：当条消息附带的图能直接看到；没被 @/没触发回复的旧图看不到。
-    workflow.companion.planning_hint += (
-        "\n对方当条消息里附带的图片你能直接看到内容并讨论；"
-        "别再说自己读不了图——之前看图猜内容都是真看到了，不是瞎猜。")
-    # 2026-11-05 owner 明确选 B：群聊人格偏温柔体贴（非 Grok 互损）。
-    # 原则与安全仍由系统后台把关；称呼用群名片/昵称。
-    workflow.companion.planning_hint += (
-        "\n群里都是熟人朋友：语气偏温柔体贴，少攻击性；可以轻轻接梗、关心人，"
-        "但不抬杠、不阴阳、不互损怼人，也不端着说教。"
-        "提到或称呼群友时直接用他们的群名片/昵称（时间线里 […|名字] 就是），"
-        "不要念 ID 或代号。"
-        "私聊可以稍亲近一点，但仍偏温柔。"
-        "别用客服腔，也别用破折号（——）串成长句那种作文腔；像平时打字一样短句。")
+            "\n当前已挂载工具：" + "、".join(_cap_names) + "。")
     # issue #57：反应图能力说明只在素材库非空时出现（每轮动态求值；
     # 模型只提语义标签，选图/频控由素材层兜底，发不出就纯文字）。
     _base_planning_hint = workflow.companion.planning_hint
@@ -1971,6 +1955,9 @@ def cmd_run(args) -> int:
                     break
         except Exception:
             pass
+    workflow.companion.self_uid = self_uid
+    if _hc is not None:
+        _hc.self_uid = self_uid
     target_resolver = ReplyTargetResolver(self_uin=self_uin, self_uid=self_uid)
 
     # issue #18：群聊主动参与策略（quiet/balanced/lively）。
