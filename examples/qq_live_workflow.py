@@ -1611,6 +1611,23 @@ def cmd_run(args) -> int:
                 _tspan(_tid, "plan", "skipped", reason_code="silent_planned")
                 _tfin(_tid, "silent")
                 return
+            # 2026-11-13 owner 决策：定向回复在群里 @ 回对方（QQ 惯例——
+            # 回某个人的话就 @ 他）。从来件元数据取目标，一次性消费；
+            # 模型无权编造 at 目标。在发送前一刻 prime，静默轮不产生残留。
+            if event.conversation.startswith("group:") and hasattr(
+                    send_port, "prime_group_at"):
+                _at_name = ""
+                _nd = globals().get("_name_directory_ref")
+                if _nd is not None and (event.sender_id or event.sender_uid):
+                    try:
+                        _at_name = _nd.resolver()(event.conversation, [
+                            (event.sender_id, event.sender_uid)]).get(
+                                str(event.sender_id), "")
+                    except Exception:
+                        pass
+                send_port.prime_group_at(
+                    event.conversation, uid=str(event.sender_uid or ""),
+                    uin=event.sender_id or 0, name=_at_name)
             _sent_segs = 0
             for i, seg in enumerate(segments):
                 # 2026-11-01 owner 决策：群里别人接着说 ≠ 截断机器人已开始
@@ -1825,6 +1842,21 @@ def cmd_run(args) -> int:
             _tspan(_tid, "plan", "skipped", reason_code="silent_planned")
             _tfin(_tid, "silent")
             return
+        # 2026-11-13 owner 决策：接话/回复在群里 @ 被回应的人（比如安慰
+        # 刚发图的那位）。目标从来件 sender 元数据取，发送前一刻 prime。
+        if is_group and hasattr(send_port, "prime_group_at"):
+            _at_name = ""
+            _nd = globals().get("_name_directory_ref")
+            _sid = str(incoming.sender_id or incoming.account or "")
+            _suid = str(incoming.sender_uid or "")
+            if _nd is not None and (_sid or _suid):
+                try:
+                    _at_name = _nd.resolver()(incoming.conversation,
+                                              [(_sid, _suid)]).get(_sid, "")
+                except Exception:
+                    pass
+            send_port.prime_group_at(incoming.conversation, uid=_suid,
+                                     uin=_sid or 0, name=_at_name)
         _sent_segs = 0
         _send_failed = False
         for i, seg in enumerate(segments):
