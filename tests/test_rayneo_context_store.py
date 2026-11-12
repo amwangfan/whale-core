@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import threading
 from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
@@ -171,7 +172,8 @@ def test_backup_to_roundtrip(tmp_path):
     src.ingest_batch("dev", [_item(1, "备份内容")], now_ms=1)
     dest = src.backup_to(tmp_path / "bak.sqlite3")
     assert dest.exists()
-    assert dest.stat().st_mode & 0o777 == 0o600
+    if os.name == "posix":
+        assert dest.stat().st_mode & 0o777 == 0o600
     src.close()
     restored = RayneoContextStore(dest)
     rows = restored.query_segments(limit=5)
