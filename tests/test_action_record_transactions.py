@@ -24,6 +24,31 @@ def seed(store, state="pending", created=9950):
     store.put("device:action-id:dev:act", "idem:key")
 
 
+def test_late_terminal_receipt_gets_a_full_retention_window(store):
+    seed(store, created=1)
+    records = ActionRecords(store)
+    records.receive("dev", {"action_id": "act", "status": "succeeded"}, 10000)
+    assert records.sweep(10050, 100, 50, 10)["deleted"] == 0
+    assert store.get("device:action:dev:idem:key")["state"] == "succeeded"
+    assert records.sweep(10101, 100, 50, 10)["deleted"] == 1
+
+
+def test_duplicate_terminal_does_not_extend_retention(store):
+    seed(store, created=1)
+    records = ActionRecords(store)
+    records.receive("dev", {"action_id": "act", "status": "succeeded"}, 100)
+    records.receive("dev", {"action_id": "act", "status": "failed"}, 190)
+    assert records.sweep(201, 100, 50, 10)["deleted"] == 1
+
+
+@pytest.mark.parametrize("options", [(True, 10, 10), (1, -1, 10), (1, 10, float("inf"))])
+def test_bad_retention_limits_cannot_modify_records(store, options):
+    seed(store)
+    with pytest.raises(ValueError):
+        ActionRecords(store).sweep(*options, 10)
+    assert store.get("device:action:dev:idem:key")["state"] == "pending"
+
+
 def test_nested_rollback_and_transaction_delete_match_backends(store):
     store.put("value", {"nested": [1]})
     store.put("other", 2)

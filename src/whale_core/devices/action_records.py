@@ -10,6 +10,10 @@ class ActionRecords:
 
     def receive(self, device_id: str, payload: dict, now: int) -> dict | None:
         action_id, status = payload["action_id"], payload["status"]
+        if status not in TERMINAL_STATES | {"received"}:
+            raise ValueError("invalid receipt state")
+        if type(now) is not int or now < 0:
+            raise ValueError("now must be a nonnegative integer")
         def update(tx):
             idem = tx.get(f"device:action-id:{device_id}:{action_id}")
             if not isinstance(idem, str):
@@ -36,6 +40,9 @@ class ActionRecords:
         return self.store.transact(update)
 
     def sweep(self, now: int, retention_ms: int, grace_ms: int, max_deletes: int) -> dict:
+        for name, value in (("now", now), ("retention_ms", retention_ms), ("grace_ms", grace_ms)):
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{name} must be a nonnegative integer")
         if type(max_deletes) is not int or max_deletes < 0:
             raise ValueError("max_deletes 必须为非负整数")
         scanned = deleted = marked = 0
@@ -49,11 +56,12 @@ class ActionRecords:
                     return None
                 try:
                     created, expires = int(record.get("created_at") or 0), int(record.get("expires_at") or 0)
-                except (ValueError, TypeError):
+                    terminal_at = int(record.get("updated_at", created))
+                except (ValueError, TypeError, OverflowError):
                     return None
                 state = record.get("state")
                 if state in TERMINAL_STATES:
-                    if created + retention_ms >= now or deleted >= max_deletes:
+                    if max(created, terminal_at) + retention_ms >= now or deleted >= max_deletes:
                         return None
                     tx.delete(key)
                     device, action = record.get("device_id"), record.get("action_id")
