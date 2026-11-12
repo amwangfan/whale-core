@@ -81,10 +81,10 @@ def test_pending_past_grace_marked_unknown_not_deleted():
     rec = store.get("device:action:dev1:idem-stale")
     assert rec["state"] == "unknown"
     # 幂等键仍在：重复提交仍命中查重（不提前释放）
-    # （再老化超过 7 天保留窗后才删除）
-    rec["created_at"] = NOW - 8 * DAY
-    store.put("device:action:dev1:idem-stale", rec)
+    # Freshly estimated unknown keeps a full retention window, regardless of creation age.
     stats = gw.sweep_action_retention(now=NOW)
+    assert stats["deleted"] == 0
+    stats = gw.sweep_action_retention(now=NOW + 8 * DAY)
     assert stats["deleted"] == 1
 
 
