@@ -357,6 +357,21 @@ class WhaleApiServer:
         self.ctx = ctx
         if ctx.settings is not None:
             ctx.settings.on_apply = ctx.apply_bundle
+            # owner_fact_v1（PR#88 发布前核查）：生产 launcher 经
+            # ``ctx.settings = SettingsController(..., bundle)`` 挂装配产物，
+            # 不显式传 owner_facts/owner_fact_authority/owner_fact_worker；
+            # 只注册 on_apply 意味着首启管理路径 409、worker 丢失 stop 钩子
+            # （要等 settings 热重载才接线）。此处从 settings.bundle 补齐仍
+            # 为 None 的字段；宿主显式注入（非 None）的一律保留，绝不覆盖。
+            # 刻意不整调 ctx.apply_bundle：它会重设 profile/manager/
+            # orchestrator/optional、重建 workflows 并重置 voice_bridge，
+            # 超出本次初始化语义（防 profile 等副作用）。
+            bundle = getattr(ctx.settings, "bundle", None)
+            if bundle is not None:
+                for _field in ("owner_facts", "owner_fact_authority",
+                               "owner_fact_worker"):
+                    if getattr(ctx, _field) is None:
+                        setattr(ctx, _field, getattr(bundle, _field, None))
         self.token = token
         self._httpd = _BoundedServer((host, port), _Handler)
         self._httpd.ctx = ctx       # type: ignore[attr-defined]
