@@ -48,3 +48,5 @@
 第20轮最终验证：完整Core Python **2665 passed /18 skipped /69 warnings**（231.77秒），Mobile纯JVM **125/125 /16个测试类**，协议 **72/72**，Python工具 **4 passed /1 skipped**，两仓 **68个契约文件一致**。前端未改，沿用第17轮网页96项、类型检查与构建结果；wheel在本轮源码上重新构建及源码外冒烟。Android组件、Robolectric、完整APK与真机未验证，纯JVM不代表这些项目通过。
 
 运行记录集中保存在本机工作区 `logs/12-V2分支初始化` 至 `logs/33-V2第20轮最终优化`；不将原始运行记录和私人配置提交到源码仓库。按用户最后追加要求完成第20轮，更新现有两个PR后停止。
+
+第21–25轮：[输出分页边界与完整性](21-25-output-boundaries.md)，后续分支 refactor/v2-output-hardening。
