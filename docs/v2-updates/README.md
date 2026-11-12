@@ -56,3 +56,5 @@
 第27轮：[编码预算与来源截断](27-encoded-output-budget.md)，Core相关93项、Mobile纯JVM129项通过。
 
 第28轮：[完整输出链路整合](28-complete-output-pipeline.md)，读取总时限/分页预算、手机共用文件访问、流式尾部、真实Kotlin→Python观察解析。
+
+第29轮：[分板块深入优化](29-module-hardening.md)：后台调用与记忆任务、动作保留清理、HTTP/设备JSON输入；含后续板块优先级。

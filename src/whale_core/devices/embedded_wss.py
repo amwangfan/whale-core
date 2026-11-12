@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+from whale_core.security.json_input import loads as strict_json_loads
 import logging
 import math
 import re
@@ -72,17 +73,6 @@ class GatewayError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
-
-
-def _reject_json_constant(value: str):
-    raise ValueError(f"non-standard JSON constant: {value}")
-
-
-def _finite_json_float(value: str) -> float:
-    result = float(value)
-    if not math.isfinite(result):
-        raise ValueError("JSON number exceeds finite floating-point range")
-    return result
 
 
 def _timeout_ms(value: float, minimum: float, maximum: float) -> int:
@@ -354,7 +344,7 @@ class EmbeddedWssGateway:
             return False
 
         try:
-            msg = json.loads(raw, parse_constant=_reject_json_constant, parse_float=_finite_json_float)
+            msg = strict_json_loads(raw)
         except (ValueError, TypeError):
             return fail("auth_failed", "first frame is not valid JSON")
         if not isinstance(msg, dict):
@@ -453,7 +443,7 @@ class EmbeddedWssGateway:
         """认证后的常规帧。返回 False 表示应关闭连接。"""
         ref_id = REF_ID_FALLBACK
         try:
-            msg = json.loads(raw, parse_constant=_reject_json_constant, parse_float=_finite_json_float)
+            msg = strict_json_loads(raw)
         except (ValueError, TypeError):
             self.send_error(st, ref_id, "invalid_message", "frame is not valid JSON")
             return True

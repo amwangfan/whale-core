@@ -143,6 +143,7 @@ class _Handler(BaseHTTPRequestHandler):
             pass
 
     def _body_json(self, max_bytes: int = MAX_BODY_BYTES) -> dict | None:
+        from whale_core.security.json_input import loads
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
@@ -150,8 +151,8 @@ class _Handler(BaseHTTPRequestHandler):
         if length <= 0 or length > max_bytes:
             return None
         try:
-            data = json.loads(self.rfile.read(length))
-        except (json.JSONDecodeError, UnicodeDecodeError):
+            data = loads(self.rfile.read(length))
+        except (ValueError, UnicodeDecodeError):
             return None
         return data if isinstance(data, dict) else None
 
