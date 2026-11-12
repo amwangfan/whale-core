@@ -330,6 +330,22 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
                 api_key=(env.get("WHALE_QUICK_API_KEY") or env.get("QQ_INTENT_API_KEY")
                          or "").strip() or None)
 
+    # owner_fact_v1：眼镜宿主装配（单宿主单 worker；提炼脑复用轻量/意图档
+    # 文本脑，不加新密钥服务）。装配状态必须显式落启动日志（约束：不允许
+    # 静默 skip——off/缺失/失败各有明确文案）。
+    from whale_core.core.owner_fact_host import (
+        BoundedModelReply, build_owner_fact_stack, register_owner_source)
+    try:
+        _of_reply = BoundedModelReply(quick_brain_factory().reply)
+    except Exception:
+        _of_reply = None
+    _of_stack = build_owner_fact_stack(store, _of_reply, env=env)
+    if _of_stack.enabled:
+        # 眼镜宿主 pairing 是 ("phone","phone")→owner（glasses_identity）：
+        # 登记为可信身份来源（OwnerRegistry 物化，commit 时可实时回查）。
+        register_owner_source(store, "owner", "phone", "phone")
+    print(f"[glasses] {_of_stack.note}", flush=True)
+
     def _make_companion():
         from whale_core.core.companion import WhaleCompanion
         from whale_core.memory.curation import MemoryCurator
@@ -354,7 +370,9 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
 
         return WhaleCompanion(
             store, brain_factory(), curator=MemoryCurator(store),
-            exploration_delivery=_deliver_exploration)
+            exploration_delivery=_deliver_exploration,
+            owner_facts=_of_stack.service,
+            owner_fact_authority=_of_stack.authority)
 
     # 单 owner 通道：复用 companion/orchestrator，避免每请求重建搜索/shell 插件。
     # ThreadingHTTPServer 下用锁串行化一轮 handle，避免改 location / intent 上下文竞态。
@@ -514,6 +532,26 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
         import time as _time
         mark_chat()
         t_all = _time.perf_counter()
+        # owner_fact_v1：主模型调用前的快速持久受理（原话=本次请求 text，
+        # 未拼接任何系统提示；evidence_id 为本轮入口 server UUID，主/重模型/
+        # 补发同轮复用）。同时快照会话写回代际，供 _finish_audio 迟到改写
+        # 守卫（遗忘后不重建）。全部 fail-soft，不阻塞对话。
+        from uuid import uuid4 as _uuid4
+        from whale_core.memory.history import history_generation as _hist_gen_read
+        _of_gen = _hist_gen_read(store, conversation_id)
+        if _of_stack.service is not None:
+            try:
+                from whale_core.core.owner_fact_host import observe_owner_text
+                _of_ctx = context_resolver.resolve(
+                    channel="phone", sender_id="phone",
+                    conversation_id=conversation_id)
+                observe_owner_text(
+                    _of_stack.service, _of_stack.authority, store,
+                    context=_of_ctx, conversation_id=conversation_id,
+                    channel="phone", text=text,
+                    evidence_id=f"phone:glasses:{_uuid4().hex}")
+            except Exception:
+                pass  # 采集缺席非致命（记忆缺席不阻塞对话）
         # 眼镜侧「做一张简单结果图发我」：规则短路 → 本地图 → ResultDelivery。
         try:
             from whale_core.life.do_request import match_do_request, execute_do_request
@@ -579,28 +617,36 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
                 reply = _delivery_note(delivery, [{"kind": "audio"}], say=lambda prompt:
                     quick_chat(prompt, persona=_persona_card_text(store, resolved.persona_id))[0])
                 # Replace the pre-delivery wording for this turn, keeping the first reply.
+                # owner_fact_v1 遗忘防线：迟到旁路改写与代际快照在同一事务内
+                # 比较——轮内发生过遗忘/清历史时整段作废，不重建被遗忘内容。
                 from dataclasses import replace
-                from whale_core.memory.history import conversation_lock, load_history
-                with conversation_lock(store, conversation_id):
-                    history = load_history(store, conversation_id)
+                from whale_core.memory.history import (
+                    patch_history_if_generation, put_record_if_generation)
+
+                def _swap_reply(history):
                     for i in range(len(history) - 1, 0, -1):
                         if (history[i]["role"] == "assistant"
                                 and history[i - 1] == {"role": "user", "content": text[:4000]}
                                 and result.reply and history[i]["content"].endswith(result.reply)):
                             history[i]["content"] = (
                                 history[i]["content"][:-len(result.reply)] + reply)[:4000]
-                            store.put("chat:history:" + conversation_id[:160], history)
-                            break
-                    task_id = getattr(result, "task_id", "")
-                    episode = store.get_record(f"ep:chat:{conversation_id}:{task_id}") if task_id else None
-                    if episode is not None:
-                        content = dict(episode.content)
-                        content["summary"] = f"用户：{text[:500]}\nEnxi：{reply[:500]}"
-                        store.put_record(replace(episode, content=content))
-                    task = store.get("task:" + task_id) if task_id else None
-                    if isinstance(task, dict):
-                        task["result_reply"] = reply
-                        store.put("task:" + task_id, task)
+                            return history
+                    return None
+
+                patch_history_if_generation(store, conversation_id, _of_gen,
+                                            _swap_reply)
+                task_id = getattr(result, "task_id", "")
+                episode = store.get_record(f"ep:chat:{conversation_id}:{task_id}") if task_id else None
+                if episode is not None:
+                    content = dict(episode.content)
+                    content["summary"] = f"用户：{text[:500]}\nEnxi：{reply[:500]}"
+                    put_record_if_generation(
+                        store, conversation_id, _of_gen,
+                        replace(episode, content=content))
+                task = store.get("task:" + task_id) if task_id else None
+                if isinstance(task, dict):
+                    task["result_reply"] = reply
+                    store.put("task:" + task_id, task)
             return reply, delivery
 
         envelope = InputEnvelope(
@@ -884,6 +930,9 @@ def build_delegates(env: dict, *, brain_factory=None, quick_brain_factory=None,
             "prefs": prefs, "store": store,
             "rayneo_store": rayneo_store,
             "last_chat_ms": last_chat_ms, "mark_chat": mark_chat,
+            # owner_fact_v1 生命周期钩子：宿主 serve 收尾必须调用（幂等），
+            # 重复 build_delegates 不得遗留后台 worker 线程。
+            "owner_fact_shutdown": _of_stack.shutdown,
             "env": env}
 
 
@@ -1477,6 +1526,13 @@ def main(argv=None) -> int:
             greeting_loop.stop_background()
         if summarizer is not None:
             summarizer.stop_background()
+        # owner_fact_v1：后台提炼 worker 随宿主收尾关闭（不靠进程退出兜底）
+        try:
+            shutdown_of = delegates.get("owner_fact_shutdown")
+            if callable(shutdown_of):
+                shutdown_of()
+        except Exception:
+            pass
         try:
             rs = delegates.get("rayneo_store")
             if rs is not None:

@@ -64,9 +64,17 @@ class QqInboundWorkflow:
                  auth_service=None,
                  context_resolver=None,
                  on_member_provisioned=None,
-                 stranger_daily_limit: int | None = None) -> None:
+                 stranger_daily_limit: int | None = None,
+                 owner_facts=None,
+                 owner_fact_authority=None) -> None:
         self.store = store
-        self.companion = WhaleCompanion(store, brain, curator=MemoryCurator(store))
+        # owner_fact_v1（首批缩界）：领域服务 + 实时授权提供者（宿主装配注入；
+        # 未注入 = 功能未装配，行为与旧版完全一致）。
+        self._owner_facts = owner_facts
+        self._owner_fact_authority = owner_fact_authority
+        self.companion = WhaleCompanion(store, brain, curator=MemoryCurator(store),
+                                        owner_facts=owner_facts,
+                                        owner_fact_authority=owner_fact_authority)
         self.outbox = ProactiveOutbox(store)
         # Safe default: a caller must explicitly opt in to processing QQ messages.
         # The live runner passes owner-bound, operator-configured prefs explicitly.
@@ -464,7 +472,11 @@ class QqInboundWorkflow:
         （工作副本优先，未绑定时落主人受保护库——安全但暂不进对话召回）。
         """
         space_id, allowed = "", None
-        resolver = getattr(self.orchestrator, "context_resolver", None)
+        principal_id = ""
+        # 与回落聊天路径同口径：编排器缺位时用宿主注入的解析器（否则
+        # 记忆指令拿不到授权空间，owner_fact 窄分派与写回全部失效）。
+        resolver = (getattr(self.orchestrator, "context_resolver", None)
+                    or self._context_resolver)
         if resolver is not None:
             ctx = resolver.resolve(channel=event.channel,
                                    sender_id=event.sender_id or event.owner_id,
@@ -472,6 +484,7 @@ class QqInboundWorkflow:
             from whale_core.memory.spaces import default_write_space
             space_id = default_write_space(ctx.allowed_memory_spaces)
             allowed = ctx.allowed_memory_spaces
+            principal_id = str(getattr(ctx.principal, "principal_id", "") or "")
             # A group with no writable memory must NEVER fall back to the
             # owner's protected vault. Forget is also a write operation.
             from whale_core.core.memory_commands import REMEMBER_PREFIXES, FORGET_PREFIXES
@@ -481,7 +494,43 @@ class QqInboundWorkflow:
             self.store, text, source="qq:owner",
             evidence_id=f"qq:{event.conversation}:{event.message_id}",
             curator=self._curator, space_id=space_id, allowed_spaces=allowed,
+            owner_facts=self._owner_facts,
+            owner_fact_authority=self._owner_fact_authority,
+            principal_id=principal_id,
         )
+
+    def _observe_owner_fact(self, event: OwnerEvent, raw_text: str) -> None:
+        """owner_fact_v1 可信入口受理（主回答模型调用前；fail-soft）。
+
+        - ``raw_text`` 必须是**用户原话**（event.text，尚未拼接引用注释/
+          系统提示/助手内容）；
+        - evidence_id = 渠道+账号域+消息ID（稳定）：inbox 重投/两段式补发
+          同 ID → 服务侧幂等 duplicate；
+        - sudo 口令已由 maybe_intercept_sudo 在一切持久化之前截获（N17），
+          敏感内容由服务 observe 内部再挡一层；
+        - 授权由服务端 resolver 实时解析（群聊/未配对/无可写空间/context
+          缺失一律不采集）；任何异常不阻塞聊天主链路。
+        """
+        if self._owner_facts is None or self._owner_fact_authority is None:
+            return
+        try:
+            resolver = (getattr(self.orchestrator, "context_resolver", None)
+                        or self._context_resolver)
+            if resolver is None:
+                return  # 无服务端解析器 = 无可信上下文：绝不自动采集
+            ctx = resolver.resolve(channel=event.channel,
+                                   sender_id=event.sender_id or event.owner_id,
+                                   conversation_id=event.conversation)
+            from whale_core.core.owner_fact_host import observe_owner_text
+            sender = str(event.sender_id or event.owner_id or "")
+            observe_owner_text(
+                self._owner_facts, self._owner_fact_authority, self.store,
+                context=ctx, conversation_id=event.conversation,
+                channel=str(event.channel or "qq"), text=raw_text,
+                evidence_id=f"qq:{sender}:{event.message_id}",
+                source_message_id=str(event.message_id or "") or None)
+        except Exception:
+            pass  # 采集缺席非致命（记忆缺席不阻塞对话）
 
     def handle_owner_event(self, event: OwnerEvent) -> dict:
         """处理一条已配对的所有者消息，返回结构化结果（不含发送行为）。
@@ -538,6 +587,10 @@ class QqInboundWorkflow:
         if command_reply is not None:
             reply = command_reply
         else:
+            # owner_fact_v1：主模型调用前的快速持久受理（此时 text 仍是
+            # event.text 原文——引用注释在其后拼接；显式记忆指令轮不重复
+            # 采集，那是确定性 curated 路径）。
+            self._observe_owner_fact(event, text)
             do_handled = self._try_owner_do_request(event, text, eff_prefs)
             if do_handled is not None:
                 return do_handled

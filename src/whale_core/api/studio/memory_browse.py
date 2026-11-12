@@ -260,10 +260,18 @@ def _browse(handler, ctx, svc: StudioServices) -> None:
 
     matched: list = []
     scan_kinds = kind_filter or tuple(MemoryKind)
+    from whale_core.core.owner_fact_host import (
+        is_owner_fact_record, owner_fact_status)
     for kind in scan_kinds:
         for rec in ctx.store.list_by_kind(kind, space_ids=space_ids):
             if not include_superseded and "superseded" in rec.tags:
                 continue
+            # owner_fact_v1 墓碑（status=deleted）永不进列表；pending 可见
+            # （管理面）但带状态标注，对话召回侧由服务过滤。
+            if is_owner_fact_record(rec):
+                status = owner_fact_status(rec)
+                if status == "deleted":
+                    continue
             if since and rec.created_at < since:
                 continue
             if until and rec.created_at > until:
@@ -304,6 +312,15 @@ def _record_for_owner_op(ctx, svc: StudioServices, key: str):
     rec = ctx.store.get_record(key)
     if rec is None:
         raise StudioError(404, "not_found", "记录不存在")
+    # owner_fact_v1 窄分派（Astra P0）：该命名空间的 correct/expire/delete
+    # 一律明确拒绝——生命周期（更正/遗忘/墓碑/generation fence）只能走
+    # owner_fact 服务路径，旧 API 直写会打掉墓碑或绕过防复活 fence。
+    from whale_core.core.owner_fact_host import is_owner_fact_record
+    if is_owner_fact_record(rec):
+        raise StudioError(
+            409, "owner_fact_v1",
+            "owner_fact_v1 记录请走新记忆管理路径（聊天「忘掉：<完整内容>」"
+            "或 /memory/{key} DELETE）；本入口拒绝直写以保护防复活墓碑")
     ref = svc.spaces.ref(rec.space_id) if rec.space_id else None
     if ref is not None and ref.type is MemorySpaceType.PROTECTED_ORIGINAL:
         raise StudioError(403, "vault_restricted",

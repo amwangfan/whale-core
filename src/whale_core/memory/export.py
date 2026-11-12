@@ -12,8 +12,17 @@ v1 旧文件缺 ``space_id`` 时按未分区（空串）导入。
 边界：只导出 / 导入记忆记录（MemoryRecord，三种 MemoryKind）。
 store 的 kv（draft / ledger / quota 等账本数据）不属于记忆，不导出。
 
+owner_fact_v1 命名空间（tag ``owner_fact_v1`` / key 前缀 ``offact:``）：
+
+- **导出**：随普通记录一起导出（数据备份视角），但导出件**不是生命周期
+  恢复手段**——它不含 generation/墓碑/任务账本（kv 不导出），灌回不能
+  恢复遗忘 fence 语义；完整恢复只认整库 SQLite 备份管道；
+- **导入**：一律拒绝该命名空间的行（计入 skipped）——防旧备份经
+  ``overwrite=True`` 盖掉防复活墓碑、让已遗忘事实复活（Astra 2026-11-12）。
+
 导入幂等语义：默认 ``overwrite=False``，目标库已存在同 key 记录时跳过，
-重复执行同一导入不会放大已有数据；``overwrite=True`` 时同 key 覆盖写入。
+重复执行同一导入不会放大已有数据；``overwrite=True`` 时同 key 覆盖写入
+（owner_fact_v1 行除外——任何模式都拒绝）。
 
 两个函数只依赖 MemoryStore 协议：不 import sqlite3、不碰文件路径，
 文件对象（文本模式、utf-8 编码）由调用方负责打开与关闭。
@@ -95,6 +104,16 @@ def import_jsonl(
             skipped += 1
             continue
         if not isinstance(content, dict):
+            skipped += 1
+            continue
+        # owner_fact_v1 命名空间不支持通用导入（防旧备份盖墓碑复活已遗忘
+        # 事实；该命名空间的生命周期只能走 owner_fact 服务路径）。
+        tags_raw_check = obj.get("tags")
+        is_owner_fact_ns = (
+            str(key).startswith("offact:")
+            or (isinstance(tags_raw_check, (list, tuple))
+                and "owner_fact_v1" in tags_raw_check))
+        if is_owner_fact_ns:
             skipped += 1
             continue
         if not overwrite and store.get_record(key) is not None:

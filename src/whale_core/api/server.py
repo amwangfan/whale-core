@@ -59,6 +59,11 @@ class ApiContext:
     lock: Any = field(default_factory=threading.RLock)
     stopping: Any = field(default_factory=threading.Event)
     curator: Any = None        # MemoryCurator
+    # owner_fact_v1（首批缩界）：领域服务 + 实时授权提供者（bundle 装配注入；
+    # None = 未装配，路由对该命名空间只拒绝不直写）。
+    owner_facts: Any = None
+    owner_fact_authority: Any = None
+    owner_fact_worker: Any = None  # 随 bundle 装配；server stop 时关闭（生命周期钩子）
     attachments: Any = None    # cloud.attachments.AttachmentStore（/api/v2 懒构建）
     started_at: float = field(default_factory=time.time)
     events: list[dict] = field(default_factory=list)  # bounded, non-durable log
@@ -78,6 +83,9 @@ class ApiContext:
             self.profile, self.manager = bundle.profile, bundle.manager
             self.orchestrator, self.curator = bundle.orchestrator, bundle.companion.curator
             self.optional = bundle.optional
+            self.owner_facts = getattr(bundle, "owner_facts", None)
+            self.owner_fact_authority = getattr(bundle, "owner_fact_authority", None)
+            self.owner_fact_worker = getattr(bundle, "owner_fact_worker", None)
             from whale_core.service.workflows import WorkflowsService
             self.workflows = WorkflowsService(bundle.orchestrator)
             if self.worker is not None:
@@ -409,11 +417,22 @@ class WhaleApiServer:
         finally:
             if self.ctx.worker:
                 self.ctx.worker.stop()
+            if self.ctx.owner_fact_worker is not None:
+                try:
+                    self.ctx.owner_fact_worker.stop(drain=False, timeout=5.0)
+                except Exception:
+                    pass
 
     def stop(self) -> None:
         self.ctx.stopping.set()
         if self.ctx.worker:
             self.ctx.worker.stop()
+        # owner_fact_v1：后台提炼 worker 随服务器停止（不依赖进程退出兜底）
+        if self.ctx.owner_fact_worker is not None:
+            try:
+                self.ctx.owner_fact_worker.stop(drain=False, timeout=5.0)
+            except Exception:
+                pass
         if self.ctx.voice_bridge is not None:
             self.ctx.voice_bridge.shutdown()
         if self.ctx.pcm_voice_gateway is not None:

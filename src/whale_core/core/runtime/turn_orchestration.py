@@ -489,11 +489,21 @@ class TurnOrchestrationMixin:
                 if text.strip().startswith(REMEMBER_PREFIXES + FORGET_PREFIXES):
                     return _Decision(route="memory", memory_reply=(
                         "当前会话没有可写记忆库，请先绑定有写权限的记忆空间。"))
+            # owner_fact_v1 窄分派：companion 装配了领域服务时，「忘掉」先做
+            # 确定性精确匹配的长期事实遗忘（多义澄清、禁止 top-1 盲删）。
+            companion = getattr(self, "companion", None)
+            owner_facts = getattr(companion, "owner_facts", None)
+            owner_fact_authority = getattr(companion, "owner_fact_authority", None)
+            principal_id = str(getattr(getattr(ctx, "principal", None),
+                                       "principal_id", "") or "")
             command = handle_memory_command(
                 self.store, text, source=env.source, curator=self.companion.curator,
                 evidence_id=f"{env.source}:{env.conversation_id}:{uuid4().hex}",
                 space_id=write_space or "",
                 allowed_spaces=_ctx_spaces(ctx),
+                owner_facts=owner_facts,
+                owner_fact_authority=owner_fact_authority,
+                principal_id=principal_id,
             )
             if command is not None:
                 return _Decision(route="memory", memory_reply=command)

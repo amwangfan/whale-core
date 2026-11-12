@@ -22,12 +22,16 @@ def handle_memory_command(
     curator: MemoryCurator | None = None,
     space_id: str = "",
     allowed_spaces=None,
+    owner_facts=None,
+    owner_fact_authority=None,
+    principal_id: str = "",
 ) -> str | None:
     """识别并执行记忆指令，返回确定性回复文本；非指令返回 None。
 
     - 记住：<事实> → curated 稳定事实（consent=True；stable_fact=True 不衰减）；
-    - 忘掉/忘记：<线索> → 词项召回最相关的一条 curated 记忆并删除；
-      只删 curated 记录（curator.forget 语义），聊天情节不受影响。
+    - 忘掉/忘记：<线索> → 先走 owner_fact_v1 窄分派（确定性精确匹配：唯一
+      命中才删，多义必须澄清，**禁止相似度 top-1 盲删**）；零命中回落既有
+      curated 词项召回删除（旧行为不变，chat 情节同样不受影响）。
 
     S2：``space_id`` 为写入目标空间（调用方按 ResolvedContext 授权决定；
     空串 = 未分区兼容行为）。``allowed_spaces`` 限定「忘掉」的检索范围
@@ -62,6 +66,22 @@ def handle_memory_command(
             clue = text[len(prefix):].strip()
             if not clue:
                 return "想让我忘掉什么？"
+            # owner_fact_v1 窄分派：长期事实的显式遗忘（含修订链墓碑 +
+            # 源 episode/短历史抑制），确定性匹配不命中才回落旧路径。
+            if (owner_facts is not None and owner_fact_authority is not None
+                    and space_id):
+                from whale_core.core.owner_fact_host import (
+                    explicit_forget_owner_fact)
+                meta = store.get(f"space:{space_id}")
+                owner_id = (str(meta.get("owner"))
+                            if isinstance(meta, dict) and meta.get("owner")
+                            else "owner")
+                reply, handled = explicit_forget_owner_fact(
+                    store, owner_facts, owner_fact_authority,
+                    owner_id=owner_id, space_id=space_id, clue=clue,
+                    principal_id=principal_id)
+                if handled:
+                    return reply
             from whale_core.core.companion import _recall
             hits = _recall(cur, clue, allowed_spaces, limit=1)
             if hits and cur.forget(hits[0].record.key):

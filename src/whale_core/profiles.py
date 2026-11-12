@@ -54,6 +54,25 @@ class RuntimeBundle:
     orchestrator: ConversationOrchestrator
     notes: list[str] = field(default_factory=list)
     optional: object = None
+    # owner_fact_v1（首批缩界）：装配栈（service/authority/worker）。
+    # None 或 enabled=False = 未装配（notes 里有明确原因，绝不静默）。
+    owner_facts: object = None
+    owner_fact_authority: object = None
+    owner_fact_worker: object = None
+
+    def shutdown(self) -> None:
+        """宿主生命周期收尾：停掉本 bundle 启动的后台 worker（幂等）。
+
+        不依赖进程退出兜底——settings 重装配换 bundle、服务器 stop、REPL
+        退出都必须调用，重复装配不得遗留 worker 线程。
+        """
+        worker = self.owner_fact_worker
+        if worker is not None:
+            try:
+                worker.stop(drain=False, timeout=5.0)
+            except Exception:
+                pass
+            self.owner_fact_worker = None
 
 
 class _ManagedTools(ToolRegistry):
@@ -150,8 +169,14 @@ def assemble_runtime(
     env: Mapping[str, str] | None = None,
     config_dir: str | None = None,
     use_saved_config: bool = True,
+    start_workers: bool = True,
 ) -> RuntimeBundle:
-    """按配置档装配运行时。profile 非法 → ValueError。"""
+    """按配置档装配运行时。profile 非法 → ValueError。
+
+    ``start_workers=False`` 用于**验证性装配**（settings 试装 candidate、
+    测试）：构建 service 但不启动后台 worker 线程——重复装配不得遗留
+    worker（协调约束 2026-11-12）。
+    """
     if profile not in PROFILE_NAMES:
         raise ValueError(f"unknown profile {profile!r}（可选：{', '.join(PROFILE_NAMES)}）")
     env = os.environ if env is None else env
@@ -254,6 +279,23 @@ def assemble_runtime(
     managed_model = _ManagedModel(registry, store)
     from whale_core.memory.semantic import DynamicHybridCurator
     companion = WhaleCompanion(store, managed_model, curator=DynamicHybridCurator(store, registry, base=MemoryCurator(store)))
+    # owner_fact_v1：服务模式装配（提炼脑复用 intent 角色模型，未配置时
+    # 自动回落 llm.chat——不加新密钥服务；单 worker 随本进程生命周期）。
+    # 装配结果（on/off/失败原因）必须进 notes——不允许静默 skip。
+    from whale_core.core.owner_fact_host import (
+        BoundedModelReply, build_owner_fact_stack, register_owner_source)
+    _of_stack = build_owner_fact_stack(
+        store, BoundedModelReply(_ManagedRoleModel(registry, store, "intent").reply),
+        env=env, start_worker=start_workers)
+    notes.append(_of_stack.note)
+    if _of_stack.enabled:
+        companion.owner_facts = _of_stack.service
+        companion.owner_fact_authority = _of_stack.authority
+        # 本机管理通道（与下方 resolver pairing 表一致）登记为可信身份来源：
+        # OwnerRegistry 物化绑定，管理面窄分派经 authorize_principal_now 现查。
+        for _ch, _sender in (("api", "console"), ("cli", "local"),
+                             ("voice", "console")):
+            register_owner_source(store, "owner", _ch, _sender)
     # Explicit searches route to web.search; arbitrary LLM tool planning is opt-in.
     # Safe if no search provider is installed: runtime reports capability unavailable.
     llm_intent = env.get("WHALE_INTENT_MODEL_ENABLED", "") == "1"
@@ -319,4 +361,7 @@ def assemble_runtime(
     return RuntimeBundle(
         profile=profile, store=store, registry=registry, manager=manager,
         tools=tools, companion=companion, orchestrator=orchestrator, notes=notes, optional=optional,
+        owner_facts=_of_stack.service if _of_stack.enabled else None,
+        owner_fact_authority=_of_stack.authority if _of_stack.enabled else None,
+        owner_fact_worker=_of_stack.worker if _of_stack.enabled else None,
     )

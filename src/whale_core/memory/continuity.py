@@ -137,11 +137,17 @@ def remember_episode(
     tags: Sequence[str] = (),
     extra: Mapping[str, Any] | None = None,
     space_id: str = "",
-) -> MemoryRecord:
+    generation: int | None = None,
+    generation_conversation: str = "",
+) -> MemoryRecord | None:
     """便捷写入一条 episode，便于本地演示连续性。
 
     S2：``space_id`` 为目标记忆空间；调用方应传入已授权的可写空间，
     本函数不自行判定权限（权限在进入本函数前决定）。
+
+    owner_fact_v1 遗忘防线：``generation`` 与 ``generation_conversation``
+    同时给出时，写入与代际比较在同一事务内完成——期间发生过遗忘/清历史
+    （代际已 bump）则丢弃写入并返回 None（迟到的情节写回不复活被遗忘内容）。
     """
     content: dict[str, Any] = {"summary": summary}
     if extra:
@@ -153,6 +159,13 @@ def remember_episode(
         tags=tuple(tags),
         space_id=space_id,
     )
+    if generation is not None and generation_conversation:
+        from whale_core.memory.history import put_record_if_generation
+
+        if not put_record_if_generation(
+                store, generation_conversation, generation, record):
+            return None
+        return record
     store.put_record(record)
     return record
 

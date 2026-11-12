@@ -156,8 +156,13 @@ def memory(handler, method: str, parts: list[str], query: dict) -> None:
             return
         q = (query.get("q") or [""])[0]
         if not q.strip():
+            from whale_core.core.owner_fact_host import is_owner_fact_record
             from whale_core.memory.store import MemoryKind
-            records = sorted((r for kind in MemoryKind for r in store.list_by_kind(kind)),
+            # owner_fact_v1 不进旧 recent 列表（pending/deleted 不得作召回显示；
+            # 该命名空间的管理走新路径）。
+            records = sorted((r for kind in MemoryKind
+                              for r in store.list_by_kind(kind)
+                              if not is_owner_fact_record(r)),
                              key=lambda r: r.created_at, reverse=True)[:100]
             result = [{'key': r.key, 'kind': r.kind.value,
                        'summary': str(r.content.get('summary') or r.content.get('text') or '')[:1000],
@@ -191,6 +196,21 @@ def memory(handler, method: str, parts: list[str], query: dict) -> None:
             if record is None:
                 handler._send(404, _error("not_found", "no such memory"))
                 return
+            from whale_core.core.owner_fact_host import (
+                is_owner_fact_record, owner_fact_status)
+            if is_owner_fact_record(record):
+                status = owner_fact_status(record)
+                if status == "deleted":
+                    # 墓碑与不存在同口径（不泄露存在性细节，也不展示已删内容）
+                    handler._send(404, _error("not_found", "no such memory"))
+                    return
+                handler._send(200, _json_bytes({"result": {
+                    "key": record.key, "kind": record.kind.value,
+                    "namespace": "owner_fact_v1", "status": status,
+                    "content": dict(record.content), "tags": list(record.tags),
+                    "created_at": record.created_at.isoformat(),
+                }}))
+                return
             handler._send(200, _json_bytes({"result": {
                 "key": record.key, "kind": record.kind.value,
                 "content": dict(record.content), "tags": list(record.tags),
@@ -203,6 +223,59 @@ def memory(handler, method: str, parts: list[str], query: dict) -> None:
                 handler._send(404, _error('not_found', 'no such memory record'))
                 return
             record = store.get_record(key)
+            # owner_fact_v1 窄分派（Astra 红队 P0）：提前 return——绝不落到
+            # 下方无条件 store.delete（那会打掉防复活墓碑）。服务未装配时
+            # 明确 409 拒绝，不做任何直写。
+            from whale_core.core.owner_fact_host import (
+                is_owner_fact_record, owner_fact_id, owner_fact_status,
+                snapshot_fact_texts, suppress_after_forget)
+            if is_owner_fact_record(record):
+                status = owner_fact_status(record)
+                if status == "deleted":
+                    handler._send(404, _error('not_found', 'no such memory record'))
+                    return
+                service = getattr(ctx, "owner_facts", None)
+                authority = getattr(ctx, "owner_fact_authority", None)
+                if service is None or authority is None:
+                    handler._send(409, _error(
+                        'owner_fact_v1',
+                        'owner_fact_v1 记录须经新记忆管理路径删除（服务未装配）；'
+                        '拒绝直接物理删除以免破坏防复活墓碑'))
+                    return
+                fact_id = owner_fact_id(record)
+                owner_id = str(record.content.get("owner_id") or "owner")
+                # 管理通道（本地 token）以控制台规范主体做真实来源核查：
+                # authorize_principal_now 现查 OwnerRegistry 绑定，解绑即拒。
+                from whale_core.core.owner_fact_host import CONSOLE_PRINCIPAL
+                authorize_principal = getattr(
+                    authority, "authorize_principal_now", None)
+                if callable(authorize_principal):
+                    auth = authorize_principal(
+                        owner_id, record.space_id, CONSOLE_PRINCIPAL)
+                else:
+                    auth = authority.authorize_now(owner_id, record.space_id)
+                if auth is None:
+                    handler._send(409, _error(
+                        'policy', '当前授权不可用（空间暂停/注销/归属不符/来源解绑），没有删除'))
+                    return
+                texts = snapshot_fact_texts(service, [fact_id])
+                report = service.forget(
+                    [fact_id], auth,
+                    {fact_id: int(record.content.get("revision") or 0)})
+                if not report.ok:
+                    handler._send(409, _error(
+                        'conflict', f'遗忘被拒绝：{report.reason_code or "unknown"}'))
+                    return
+                stats = suppress_after_forget(
+                    store, report, texts, owner_id=owner_id,
+                    space_id=record.space_id)
+                ctx.log_event("memory:delete", f"owner_fact_v1:{fact_id[-8:]}")
+                handler._send(200, _json_bytes({"result": {
+                    "deleted": True, "namespace": "owner_fact_v1",
+                    "affected_fact_ids": list(report.affected_fact_ids),
+                    "suppression": stats,
+                }}))
+                return
             if ctx.curator is not None and hasattr(ctx.curator, 'forget'):
                 ctx.curator.forget(key)
             else:

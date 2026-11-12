@@ -41,6 +41,7 @@ The screenshots below come from a local temporary setup with sample data; they c
 | Voice and media | ASR, TTS, image generation, asynchronous Wan video, private artifacts; TTS output can be sent as QQ voice messages and images can be mixed with text | A DashScope-compatible platform or OpenAI-compatible endpoints, configured as needed; see [capability configuration](docs/media-and-voice.md) for setup and integration boundaries |
 | Realtime voice | Native Realtime WSS sessions (browser microphone, interruption, persona and memory, transcripts written to memory); plus a whale-io PCM relay for low-latency calls | A Realtime-compatible service and the optional `voice` extra; the PCM relay has not been tested against a real audio bridge |
 | Semantic memory | Optional real embeddings fused with keyword recall, fallback on failure, cache cleanup; raw chat episodes are recalled by relevance only and never auto-promoted into long-term facts | An OpenAI-compatible embedding endpoint; keyword recall keeps working without it |
+| Owner long-term facts | In the trusted owner's QQ private chats and glasses conversations, explicit self-statements settle verbatim into traceable facts and preferences: background extraction, cross-session recall, natural correction of earlier statements, and explicit forgetting that prevents old content from being written back; every fact carries its source quote and is not a verified external truth | Works with the existing text model and an authorized memory space — no separate cloud memory service; this first batch covers only owner private chats and glasses, not the console/CLI/group chats, and does not backfill history |
 | Proactive exploration | Interests, real search and reading (including read-only discovery of public Bilibili video pages), candidate drafts, quiet hours, quotas, backoff, scheduled worker, pause | Scheduled exploration is off by default; outbound delivery needs a bound channel dispatcher |
 | QQ and expression | Group/private chat, persona cards, multi-part replies, proactive greetings; the intent model chooses semantically whether to join a group conversation or observe | Requires a configured QQ/WeQ channel, and an intent model for semantic participation; delivery depends on actual send receipts |
 | Weather and context | QWeather conditions and forecasts, location context, web-search fallback | A QWeather API or search provider; a configured default city when location is unavailable |
@@ -68,6 +69,7 @@ See the [device documentation](docs/devices.md) for device interfaces and contra
 
 ## Roadmap
 
+- Broader fact-type coverage for owner fact memory, plus long-term quality evaluation
 - Native writes to the phone system gallery
 - A unified production action entry across ADB/SSH and WSS, and unified task scheduling across devices
 - The on-device glasses display and draw-receipt loop
@@ -139,4 +141,5 @@ See [docs/README.md](docs/README.md) for the documentation index.
 - [Device and intent contracts](docs/contracts.md)
 - [Capability and voice configuration](docs/media-and-voice.md)
 - [Shell sandbox](docs/shell-sandbox.md)
+- [Owner fact memory](docs/owner-fact-memory.md)
 - [Contributing](CONTRIBUTING.md)
