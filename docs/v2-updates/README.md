@@ -50,3 +50,5 @@
 运行记录集中保存在本机工作区 `logs/12-V2分支初始化` 至 `logs/33-V2第20轮最终优化`；不将原始运行记录和私人配置提交到源码仓库。按用户最后追加要求完成第20轮，更新现有两个PR后停止。
 
 第21–25轮：[输出分页边界与完整性](21-25-output-boundaries.md)，后续分支 refactor/v2-output-hardening。
+
+第26轮：[宿主平台兼容与回归收尾](26-host-platform-regressions.md)。
