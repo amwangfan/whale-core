@@ -19,6 +19,12 @@ class OutputPage:
 
 
 def decode_page(result: dict, offset: int, limit: int) -> OutputPage:
+    if type(offset) is not int or offset < 0:
+        raise ValueError("offset 必须为非负整数")
+    if type(limit) is not int or not 1 <= limit <= MAX_PAGE_BYTES:
+        raise ValueError("limit 超出分页范围")
+    if not isinstance(result, dict):
+        raise ValueError("输出响应必须为对象")
     data = result.get("data")
     if not isinstance(data, list) or not data or not isinstance(data[0], dict):
         raise ValueError("device.output.read 缺少输出对象")
@@ -44,6 +50,8 @@ def decode_page(result: dict, offset: int, limit: int) -> OutputPage:
             raise ValueError("输出分页偏移不连续")
         if len(chunk) > limit or next_offset > total or truncated != (next_offset < total):
             raise ValueError("输出分页长度或截断标记无效")
+    if len(chunk) > limit:
+        raise ValueError("输出页超过请求长度")
     return OutputPage(chunk, truncated, next_offset, total, item.get("source_truncated") is True)
 
 
