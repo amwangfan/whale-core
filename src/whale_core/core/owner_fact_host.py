@@ -681,7 +681,16 @@ class OwnerFactStack:
     def shutdown(self, *, drain: bool = False, timeout: float = 5.0) -> None:
         try:
             if self.worker is not None:
-                self.worker.stop(drain=drain, timeout=timeout)
+                quiesce = getattr(self.worker, "quiesce", None)
+                if drain and callable(quiesce):
+                    try:
+                        self.worker.stop(drain=True, timeout=timeout)
+                    finally:
+                        quiesce(timeout=0)  # fence any result that outlived the graceful wait
+                elif callable(quiesce):
+                    quiesce(timeout=timeout)
+                else:
+                    self.worker.stop(drain=drain, timeout=timeout)
         except Exception:
             pass
         finally:

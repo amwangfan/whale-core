@@ -58,3 +58,5 @@
 第28轮：[完整输出链路整合](28-complete-output-pipeline.md)，读取总时限/分页预算、手机共用文件访问、流式尾部、真实Kotlin→Python观察解析。
 
 第29轮：[分板块深入优化](29-module-hardening.md)：后台调用与记忆任务、动作保留清理、HTTP/设备JSON输入；含后续板块优先级。
+
+第30轮：[记忆队列与关闭恢复](30-memory-worker-lifecycle.md)，保留普通stop，新增宿主quiesce；租约恢复、重复关闭与并发启动验证。
