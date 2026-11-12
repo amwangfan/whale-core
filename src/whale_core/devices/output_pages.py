@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import asyncio
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
@@ -63,13 +64,27 @@ def decode_page(result: dict, offset: int, limit: int) -> OutputPage:
 
 
 async def collect_pages(fetch: Callable[[int, int], Awaitable[OutputPage]], *,
-                        max_bytes: int = 1024 * 1024) -> bytes:
+                        max_bytes: int = 1024 * 1024, max_pages: int = 4096,
+                        timeout_s: float = 60.0) -> bytes:
+    if type(max_pages) is not int or max_pages <= 0:
+        raise ValueError("max_pages 必须为正整数")
+    if type(timeout_s) not in (int, float) or not 0 < timeout_s <= 86400:
+        raise ValueError("timeout_s 须在0到86400秒之间")
+    async with asyncio.timeout(timeout_s):
+        return await _collect_pages(fetch, max_bytes=max_bytes, max_pages=max_pages)
+
+
+async def _collect_pages(fetch, *, max_bytes: int, max_pages: int) -> bytes:
     if type(max_bytes) is not int or max_bytes <= 0:
         raise ValueError("max_bytes 必须为正整数")
     output = bytearray()
     expected_total = None
     first = True
+    pages = 0
     while True:
+        if pages >= max_pages:
+            raise ValueError("输出超过分页请求预算")
+        pages += 1
         limit = min(MAX_PAGE_BYTES, max_bytes - len(output))
         page = await fetch(len(output), limit)
         if not isinstance(page, OutputPage) or not isinstance(page.data, bytes):
@@ -86,6 +101,8 @@ async def collect_pages(fetch: Callable[[int, int], Awaitable[OutputPage]], *,
                 raise ValueError("输出页完整性无效")
         if page.source_truncated:
             raise ValueError("输出源已截断，无法组装完整输出")
+        if page.total_bytes is not None and page.total_bytes > max_bytes:
+            raise ValueError("输出总长度超过读取预算")
         if len(output) + len(page.data) > max_bytes:
             raise ValueError("输出超过读取预算")
         if not first and page.total_bytes != expected_total:

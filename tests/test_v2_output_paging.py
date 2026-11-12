@@ -51,7 +51,7 @@ def test_read_budget_stops_further_queries():
     gateway = PagedGateway(b"a" * 20000)
     with pytest.raises(GatewayError, match="预算"):
         asyncio.run(EmbeddedWssTransport(gateway).read_output_complete("dev", "ref", max_bytes=1000))
-    assert gateway.offsets == [0, 997]
+    assert gateway.offsets == [0]  # declared total rejects the source on its first page
 
 
 @pytest.mark.parametrize("offset,limit", [(-1, 1), (True, 1), (0, 0), (0, float("inf"))])

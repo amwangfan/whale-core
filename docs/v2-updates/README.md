@@ -54,3 +54,5 @@
 第26轮：[宿主平台兼容与回归收尾](26-host-platform-regressions.md)。
 
 第27轮：[编码预算与来源截断](27-encoded-output-budget.md)，Core相关93项、Mobile纯JVM129项通过。
+
+第28轮：[完整输出链路整合](28-complete-output-pipeline.md)，读取总时限/分页预算、手机共用文件访问、流式尾部、真实Kotlin→Python观察解析。
