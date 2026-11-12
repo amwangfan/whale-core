@@ -52,3 +52,5 @@
 第21–25轮：[输出分页边界与完整性](21-25-output-boundaries.md)，后续分支 refactor/v2-output-hardening。
 
 第26轮：[宿主平台兼容与回归收尾](26-host-platform-regressions.md)。
+
+第27轮：[编码预算与来源截断](27-encoded-output-budget.md)，Core相关93项、Mobile纯JVM129项通过。

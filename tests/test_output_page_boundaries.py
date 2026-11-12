@@ -4,6 +4,19 @@ import asyncio
 from whale_core.devices.output_pages import decode_page, collect_pages, OutputPage
 
 
+def test_oversized_base64_is_rejected_before_decoder_allocation(monkeypatch):
+    monkeypatch.setattr("whale_core.devices.output_pages.base64.b64decode",
+                        lambda *args, **kwargs: pytest.fail("must reject before decoding"))
+    with pytest.raises(ValueError, match="请求长度"):
+        decode_page({"data": [{"bytes_b64": "AAAA" * 10000}]}, 0, 1)
+
+
+@pytest.mark.parametrize("text,limit", [("鲸", 2), ("🐋", 3), ("abc", 2)])
+def test_text_budget_uses_bytes_even_with_character_precheck(text, limit):
+    with pytest.raises(ValueError):
+        decode_page({"data": [{"text": text}]}, 0, limit)
+
+
 @pytest.mark.parametrize("offset,limit", [(True, 1), (-1, 1), (0, False), (0, 0), (0, 49153)])
 def test_invalid_request_boundary(offset, limit):
     with pytest.raises(ValueError):

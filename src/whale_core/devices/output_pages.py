@@ -33,11 +33,15 @@ def decode_page(result: dict, offset: int, limit: int) -> OutputPage:
         if any(key in obj and type(obj[key]) is not bool for key in keys):
             raise ValueError("输出截断标记必须为布尔值")
     if isinstance(item.get("text"), str):
+        if len(item["text"]) > limit:
+            raise ValueError("输出页超过请求长度")
         chunk = item["text"].encode("utf-8")
     else:
         encoded = item.get("data_base64", item.get("bytes_b64"))
         if not isinstance(encoded, str):
             raise ValueError("device.output.read 未声明输出编码")
+        if len(encoded) > ((limit + 2) // 3) * 4:
+            raise ValueError("输出页超过请求长度")
         try:
             chunk = base64.b64decode(encoded, validate=True)
         except (binascii.Error, ValueError) as exc:
