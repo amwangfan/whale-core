@@ -13,3 +13,5 @@
 专项验证：Core分页/旧格式/观察相关51项通过；Mobile纯JVM127项通过，协议72/72。这些结果不代表Android组件、APK或真机已验证。全量及远端交付的实际结果记录于本地logs/34-V2第21至25轮。网络失败不算推送或PR成功。
 
 继续保留既有功能和未协商分页的旧调用格式；没有更改用户服务地址、模型、密钥或重启真实服务。
+
+最终全量：3063 passed /18 skipped /14 failed /69 warnings，327.54秒。失败位于test_glasses_media、test_rayneo_context_store与test_shell_partial_output，不能将本次全量称为通过。新wheel构建与源码外契约/网页/认证API冒烟通过。GitHub fetch/push/API多次连接重置，未完成远端PR交付；本地各轮提交及离线patch保留。
