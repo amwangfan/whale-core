@@ -24,11 +24,22 @@ class BoundedCall:
 
     def __init__(self, fn: Callable, *, default_timeout_s: float = 6.0):
         self._fn = fn
+        if type(default_timeout_s) not in (int, float) or not 0 < default_timeout_s <= threading.TIMEOUT_MAX:
+            raise ValueError("default_timeout_s must be positive and within platform limits")
         self._timeout = max(0.5, float(default_timeout_s))
         self._pool = ThreadPoolExecutor(max_workers=1,
                                         thread_name_prefix="bounded-call")
         self._lock = threading.Lock()
         self._busy = False
+        self._closed = False
+
+    def close(self) -> None:
+        """Stop accepting calls; a running external call still finishes naturally."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+        self._pool.shutdown(wait=False, cancel_futures=True)
 
     @property
     def busy(self) -> bool:
@@ -36,8 +47,11 @@ class BoundedCall:
             return self._busy
 
     def __call__(self, *args, default="", timeout_s: float = 0.0, **kw):
+        if type(timeout_s) not in (int, float) or not 0 <= timeout_s <= threading.TIMEOUT_MAX:
+            return default  # invalid limits must not start an external call
+        timeout = max(0.5, float(timeout_s or self._timeout))
         with self._lock:
-            if self._busy:
+            if self._busy or self._closed:
                 return default  # worker 忙：立即短路，不排队不堆积
             self._busy = True
         try:
@@ -54,7 +68,7 @@ class BoundedCall:
         fut.add_done_callback(_release)
         try:
             return fut.result(
-                timeout=max(0.5, float(timeout_s or self._timeout)))
+                timeout=timeout)
         except Exception:
             # 超时或 fn 异常：调用方立即拿 default；busy 由回调在 worker
             # 真正收尾后释放（超时的慢调用期间保持 busy，防并发堆积）。

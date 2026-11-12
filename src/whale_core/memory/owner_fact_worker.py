@@ -127,6 +127,12 @@ class OwnerFactWorker:
         poll_interval: float,
         now: Callable[[], datetime],
     ) -> None:
+        for name, value in (("lease_seconds", lease_seconds), ("model_timeout", model_timeout),
+                            ("poll_interval", poll_interval)):
+            if type(value) not in (int, float) or not 0 < value <= threading.TIMEOUT_MAX:
+                raise ValueError(f"{name} must be positive and within platform limits")
+        if type(max_retries) is not int or max_retries < 0:
+            raise ValueError("max_retries must be a nonnegative integer")
         if lease_seconds <= model_timeout:
             raise ValueError("lease_seconds 必须大于 model_timeout")
         self._store = store

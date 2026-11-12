@@ -661,25 +661,32 @@ class CompositeCallGate:
     def __call__(self, *args, default=None, timeout_s: float = 0.0, **kw):
         return self._gate(*args, default=default, timeout_s=timeout_s, **kw)
 
+    def close(self) -> None:
+        self._gate.close()  # extra_busy sources are injected, not owned by this gate
+
 
 class OwnerFactStack:
     """一次装配的完整栈。``service is None`` = 未装配（宿主必须打印 note）。"""
 
     def __init__(self, *, service=None, authority=None, extractor=None,
-                 worker=None, enabled: bool = False, note: str = "") -> None:
+                 worker=None, call_gate=None, enabled: bool = False, note: str = "") -> None:
         self.service = service
         self.authority = authority
         self.extractor = extractor
         self.worker = worker
+        self._call_gate = call_gate
         self.enabled = bool(enabled and service is not None)
         self.note = note
 
     def shutdown(self, *, drain: bool = False, timeout: float = 5.0) -> None:
-        if self.worker is not None:
-            try:
+        try:
+            if self.worker is not None:
                 self.worker.stop(drain=drain, timeout=timeout)
-            except Exception:
-                pass
+        except Exception:
+            pass
+        finally:
+            if self._call_gate is not None:
+                self._call_gate.close()
 
 
 def owner_fact_memory_enabled(env: Mapping[str, Any] | None = None) -> bool:
@@ -753,7 +760,7 @@ def build_owner_fact_stack(store: MemoryStore, model_reply, *,
             worker.start()
         state = "worker已启动" if start_worker else "worker未启动(按需)"
         return OwnerFactStack(service=service, authority=authority,
-                              extractor=extractor, worker=worker, enabled=True,
+                              extractor=extractor, worker=worker, call_gate=gate, enabled=True,
                               note=f"owner_fact_v1=on（真实装配：{state}，"
                                    f"提炼脑复用宿主文本模型，model_timeout={model_timeout:g}s）")
     except Exception as exc:
