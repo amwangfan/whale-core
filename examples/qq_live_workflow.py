@@ -2088,6 +2088,27 @@ def cmd_run(args) -> int:
     # 2026-11-10：引用/近期图解析需要读入站持久化的消息图片（msgimg:*）
     workflow._artifact_reader = cap.artifacts.read if cap.artifacts else None
 
+    # owner_fact_v1：QQ 宿主装配（可信入口 = handle_owner_event 的 owner 私聊；
+    # 提炼脑复用意图脑，缺省回落主回复脑——不加新密钥服务；单 worker 随本
+    # 进程生命周期启停）。装配状态显式落启动日志：off/缺失/失败绝不静默。
+    from whale_core.core.owner_fact_host import (
+        BoundedModelReply, build_owner_fact_stack, register_owner_source)
+    _of_brain = globals().get("_intent_brain_ref") or workflow.companion.model
+    _of_stack = build_owner_fact_stack(
+        store,
+        BoundedModelReply(_of_brain.reply) if _of_brain is not None else None,
+        start_worker=True)
+    print(f"[owner_fact] {_of_stack.note}")
+    if _of_stack.enabled:
+        workflow._owner_facts = _of_stack.service
+        workflow._owner_fact_authority = _of_stack.authority
+        workflow.companion.owner_facts = _of_stack.service
+        workflow.companion.owner_fact_authority = _of_stack.authority
+        # 已配对渠道账号登记为可信身份来源（OwnerRegistry 物化绑定；
+        # observe/commit 实时回查，解绑即失效——不是 any-source 后门）。
+        for (_ch, _sender), _oid in bindings.items():
+            register_owner_source(store, str(_oid), str(_ch), str(_sender))
+
     listener = WeQSsePushListener(
         registry, expected_token=token, self_uin=self_uin,
         on_owner_event=on_owner, on_unpaired=on_unpaired, on_mass=on_mass,
@@ -2114,6 +2135,12 @@ def cmd_run(args) -> int:
         pass
     finally:
         listener.stop()
+        # owner_fact_v1：worker 随宿主生命周期关闭（不谎称清空；未完成 job
+        # 留在持久队列，下次启动经 lease 恢复）。
+        try:
+            _of_stack.shutdown(drain=False, timeout=5.0)
+        except Exception:
+            pass
         print(f"\n[停止] 过载丢弃={listener.dropped} 条；租约收回={listener.recovered} 条")
         if inbox is not None:
             inbox.close()

@@ -17,6 +17,40 @@ class TextCompanion(Protocol):
               images=()) -> str: ...
 
 
+#: 最终记忆预算（owner_fact_v1 冻结方案 §6）：在唯一组装点统一执行，
+#: curated/相关情节/近期窗/exploration/owner 事实全部计入，任何 append
+#: 不得绕过。无 tokenizer 部署如实只执行字符硬界（不把字符伪称 token）。
+MEMORY_MAX_ITEMS = 8
+MEMORY_MAX_ITEM_CHARS = 300
+MEMORY_MAX_TOTAL_CHARS = 2400
+#: owner 长期事实在共享预算内的注入上限（保留名额给显式 curated 与情节背景）。
+OWNER_FACT_INJECT_LIMIT = 4
+
+
+def apply_memory_budget(memories, *, max_items: int = MEMORY_MAX_ITEMS,
+                        max_item_chars: int = MEMORY_MAX_ITEM_CHARS,
+                        max_total_chars: int = MEMORY_MAX_TOTAL_CHARS) -> list:
+    """最终组装点的统一预算：条数 / 单条字符 / 总字符（Unicode codepoint）。
+
+    - 顺序即优先级：靠前的（owner 事实→curated→相关情节→近期窗→exploration）
+      优先保留；总预算用尽后其余整条丢弃（不注入半截背景）。
+    - 超长单条截断到 ``max_item_chars``（含来源标签一起计）。
+    """
+    out: list = []
+    total = 0
+    for item in memories:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        if len(text) > max_item_chars:
+            text = text[:max_item_chars]
+        if len(out) >= max_items or total + len(text) > max_total_chars:
+            break
+        out.append(text)
+        total += len(text)
+    return out
+
+
 def _norm_mem(text: str) -> str:
     """记忆文本的规范化去重键：取情节中用户侧内容，压缩空白与标点。"""
     import re as _re
@@ -92,8 +126,14 @@ def _maybe_writeback_inner_state(store: MemoryStore, *, conversation_id: str,
 
 class WhaleCompanion:
     def __init__(self, store: MemoryStore, model: TextCompanion, *, curator: MemoryCurator | None = None,
-                 timeline=None, self_uid: str = "", exploration_delivery=None):
+                 timeline=None, self_uid: str = "", exploration_delivery=None,
+                 owner_facts=None, owner_fact_authority=None):
         self.store, self.model, self.curator = store, model, curator
+        # owner_fact_v1（首批缩界）：领域服务 + 授权现状提供者（宿主装配注入；
+        # 两者齐备且本轮 context 可信 owner 私聊/眼镜时才召回注入与写回守卫生效）。
+        # 服务/授权任一缺失 = 功能未装配，行为与旧版完全一致。
+        self.owner_facts = owner_facts
+        self.owner_fact_authority = owner_fact_authority
         # G1：群时间线（GroupTimelineStore）；群会话的历史从它渲染（带归属），
         # 不再用无身份的历史回放。
         self.timeline = timeline
@@ -104,6 +144,66 @@ class WhaleCompanion:
         self.planning_hint = ""
         # Optional owner-confirmed recommendation delivery callback.
         self.exploration_delivery = exploration_delivery
+
+    def _owner_fact_memories(self, query: str, context, spaces,
+                             conversation_id: str) -> list:
+        """owner_fact_v1 召回注入（首批：可信 owner 私聊/眼镜路径）。
+
+        纪律（冻结方案 §6/§8）：
+        - ``context=None`` 的兼容调用**绝不**召回/采集（无可信授权即无记忆）；
+        - 群会话永不注入（INV-03 一致；首批仅 owner 私聊 + 眼镜）；
+        - 授权经 ``authorize_now`` **实时**解析（不捕获旧 ResolvedContext），
+          目标空间必须可写（default_write_space 判定）；
+        - 服务侧只返回 accepted + user_asserted + 未过期事实（墓碑/pending
+          永不出现）；渲染带「用户自述」归属标注，防模型误认自身偏好；
+        - 任何故障 fail soft，不阻塞聊天。
+        """
+        if self.owner_facts is None or self.owner_fact_authority is None:
+            return []  # 未装配：行为与旧版一致
+        if context is None:
+            return []
+        try:
+            if str(conversation_id or "").startswith("group:"):
+                return []
+            from whale_core.life.conversation_context import ConversationKind
+            if getattr(context.conversation, "kind", None) is ConversationKind.QQ_GROUP:
+                return []
+            principal = getattr(context, "principal", None)
+            if principal is None or not getattr(principal, "is_owner", False):
+                return []
+            from whale_core.memory.spaces import default_write_space
+            space_id = default_write_space(spaces) if spaces is not None else ""
+            if not space_id:
+                return []  # 无可写空间 fail closed（不注入也不采集）
+            meta = self.store.get(f"space:{space_id}")
+            owner_id = (str(meta.get("owner")) if isinstance(meta, dict)
+                        and meta.get("owner") else "owner")
+            # 读侧同样走**真实来源精确校验**（Astra P0 2026-11-12）：
+            # QQ 来源解绑后，即使其他来源（眼镜）仍活跃，持旧 QQ context 的
+            # 会话也读不到 owner 事实——any-source 只留给无 principal 的
+            # 测试假件回落（Kimi 域侧此时按 principal 严格相等校验）。
+            principal_id = str(getattr(principal, "principal_id", "") or "")
+            authorize_principal = getattr(
+                self.owner_fact_authority, "authorize_principal_now", None)
+            if callable(authorize_principal) and principal_id:
+                auth = authorize_principal(owner_id, space_id, principal_id)
+            else:
+                auth = self.owner_fact_authority.authorize_now(owner_id, space_id)
+            if auth is None:
+                return []  # 实时授权不成立（pause/解绑/注销）：不召回
+            facts = self.owner_facts.retrieve(
+                auth, str(query or ""), limit=OWNER_FACT_INJECT_LIMIT)
+            out: list = []
+            for fact in facts or ():
+                summary = str(getattr(fact, "summary", "") or "").strip()
+                if summary:
+                    out.append(f"长期记忆（用户自述）：{summary}")
+            return out
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception(
+                "owner_fact recall failed; continuing without")
+            return []
 
 
     def chat(self, text: str, *, conversation_id: str = "", user_text: str | None = None,
@@ -251,8 +351,12 @@ class WhaleCompanion:
             # 非「用户：/Enxi：」结构的摘要：按句剥报时
             return scrub_transient_time(text_m)
 
+        # owner_fact_v1 召回注入（首批：可信 owner 私聊/眼镜；fail soft）。
+        owner_fact_snippets = self._owner_fact_memories(
+            original, context, spaces, conversation_id)
+
         if self.curator is not None:
-            memories = []
+            memories = list(owner_fact_snippets)
             for hit in _recall(self.curator, original, spaces,
                                include_protected=_spaces_include_vault(spaces)):
                 piece = _injectable_memory(
@@ -316,11 +420,10 @@ class WhaleCompanion:
                 recent_this_conv += 1
                 if recent_this_conv >= 3:
                     break
-            memories = memories[:8]
         else:
             # Legacy chat-only behavior kept for backwards compatibility; opt in
             # to curated retrieval to avoid injecting raw transcripts by default.
-            memories = [
+            memories = list(owner_fact_snippets) + [
                 m for m in (
                     _injectable_memory(str(r.content.get("summary", "")))
                     for r in ctx.recent_episodes)
@@ -362,11 +465,22 @@ class WhaleCompanion:
             if exploration_context:
                 memories.append(exploration_context)
 
+        # owner_fact_v1 冻结方案 §6：最终组装点统一预算（≤8 条 / 单条 ≤300
+        # 字符 / 总 ≤2400 Unicode 字符）。curated/相关情节/近期窗/exploration/
+        # owner 事实全部计入，任何 append 不得绕过；无 tokenizer 时如实仅执行
+        # 字符硬界（不把字符数伪称 token 数）。
+        memories = apply_memory_budget(memories)
+
         # 多轮历史：显式传 conversation_id 才启用（默认保持单轮行为，兼容旧调用方）。
         # G1：群会话改用时间线渲染——每条发言带「消息ID|发送者」归属标签，
         # 成员不坍缩成同一个 user（ID-01）；私聊保持既有历史。
         history: object = ()
+        # owner_fact_v1 遗忘防线：轮初快照会话写回代际。轮内发生遗忘/清历史
+        # （clear_history 原子 bump）时，本轮迟到的助手/补发/情节写回全部作废。
+        hist_gen: int | None = None
         if conversation_id:
+            from whale_core.memory.history import history_generation
+            hist_gen = history_generation(self.store, conversation_id)
             if self.timeline is not None and conversation_id.startswith("group:"):
                 block = self.timeline.render_for_model(conversation_id,
                                                       self_uid=self.self_uid)
@@ -455,19 +569,24 @@ class WhaleCompanion:
                 if ep_summary:
                     ep_key = (f"ep:chat:{conversation_id}:{turn_key}" if turn_key
                               else f"ep:chat:{uuid4().hex}")
+                    # generation 守卫：情节写回与会话代际比较在同一事务内，
+                    # 遗忘抑制后的迟到写回不复活源 episode（Astra 红队）。
                     remember_episode(self.store, summary=ep_summary,
                                      key=ep_key, tags=("chat",),
                                      extra={"conversation_id": conversation_id[:160],
                                             "layer": "episode"},
-                                     space_id=target)
+                                     space_id=target,
+                                     generation=hist_gen,
+                                     generation_conversation=conversation_id)
         if conversation_id and clean_response and followup:
             # 并行链路第二条：并入同一轮的助手消息（不重复写用户原话）。
             from whale_core.memory.history import append_assistant_followup
             append_assistant_followup(self.store, conversation_id, original,
-                                      clean_response)
+                                      clean_response, generation=hist_gen)
         elif conversation_id and clean_response:
             # 用户原话已在请求开头 append_user_message；这里只补助手。
-            append_assistant_message(self.store, conversation_id, clean_response)
+            append_assistant_message(self.store, conversation_id, clean_response,
+                                     generation=hist_gen)
             # 记忆/主动性闭环：轻量写回未完话题（默认开；WHALE_INNER_STATE_WRITEBACK=0 关）
             # 只写会话作用域，不授任何权限；失败 fail-soft。
             _maybe_writeback_inner_state(

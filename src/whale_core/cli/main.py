@@ -532,6 +532,8 @@ def _cmd_run_owned(args: argparse.Namespace) -> int:
                 kind = getattr(exc, "kind", type(exc).__name__)
                 print(f"whale> [error] 模型/工具调用失败：{kind}")
     finally:
+        # owner_fact_v1：REPL 退出即停后台 worker（不靠进程退出兜底）
+        bundle.shutdown()
         store.close()
     return 0
 

@@ -328,7 +328,7 @@ class SettingsController:
             # must not mark live tasks recovered or alter enabled states during validation.
             from whale_core.memory.store import InMemoryStore
             assemble_runtime(profile, store=InMemoryStore(), env=projected,
-                             use_saved_config=False)
+                             use_saved_config=False, start_workers=False)
             secret_dir = self.config_dir / 'secrets'
             secret_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             os.chmod(secret_dir, 0o700)
@@ -345,6 +345,11 @@ class SettingsController:
                                          config_dir=str(self.config_dir), use_saved_config=False)
             previous = self.bundle
             self.bundle = candidate
+            # owner_fact_v1 生命周期：换装即停旧 bundle 的后台 worker——
+            # 重复装配不得遗留 worker 线程（协调约束 2026-11-12）。
+            _shutdown = getattr(previous, "shutdown", None)
+            if callable(_shutdown):
+                _shutdown()
             # Revoke cached references held by the previous composition root.
             for manifest in list(previous.registry.manifests()):
                 previous.registry.unregister(manifest.plugin_id)
