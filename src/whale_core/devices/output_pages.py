@@ -29,6 +29,9 @@ def decode_page(result: dict, offset: int, limit: int) -> OutputPage:
     if not isinstance(data, list) or not data or not isinstance(data[0], dict):
         raise ValueError("device.output.read 缺少输出对象")
     item = data[0]
+    for obj, keys in ((result, ("truncated",)), (item, ("truncated", "source_truncated"))):
+        if any(key in obj and type(obj[key]) is not bool for key in keys):
+            raise ValueError("输出截断标记必须为布尔值")
     if isinstance(item.get("text"), str):
         chunk = item["text"].encode("utf-8")
     else:
@@ -41,7 +44,7 @@ def decode_page(result: dict, offset: int, limit: int) -> OutputPage:
             raise ValueError("device.output.read base64 无效") from exc
     truncated = bool(result.get("truncated") or item.get("truncated"))
     next_offset, total = item.get("next_offset"), item.get("total_bytes")
-    if next_offset is not None or total is not None:
+    if any(key in item for key in ("offset", "next_offset", "total_bytes")):
         start = item.get("offset")
         if any(type(n) is not int or n < 0 for n in (start, next_offset, total)):
             raise ValueError("输出分页元数据无效")

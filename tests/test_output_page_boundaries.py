@@ -17,3 +17,10 @@ def test_legacy_page_also_obeys_requested_byte_limit():
 def test_nonobject_response_fails_explicitly():
     with pytest.raises(ValueError):
         decode_page([], 0, 1)
+
+
+@pytest.mark.parametrize("extra", [{"offset": 0}, {"next_offset": None}, {"total_bytes": None},
+    {"truncated": "false"}, {"source_truncated": 1}])
+def test_partial_metadata_and_nonboolean_flags_fail(extra):
+    with pytest.raises(ValueError):
+        decode_page({"data": [{"text": "a", **extra}]}, 0, 1)
