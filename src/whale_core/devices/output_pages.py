@@ -64,15 +64,30 @@ async def collect_pages(fetch: Callable[[int, int], Awaitable[OutputPage]], *,
         raise ValueError("max_bytes 必须为正整数")
     output = bytearray()
     expected_total = None
+    first = True
     while True:
-        page = await fetch(len(output), min(MAX_PAGE_BYTES, max_bytes - len(output)))
+        limit = min(MAX_PAGE_BYTES, max_bytes - len(output))
+        page = await fetch(len(output), limit)
+        if not isinstance(page, OutputPage) or not isinstance(page.data, bytes):
+            raise ValueError("输出页类型无效")
+        if type(page.truncated) is not bool or type(page.source_truncated) is not bool:
+            raise ValueError("输出页标记无效")
+        if len(page.data) > limit:
+            raise ValueError("输出页超过请求长度")
+        if page.next_offset is not None or page.total_bytes is not None:
+            if any(type(n) is not int or n < 0 for n in (page.next_offset, page.total_bytes)):
+                raise ValueError("输出页元数据无效")
+            end = len(output) + len(page.data)
+            if page.next_offset != end or end > page.total_bytes or page.truncated != (end < page.total_bytes):
+                raise ValueError("输出页完整性无效")
         if page.source_truncated:
             raise ValueError("输出源已截断，无法组装完整输出")
         if len(output) + len(page.data) > max_bytes:
             raise ValueError("输出超过读取预算")
-        if expected_total is not None and page.total_bytes != expected_total:
+        if not first and page.total_bytes != expected_total:
             raise ValueError("读取期间输出长度发生变化")
         expected_total = page.total_bytes
+        first = False
         output.extend(page.data)
         if not page.truncated:
             return bytes(output)

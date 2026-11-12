@@ -1,6 +1,7 @@
 import pytest
+import asyncio
 
-from whale_core.devices.output_pages import decode_page
+from whale_core.devices.output_pages import decode_page, collect_pages, OutputPage
 
 
 @pytest.mark.parametrize("offset,limit", [(True, 1), (-1, 1), (0, False), (0, 0), (0, 49153)])
@@ -24,3 +25,20 @@ def test_nonobject_response_fails_explicitly():
 def test_partial_metadata_and_nonboolean_flags_fail(extra):
     with pytest.raises(ValueError):
         decode_page({"data": [{"text": "a", **extra}]}, 0, 1)
+
+
+@pytest.mark.parametrize("page", [OutputPage(b"a", False, 1, 2),
+    OutputPage(b"a", False, True, 1), OutputPage(b"a", "false", None, None),
+    OutputPage(b"aa", False, None, None)])
+def test_collector_validates_provider_pages(page):
+    async def fetch(offset, limit):
+        return page
+    with pytest.raises(ValueError):
+        asyncio.run(collect_pages(fetch, max_bytes=1))
+
+
+def test_metadata_cannot_appear_midstream():
+    async def fetch(offset, limit):
+        return OutputPage(b"a", True, 1, None) if offset == 0 else OutputPage(b"b", False, 2, 2)
+    with pytest.raises(ValueError):
+        asyncio.run(collect_pages(fetch))
