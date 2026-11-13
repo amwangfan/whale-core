@@ -65,6 +65,26 @@ def settings(handler, method: str) -> None:
         handler._send(405, _error('method_not_allowed', 'use GET or POST'))
 
 
+def memory_worker_status(ctx) -> dict:
+    worker = getattr(ctx, "owner_fact_worker", None)
+    if worker is None:
+        return {"state": "unavailable"}
+    try:
+        from dataclasses import asdict
+        stats = asdict(worker.stats())
+        fields = ("claimed", "completed", "failed", "retried", "model_failures",
+                  "commit_rejected", "queue_depth", "in_flight", "model_busy")
+        safe = {key: stats[key] for key in fields}
+        for key, value in safe.items():
+            if key in ("in_flight", "model_busy"):
+                if type(value) is not bool: raise ValueError("invalid worker flag")
+            elif type(value) is not int or value < 0:
+                raise ValueError("invalid worker counter")
+        return {"state": "ok", **safe}
+    except Exception as exc:
+        return {"state": "failed", "error": type(exc).__name__}
+
+
 def diagnostics(handler) -> None:
     from whale_core.core.diagnostics import provider_health_report
     ctx = handler.ctx
@@ -81,7 +101,8 @@ def diagnostics(handler) -> None:
     summary = {k: sum(c['status'] == k for c in checks) for k in ('ok', 'warn', 'fail')}
     handler._send(200, _json_bytes({'result': {'checks': checks, 'summary': summary,
                                          'providers': provider_health_report(ctx.store),
-                                         'worker': ctx.worker.status() if ctx.worker else None}}))
+                                         'worker': ctx.worker.status() if ctx.worker else None,
+                                         'memory_worker': memory_worker_status(ctx)}}))
 
 
 def provider_test(handler) -> None:

@@ -180,6 +180,7 @@ def test_credentials_never_follow_redirect_on_wire():
         def do_GET(self):
             seen.append(self.headers.get("Authorization"))
             self.send_response(200)
+            self.send_header("Content-Length", "0")
             self.end_headers()
 
     destination = ThreadingHTTPServer(("127.0.0.1", 0), Destination)
@@ -189,7 +190,9 @@ def test_credentials_never_follow_redirect_on_wire():
             pass
 
         def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
             self.send_response(302)
+            self.send_header("Content-Length", "0")
             self.send_header(
                 "Location", f"http://127.0.0.1:{destination.server_port}/stolen")
             self.end_headers()

@@ -14,8 +14,10 @@ import Media from "./components/Media";
 import Workflows from "./components/Workflows";
 import Studio from "./components/Studio";
 import Initiative from "./components/Initiative";
+import RuntimeDiagnostics from "./components/RuntimeDiagnostics";
 
 type TabKey =
+  | "devices"
   | "overview"
   | "studio"
   | "plugins"
@@ -34,6 +36,7 @@ const TABS: { key: TabKey; label: string; description: string }[] = [
     label: "运行总览",
     description: "一眼看见鲸鱼的运行状态。",
   },
+  { key: "devices", label: "设备与后台", description: "查看设备连接、动作记录清理与记忆任务状态。" },
   {
     key: "chat",
     label: "与鲸鱼对话",
@@ -348,6 +351,7 @@ export default function App() {
             <span className="workspace-tag">CORE CONSOLE</span>
           </div>
           {tab === "overview" && <Overview onNavigate={setTab} />}
+          {tab === "devices" && <RuntimeDiagnostics />}
           {tab === "studio" && <Studio onNavigate={(t) => setTab(t as TabKey)} />}
           {tab === "plugins" && <Plugins />}
           {tab === "memory" && <MemoryView />}

@@ -62,3 +62,5 @@
 第30轮：[记忆队列与关闭恢复](30-memory-worker-lifecycle.md)，保留普通stop，新增宿主quiesce；租约恢复、重复关闭与并发启动验证。
 
 第31轮：[动作存储分批清理与诊断](31-bounded-retention-scans.md)，前缀分页、事务安全的游标推进、后台限量与管理API状态。
+
+第32轮：[网页设备与后台诊断](32-runtime-diagnostics-console.md)，诊断数据到网页闭环、请求取消/超时/部分失败和陈旧状态。
