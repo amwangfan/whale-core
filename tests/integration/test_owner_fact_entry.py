@@ -266,7 +266,7 @@ def test_glasses_root_entry_observes(tmp_path):
 
 def test_qq_owner_entry_end_to_end(tmp_path):
     store = SqliteMemoryStore(tmp_path / "m.sqlite3")
-    stack = _stack(store)
+    stack = _stack(store, start_worker=False)
     brain = FakeBrain("年糕这名字真可爱")
     wf = _workflow(store, brain, stack)
     try:
@@ -274,6 +274,7 @@ def test_qq_owner_entry_end_to_end(tmp_path):
         assert out.get("reply")
         # 受理即持久（主模型未等待提炼）
         assert stack.service.pending_count() >= 1
+        stack.worker.start()  # separate durable admission from asynchronous completion
         _drain(stack)
         facts = _facts(store)
         assert len(facts) == 1
