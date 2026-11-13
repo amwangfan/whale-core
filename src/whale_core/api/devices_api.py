@@ -201,6 +201,7 @@ def dispatch_devices(handler, method: str, parts: list[str]) -> None:
             "capabilities": list(DEVICE_CAPABILITIES),
             "ws_path": WS_PATH,
             "ws_port": gateway.port if gateway else None,
+            "retention": gateway.retention_status() if gateway and callable(getattr(gateway, "retention_status", None)) else {"state": "unavailable"},
         }}))
         return
 

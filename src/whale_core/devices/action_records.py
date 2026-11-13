@@ -39,16 +39,30 @@ class ActionRecords:
             return record
         return self.store.transact(update)
 
-    def sweep(self, now: int, retention_ms: int, grace_ms: int, max_deletes: int) -> dict:
+    def sweep(self, now: int, retention_ms: int, grace_ms: int, max_deletes: int, *,
+              max_scan: int | None = None, cursor: str = "", receipt_cursor: str = "") -> dict:
         for name, value in (("now", now), ("retention_ms", retention_ms), ("grace_ms", grace_ms)):
             if type(value) is not int or value < 0:
                 raise ValueError(f"{name} must be a nonnegative integer")
         if type(max_deletes) is not int or max_deletes < 0:
             raise ValueError("max_deletes 必须为非负整数")
+        if max_scan is not None and (type(max_scan) is not int or not 1 <= max_scan <= 9999):
+            raise ValueError("max_scan must be in 1..9999")
+        if not isinstance(cursor, str) or not isinstance(receipt_cursor, str):
+            raise ValueError("cursors must be strings")
+        def keys(prefix, after):
+            if max_scan is None:
+                return [k for k in self.store.keys() if k.startswith(prefix)]
+            scan = getattr(self.store, "scan_keys", None)
+            if callable(scan):
+                return scan(prefix, after=after, limit=max_scan + 1)
+            return sorted(k for k in self.store.keys() if k.startswith(prefix) and k > after)[:max_scan + 1]
+        action_keys = keys("device:action:", cursor)
+        more_actions = max_scan is not None and len(action_keys) > max_scan
+        if max_scan is not None:
+            action_keys = action_keys[:max_scan]
         scanned = deleted = marked = 0
-        for key in self.store.keys():
-            if not key.startswith("device:action:"):
-                continue
+        for key in action_keys:
             scanned += 1
             def process(tx):
                 record = tx.get(key)  # re-read under the transaction, never trust a stale scan snapshot
@@ -79,11 +93,16 @@ class ActionRecords:
             result = self.store.transact(process)
             deleted += result == "deleted"
             marked += result == "marked"
-        for key in self.store.keys():
+        receipt_keys = keys("device:receipts:", receipt_cursor)
+        receipt_scanned = 0
+        next_receipt = receipt_cursor
+        for key in receipt_keys:
             if deleted >= max_deletes:
                 break
-            if not key.startswith("device:receipts:"):
-                continue
+            if max_scan is not None and receipt_scanned >= max_scan:
+                break
+            receipt_scanned += 1
+            next_receipt = key
             parts = key.split(":", 3)
             if len(parts) != 4:
                 continue
@@ -93,4 +112,12 @@ class ActionRecords:
                     return 1
                 return 0
             deleted += self.store.transact(remove_orphan)
-        return {"scanned": scanned, "deleted": deleted, "marked_unknown": marked}
+        result = {"scanned": scanned, "deleted": deleted, "marked_unknown": marked}
+        if max_scan is not None:
+            more_receipts = receipt_scanned < len(receipt_keys)
+            result.update(receipt_scanned=receipt_scanned,
+                scan_mode="native" if callable(getattr(self.store, "scan_keys", None)) else "compat",
+                cursor=action_keys[-1] if more_actions else "",
+                receipt_cursor=next_receipt if more_receipts else "",
+                more=more_actions or more_receipts)
+        return result
