@@ -97,7 +97,7 @@ export default function RuntimeDiagnostics() {
       <section className="card" aria-label="记忆后台任务"><h3>记忆后台任务</h3>
         {stale(runtime.error, runtime.at)}
         <p>{!runtime.data ? runtime.error ? "记忆任务状态暂不可用" : "等待记忆任务状态" : !memory || memory.state === "unavailable" ? "当前核心未装配记忆任务诊断" : memory.state !== "ok" ? "暂时无法读取记忆任务状态" : memory.model_busy ? "模型调用处理中" : memory.in_flight ? "任务处理中" : memory.queue_depth ? "有任务等待处理" : "当前空闲"}</p>
-        {memory?.state === "ok" && <dl><dt>待处理 / 已完成</dt><dd>{count(memory.queue_depth)} / {count(memory.completed)}</dd>
+        {memory?.state === "ok" && <dl><dt>未完成 / 已完成</dt><dd>{count(memory.queue_depth)} / {count(memory.completed)}</dd>
           <dt>重试 / 失败</dt><dd>{count(memory.retried)} / {count(memory.failed)}</dd>
           <dt>模型失败 / 提交拒绝</dt><dd>{count(memory.model_failures)} / {count(memory.commit_rejected)}</dd></dl>}
         <p className="muted">最近读取：{time(runtime.at)}。计数属于当前 worker，重建后会重置。</p>
