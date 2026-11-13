@@ -60,3 +60,5 @@
 第29轮：[分板块深入优化](29-module-hardening.md)：后台调用与记忆任务、动作保留清理、HTTP/设备JSON输入；含后续板块优先级。
 
 第30轮：[记忆队列与关闭恢复](30-memory-worker-lifecycle.md)，保留普通stop，新增宿主quiesce；租约恢复、重复关闭与并发启动验证。
+
+第31轮：[动作存储分批清理与诊断](31-bounded-retention-scans.md)，前缀分页、事务安全的游标推进、后台限量与管理API状态。
