@@ -101,7 +101,7 @@ def test_prompt_marks_mentions_and_reply_relations():
     assert "[我|#m3] 我说的" in prompt     # bot 自己的发言标签 + 可识别消息ID
     assert "不可信" in prompt             # 群聊内容不可信纪律
     assert "被谈论不等于被邀请" in prompt
-    assert "接得上不等于值得说" in prompt
+    assert "明显好玩的接话" in prompt  # 2026-11-13 owner：好玩的接话/承计算价值
     assert "不代表后面的每条都在对她说" in prompt
 
 
