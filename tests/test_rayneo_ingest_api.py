@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from http.client import HTTPConnection
 import threading
 import urllib.error
 import urllib.request
@@ -107,8 +108,19 @@ def test_auth_and_framing(server):
     # >320 KiB
     huge = _batch(_item(1, "hi"))
     raw = json.dumps(huge).encode() + b" " * (320 * 1024 + 10)
-    # 重新包装使 Content-Length 超限
-    code, body = _post(server, "/v1/rayneo/ingest", None, raw=raw)
+    # Check rejection before uploading the oversized body. Eager upload can race
+    # server close and produce TCP reset instead of delivering the 413 on Windows.
+    conn = HTTPConnection("127.0.0.1", server.server_address[1], timeout=10)
+    try:
+        conn.putrequest("POST", "/v1/rayneo/ingest")
+        conn.putheader("Authorization", "Bearer phone-token")
+        conn.putheader("Content-Type", "application/json")
+        conn.putheader("Content-Length", str(len(raw)))
+        conn.endheaders()
+        response = conn.getresponse()
+        code, body = response.status, json.loads(response.read())
+    finally:
+        conn.close()
     assert code == 413 and "too large" in body["error"]
 
 

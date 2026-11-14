@@ -45,7 +45,8 @@ def _classify(result):
 def register_shell(registry, tools, workspace: Path, *, env=None):
     workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
     import os as _os
-    _drop = 'nobody' if _os.geteuid() == 0 else None
+    _geteuid = getattr(_os, 'geteuid', None)
+    _drop = 'nobody' if _geteuid is not None and _geteuid() == 0 else None
     executor = ShellExecutor(ShellPolicy.from_env(env), allowed_cwds=(str(workspace),),
                              sandbox='bubblewrap', drop_to_user=_drop)
     class Adapter:

@@ -1,6 +1,7 @@
 import type { CSSProperties } from "react";
 
 const paths: Record<string, string> = {
+  devices: "M7 2h10v20H7z M10 18h4 M3 7h2 M19 7h2",
   media: "M3 4h18v16H3z M3 16l5-5 5 5 3-3 5 5 M15 8h.01",
   image: "M3 4h18v16H3z M3 16l5-5 5 5 3-3 5 5 M15 8h.01",
   voice:

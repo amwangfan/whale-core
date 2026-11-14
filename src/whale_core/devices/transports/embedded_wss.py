@@ -168,17 +168,22 @@ class EmbeddedWssTransport:
         return page.data, page.truncated or page.source_truncated
 
     async def read_output_complete(self, device_id: str, output_ref: str, *,
-                                   max_bytes: int = 1024 * 1024) -> bytes:
+                                   max_bytes: int = 1024 * 1024, timeout_s: float = 60.0,
+                                   max_pages: int = 4096) -> bytes:
         from whale_core.devices.embedded_wss import GatewayError
+        started = asyncio.get_running_loop().time()
         try:
             return await collect_pages(
-                lambda offset, limit: self._read_page(device_id, output_ref, offset, limit),
-                max_bytes=max_bytes)
+                lambda offset, limit: self._read_page(device_id, output_ref, offset, limit,
+                    timeout_s=min(_READ_TIMEOUT_S, max(0.001, timeout_s - (asyncio.get_running_loop().time() - started)))),
+                max_bytes=max_bytes, timeout_s=timeout_s, max_pages=max_pages)
+        except TimeoutError as exc:
+            raise GatewayError("expired", "完整输出读取超过总时限") from exc
         except ValueError as exc:
             raise GatewayError("invalid_message", str(exc)) from exc
 
     async def _read_page(self, device_id: str, output_ref: str,
-                         offset: int, max_bytes: int) -> OutputPage:
+                         offset: int, max_bytes: int, *, timeout_s: float = _READ_TIMEOUT_S) -> OutputPage:
         from whale_core.devices.embedded_wss import GatewayError
         if type(offset) is not int or offset < 0 or type(max_bytes) is not int or max_bytes <= 0:
             raise GatewayError("invalid_message", "输出偏移须为非负整数，读取长度须为正整数")
@@ -189,7 +194,7 @@ class EmbeddedWssTransport:
                 operation="device.output.read",
                 filters={"output_ref": output_ref, "offset": int(offset),
                          "max_bytes": int(max_bytes), "page_format": "bytes.v1"},
-                max_items=1, timeout_s=_READ_TIMEOUT_S)
+                max_items=1, timeout_s=timeout_s)
         except GatewayError as exc:
             raise GatewayError(exc.code, f"read_output 失败：{exc}") from exc
         if result.get("status") != "ok":

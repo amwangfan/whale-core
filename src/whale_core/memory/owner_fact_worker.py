@@ -127,6 +127,12 @@ class OwnerFactWorker:
         poll_interval: float,
         now: Callable[[], datetime],
     ) -> None:
+        for name, value in (("lease_seconds", lease_seconds), ("model_timeout", model_timeout),
+                            ("poll_interval", poll_interval)):
+            if type(value) not in (int, float) or not 0 < value <= threading.TIMEOUT_MAX:
+                raise ValueError(f"{name} must be positive and within platform limits")
+        if type(max_retries) is not int or max_retries < 0:
+            raise ValueError("max_retries must be a nonnegative integer")
         if lease_seconds <= model_timeout:
             raise ValueError("lease_seconds 必须大于 model_timeout")
         self._store = store
@@ -142,6 +148,9 @@ class OwnerFactWorker:
         self._stop = threading.Event()
         self._in_flight = threading.Event()
         self._thread: threading.Thread | None = None
+        self._lifecycle = threading.RLock()
+        self._quiesced = False
+        self._active_job = None
         self._counters = {"claimed": 0, "completed": 0, "failed": 0, "retried": 0,
                           "model_failures": 0, "commit_rejected": 0}
         self._counters_lock = threading.Lock()
@@ -149,12 +158,32 @@ class OwnerFactWorker:
     # -- 生命周期 -----------------------------------------------------------
 
     def start(self) -> None:
-        if self._thread is not None:
-            raise RuntimeError("worker 已启动；单宿主单实例")
-        self._thread = threading.Thread(
-            target=self._loop, name=f"owner-fact-worker-{self._worker_id}", daemon=True
-        )
-        self._thread.start()
+        with self._lifecycle:
+            if self._thread is not None or self._stop.is_set():
+                raise RuntimeError("worker 已启动或已停止；请建立新实例")
+            self._thread = threading.Thread(
+                target=self._loop, name=f"owner-fact-worker-{self._worker_id}", daemon=True)
+            self._thread.start()
+
+    def quiesce(self, *, timeout: float = 5.0) -> bool:
+        """Fence store access and release our lease before the host closes its store.
+
+        A late external model call can finish, but its result must not write back.
+        """
+        with self._lifecycle:
+            self._stop.set()
+            active = self._active_job if not self._quiesced else None
+            self._quiesced = True
+            if active is not None:
+                def release(tx):
+                    job = tx.get(_k_job(active["job_id"]))
+                    if isinstance(job, Mapping) and self._still_mine(job, active.get("lease_token", "")):
+                        job = dict(job)
+                        job.update(status="pending", lease_owner="", lease_token="", lease_expires_at="")
+                        tx.put(_k_job(active["job_id"]), job)
+                self._store.transact(release)
+        self.stop(timeout=timeout)
+        return self._thread is None or not self._thread.is_alive()
 
     def stop(self, *, drain: bool = False, timeout: float = 5.0) -> None:
         """停止领取新任务。drain=True 时等待在途 job 完成（有界 timeout）。
@@ -162,13 +191,14 @@ class OwnerFactWorker:
         不谎称清空：返回后队列可能仍有 pending job（下次启动恢复）。
         计时用单调时钟，不受注入的业务时钟影响。
         """
-        self._stop.set()
+        deadline = time.monotonic() + max(0.1, float(timeout))
+        with self._lifecycle:
+            self._stop.set()
         thread = self._thread
-        if thread is not None:
-            thread.join(timeout=max(0.1, float(timeout)))
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=max(0, deadline - time.monotonic()))
         if drain and self._in_flight.is_set():
             # 模型调用可能仍在 call gate 后台线程收尾；等待其自然释放
-            deadline = time.monotonic() + max(0.1, float(timeout))
             while self._in_flight.is_set() and time.monotonic() < deadline:
                 threading.Event().wait(0.02)
 
@@ -210,15 +240,22 @@ class OwnerFactWorker:
                     # 上一次模型调用尚未真正收尾：不发新请求（防线程堆积）
                     self._stop.wait(self._poll)
                     continue
-                claimed = self._claim_next()
+                with self._lifecycle:
+                    if self._stop.is_set():
+                        break
+                    claimed = self._claim_next()
+                    if claimed is not None:
+                        self._active_job = claimed
+                        self._in_flight.set()
                 if claimed is None:
                     self._stop.wait(self._poll)
                     continue
-                self._in_flight.set()
                 try:
                     self._process(claimed)
                 finally:
-                    self._in_flight.clear()
+                    with self._lifecycle:
+                        self._active_job = None
+                        self._in_flight.clear()
             except Exception:
                 # worker 异常不得杀死循环，也不得影响主对话
                 with self._counters_lock:
@@ -258,8 +295,9 @@ class OwnerFactWorker:
                 if status == "leased":
                     lease_end = job.get("lease_expires_at") or ""
                     try:
-                        expired = bool(lease_end) and now > datetime.fromisoformat(lease_end)
-                    except ValueError:
+                        end = datetime.fromisoformat(lease_end)
+                        expired = end.tzinfo is None or now >= end
+                    except (ValueError, TypeError):
                         expired = True  # 损坏 lease 视为过期，可恢复
                 if status == "leased" and not expired:
                     # 有效 leased 的 domain 头部阻塞后续
@@ -310,54 +348,60 @@ class OwnerFactWorker:
     # -- 处理 ----------------------------------------------------------------
 
     def _process(self, job: dict[str, Any]) -> None:
-        job_id = str(job["job_id"])
-        token = str(job.get("lease_token") or "")
-        ev = self._store.get(_k_ev(str(job.get("evidence_id") or "")))
-        if not isinstance(ev, Mapping) or not ev.get("text"):
-            self._finish_terminal(job_id, token, "evidence_missing")
-            return
-        received = ev.get("received_at") or ""
-        try:
-            received_at = datetime.fromisoformat(str(received))
-        except ValueError:
-            self._finish_terminal(job_id, token, "bad_evidence_time")
-            return
-        evidence = UserEvidence(
-            evidence_id=str(ev["evidence_id"]),
-            owner_id=str(ev["owner_id"]),
-            principal_id=str(ev["principal_id"]),
-            conversation_id=str(ev["conversation_id"]),
-            channel=str(ev["channel"]),
-            space_id=str(ev["space_id"]),
-            text=str(ev["text"]),
-            received_at=received_at,
-            timezone=ev.get("timezone"),
-            source_message_id=ev.get("source_message_id"),
-            schema_version=int(ev.get("schema_version") or 1),
-        )
-        existing = self._load_snapshot_facts(job)
+        with self._lifecycle:
+            if self._quiesced:
+                return
+            job_id = str(job["job_id"])
+            token = str(job.get("lease_token") or "")
+            ev = self._store.get(_k_ev(str(job.get("evidence_id") or "")))
+            if not isinstance(ev, Mapping) or not ev.get("text"):
+                self._finish_terminal(job_id, token, "evidence_missing")
+                return
+            received = ev.get("received_at") or ""
+            try:
+                received_at = datetime.fromisoformat(str(received))
+            except ValueError:
+                self._finish_terminal(job_id, token, "bad_evidence_time")
+                return
+            evidence = UserEvidence(
+                evidence_id=str(ev["evidence_id"]),
+                owner_id=str(ev["owner_id"]),
+                principal_id=str(ev["principal_id"]),
+                conversation_id=str(ev["conversation_id"]),
+                channel=str(ev["channel"]),
+                space_id=str(ev["space_id"]),
+                text=str(ev["text"]),
+                received_at=received_at,
+                timezone=ev.get("timezone"),
+                source_message_id=ev.get("source_message_id"),
+                schema_version=int(ev.get("schema_version") or 1),
+            )
+            existing = self._load_snapshot_facts(job)
         candidates = self._gate(
             evidence, existing, default=None, timeout_s=self._model_timeout
         )
-        if candidates is None:
-            # 模型超时/异常/解析失败：有界重试（合法空候选走正常 commit 完成）
+        with self._lifecycle:
+            if self._quiesced:
+                return
+            if candidates is None:
+                # 模型超时/异常/解析失败：有界重试（合法空候选走正常 commit 完成）
+                with self._counters_lock:
+                    self._counters["model_failures"] += 1
+                self._fail_or_retry(job_id, token)
+                return
+            report = self._service.commit(
+                job_id,
+                tuple(candidates),
+                int(job.get("generation") or 0),
+                str(job.get("authority_version") or ""),
+                worker_id=self._worker_id,
+                lease_token=token,
+            )
             with self._counters_lock:
-                self._counters["model_failures"] += 1
-            self._fail_or_retry(job_id, token)
-            return
-        report = self._service.commit(
-            job_id,
-            tuple(candidates),
-            int(job.get("generation") or 0),
-            str(job.get("authority_version") or ""),
-            worker_id=self._worker_id,
-            lease_token=token,
-        )
-        with self._counters_lock:
-            if report.status == "committed":
-                self._counters["completed"] += 1
-            else:
-                self._counters["commit_rejected"] += 1
+                if report.status == "committed":
+                    self._counters["completed"] += 1
+                else:
+                    self._counters["commit_rejected"] += 1
 
     def _load_snapshot_facts(self, job: Mapping[str, Any]) -> tuple[FactRecord, ...]:
         out: list[FactRecord] = []

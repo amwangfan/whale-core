@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+from whale_core.security.json_input import loads as strict_json_loads
 import logging
 import math
 import re
@@ -72,17 +73,6 @@ class GatewayError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
-
-
-def _reject_json_constant(value: str):
-    raise ValueError(f"non-standard JSON constant: {value}")
-
-
-def _finite_json_float(value: str) -> float:
-    result = float(value)
-    if not math.isfinite(result):
-        raise ValueError("JSON number exceeds finite floating-point range")
-    return result
 
 
 def _timeout_ms(value: float, minimum: float, maximum: float) -> int:
@@ -354,7 +344,7 @@ class EmbeddedWssGateway:
             return False
 
         try:
-            msg = json.loads(raw, parse_constant=_reject_json_constant, parse_float=_finite_json_float)
+            msg = strict_json_loads(raw)
         except (ValueError, TypeError):
             return fail("auth_failed", "first frame is not valid JSON")
         if not isinstance(msg, dict):
@@ -453,7 +443,7 @@ class EmbeddedWssGateway:
         """认证后的常规帧。返回 False 表示应关闭连接。"""
         ref_id = REF_ID_FALLBACK
         try:
-            msg = json.loads(raw, parse_constant=_reject_json_constant, parse_float=_finite_json_float)
+            msg = strict_json_loads(raw)
         except (ValueError, TypeError):
             self.send_error(st, ref_id, "invalid_message", "frame is not valid JSON")
             return True
@@ -751,7 +741,7 @@ class EmbeddedWssGateway:
     ACTION_PENDING_GRACE_MS = 24 * 3600 * 1000
 
     def sweep_action_retention(self, *, now: int | None = None,
-                               max_deletes: int = 500) -> dict:
+                               max_deletes: int = 500, max_scan: int | None = None) -> dict:
         """有界清理设备动作回执/幂等记录/反向索引。
 
         - 终态且过保留窗口 → 删除动作记录 + 反向索引 + 回执流水；
@@ -760,9 +750,26 @@ class EmbeddedWssGateway:
         - 仍在有效重试窗口内的记录一律不动（幂等键不提前释放）；
         - 孤儿回执流水直接清；单趟删除量封顶 ``max_deletes``。
         """
-        return ActionRecords(self.store).sweep(
-            now if now is not None else now_ms(), self.ACTION_RETENTION_MS,
-            self.ACTION_PENDING_GRACE_MS, max_deletes)
+        started = time.monotonic()
+        cursors = getattr(self, "_retention_cursors", ("", "")) if max_scan is not None else ("", "")
+        try:
+            stats = ActionRecords(self.store).sweep(
+                now if now is not None else now_ms(), self.ACTION_RETENTION_MS,
+                self.ACTION_PENDING_GRACE_MS, max_deletes,
+                max_scan=max_scan, cursor=cursors[0], receipt_cursor=cursors[1])
+        except Exception as exc:
+            self._retention_status = {"state": "failed", "at": now_ms(),
+                "duration_ms": int((time.monotonic() - started) * 1000), "error": type(exc).__name__}
+            raise
+        if max_scan is not None:
+            self._retention_cursors = (stats["cursor"], stats["receipt_cursor"])
+        self._retention_status = {"state": "ok", "at": now_ms(),
+            "duration_ms": int((time.monotonic() - started) * 1000),
+            **{k: v for k, v in stats.items() if k not in ("cursor", "receipt_cursor")}}
+        return stats
+
+    def retention_status(self) -> dict:
+        return dict(getattr(self, "_retention_status", {"state": "not_run"}))
 
     # ------------------------------------------------------------------
     # 心跳离线扫描（内存状态即可，§1）
@@ -771,6 +778,7 @@ class EmbeddedWssGateway:
     def _sweep_loop(self) -> None:
         interval = max(0.2, min(self.heartbeat_timeout / 3, 10.0))
         last_retention_sweep = 0.0
+        retention_pending = False
         while not self.stopping.wait(interval):
             now = time.monotonic()
             with self.lock:
@@ -779,13 +787,15 @@ class EmbeddedWssGateway:
                 self._expire_heartbeat(device_id, st, now)
             # 动作回执保留清理搭既有 sweep 线程（不另建后台系统），
             # 每小时一趟、每趟删除量封顶。
-            if now - last_retention_sweep >= 3600:
+            if now - last_retention_sweep >= (interval if retention_pending else 3600):
                 last_retention_sweep = now
                 try:
-                    stats = self.sweep_action_retention()
+                    stats = self.sweep_action_retention(max_scan=500)
+                    retention_pending = stats.get("more", False)
                     if stats.get("deleted") or stats.get("marked_unknown"):
                         log.info("设备动作保留清理：%s", stats)
                 except Exception:
+                    retention_pending = False  # retain cursors, but back off on storage failures
                     log.warning("设备动作保留清理失败（下轮重试）", exc_info=True)
 
     def _expire_heartbeat(self, device_id: str, st: ConnectionState, now: float) -> None:

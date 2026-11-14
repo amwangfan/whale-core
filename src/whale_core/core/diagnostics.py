@@ -15,6 +15,7 @@ provider；``error_taxonomy`` 静态文档化 ``ModelError.kind`` 的六个取�
 from __future__ import annotations
 
 import time
+import math
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
@@ -94,7 +95,8 @@ def _load_stats(store, key: str) -> dict:
         stats[field] = value
     for field in ("last_latency_ms", "total_latency_ms"):
         value = raw.get(field, 0.0)
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or value < 0 or not math.isfinite(value)):
             return _zero_stats()
         stats[field] = float(value)
     for field in ("last_error_kind", "last_error_at", "updated_at"):
@@ -107,12 +109,14 @@ def _load_stats(store, key: str) -> dict:
         stats["error_events"] = [list(e) for e in events
                                  if isinstance(e, (list, tuple)) and len(e) == 2
                                  and isinstance(e[0], (int, float))
+                                 and not isinstance(e[0], bool) and math.isfinite(e[0])
                                  and isinstance(e[1], str)][-_MAX_ERROR_EVENTS:]
     samples = raw.get("latency_samples", [])
     if isinstance(samples, list):
         stats["latency_samples"] = [float(v) for v in samples
                                     if isinstance(v, (int, float))
-                                    and not isinstance(v, bool) and v >= 0][-_MAX_LATENCY_SAMPLES:]
+                                    and not isinstance(v, bool) and v >= 0
+                                    and math.isfinite(v)][-_MAX_LATENCY_SAMPLES:]
     return stats
 
 
@@ -170,7 +174,6 @@ class InstrumentedProvider:
         self._key = _HEALTH_PREFIX + name
 
     def reply(self, text, *, persona="", memories=(), history=()) -> str:
-        stats = _load_stats(self._store, self._key)
         t0 = time.monotonic()
         try:
             result = self._inner.reply(
@@ -180,14 +183,26 @@ class InstrumentedProvider:
             kind = getattr(exc, "kind", None)
             if not isinstance(kind, str) or not kind:
                 kind = type(exc).__name__
-            self._record(stats, t0, len(text), 0, error_kind=kind)
+            self._record(t0, len(text), 0, error_kind=kind)
             raise
-        self._record(stats, t0, len(text), len(result), error_kind=None)
+        self._record(t0, len(text), len(result), error_kind=None)
         return result
 
-    def _record(self, stats: dict, t0: float, in_len: int, out_len: int, *,
+    def _record(self, t0: float, in_len: int, out_len: int, *,
                 error_kind: str | None) -> None:
         elapsed_ms = (time.monotonic() - t0) * 1000.0
+        # Only the short read/modify/write is transactional; never lock during
+        # network I/O. Multiple wrappers and SQLite connections share totals.
+        def update(tx):
+            stats = _load_stats(tx, self._key)
+            self._update_stats(stats, elapsed_ms, in_len, out_len, error_kind)
+            tx.put(self._key, stats)
+
+        self._store.transact(update)
+
+    @staticmethod
+    def _update_stats(stats: dict, elapsed_ms: float, in_len: int, out_len: int,
+                      error_kind: str | None) -> None:
         stats["calls"] += 1
         stats["chars_in"] += in_len
         if error_kind is None:
@@ -205,7 +220,6 @@ class InstrumentedProvider:
         samples.append(elapsed_ms)
         stats["latency_samples"] = samples[-_MAX_LATENCY_SAMPLES:]
         stats["updated_at"] = _utc_now_iso()
-        self._store.put(self._key, stats)
 
     def health(self) -> dict:
         """读回统计 + {"name": ...}；kv 数据损坏时返回零值视图，不抛。"""
@@ -213,7 +227,7 @@ class InstrumentedProvider:
 
 
 def provider_health_report(store) -> dict:
-    """扫 store.keys() 中 ``provider:health:*`` 键汇总。
+    """分页扫描 ``provider:health:*`` 键汇总（旧后端兼容 keys）。
 
     返回 {"providers": [health 视图, ...], "totals": {"calls", "errors"}}；
     损坏条目按零值计入，不抛。
@@ -222,7 +236,15 @@ def provider_health_report(store) -> dict:
     total_calls = 0
     total_errors = 0
     try:
-        keys = store.keys()
+        scan = getattr(store, "scan_keys", None)
+        if callable(scan):
+            keys = []
+            cursor = ""
+            while batch := scan(_HEALTH_PREFIX, after=cursor, limit=500):
+                keys.extend(batch)
+                cursor = batch[-1]
+        else:
+            keys = store.keys()
     except Exception:
         keys = []
     for key in sorted(k for k in keys if isinstance(k, str)):

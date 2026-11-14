@@ -48,3 +48,23 @@
 第20轮最终验证：完整Core Python **2665 passed /18 skipped /69 warnings**（231.77秒），Mobile纯JVM **125/125 /16个测试类**，协议 **72/72**，Python工具 **4 passed /1 skipped**，两仓 **68个契约文件一致**。前端未改，沿用第17轮网页96项、类型检查与构建结果；wheel在本轮源码上重新构建及源码外冒烟。Android组件、Robolectric、完整APK与真机未验证，纯JVM不代表这些项目通过。
 
 运行记录集中保存在本机工作区 `logs/12-V2分支初始化` 至 `logs/33-V2第20轮最终优化`；不将原始运行记录和私人配置提交到源码仓库。按用户最后追加要求完成第20轮，更新现有两个PR后停止。
+
+第21–25轮：[输出分页边界与完整性](21-25-output-boundaries.md)，后续分支 refactor/v2-output-hardening。
+
+第26轮：[宿主平台兼容与回归收尾](26-host-platform-regressions.md)。
+
+第27轮：[编码预算与来源截断](27-encoded-output-budget.md)，Core相关93项、Mobile纯JVM129项通过。
+
+第28轮：[完整输出链路整合](28-complete-output-pipeline.md)，读取总时限/分页预算、手机共用文件访问、流式尾部、真实Kotlin→Python观察解析。
+
+第29轮：[分板块深入优化](29-module-hardening.md)：后台调用与记忆任务、动作保留清理、HTTP/设备JSON输入；含后续板块优先级。
+
+第30轮：[记忆队列与关闭恢复](30-memory-worker-lifecycle.md)，保留普通stop，新增宿主quiesce；租约恢复、重复关闭与并发启动验证。
+
+第31轮：[动作存储分批清理与诊断](31-bounded-retention-scans.md)，前缀分页、事务安全的游标推进、后台限量与管理API状态。
+
+第32轮：[网页设备与后台诊断](32-runtime-diagnostics-console.md)，诊断数据到网页闭环、请求取消/超时/部分失败和陈旧状态。
+
+第33轮：[并发调用统计与诊断查询](33-provider-diagnostics-atomic.md)，事务累加、供应商前缀分页与非有限指标容错。
+
+第34轮：[控制台按需加载与页面恢复](34-console-deferred-pages.md)，11个页面拆包、加载/渲染失败隔离与重试、安装包分块资源校验。

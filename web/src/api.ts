@@ -8,6 +8,21 @@
 
 export const API_BASE = "/api/v1";
 
+export interface RetentionReport {
+  state: string; at?: number; duration_ms?: number; scanned?: number;
+  receipt_scanned?: number; deleted?: number; marked_unknown?: number; more?: boolean;
+  scan_mode?: string; error?: string;
+}
+export interface DeviceReport {
+  devices: { device_id: string; label?: string; status: string; online?: boolean; scopes?: string[] }[];
+  retention?: RetentionReport;
+}
+export interface MemoryWorkerReport {
+  state: string; error?: string; claimed?: number; completed?: number; failed?: number;
+  retried?: number; model_failures?: number; commit_rejected?: number;
+  queue_depth?: number; in_flight?: boolean; model_busy?: boolean;
+}
+
 const TOKEN_KEY = "whale.console.token";
 
 // ---------- 类型（与后端契约一一对应） ----------
@@ -229,6 +244,7 @@ export interface RuntimeSettings {
   budget?: BudgetView;
 }
 export interface DiagnosticReport {
+  memory_worker?: MemoryWorkerReport;
   checks: { name: string; status: string; detail: string }[];
   summary: Record<string, unknown>;
 }
@@ -411,6 +427,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 // ---------- 端点 ----------
 
 export const api = {
+  devices: (signal?: AbortSignal) => request<DeviceReport>("/devices", { signal }),
   conversation: (id = "console") =>
     request<{
       conversation_id: string;
@@ -531,7 +548,7 @@ export const api = {
     }),
   testProvider: () =>
     request<ProviderTest>("/providers/test", { method: "POST", body: "{}" }),
-  diagnostics: () => request<DiagnosticReport>("/diagnostics"),
+  diagnostics: (signal?: AbortSignal) => request<DiagnosticReport>("/diagnostics", { signal }),
   testPlugin: (id: string) =>
     request<ProviderTest & { via?: string }>(
       `/plugins/${encodeURIComponent(id)}/test`,

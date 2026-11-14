@@ -12,7 +12,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from whale_core.memory.store import MemoryKind, MemoryRecord, PersonaContinuity
+from whale_core.memory.store import MemoryKind, MemoryRecord, PersonaContinuity, _scan_bounds
 
 _SCHEMA_VERSION = 1
 
@@ -137,6 +137,17 @@ class SqliteMemoryStore:
         with self._lock:
             rows = self.db.execute("SELECT key FROM kv UNION SELECT key FROM records ORDER BY key").fetchall()
             return [row[0] for row in rows]
+
+    def scan_keys(self, prefix: str, *, after: str = "", limit: int = 500) -> list[str]:
+        upper = _scan_bounds(prefix, after, limit)
+        where = "key >= ? AND key > ?" + (" AND key < ?" if upper is not None else "")
+        params = [prefix, after] + ([upper] if upper is not None else []) + [limit]
+        with self._lock:
+            keys = set()
+            for table in ("kv", "records"):
+                rows = self.db.execute(f"SELECT key FROM {table} WHERE {where} ORDER BY key LIMIT ?", params)
+                keys.update(row[0] for row in rows)
+            return sorted(keys)[:limit]
 
     def transact(self, fn):
         """S4：单事务执行 fn(tx)（BEGIN IMMEDIATE），tx 提供 kv get/put。

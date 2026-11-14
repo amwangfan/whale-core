@@ -441,6 +441,8 @@ def test_bound_persona_and_final_delivery_wording_are_consistent(tmp_path, monke
             return "语音已送出"
     delegates = build_delegates(
         {"WHALE_STORE": str(tmp_path / "persona.sqlite"), "OWNER_UID": "owner-uid",
+         # This test observes conversational persona, not background extraction prompts.
+         "WHALE_OWNER_FACT_MEMORY": "0",
          "WHALE_MINIMAX_API_KEY": "fake-key", "WHALE_PARALLEL_REPLY": "1" if parallel else "0"},
         brain_factory=Brain, quick_brain_factory=Quick, send_port_factory=_OnlineVoicePort)
     store = delegates["store"]
@@ -458,6 +460,7 @@ def test_bound_persona_and_final_delivery_wording_are_consistent(tmp_path, monke
             assert out["status"] == "ready"
             reply = out["reply"]
         assert reply == "语音已送出"
+        assert model_personas and quick_personas
         assert all("会话鲸鲸" in p and "全局鲸鲸" not in p for p in model_personas + quick_personas)
         history = load_history(store, "glasses:bound")
         assert "尚未投递的旧措辞" not in str(history)

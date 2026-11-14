@@ -179,6 +179,14 @@ class InMemoryStore:
         with self._lock:
             return sorted(set(self._data) | set(self._records))
 
+    def scan_keys(self, prefix: str, *, after: str = "", limit: int = 500) -> list[str]:
+        import heapq
+        import itertools
+        _scan_bounds(prefix, after, limit)
+        with self._lock:
+            keys = itertools.chain(self._data, (k for k in self._records if k not in self._data))
+            return heapq.nsmallest(limit, (k for k in keys if k.startswith(prefix) and k > after))
+
     def put_record(self, record: MemoryRecord) -> None:
         # JSON 往返归一 content/tags（与 SqliteMemoryStore 序列化语义对齐）：
         # 非 JSON 可序列化内容在此抛 TypeError；tuple 等类型归一为 list。
@@ -267,3 +275,14 @@ class InMemoryStore:
                 self._data = original_data
                 self._records = original_records
                 raise
+
+
+def _scan_bounds(prefix: str, after: str, limit: int) -> str | None:
+    if not isinstance(prefix, str) or not isinstance(after, str):
+        raise ValueError("prefix and after must be strings")
+    if type(limit) is not int or not 1 <= limit <= 10000:
+        raise ValueError("limit must be in 1..10000")
+    for index in range(len(prefix) - 1, -1, -1):
+        if ord(prefix[index]) < 0x10ffff:
+            return prefix[:index] + chr(ord(prefix[index]) + 1)
+    return None
