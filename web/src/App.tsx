@@ -1,20 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, getToken, isUnauthorized, onUnauthorized, setToken, type RuntimeSettings } from "./api";
 import Overview from "./components/Overview";
-import Plugins from "./components/Plugins";
-import MemoryView from "./components/Memory";
-import Approvals from "./components/Approvals";
+import { deferredPage } from "./components/DeferredPage";
 import Chat, { type Msg } from "./components/Chat";
-import Tasks from "./components/Tasks";
-import Events from "./components/Events";
 import Icon from "./components/Icon";
-import Settings from "./components/Settings";
 import FirstRunSetup from "./components/FirstRunSetup";
-import Media from "./components/Media";
-import Workflows from "./components/Workflows";
-import Studio from "./components/Studio";
-import Initiative from "./components/Initiative";
-import RuntimeDiagnostics from "./components/RuntimeDiagnostics";
+const Plugins = deferredPage(() => import("./components/Plugins"));
+const MemoryView = deferredPage(() => import("./components/Memory"));
+const Approvals = deferredPage(() => import("./components/Approvals"));
+const Tasks = deferredPage(() => import("./components/Tasks"));
+const Events = deferredPage(() => import("./components/Events"));
+const Settings = deferredPage(() => import("./components/Settings"));
+const Media = deferredPage(() => import("./components/Media"));
+const Workflows = deferredPage(() => import("./components/Workflows"));
+const Studio = deferredPage(() => import("./components/Studio"));
+const Initiative = deferredPage(() => import("./components/Initiative"));
+const RuntimeDiagnostics = deferredPage(() => import("./components/RuntimeDiagnostics"));
 
 type TabKey =
   | "devices"

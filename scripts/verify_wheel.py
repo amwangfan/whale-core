@@ -45,6 +45,21 @@ try:
     with urllib.request.urlopen(base + "/", timeout=5) as response:
         html = response.read().decode()
         assert response.status == 200 and '<div id="root">' in html
+    # Lazy pages have separate JS/CSS files. Loading only index.html can miss
+    # broken asset routing or SPA fallbacks that return HTML for a chunk URL.
+    assets = sorted((static / "assets").rglob("*"))
+    checked = 0
+    for asset in assets:
+        if asset.suffix not in {".js", ".css"}:
+            continue
+        path = asset.relative_to(static).as_posix()
+        with urllib.request.urlopen(base + "/" + path, timeout=5) as response:
+            assert response.status == 200, path
+            assert "text/html" not in response.headers.get("Content-Type", ""), path
+            assert response.read() == asset.read_bytes(), path
+        checked += 1
+    assert checked, "no packaged console assets"
+    print(f"Served {checked} packaged JavaScript/CSS assets with exact bytes.")
     request = urllib.request.Request(server.url + "/health",
                                      headers={"Authorization": "Bearer wheel-smoke-token"})
     with urllib.request.urlopen(request, timeout=5) as response:
