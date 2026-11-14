@@ -64,3 +64,5 @@
 第31轮：[动作存储分批清理与诊断](31-bounded-retention-scans.md)，前缀分页、事务安全的游标推进、后台限量与管理API状态。
 
 第32轮：[网页设备与后台诊断](32-runtime-diagnostics-console.md)，诊断数据到网页闭环、请求取消/超时/部分失败和陈旧状态。
+
+第33轮：[并发调用统计与诊断查询](33-provider-diagnostics-atomic.md)，事务累加、供应商前缀分页与非有限指标容错。
