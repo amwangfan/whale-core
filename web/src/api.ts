@@ -321,6 +321,7 @@ export function isUnauthorized(err: unknown): boolean {
 // ---------- token 管理 ----------
 
 let cachedToken: string | null = null;
+let tokenVersion = 0;
 
 function storageAvailable(): boolean {
   try {
@@ -344,6 +345,7 @@ export function getToken(): string {
 }
 
 export function setToken(token: string): void {
+  ++tokenVersion;
   cachedToken = token.trim();
   if (!storageAvailable()) return;
   try {
@@ -383,6 +385,7 @@ export function apiUrl(path: string): string {
 
 /** 发起请求并返回原始 Response；非 2xx 时按 `{error:{code,message}}` 解析并抛 ApiError。 */
 async function rawRequest(path: string, init?: RequestInit): Promise<Response> {
+  const version = tokenVersion;
   const headers = new Headers(init?.headers);
   const token = getToken();
   if (token) headers.set("Authorization", `Bearer ${token}`);
@@ -413,7 +416,8 @@ async function rawRequest(path: string, init?: RequestInit): Promise<Response> {
     } catch {
       /* 非 JSON 错误体：保留 http_<status> 兜底 */
     }
-    if (res.status === 401) notifyUnauthorized();
+    if (res.status === 401 && version === tokenVersion && !init?.signal?.aborted)
+      notifyUnauthorized();
     throw new ApiError(code, message, res.status);
   }
   return res;
@@ -1455,35 +1459,12 @@ export async function chatStream(
   callbacks: ChatStreamCallbacks,
   signal?: AbortSignal,
 ): Promise<ChatStreamDone | null> {
-  const headers = new Headers({
-    "Content-Type": "application/json",
-    Accept: "text/event-stream",
-  });
-  const token = getToken();
-  if (token) headers.set("Authorization", `Bearer ${token}`);
-  const res = await fetch(apiUrl("/chat/stream"), {
+  const res = await rawRequest("/chat/stream", {
     method: "POST",
-    headers,
+    headers: { Accept: "text/event-stream" },
     body: JSON.stringify({ conversation_id: conversationId, text }),
     signal,
-    redirect: "error",
   });
-  if (!res.ok) {
-    let code = `http_${res.status}`;
-    let message = res.statusText || `HTTP ${res.status}`;
-    try {
-      const body: unknown = await res.json();
-      if (body && typeof body === "object" && "error" in body) {
-        const err = (body as { error: { code?: unknown; message?: unknown } })
-          .error;
-        if (typeof err.code === "string") code = err.code;
-        if (typeof err.message === "string") message = err.message;
-      }
-    } catch {
-      /* 保留默认错误信息 */
-    }
-    throw new ApiError(code, message, res.status);
-  }
   if (!res.body)
     throw new ApiError("no_stream", "chat stream has no body", res.status);
   let done: ChatStreamDone | null = null;
