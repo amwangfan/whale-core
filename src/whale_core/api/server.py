@@ -312,12 +312,22 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(403, _error("forbidden", "path outside static root"))
             return
         if not target.is_file():
+            if rel.startswith("assets/") or target.suffix:
+                self._send(404, _error("not_found", "static resource not found"))
+                return
             target = root / "index.html"  # SPA 回落
             if not target.is_file():
                 self._send(404, _error("not_found", "console not built (web/dist missing)"))
                 return
         ctype = self._STATIC_TYPES.get(target.suffix.lower(), "application/octet-stream")
-        data = target.read_bytes()
+        try:
+            data = target.read_bytes()
+        except FileNotFoundError:
+            self._send(404, _error("not_found", "static resource not found"))
+            return
+        except OSError:
+            self._send(403, _error("forbidden", "static resource unavailable"))
+            return
         self._send(200, data, content_type=ctype)
 
 

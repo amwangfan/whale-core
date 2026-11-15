@@ -78,3 +78,5 @@
 第38轮：[活动与Trace查询隔离](38-events-query-isolation.md)，详情生命周期、局部重试与分页条件一致性。
 
 第39轮：[记忆查询身份隔离](39-memory-read-isolation.md)，主体/筛选/分页结果绑定、旧治理按钮隐藏、取消与恢复。
+
+第40轮：[静态资源错误语义](40-static-resource-errors.md)，缺失资源404、SPA深链保留及读取竞态处理。
