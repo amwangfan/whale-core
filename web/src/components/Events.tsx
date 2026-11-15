@@ -6,12 +6,11 @@
  *   （/traces 列表筛选，点 trace_id 展开 /traces/{id} 的 spans 明细）。
  */
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { useApi } from "../hooks";
 import {
   api,
   streamEvents,
-  type ActivityItem,
-  type TraceDetail,
-  type TracesListResult,
+  type TracesQuery,
   type WhaleEvent,
 } from "../api";
 
@@ -65,28 +64,10 @@ function fmtClock(epochS: number): string {
 // ---------------------------------------------------------------- 活动记录
 
 function ActivityView() {
-  const [items, setItems] = useState<ActivityItem[] | null>(null);
-  const [total, setTotal] = useState(0);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const r = await api.activityList(50, 0);
-      setItems(r.items);
-      setTotal(r.total);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
+  const fetchActivity = useCallback((signal: AbortSignal) => api.activityList(50, 0, signal), []);
+  const { data, loading, error, reload: load } = useApi(fetchActivity);
+  const items = data?.items ?? null;
+  const total = data?.total ?? 0;
 
   return (
     <section aria-label="活动记录">
@@ -132,63 +113,41 @@ function ActivityView() {
 
 const TRACE_STATUS_OPTIONS = ["replied", "silent", "failed", "partial"];
 
+function TraceDetails({ id }: { id: string }) {
+  const fetchDetail = useCallback((signal: AbortSignal) => api.tracesDetail(id, signal), [id]);
+  const { data: detail, loading, error, reload } = useApi(fetchDetail);
+  if (loading) return <span className="muted">正在读取详情…</span>;
+  if (error) return <div className="banner error">{error} <button onClick={reload}>重试详情</button></div>;
+  if (!detail || detail.trace_id !== id) return null;
+  return <>
+    <span className="section-label">spans（{detail.spans.length}）</span>
+    <table className="table span-table">
+      <thead><tr><th>阶段</th><th>状态</th><th>reason_code</th><th>耗时</th><th>detail</th></tr></thead>
+      <tbody>{detail.spans.map(s => <tr key={s.span_id}>
+        <td>{s.phase}</td><td>{s.status}</td><td className="mono">{s.reason_code || "—"}</td>
+        <td>{s.duration_ms} ms</td><td>{s.detail || "—"}</td>
+      </tr>)}</tbody>
+    </table>
+  </>;
+}
+
 function TracePanel() {
   const [status, setStatus] = useState("");
   const [conv, setConv] = useState("");
   const [limit, setLimit] = useState(50);
-  const [offset, setOffset] = useState(0);
-  const [result, setResult] = useState<TracesListResult | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [query, setQuery] = useState<TracesQuery>({ limit: 50, offset: 0 });
+  const fetchList = useCallback((signal: AbortSignal) => api.tracesList(query, signal), [query]);
+  const { data, loading, error } = useApi(fetchList);
+  const result = loading || error ? null : data;
+  const offset = query.offset ?? 0;
+  const pageSize = query.limit ?? 50;
   const [openId, setOpenId] = useState<string | null>(null);
-  const [detail, setDetail] = useState<TraceDetail | null>(null);
-  const [detailLoading, setDetailLoading] = useState(false);
-
-  const load = useCallback(
-    async (off: number) => {
-      setLoading(true);
-      setError(null);
-      try {
-        const r = await api.tracesList({
-          status: status || undefined,
-          conversation_id: conv.trim() || undefined,
-          limit,
-          offset: off,
-        });
-        setResult(r);
-        setOffset(off);
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-      } finally {
-        setLoading(false);
-      }
-    },
-    [status, conv, limit],
-  );
-
-  useEffect(() => {
-    void load(0);
-    // 仅在挂载时自动查询一次；筛选变化由「查询」按钮触发。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const toggle = async (traceId: string) => {
-    if (openId === traceId) {
-      setOpenId(null);
-      setDetail(null);
-      return;
-    }
-    setOpenId(traceId);
-    setDetail(null);
-    setDetailLoading(true);
-    try {
-      setDetail(await api.tracesDetail(traceId));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setDetailLoading(false);
-    }
+  const load = () => {
+    setOpenId(null);
+    setQuery({ status: status || undefined, conversation_id: conv.trim() || undefined, limit, offset: 0 });
   };
+  const page = (off: number) => { setOpenId(null); setQuery(prev => ({ ...prev, offset: off })); };
+  const toggle = (id: string) => setOpenId(prev => prev === id ? null : id);
 
   return (
     <section className="trace-panel" aria-label="Trace 查询">
@@ -218,7 +177,7 @@ function TracePanel() {
           value={conv}
           onChange={(e) => setConv(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter") void load(0);
+            if (e.key === "Enter") void load();
           }}
         />
         <select
@@ -232,7 +191,7 @@ function TracePanel() {
             </option>
           ))}
         </select>
-        <button disabled={loading} onClick={() => void load(0)}>
+        <button disabled={loading} onClick={() => void load()}>
           {loading ? "查询中…" : "查询"}
         </button>
       </div>
@@ -280,40 +239,7 @@ function TracePanel() {
                   {openId === t.trace_id && (
                     <tr className="expand-row">
                       <td colSpan={6}>
-                        {detailLoading && (
-                          <span className="muted">正在读取详情…</span>
-                        )}
-                        {detail && detail.trace_id === t.trace_id && (
-                          <>
-                            <span className="section-label">
-                              spans（{detail.spans.length}）
-                            </span>
-                            <table className="table span-table">
-                              <thead>
-                                <tr>
-                                  <th>阶段</th>
-                                  <th>状态</th>
-                                  <th>reason_code</th>
-                                  <th>耗时</th>
-                                  <th>detail</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {detail.spans.map((s) => (
-                                  <tr key={s.span_id}>
-                                    <td>{s.phase}</td>
-                                    <td>{s.status}</td>
-                                    <td className="mono">
-                                      {s.reason_code || "—"}
-                                    </td>
-                                    <td>{s.duration_ms} ms</td>
-                                    <td>{s.detail || "—"}</td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </>
-                        )}
+                        <TraceDetails key={t.trace_id} id={t.trace_id} />
                       </td>
                     </tr>
                   )}
@@ -327,18 +253,18 @@ function TracePanel() {
         <div className="memory-pager">
           <button
             disabled={offset === 0 || loading}
-            onClick={() => void load(Math.max(0, offset - limit))}
+            onClick={() => page(Math.max(0, offset - pageSize))}
           >
             上一页
           </button>
           <span className="muted small">
             {result.total === 0
               ? "共 0 条"
-              : `第 ${offset + 1}–${Math.min(offset + limit, result.total)} 条 / 共 ${result.total} 条`}
+              : `第 ${offset + 1}–${Math.min(offset + pageSize, result.total)} 条 / 共 ${result.total} 条`}
           </span>
           <button
-            disabled={offset + limit >= result.total || loading}
-            onClick={() => void load(offset + limit)}
+            disabled={offset + pageSize >= result.total || loading}
+            onClick={() => page(offset + pageSize)}
           >
             下一页
           </button>

@@ -638,7 +638,7 @@ export const api = {
 
   // ---- Trace 账本（诊断视图走 console API token，放 api 组） ----
 
-  tracesList: (params: TracesQuery = {}) => {
+  tracesList: (params: TracesQuery = {}, signal?: AbortSignal) => {
     const qs = new URLSearchParams();
     if (params.kind) qs.set("kind", params.kind);
     if (params.conversation_id)
@@ -650,19 +650,21 @@ export const api = {
     if (params.limit !== undefined) qs.set("limit", String(params.limit));
     if (params.offset !== undefined) qs.set("offset", String(params.offset));
     const suffix = qs.toString();
-    return request<TracesListResult>(`/traces${suffix ? `?${suffix}` : ""}`);
+    return request<TracesListResult>(`/traces${suffix ? `?${suffix}` : ""}`, { signal });
   },
 
-  tracesDetail: async (traceId: string) =>
+  tracesDetail: async (traceId: string, signal?: AbortSignal) =>
     (
       await request<{ trace: TraceDetail }>(
         `/traces/${encodeURIComponent(traceId)}`,
+        { signal },
       )
     ).trace,
 
-  activityList: (limit = 30, offset = 0) =>
+  activityList: (limit = 30, offset = 0, signal?: AbortSignal) =>
     request<{ total: number; items: ActivityItem[] }>(
       `/activity?limit=${limit}&offset=${offset}`,
+      { signal },
     ),
 
   /** issue #43：任务执行时间线（可读阶段/回执/送达/重试建议/Trace 关联）。 */

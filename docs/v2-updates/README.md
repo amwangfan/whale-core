@@ -74,3 +74,5 @@
 第36轮：[网页读取请求生命周期](36-console-read-lifecycle.md)，公共读取真实取消、超时恢复、卸载清理和9类API信号传递。
 
 第37轮：[共享有界流式读取](37-shared-stream-reader.md)，聊天/事件流解析收敛、单行上限、reader释放与取消隔离。
+
+第38轮：[活动与Trace查询隔离](38-events-query-isolation.md)，详情生命周期、局部重试与分页条件一致性。
