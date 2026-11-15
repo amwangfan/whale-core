@@ -2044,7 +2044,7 @@ def cmd_run(args) -> int:
         _participation_judge = ParticipationJudge(
             lambda prompt: _llm_call_bounded(
                 prompt, default="observe", timeout_s=float(
-                    os.environ.get("QQ_PARTICIPATE_TIMEOUT_S", "6") or "6")),
+                    os.environ.get("QQ_PARTICIPATE_TIMEOUT_S", "15") or "15")),
             bot_name=bot_aliases[0] if bot_aliases else "Enxi",
             name_resolver=timeline.name_resolver, self_uid=self_uid)
 
