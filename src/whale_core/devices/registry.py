@@ -18,6 +18,7 @@ import json
 import re
 import secrets
 import time
+from functools import wraps
 from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 from uuid import uuid4
@@ -65,6 +66,38 @@ class DeviceRegistryError(ValueError):
         self.code = code
 
 
+class _RegistryTransaction:
+    """Read/write via the transaction; key discovery uses the same locked store.
+
+    SQLite's BEGIN IMMEDIATE serializes writers across connections as well as
+    registry instances. No nested store.put/commit is allowed in the callback.
+    """
+
+    def __init__(self, store, tx):
+        self.get, self.put, self.delete = tx.get, tx.put, tx.delete
+        self.keys = store.keys
+        if callable(getattr(store, "scan_keys", None)):
+            self.scan_keys = store.scan_keys
+
+
+def _atomic_change(method):
+    @wraps(method)
+    def change(self, *args, **kwargs):
+        def apply(tx):
+            registry = DeviceRegistry(_RegistryTransaction(self.store, tx), actor=self.actor)
+            return method(registry, *args, **kwargs)
+        try:
+            return self.store.transact(apply)
+        except DeviceRegistryError as exc:
+            # Denied approvals must remain audited even though their transaction
+            # rolled back. Successful changes and their audits commit together.
+            if method.__name__ == "approve" and exc.code in {"expired", "bad_request"}:
+                self.audit("device.pair.approve", outcome="denied",
+                           reason="code_expired" if exc.code == "expired" else "code_not_found")
+            raise
+    return change
+
+
 class DeviceRegistry:
     """设备元数据 CRUD + 配对状态机（pending → active → revoked）。"""
 
@@ -99,9 +132,19 @@ class DeviceRegistry:
             return None
         return dict(meta)
 
+    def _device_keys(self):
+        scan = getattr(self.store, "scan_keys", None)
+        if not callable(scan):
+            yield from self.store.keys()
+            return
+        cursor = ""
+        while batch := scan(DEVICE_KEY_PREFIX, after=cursor, limit=500):
+            yield from batch
+            cursor = batch[-1]
+
     def list_devices(self) -> list[dict[str, Any]]:
         out = []
-        for key in self.store.keys():
+        for key in self._device_keys():
             # 只收设备记录本体（device:<32hex>），排除 device:action:* / device:receipts:* 等子键域
             if not key.startswith(DEVICE_KEY_PREFIX):
                 continue
@@ -129,6 +172,7 @@ class DeviceRegistry:
 
     # ---- 配对状态机 ----
 
+    @_atomic_change
     def request_pairing(self, *, label: str, pubkey_hex: str,
                         scopes: Iterable[str] | None = None,
                         code_ttl_s: int = PAIR_CODE_TTL_S) -> dict[str, Any]:
@@ -144,7 +188,9 @@ class DeviceRegistry:
                 "bad_request", "pubkey_hex 须为 Ed25519 公钥的 64 hex 字符")
         pubkey_hex = pubkey_hex.lower()
         device_id = device_id_from_pubkey_hex(pubkey_hex)
-        scope_tuple = self._validate_scopes(scopes or DEVICE_CAPABILITIES)
+        if isinstance(code_ttl_s, bool) or not isinstance(code_ttl_s, int) or code_ttl_s < 0:
+            raise DeviceRegistryError("bad_request", "code_ttl_s 须为非负整数")
+        scope_tuple = self._validate_scopes(DEVICE_CAPABILITIES if scopes is None else scopes)
         existing = self.get(device_id)
         if existing and existing.get("status") == "active":
             raise DeviceRegistryError(
@@ -154,11 +200,15 @@ class DeviceRegistry:
                 "conflict", f"设备 {device_id} 已 revoked；如需重配对请先删除记录")
         code = f"{secrets.randbelow(1_000_000):06d}"
         # 配对码全局唯一（撞码时重摇，避免把别人的设备批准进来）
+        used_codes = {d["pairing_code"] for d in self.list_devices()
+                      if isinstance(d.get("pairing_code"), str)}
         for _ in range(8):
-            clash = any(d.get("pairing_code") == code for d in self.list_devices())
+            clash = code in used_codes
             if not clash:
                 break
             code = f"{secrets.randbelow(1_000_000):06d}"
+        else:
+            raise DeviceRegistryError("conflict", "暂时无法分配唯一配对码，请重试")
         now = now_ms()
         meta = {
             "device_id": device_id,
@@ -176,15 +226,13 @@ class DeviceRegistry:
                    scopes=scope_tuple)
         return {"code": code, "device_id": device_id, "expires_in": code_ttl_s}
 
+    @_atomic_change
     def approve(self, code: str) -> dict[str, Any]:
         """主人在管理端批准配对码 → 设备转 active。"""
         if not isinstance(code, str) or not re.fullmatch(r"\d{6}", code):
             raise DeviceRegistryError("bad_request", "配对码须为 6 位数字")
-        target = None
-        for meta in self.list_devices():
-            if meta.get("pairing_code") == code:
-                target = meta
-                break
+        matches = [meta for meta in self.list_devices() if meta.get("pairing_code") == code]
+        target = matches[0] if len(matches) == 1 else None
         if target is None or target.get("status") != "pending":
             self.audit("device.pair.approve", outcome="denied",
                        reason="code_not_found")
@@ -202,6 +250,7 @@ class DeviceRegistry:
         self.audit("device.pair.approve", device_id=target["device_id"])
         return dict(target)
 
+    @_atomic_change
     def revoke(self, device_id: str) -> dict[str, Any]:
         """吊销设备：状态即时生效；踢在线连接由调用方（API 层）触发。"""
         meta = self.get(device_id)
@@ -216,6 +265,7 @@ class DeviceRegistry:
         self.audit("device.revoke", device_id=device_id)
         return dict(meta)
 
+    @_atomic_change
     def purge(self, device_id: str) -> bool:
         """彻底删除设备记录（允许随后重新配对）。
 
@@ -242,6 +292,7 @@ class DeviceRegistry:
             return ()
         return tuple(str(s) for s in meta.get("scopes") or ())
 
+    @_atomic_change
     def set_scopes(self, device_id: str, scopes: Iterable[str]) -> dict[str, Any]:
         """收窄/重设设备注册 scope（active 设备）。
 
