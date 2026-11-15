@@ -88,3 +88,5 @@
 第43轮：[任务详情与时间线生命周期](43-task-detail-lifecycle.md)，读取取消、局部恢复、刷新和操作后的状态一致性。
 
 第44轮：[模型配置读取门槛](44-model-config-load-gate.md)，成功读取后编辑、失败恢复、角色/密钥草稿隔离。
+
+第45轮：[探索调度服务代次与取消](45-exploration-worker-generations.md)，服务切换隔离、tick去重、停止恢复与协作式取消检查。

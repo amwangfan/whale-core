@@ -190,7 +190,14 @@ class WorkflowsService:
             return self._view(record)
 
     def explore(self, topics: list[str] | None = None, *, stop_event: threading.Event | None = None) -> dict:
+        def stopped():
+            return stop_event is not None and stop_event.is_set()
+
+        if stopped():
+            return {"status": "stopped", "drafts": [], "tasks": []}
         with self._execution_lock:
+            if stopped():
+                return {"status": "stopped", "drafts": [], "tasks": []}
             settings = self.get_settings()
             if settings["paused"]:
                 return {"status": "paused", "drafts": [], "tasks": []}
@@ -236,12 +243,14 @@ class WorkflowsService:
             items, task_ids, seen_urls = [], [], set()
 
             def _run_tool(tool, args):
-                if self.get_settings()["paused"] or (stop_event is not None and stop_event.is_set()):
+                if stopped() or self.get_settings()["paused"]:
                     return ""
                 result = self.runtime.execute_tool(
                     tool.name, args, conversation_id="exploration",
                     source="api", timeout_s=30)
                 task_ids.append(result.task_id)
+                if stopped():
+                    return ""
                 if result.status != "answered":
                     return ""
                 return self._output(self.store.get(f"task:{result.task_id}") or {})
@@ -256,13 +265,13 @@ class WorkflowsService:
             # public-video adapter over the same audited search/fetch capabilities.
             bilibili = BilibiliContentAdapter(_search, _fetch, max_per_topic=2)
             for topic in selected:
-                if self.get_settings()["paused"] or (stop_event is not None and stop_event.is_set()):
+                if stopped() or self.get_settings()["paused"]:
                     break
                 output = _search(topic, limit=3)
                 urls = list(dict.fromkeys(
                     u.rstrip(".,;:!?。，；：！？") for u in _URLS.findall(output)))[:2]
                 for url in urls:
-                    if self.get_settings()["paused"] or (stop_event is not None and stop_event.is_set()):
+                    if stopped() or self.get_settings()["paused"]:
                         break
                     parsed = urlsplit(url)
                     host = (parsed.hostname or "").lower()
@@ -279,15 +288,15 @@ class WorkflowsService:
                         title=page.splitlines()[0][:80] or host, url=url,
                         source_name=host, summary=page[:500], inspected=True,
                         content_type="web", inspection_method="web_page_text"))
-                if not (self.get_settings()["paused"] or
-                        (stop_event is not None and stop_event.is_set())):
+                if not (stopped() or self.get_settings()["paused"]):
                     for video in bilibili.discover(
-                            topic, should_stop=lambda: self.get_settings()["paused"] or
-                            (stop_event is not None and stop_event.is_set())):
+                            topic, should_stop=lambda: stopped() or self.get_settings()["paused"]):
                         if video.url not in seen_urls:
                             seen_urls.add(video.url)
                             items.append(video)
 
+            if stopped():
+                return {"status": "stopped", "drafts": [], "tasks": task_ids}
             hosts = frozenset(urlsplit(item.url).hostname or "" for item in items)
             manager = ExplorationManager(
                 self.store, planner=DiscoveryPlanner(allowed_hosts=hosts),
