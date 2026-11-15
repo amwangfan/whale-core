@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, ApiError, PluginDetail, PluginHealth, PluginInfo } from "../api";
+import { api, ApiError, PluginHealth, PluginInfo } from "../api";
 import { useApi } from "../hooks";
 
 const KIND_LABELS: Record<string, string> = {
@@ -191,11 +191,6 @@ function formatConfigValue(value: unknown): string {
     : (JSON.stringify(value) ?? String(value));
 }
 
-type ConfigLoadState =
-  | { kind: "loading" }
-  | { kind: "error"; message: string }
-  | { kind: "ok"; detail: PluginDetail };
-
 function PluginConfigPanel({
   pluginId,
   onSaved,
@@ -203,29 +198,16 @@ function PluginConfigPanel({
   pluginId: string;
   onSaved: () => void;
 }) {
-  const [state, setState] = useState<ConfigLoadState>({ kind: "loading" });
+  const fetchConfig = useCallback((signal: AbortSignal) => api.plugin(pluginId, signal), [pluginId]);
+  const configRequest = useApi(fetchConfig);
   const [rows, setRows] = useState<KvRow[]>([]);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    setState({ kind: "loading" });
-    try {
-      const detail = await api.plugin(pluginId);
-      setState({ kind: "ok", detail });
-      setRows(configToRows(detail.config ?? {}));
-    } catch (e) {
-      setState({
-        kind: "error",
-        message: e instanceof Error ? e.message : String(e),
-      });
-    }
-  }, [pluginId]);
-
   useEffect(() => {
-    void load();
-  }, [load]);
+    if (configRequest.data) setRows(configToRows(configRequest.data.config ?? {}));
+  }, [configRequest.data]);
 
   const setRow = (i: number, patch: Partial<KvRow>) =>
     setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
@@ -235,24 +217,30 @@ function PluginConfigPanel({
     setSaveError(null);
     setNotice(null);
     try {
-      const config: Record<string, unknown> = {};
-      const original = state.kind === "ok" ? (state.detail.config ?? {}) : {};
+      const config: Record<string, unknown> = Object.create(null);
+      const original = configRequest.data?.config ?? {};
+      const originalRows = new Map(configToRows(original).map(r => [r.key, r]));
       const currentKeys = new Set<string>();
       for (const row of rows) {
         const key = row.key.trim();
         if (!key) continue;
+        if (currentKeys.has(key)) throw new Error(`配置字段重复：${key}`);
         currentKeys.add(key);
         // A masked, untouched secret must NOT be replaced with an empty string.
         if (row.masked && row.value === "") continue;
+        // Preserve the original type of an untouched value (e.g. string "123").
+        const oldRow = originalRows.get(key);
+        if (oldRow && oldRow.value === row.value && oldRow.masked === row.masked) continue;
         config[key] = parseValue(row.value);
       }
       // The API accepts a patch; null explicitly deletes a removed key.
       for (const key of Object.keys(original)) {
         if (!currentKeys.has(key)) config[key] = null;
       }
+      if (Object.keys(config).length === 0) { setNotice("配置没有改动。"); return; }
       await api.setPluginConfig(pluginId, config);
       setNotice("配置已保存；未修改的敏感字段保持原值。");
-      await load(); // 重新拉取脱敏视图
+      configRequest.reload(); // 重新拉取脱敏视图
       onSaved(); // 刷新外层插件列表
     } catch (e) {
       const prefix =
@@ -263,11 +251,11 @@ function PluginConfigPanel({
     }
   };
 
-  if (state.kind === "loading") return <div className="muted">加载配置…</div>;
-  if (state.kind === "error")
-    return <div className="banner error">{state.message}</div>;
+  if (configRequest.loading) return <div className="muted">加载配置…</div>;
+  if (configRequest.error)
+    return <div className="banner error">{configRequest.error} <button onClick={configRequest.reload}>重试配置</button></div>;
 
-  const config = state.detail.config ?? {};
+  const config = configRequest.data?.config ?? {};
 
   return (
     <div className="config-panel">
@@ -297,6 +285,7 @@ function PluginConfigPanel({
           <div className="kv-row" key={i}>
             <input
               className="key mono"
+              disabled={saving}
               aria-label={`配置字段 ${i + 1}`}
               placeholder="key"
               value={row.key}
@@ -304,6 +293,7 @@ function PluginConfigPanel({
             />
             <input
               className="value mono"
+              disabled={saving}
               type={
                 row.masked || /secret|token|key|password|cookie/i.test(row.key)
                   ? "password"
@@ -323,6 +313,7 @@ function PluginConfigPanel({
             />
             <button
               aria-label={`删除配置字段 ${row.key || i + 1}`}
+              disabled={saving}
               onClick={() => setRows((rs) => rs.filter((_, j) => j !== i))}
             >
               ✕
@@ -331,6 +322,7 @@ function PluginConfigPanel({
         ))}
         <div className="actions">
           <button
+            disabled={saving}
             onClick={() =>
               setRows((rs) => [...rs, { key: "", value: "", masked: false }])
             }

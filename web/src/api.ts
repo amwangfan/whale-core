@@ -567,8 +567,8 @@ export const api = {
   plugins: async (signal?: AbortSignal) =>
     (await request<{ plugins: PluginInfo[] }>("/plugins", { signal })).plugins,
 
-  plugin: (id: string) =>
-    request<PluginDetail>(`/plugins/${encodeURIComponent(id)}`),
+  plugin: (id: string, signal?: AbortSignal) =>
+    request<PluginDetail>(`/plugins/${encodeURIComponent(id)}`, { signal }),
 
   setPluginEnabled: (id: string, enabled: boolean) =>
     request<{ plugin_id: string; status: string }>(
@@ -588,7 +588,7 @@ export const api = {
 
   tasks: async (signal?: AbortSignal) => (await request<{ tasks: TaskRecord[] }>("/tasks", { signal })).tasks,
 
-  task: (id: string) => request<TaskRecord>(`/tasks/${encodeURIComponent(id)}`),
+  task: (id: string, signal?: AbortSignal) => request<TaskRecord>(`/tasks/${encodeURIComponent(id)}`, { signal }),
   cancelTask: (id: string) =>
     request<TaskRecord>(`/tasks/${encodeURIComponent(id)}/cancel`, {
       method: "POST",
@@ -673,8 +673,8 @@ export const api = {
     ),
 
   /** issue #43：任务执行时间线（可读阶段/回执/送达/重试建议/Trace 关联）。 */
-  taskTimeline: (id: string) =>
-    request<TaskTimeline>(`/tasks/${encodeURIComponent(id)}/timeline`),
+  taskTimeline: (id: string, signal?: AbortSignal) =>
+    request<TaskTimeline>(`/tasks/${encodeURIComponent(id)}/timeline`, { signal }),
 };
 
 // ---------- Whale Studio（S6：关系画布；所有授权判断都在服务端） ----------

@@ -159,9 +159,10 @@ describe("console user flows", () => {
     const key = await screen.findByLabelText("配置值 api_key");
     expect(key.getAttribute("type")).toBe("password");
     expect((key as HTMLInputElement).value).toBe("");
+    fireEvent.change(screen.getByLabelText("配置值 limit"), { target: { value: "3" } });
     fireEvent.click(screen.getByRole("button", { name: "保存配置" }));
     await waitFor(() =>
-      expect(api.setPluginConfig).toHaveBeenCalledWith("search_web", { limit: 2 }),
+      expect(api.setPluginConfig).toHaveBeenCalledWith("search_web", { limit: 3 }),
     );
   });
 
