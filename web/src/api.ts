@@ -599,10 +599,11 @@ export const api = {
       method: "POST",
     }),
 
-  searchMemory: async (q: string) =>
+  searchMemory: async (q: string, signal?: AbortSignal) =>
     (
       await request<{ hits: MemoryHit[] }>(
         `/memory/search?q=${encodeURIComponent(q)}`,
+        { signal },
       )
     ).hits,
 
@@ -1272,10 +1273,10 @@ export const studioApi = {
 
   // ---- 记忆管理面（主体优先）：subjects 总览 + browse 浏览 + 治理操作 ----
 
-  memorySubjects: () =>
-    request<MemorySubjects>("/studio/memory/subjects"),
+  memorySubjects: (signal?: AbortSignal) =>
+    request<MemorySubjects>("/studio/memory/subjects", { signal }),
 
-  memoryBrowse: (params: MemoryBrowseParams) => {
+  memoryBrowse: (params: MemoryBrowseParams, signal?: AbortSignal) => {
     const qs = new URLSearchParams();
     if (params.space_id) qs.set("space_id", params.space_id);
     else if (params.principal_id) qs.set("principal_id", params.principal_id);
@@ -1292,6 +1293,7 @@ export const studioApi = {
     const suffix = qs.toString();
     return request<MemoryBrowseResult>(
       `/studio/memory/browse${suffix ? `?${suffix}` : ""}`,
+      { signal },
     );
   },
 
@@ -1384,6 +1386,7 @@ export interface EventStream {
 export function streamEvents(handlers: EventStreamHandlers): EventStream {
   const controller = new AbortController();
   void (async () => {
+    let body: ReadableStream<Uint8Array> | null = null;
     try {
       const res = await rawRequest("/events", {
         headers: { Accept: "text/event-stream" },
@@ -1391,6 +1394,7 @@ export function streamEvents(handlers: EventStreamHandlers): EventStream {
       });
       if (!res.body)
         throw new ApiError("no_stream", "SSE response has no body", res.status);
+      body = res.body;
       if (controller.signal.aborted) { void res.body.cancel().catch(() => undefined); return; }
       handlers.onOpen?.();
       for await (const event of readJsonEvents(res.body, controller.signal)) {
@@ -1403,6 +1407,9 @@ export function streamEvents(handlers: EventStreamHandlers): EventStream {
     } catch (e) {
       if (controller.signal.aborted) return; // 主动 close，不算错误
       handlers.onError?.(e instanceof Error ? e : new Error(String(e)));
+    } finally {
+      // onOpen can fail before the shared reader takes ownership.
+      if (body && !body.locked) void body.cancel().catch(() => undefined);
     }
   })();
   return {

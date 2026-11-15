@@ -6,17 +6,15 @@
  * - 行级治理：纠错 / 标记过期 / 删除；空间级「暂停记录 / 恢复记录」开关；
  * - 底部「高级」保留原全局关键词搜索与 NDJSON 导出。
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useApi } from "../hooks";
 import {
   api,
   ApiError,
   studioApi,
   type MemoryBrowseItem,
-  type MemoryBrowseResult,
-  type MemoryHit,
   type MemoryMemberSubject,
   type MemorySpaceSubject,
-  type MemorySubjects,
 } from "../api";
 
 /** 当前选中的浏览主体：空间直选 或 群友（按 principal_id）。 */
@@ -36,15 +34,6 @@ type Selector =
       paused: boolean;
       scopeNote: string;
     };
-
-function selectorParams(sel: Selector): {
-  space_id?: string;
-  principal_id?: string;
-} {
-  return sel.kind === "space"
-    ? { space_id: sel.spaceId }
-    : { principal_id: sel.principalId };
-}
 
 function fmtTime(iso?: string | null): string {
   if (!iso) return "";
@@ -73,11 +62,7 @@ function friendlyError(e: unknown): string {
 }
 
 export default function MemoryView() {
-  const [subjects, setSubjects] = useState<MemorySubjects | null>(null);
-  const [subjectsLoading, setSubjectsLoading] = useState(false);
   const [sel, setSel] = useState<Selector | null>(null);
-  const [browse, setBrowse] = useState<MemoryBrowseResult | null>(null);
-  const [browseLoading, setBrowseLoading] = useState(false);
   const [kindFilter, setKindFilter] = useState("");
   const [qInput, setQInput] = useState("");
   const [qApplied, setQApplied] = useState("");
@@ -90,68 +75,49 @@ export default function MemoryView() {
 
   // ---- 高级区：全局关键词搜索（旧版行为保留） ----
   const [advQ, setAdvQ] = useState("");
-  const [advHits, setAdvHits] = useState<MemoryHit[] | null>(null);
-  const [advLoading, setAdvLoading] = useState(false);
-
-  const loadSubjects = useCallback(async () => {
-    setSubjectsLoading(true);
-    try {
-      const subs = await studioApi.memorySubjects();
-      setSubjects(subs);
-      // 刷新后同步选中主体的暂停态（pause 开关操作后状态会变）。
-      setSel((prev) => {
-        if (!prev) return prev;
-        const spaces: MemorySpaceSubject[] = [
-          ...subs.owner.spaces,
-          ...subs.groups,
-          ...subs.forks,
-        ];
-        const sid = prev.spaceId;
-        const hit =
-          spaces.find((s) => s.space_id === sid) ??
-          subs.members.find((m) => m.space_id === sid);
-        return hit ? { ...prev, paused: hit.paused } : prev;
-      });
-    } catch (e) {
-      setError(friendlyError(e));
-    } finally {
-      setSubjectsLoading(false);
-    }
+  const [advQuery, setAdvQuery] = useState<{ q: string } | null>(null);
+  const fetchSubjects = useCallback(async (signal: AbortSignal) => {
+    try { return await studioApi.memorySubjects(signal); }
+    catch (e) { throw new Error(friendlyError(e)); }
   }, []);
-
+  const { data: subjects, loading: subjectsLoading, error: subjectsError, reload: loadSubjects } = useApi(fetchSubjects);
   useEffect(() => {
-    void loadSubjects();
-  }, [loadSubjects]);
+    if (!subjects) return;
+    // Refresh pause state without changing the record query's identity.
+    setSel(prev => {
+      if (!prev) return prev;
+      const spaces = [...subjects.owner.spaces, ...subjects.groups, ...subjects.forks];
+      const hit = spaces.find(s => s.space_id === prev.spaceId)
+        ?? subjects.members.find(m => m.space_id === prev.spaceId);
+      return hit && hit.paused !== prev.paused ? { ...prev, paused: hit.paused } : prev;
+    });
+  }, [subjects]);
 
-  useEffect(() => {
-    if (!sel) return;
-    let cancelled = false;
-    void (async () => {
-      setBrowseLoading(true);
-      setError(null);
-      try {
-        const res = await studioApi.memoryBrowse({
-          ...selectorParams(sel),
-          kind: kindFilter || undefined,
-          q: qApplied || undefined,
-          include_superseded: includeSuperseded || undefined,
-          limit,
-          offset,
-        });
-        if (!cancelled) setBrowse(res);
-      } catch (e) {
-        if (!cancelled) {
-          setBrowse(null);
-          setError(friendlyError(e));
-        }
-      } finally {
-        if (!cancelled) setBrowseLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [sel, kindFilter, qApplied, includeSuperseded, limit, offset, reloadKey]);
+  const spaceId = sel?.kind === "space" ? sel.spaceId : undefined;
+  const principalId = sel?.kind === "principal" ? sel.principalId : undefined;
+  // Identity changes immediately hide old rows, before effects start a new read.
+  const browseToken = useMemo(() => ({ params: {
+    space_id: spaceId, principal_id: principalId, kind: kindFilter || undefined,
+    q: qApplied || undefined, include_superseded: includeSuperseded || undefined, limit, offset,
+  }, revision: reloadKey }), [spaceId, principalId, kindFilter, qApplied, includeSuperseded, limit, offset, reloadKey]);
+  const fetchBrowse = useCallback(async (signal: AbortSignal) => {
+    if (!browseToken.params.space_id && !browseToken.params.principal_id) return null;
+    try { return { token: browseToken, result: await studioApi.memoryBrowse(browseToken.params, signal) }; }
+    catch (e) { throw new Error(friendlyError(e)); }
+  }, [browseToken]);
+  const browseRequest = useApi(fetchBrowse);
+  const browseLoading = !!sel && browseRequest.loading;
+  const browse = !browseRequest.loading && !browseRequest.error && browseRequest.data?.token === browseToken
+    ? browseRequest.data.result : null;
+  const fetchAdvanced = useCallback(async (signal: AbortSignal) => {
+    if (!advQuery) return null;
+    try { return { token: advQuery, hits: await api.searchMemory(advQuery.q, signal) }; }
+    catch (e) { throw new Error(friendlyError(e)); }
+  }, [advQuery]);
+  const advRequest = useApi(fetchAdvanced);
+  const advLoading = !!advQuery && advRequest.loading;
+  const advHits = !advRequest.loading && !advRequest.error && advRequest.data?.token === advQuery
+    ? advRequest.data.hits : null;
 
   const pickSpace = (s: MemorySpaceSubject) => {
     setSel({
@@ -161,7 +127,6 @@ export default function MemoryView() {
       paused: s.paused,
       scopeNote: s.scope_note,
     });
-    setBrowse(null);
     setOffset(0);
     setQApplied("");
     setQInput("");
@@ -178,7 +143,6 @@ export default function MemoryView() {
       paused: m.paused,
       scopeNote: m.scope_note,
     });
-    setBrowse(null);
     setOffset(0);
     setQApplied("");
     setQInput("");
@@ -260,17 +224,10 @@ export default function MemoryView() {
 
   // ---- 高级区行为 ----
 
-  const advSearch = async () => {
-    setAdvLoading(true);
+  const advSearch = () => {
     setError(null);
     setNotice(null);
-    try {
-      setAdvHits(await api.searchMemory(advQ.trim()));
-    } catch (e) {
-      setError(friendlyError(e));
-    } finally {
-      setAdvLoading(false);
-    }
+    setAdvQuery({ q: advQ.trim() });
   };
 
   const advRemove = async (key: string) => {
@@ -278,7 +235,7 @@ export default function MemoryView() {
     try {
       const r = await api.deleteMemory(key);
       setNotice(r.deleted ? `已删除：${key}` : `未找到：${key}`);
-      if (advHits) setAdvHits(advHits.filter((h) => h.key !== key));
+      advRequest.reload();
     } catch (e) {
       setError(friendlyError(e));
     }
@@ -402,10 +359,12 @@ export default function MemoryView() {
     <div>
       <div className="page-head">
         <h2>记忆</h2>
+        <button onClick={loadSubjects} disabled={subjectsLoading}>刷新主体</button>
         <button onClick={() => void exportAll()}>导出 NDJSON</button>
       </div>
 
-      {error && <div className="banner error">{error}</div>}
+      {(error || subjectsError || browseRequest.error || advRequest.error) &&
+        <div className="banner error">{error || subjectsError || browseRequest.error || advRequest.error}</div>}
       {notice && <div className="banner ok">{notice}</div>}
 
       {subjectsLoading && !subjects && (
@@ -550,6 +509,7 @@ export default function MemoryView() {
           </div>
 
           {browseLoading && <p className="muted">加载中…</p>}
+          {browseRequest.error && <button onClick={browseRequest.reload}>重试浏览</button>}
           {browse && browse.items.length === 0 && !browseLoading && (
             <div className="empty">该主体下暂无匹配记录。</div>
           )}

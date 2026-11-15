@@ -81,3 +81,15 @@ it("does not swallow chat consumer failures as malformed JSON", async () => {
   await expect(chatStream("x", "c", { onDelta() { throw new Error("consumer failed"); } })).rejects.toThrow("consumer failed");
   expect(body.locked).toBe(false);
 });
+
+it("cancels the event body when opening fails before acquiring a reader", async () => {
+  const cancel = vi.fn();
+  const body = new ReadableStream<Uint8Array>({ cancel });
+  vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(body)));
+  const onError = vi.fn();
+  streamEvents({ onEvent: vi.fn(), onOpen() { throw new Error("open failed"); }, onError });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  expect(onError).toHaveBeenCalledOnce();
+  expect(cancel).toHaveBeenCalledOnce();
+  expect(body.locked).toBe(false);
+});

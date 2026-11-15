@@ -136,9 +136,11 @@ function TracePanel() {
   const [conv, setConv] = useState("");
   const [limit, setLimit] = useState(50);
   const [query, setQuery] = useState<TracesQuery>({ limit: 50, offset: 0 });
-  const fetchList = useCallback((signal: AbortSignal) => api.tracesList(query, signal), [query]);
+  const fetchList = useCallback(async (signal: AbortSignal) => ({
+    query, result: await api.tracesList(query, signal),
+  }), [query]);
   const { data, loading, error } = useApi(fetchList);
-  const result = loading || error ? null : data;
+  const result = !loading && !error && data?.query === query ? data.result : null;
   const offset = query.offset ?? 0;
   const pageSize = query.limit ?? 50;
   const [openId, setOpenId] = useState<string | null>(null);

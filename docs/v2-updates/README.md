@@ -76,3 +76,5 @@
 第37轮：[共享有界流式读取](37-shared-stream-reader.md)，聊天/事件流解析收敛、单行上限、reader释放与取消隔离。
 
 第38轮：[活动与Trace查询隔离](38-events-query-isolation.md)，详情生命周期、局部重试与分页条件一致性。
+
+第39轮：[记忆查询身份隔离](39-memory-read-isolation.md)，主体/筛选/分页结果绑定、旧治理按钮隐藏、取消与恢复。
