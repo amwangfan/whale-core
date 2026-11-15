@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, ApiError, PluginHealth, PluginInfo } from "../api";
+import { api, ApiError, PluginHealth, PluginInfo, type RuntimeSettings } from "../api";
 import { useApi } from "../hooks";
 
 const KIND_LABELS: Record<string, string> = {
@@ -28,38 +28,33 @@ const ROLE_LABELS: Record<string, string> = {
 
 /** 模型插件专用配置界面：供应商/端点/模型/密钥由用户自行决定。 */
 function ModelConfigPanel({
+  pluginId, onSaved,
+}: { pluginId: string; onSaved: () => void }) {
+  const load = useCallback((signal: AbortSignal) => api.settings(signal), []);
+  const { data, loading, error, reload } = useApi(load);
+  if (loading) return <div className="muted">加载模型配置…</div>;
+  if (error) return <div className="banner error">{error} <button onClick={reload}>重试模型配置</button></div>;
+  return data ? <ModelConfigEditor key={pluginId} pluginId={pluginId} onSaved={onSaved} settings={data} /> : null;
+}
+
+function ModelConfigEditor({
   pluginId,
   onSaved,
+  settings,
 }: {
   pluginId: string;
   onSaved: () => void;
+  settings: RuntimeSettings;
 }) {
   const role = PLUGIN_ROLE[pluginId] ?? "chat";
-  const [endpoint, setEndpoint] = useState("");
-  const [modelName, setModelName] = useState("");
+  const cfg = settings.models?.[role];
+  const fallback = role === "chat" ? settings.model : undefined;
+  const [endpoint, setEndpoint] = useState(() => cfg?.base_url || fallback?.base_url || "");
+  const [modelName, setModelName] = useState(() => cfg?.model || fallback?.model || "");
   const [apiKey, setApiKey] = useState("");
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
-
-  useEffect(() => {
-    let alive = true;
-    api
-      .settings()
-      .then((s) => {
-        if (!alive) return;
-        const cfg = (s.models ?? {})[role];
-        // chat 角色的配置在主 model 键里；role 矩阵里的值优先，主键兜底。
-        // 端点/模型名正常回显；api_key 永不回显（只报「已配置」占位）。
-        const fallback = role === "chat" ? s.model : undefined;
-        setEndpoint((cfg?.base_url ?? "") || (fallback?.base_url ?? ""));
-        setModelName((cfg?.model ?? "") || (fallback?.model ?? ""));
-      })
-      .catch(() => undefined);
-    return () => {
-      alive = false;
-    };
-  }, [role]);
 
   const save = async () => {
     setBusy("save");
@@ -109,6 +104,8 @@ function ModelConfigPanel({
       <div className="form-field">
         <label>API 端点（OpenAI 兼容）</label>
         <input
+          aria-label="模型 API 端点"
+          disabled={Boolean(busy)}
           value={endpoint}
           onChange={(e) => setEndpoint(e.target.value)}
           placeholder="如 https://api.deepseek.com 或 http://127.0.0.1:11434/v1"
@@ -117,6 +114,8 @@ function ModelConfigPanel({
       <div className="form-field">
         <label>模型名</label>
         <input
+          aria-label="模型名称"
+          disabled={Boolean(busy)}
           value={modelName}
           onChange={(e) => setModelName(e.target.value)}
           placeholder="如 deepseek-v4.1-flash / qwen3.8-flash / kimi-k3"
@@ -125,6 +124,8 @@ function ModelConfigPanel({
       <div className="form-field">
         <label>API 密钥</label>
         <input
+          aria-label="模型 API 密钥"
+          disabled={Boolean(busy)}
           type="password"
           value={apiKey}
           onChange={(e) => setApiKey(e.target.value)}
@@ -474,9 +475,9 @@ export default function Plugins() {
             <div className="plugin-card-config" style={{ marginTop: 14 }}>
               <div className="section-label">配置</div>
               {p.kind === "model" ? (
-                <ModelConfigPanel pluginId={p.plugin_id} onSaved={reload} />
+                <ModelConfigPanel key={p.plugin_id} pluginId={p.plugin_id} onSaved={reload} />
               ) : (
-                <PluginConfigPanel pluginId={p.plugin_id} onSaved={reload} />
+                <PluginConfigPanel key={p.plugin_id} pluginId={p.plugin_id} onSaved={reload} />
               )}
             </div>
           </section>

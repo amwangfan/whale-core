@@ -29,6 +29,9 @@ function stubFetch(res: Response) {
 
 describe("api client", () => {
   it.each([
+    ["plugin configuration", (s: AbortSignal) => api.plugin("id", s)],
+    ["task detail", (s: AbortSignal) => api.task("id", s)],
+    ["task timeline", (s: AbortSignal) => api.taskTimeline("id", s)],
     ["trace list", (s: AbortSignal) => api.tracesList({}, s)],
     ["trace detail", (s: AbortSignal) => api.tracesDetail("id", s)],
     ["activity", (s: AbortSignal) => api.activityList(50, 0, s)],
