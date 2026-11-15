@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { api, TaskRecord, type TaskTimeline } from "../api";
+import { api, type TaskTimeline } from "../api";
 import { useApi } from "../hooks";
 
 /** status → 中文标签（徽标悬停可查看原始状态值）。 */
@@ -28,6 +28,30 @@ function statusBadgeClass(status: string): string {
     default:
       return "badge";
   }
+}
+
+function TaskDetails({ id }: { id: string }) {
+  const load = useCallback((signal: AbortSignal) => api.task(id, signal), [id]);
+  const { data: task, loading, error, reload } = useApi(load);
+  if (loading) return <div className="muted">加载详情…</div>;
+  if (error) return <div className="banner error">加载失败：{error} <button onClick={reload}>重试详情</button></div>;
+  if (!task || task.task_id !== id) return null;
+  return <>
+    <div className="mono muted">task_id: {task.task_id} · status: {task.status} · {formatAt(task.at)}</div>
+    <div><div className="section-label">模型提出的计划（未必全部执行）</div>
+      <div>目标：{task.goal || "—"}</div><div>声明能力：<Capabilities capabilities={task.capabilities} /></div></div>
+    <div><div className="section-label">实际执行的回执（真实发生）</div><ReceiptList receipts={task.receipts} /></div>
+  </>;
+}
+
+function TaskTimelineRead({ id, busy, onRetry, onNavigate }: {
+  id: string; busy: boolean; onRetry: (id: string) => void; onNavigate?: (tab: string) => void;
+}) {
+  const load = useCallback((signal: AbortSignal) => api.taskTimeline(id, signal), [id]);
+  const { data, loading, error, reload } = useApi(load);
+  if (loading) return <div className="muted">加载时间线…</div>;
+  if (error) return <div className="banner error">加载失败：{error} <button onClick={reload}>重试时间线</button></div>;
+  return data ? <TimelinePanel tl={data} busy={busy} onRetry={onRetry} onNavigate={onNavigate} /> : null;
 }
 
 function formatAt(at: number): string {
@@ -62,16 +86,6 @@ function ReceiptList({ receipts }: { receipts: string[] }) {
     </ul>
   );
 }
-
-type DetailState =
-  | { kind: "loading" }
-  | { kind: "ok"; task: TaskRecord }
-  | { kind: "error"; message: string };
-
-type TimelineState =
-  | { kind: "loading" }
-  | { kind: "ok"; tl: TaskTimeline }
-  | { kind: "error"; message: string };
 
 /** issue #43：阶段徽标配色（phase 语义真实：unknown 永不显示成成功）。 */
 function phaseBadgeClass(phase: string): string {
@@ -243,45 +257,17 @@ export default function Tasks({
           setNotice(r.reply || `任务已恢复：${r.status}`);
         } else setNotice("已拒绝任务。");
       }
-      reload();
-      setDetails({});
+      refresh();
     } catch (e) {
       setActionError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy("");
     }
   };
-  const [details, setDetails] = useState<Record<string, DetailState>>({});
-  // issue #43：时间线展开状态（与「详情」相互独立，可同时展开）
-  const [timelines, setTimelines] = useState<Record<string, TimelineState>>({});
+  const [revision, setRevision] = useState(0);
   const [expandedTlId, setExpandedTlId] = useState<string | null>(null);
-
-  const fetchTimeline = async (taskId: string) => {
-    setTimelines((m) => ({ ...m, [taskId]: { kind: "loading" } }));
-    try {
-      const tl = await api.taskTimeline(taskId);
-      setTimelines((m) => ({ ...m, [taskId]: { kind: "ok", tl } }));
-    } catch (e) {
-      setTimelines((m) => ({
-        ...m,
-        [taskId]: {
-          kind: "error",
-          message: e instanceof Error ? e.message : String(e),
-        },
-      }));
-    }
-  };
-
-  const toggleTimeline = (taskId: string) => {
-    if (expandedTlId === taskId) {
-      setExpandedTlId(null);
-      return;
-    }
-    setExpandedTlId(taskId);
-    if (timelines[taskId]?.kind === "ok") return; // 已加载过，直接展开
-    void fetchTimeline(taskId);
-  };
-
+  const refresh = () => { reload(); setRevision(v => v + 1); };
+  const toggleTimeline = (id: string) => setExpandedTlId(old => old === id ? null : id);
   /** 时间线「重试」：走既有 resumeTask（幂等键保护），完成后刷新列表与时间线。 */
   const retryTask = async (taskId: string) => {
     setBusy(taskId);
@@ -290,8 +276,7 @@ export default function Tasks({
     try {
       const r = await api.resumeTask(taskId);
       setNotice(r.reply || `任务已恢复：${r.status}`);
-      reload();
-      void fetchTimeline(taskId);
+      refresh();
     } catch (e) {
       setActionError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -299,33 +284,13 @@ export default function Tasks({
     }
   };
 
-  const toggle = async (taskId: string) => {
-    if (expandedId === taskId) {
-      setExpandedId(null);
-      return;
-    }
-    setExpandedId(taskId);
-    if (details[taskId]?.kind === "ok") return; // 已加载过，直接展开
-    setDetails((d) => ({ ...d, [taskId]: { kind: "loading" } }));
-    try {
-      const task = await api.task(taskId);
-      setDetails((d) => ({ ...d, [taskId]: { kind: "ok", task } }));
-    } catch (e) {
-      setDetails((d) => ({
-        ...d,
-        [taskId]: {
-          kind: "error",
-          message: e instanceof Error ? e.message : String(e),
-        },
-      }));
-    }
-  };
+  const toggle = (id: string) => setExpandedId(old => old === id ? null : id);
 
   return (
     <div>
       <div className="page-head">
         <h2>任务</h2>
-        <button onClick={reload}>刷新</button>
+        <button onClick={refresh}>刷新</button>
       </div>
 
       <div className="muted small page-note">
@@ -356,7 +321,7 @@ export default function Tasks({
         <ul className="list">
           {tasks.map((t) => {
             const expanded = expandedId === t.task_id;
-            const detail = details[t.task_id];
+
             return (
               <li
                 key={t.task_id}
@@ -391,71 +356,17 @@ export default function Tasks({
                   </details>
 
                   {expanded && (
-                    <div
-                      className="detail-panel"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      {(!detail || detail.kind === "loading") && (
-                        <div className="muted">加载详情…</div>
-                      )}
-                      {detail?.kind === "error" && (
-                        <div className="banner error">
-                          加载失败：{detail.message}
-                        </div>
-                      )}
-                      {detail?.kind === "ok" && (
-                        <>
-                          <div className="mono muted">
-                            task_id: {detail.task.task_id} · status:{" "}
-                            {detail.task.status} · {formatAt(detail.task.at)}
-                          </div>
-                          <div>
-                            <div className="section-label">
-                              模型提出的计划（未必全部执行）
-                            </div>
-                            <div>目标：{detail.task.goal || "—"}</div>
-                            <div>
-                              声明能力：
-                              <Capabilities
-                                capabilities={detail.task.capabilities}
-                              />
-                            </div>
-                          </div>
-                          <div>
-                            <div className="section-label">
-                              实际执行的回执（真实发生）
-                            </div>
-                            <ReceiptList receipts={detail.task.receipts} />
-                          </div>
-                        </>
-                      )}
+                    <div className="detail-panel" onClick={e => e.stopPropagation()}>
+                      <TaskDetails key={`${t.task_id}:${revision}`} id={t.task_id} />
                     </div>
                   )}
-
                   {expandedTlId === t.task_id && (
                     <div
                       className="detail-panel"
                       onClick={(e) => e.stopPropagation()}
                     >
-                      {(() => {
-                        const tlState = timelines[t.task_id];
-                        if (!tlState || tlState.kind === "loading")
-                          return <div className="muted">加载时间线…</div>;
-                        if (tlState.kind === "error")
-                          return (
-                            <div className="banner error">
-                              加载失败：{tlState.message}
-                            </div>
-                          );
-                        return (
-                          <TimelinePanel
-                            tl={tlState.tl}
-                            busy={busy === t.task_id}
-                            onRetry={(id) => void retryTask(id)}
-                            onNavigate={onNavigate}
-                          />
-                        );
-                      })()}
+                      <TaskTimelineRead key={`${t.task_id}:${revision}`} id={t.task_id} busy={busy === t.task_id} onRetry={retryTask} onNavigate={onNavigate} />
+
                     </div>
                   )}
                 </div>
