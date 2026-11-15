@@ -18,9 +18,9 @@ export default function Overview({
     tab: "chat" | "plugins" | "memory" | "tasks" | "approvals" | "settings",
   ) => void;
 }) {
-  const statusFn = useCallback(() => api.status(), []);
+  const statusFn = useCallback((signal: AbortSignal) => api.status(signal), []);
   const { data, loading, error, reload } = useApi(statusFn);
-  const taskFn = useCallback(() => api.tasks(), []);
+  const taskFn = useCallback((signal: AbortSignal) => api.tasks(signal), []);
   const tasks = useApi(taskFn);
   return (
     <div className="overview">

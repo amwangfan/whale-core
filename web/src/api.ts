@@ -495,8 +495,8 @@ export const api = {
       throw new ApiError("invalid_artifact", "产物地址无效", 0);
     return (await rawRequest(path.slice(API_BASE.length), { signal })).blob();
   },
-  skills: async () =>
-    (await request<{ skills: SkillInfo[] }>("/workflows/skills")).skills,
+  skills: async (signal?: AbortSignal) =>
+    (await request<{ skills: SkillInfo[] }>("/workflows/skills", { signal })).skills,
   runSkill: (name: string, input_text: string) =>
     request<unknown>(`/workflows/skills/${encodeURIComponent(name)}/run`, {
       method: "POST",
@@ -507,7 +507,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ topics }),
     }),
-  life: () => request<LifeState>("/life"),
+  life: (signal?: AbortSignal) => request<LifeState>("/life", { signal }),
   addInterest: (topic: string) =>
     request<LifeInterest>("/life/interests", {
       method: "POST",
@@ -524,14 +524,14 @@ export const api = {
       body: JSON.stringify({ topic, signal }),
     }),
 
-  workflowSettings: () => request<WorkflowSettings>("/workflows/settings"),
+  workflowSettings: (signal?: AbortSignal) => request<WorkflowSettings>("/workflows/settings", { signal }),
   saveWorkflowSettings: (settings: WorkflowSettings) =>
     request<WorkflowSettings>("/workflows/settings", {
       method: "POST",
       body: JSON.stringify(settings),
     }),
 
-  settings: () => request<RuntimeSettings>("/settings"),
+  settings: (signal?: AbortSignal) => request<RuntimeSettings>("/settings", { signal }),
   saveSettings: (settings: {
     setup_completed?: boolean;
     profile?: "cloud" | "local";
@@ -554,12 +554,12 @@ export const api = {
       `/plugins/${encodeURIComponent(id)}/test`,
       { method: "POST" },
     ),
-  status: () => request<StatusResult>("/status"),
+  status: (signal?: AbortSignal) => request<StatusResult>("/status", { signal }),
 
   health: () => request<HealthResult>("/health"),
 
-  plugins: async () =>
-    (await request<{ plugins: PluginInfo[] }>("/plugins")).plugins,
+  plugins: async (signal?: AbortSignal) =>
+    (await request<{ plugins: PluginInfo[] }>("/plugins", { signal })).plugins,
 
   plugin: (id: string) =>
     request<PluginDetail>(`/plugins/${encodeURIComponent(id)}`),
@@ -580,7 +580,7 @@ export const api = {
       { method: "POST", body: JSON.stringify({ config }) },
     ),
 
-  tasks: async () => (await request<{ tasks: TaskRecord[] }>("/tasks")).tasks,
+  tasks: async (signal?: AbortSignal) => (await request<{ tasks: TaskRecord[] }>("/tasks", { signal })).tasks,
 
   task: (id: string) => request<TaskRecord>(`/tasks/${encodeURIComponent(id)}`),
   cancelTask: (id: string) =>
@@ -625,8 +625,8 @@ export const api = {
       signal,
     }),
 
-  approvals: async () =>
-    (await request<{ approvals: Approval[] }>("/approvals")).approvals,
+  approvals: async (signal?: AbortSignal) =>
+    (await request<{ approvals: Approval[] }>("/approvals", { signal })).approvals,
 
   decideApproval: (draftId: string, decision: "approve" | "reject") =>
     request<{ draft_id: string; decision: string }>(

@@ -3,7 +3,7 @@ import { api } from "../api";
 import { useApi } from "../hooks";
 
 export default function Approvals() {
-  const listFn = useCallback(() => api.approvals(), []);
+  const listFn = useCallback((signal: AbortSignal) => api.approvals(signal), []);
   const { data: approvals, error, loading, reload } = useApi(listFn);
   const [busy, setBusy] = useState<string | null>(null);
   const [actionError, setActionError] = useState("");

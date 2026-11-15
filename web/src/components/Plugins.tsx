@@ -360,7 +360,7 @@ function PluginConfigPanel({
 // ---------- 插件列表 ----------
 
 export default function Plugins() {
-  const listFn = useCallback(() => api.plugins(), []);
+  const listFn = useCallback((signal: AbortSignal) => api.plugins(signal), []);
   const { data: plugins, error, loading, reload } = useApi(listFn);
   const [busy, setBusy] = useState<string | null>(null);
   const [health, setHealth] = useState<Record<string, HealthState>>({});

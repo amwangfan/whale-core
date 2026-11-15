@@ -65,9 +65,9 @@ export default function Settings({
   onDisconnect: () => void;
   onRunSetup?: () => void;
 }) {
-  const load = useCallback(() => api.settings(), []);
+  const load = useCallback((signal: AbortSignal) => api.settings(signal), []);
   const settings = useApi(load);
-  const diagnosticLoad = useCallback(() => api.diagnostics(), []);
+  const diagnosticLoad = useCallback((signal: AbortSignal) => api.diagnostics(signal), []);
   const diagnostics = useApi(diagnosticLoad);
   const [draft, setDraft] = useState<RuntimeSettings | null>(null);
   const [key, setKey] = useState("");

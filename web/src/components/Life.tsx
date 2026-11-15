@@ -12,7 +12,7 @@ import Icon from "./Icon";
  * 反馈只调整兴趣权重与探索退避，不触发探索、不发送消息。
  */
 export default function Life() {
-  const state = useApi(useCallback(() => api.life(), []));
+  const state = useApi(useCallback((signal: AbortSignal) => api.life(signal), []));
   const [topic, setTopic] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");

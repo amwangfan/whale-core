@@ -110,7 +110,7 @@ export function ArtifactPreview({ path }: { path: string }) {
 }
 
 export default function Media() {
-  const settingsLoad = useCallback(() => api.settings(), []);
+  const settingsLoad = useCallback((signal: AbortSignal) => api.settings(signal), []);
   const settings = useApi(settingsLoad);
   const [mode, setMode] = useState(MODES[0].id);
   const [prompt, setPrompt] = useState("");

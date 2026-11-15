@@ -5,9 +5,9 @@ import Icon from "./Icon";
 import Life from "./Life";
 
 export default function Workflows() {
-  const loadSkills = useCallback(() => api.skills(), []);
+  const loadSkills = useCallback((signal: AbortSignal) => api.skills(signal), []);
   const skills = useApi(loadSkills);
-  const loadSettings = useCallback(() => api.workflowSettings(), []);
+  const loadSettings = useCallback((signal: AbortSignal) => api.workflowSettings(signal), []);
   const settings = useApi(loadSettings);
   const [draft, setDraft] = useState<WorkflowSettings | null>(null);
   const [skill, setSkill] = useState("");

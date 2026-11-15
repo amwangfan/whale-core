@@ -216,7 +216,7 @@ export default function Tasks({
 }: {
   onNavigate?: (tab: string) => void;
 }) {
-  const listFn = useCallback(() => api.tasks(), []);
+  const listFn = useCallback((signal: AbortSignal) => api.tasks(signal), []);
   const { data: tasks, error, loading, reload } = useApi(listFn);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [busy, setBusy] = useState("");

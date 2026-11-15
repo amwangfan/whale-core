@@ -28,6 +28,17 @@ function stubFetch(res: Response) {
 }
 
 describe("api client", () => {
+  it.each(["status", "tasks", "plugins", "approvals", "settings", "diagnostics", "skills", "workflowSettings", "life"] as const)(
+    "%s forwards the read cancellation signal to fetch", async (name) => {
+      const fetchMock = stubFetch(mockResponse(200, { result: { tasks: [], plugins: [], approvals: [], skills: [] } }));
+      const controller = new AbortController();
+      await api[name](controller.signal);
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(init.signal).toBe(controller.signal);
+      expect(init.method ?? "GET").toBe("GET");
+      expect(init.redirect).toBe("error");
+    },
+  );
   afterEach(() => {
     vi.unstubAllGlobals();
     setToken("");
