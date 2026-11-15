@@ -72,3 +72,5 @@
 第35轮：[设备注册状态事务化](35-device-registry-transactions.md)，状态与审计一致提交、并发配对码唯一性、撤销/权限更新一致性。
 
 第36轮：[网页读取请求生命周期](36-console-read-lifecycle.md)，公共读取真实取消、超时恢复、卸载清理和9类API信号传递。
+
+第37轮：[共享有界流式读取](37-shared-stream-reader.md)，聊天/事件流解析收敛、单行上限、reader释放与取消隔离。

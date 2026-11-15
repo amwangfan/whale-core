@@ -6,6 +6,8 @@
  * - 错误统一抛 ApiError（code/message 取自 `{error:{code,message}}`）。
  */
 
+import { readJsonEvents } from "./sse";
+
 export const API_BASE = "/api/v1";
 
 export interface RetentionReport {
@@ -1387,29 +1389,12 @@ export function streamEvents(handlers: EventStreamHandlers): EventStream {
       });
       if (!res.body)
         throw new ApiError("no_stream", "SSE response has no body", res.status);
+      if (controller.signal.aborted) { void res.body.cancel().catch(() => undefined); return; }
       handlers.onOpen?.();
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        let idx: number;
-        while ((idx = buffer.indexOf("\n")) >= 0) {
-          const line = buffer.slice(0, idx).replace(/\r$/, "");
-          buffer = buffer.slice(idx + 1);
-          // 只处理 data: 行；心跳注释（": ping"）与空行忽略
-          if (!line.startsWith("data:")) continue;
-          const payload = line.slice("data:".length).trim();
-          if (!payload) continue;
-          try {
-            handlers.onEvent(JSON.parse(payload) as WhaleEvent);
-          } catch {
-            /* 跳过无法解析的帧 */
-          }
-        }
+      for await (const event of readJsonEvents(res.body, controller.signal)) {
+        if (!controller.signal.aborted) handlers.onEvent(event as unknown as WhaleEvent);
       }
+      if (controller.signal.aborted) return;
       handlers.onError?.(
         new ApiError("stream_closed", "event stream closed", 0),
       );
@@ -1492,45 +1477,14 @@ export async function chatStream(
   }
   if (!res.body)
     throw new ApiError("no_stream", "chat stream has no body", res.status);
-  const reader = res.body.getReader();
-  // 双保险：真实 fetch 的 signal 会中止读取；手工 mock 的流则靠这里取消。
-  const onAbort = () => {
-    reader.cancel().catch(() => undefined);
-  };
-  signal?.addEventListener("abort", onAbort);
-  const decoder = new TextDecoder();
-  let buffer = "";
   let done: ChatStreamDone | null = null;
-  try {
-    for (;;) {
-      const { done: finished, value } = await reader.read();
-      if (finished) break;
-      buffer += decoder.decode(value, { stream: true });
-      let idx: number;
-      while ((idx = buffer.indexOf("\n")) >= 0) {
-        const line = buffer.slice(0, idx).replace(/\r$/, "");
-        buffer = buffer.slice(idx + 1);
-        if (!line.startsWith("data:")) continue;
-        const payload = line.slice("data:".length).trim();
-        if (!payload) continue;
-        try {
-          const ev = JSON.parse(payload) as Record<string, unknown>;
-          if (ev.type === "phase") callbacks.onPhase?.(String(ev.phase ?? ""));
-          else if (ev.type === "delta")
-            callbacks.onDelta?.(String(ev.text ?? ""));
-          else if (ev.type === "done") {
-            done = ev as unknown as ChatStreamDone;
-            callbacks.onDone?.(done);
-          } else if (ev.type === "error") {
-            callbacks.onError?.(String(ev.error ?? "server"));
-          }
-        } catch {
-          /* 跳过无法解析的帧 */
-        }
-      }
-    }
-  } finally {
-    signal?.removeEventListener("abort", onAbort);
+  for await (const ev of readJsonEvents(res.body, signal)) {
+    if (ev.type === "phase") callbacks.onPhase?.(String(ev.phase ?? ""));
+    else if (ev.type === "delta") callbacks.onDelta?.(String(ev.text ?? ""));
+    else if (ev.type === "done") {
+      done = ev as unknown as ChatStreamDone;
+      callbacks.onDone?.(done);
+    } else if (ev.type === "error") callbacks.onError?.(String(ev.error ?? "server"));
   }
   return done;
 }
