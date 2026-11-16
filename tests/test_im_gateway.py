@@ -507,7 +507,7 @@ def test_recording_transport_jsonl_and_failure_injection(tmp_path):
     provider.pump()
     target = provider._alias(f"private:{OWNER_UIN}")
     gateway.send_text(target, "落盘验证", reply_to="1")
-    rows = [json.loads(line) for line in log.read_text().splitlines()]
+    rows = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
     assert rows[0]["action"] == "send_private_msg"
     segs = rows[0]["params"]["message"]
     assert segs[0]["type"] == "reply" and segs[0]["data"]["id"] == "1"

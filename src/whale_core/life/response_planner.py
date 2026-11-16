@@ -23,6 +23,10 @@ from dataclasses import dataclass
 from typing import Tuple
 
 from whale_core.life.segments import split_reply
+from whale_core.life.message_text import (
+    fenced_parts, has_code_fence, map_outside_fences as _map_outside_fences,
+    split_outside_fences,
+)
 
 #: 人格层提示（由宿主在 QQ 会话拼入 persona 文本）。
 PLANNING_HINT = (
@@ -40,7 +44,7 @@ _FOLLOW_RE = re.compile(r"\[\[稍后补充[:：]([^\]\n]{1,60})\]\]")
 # issue #57：反应图意图标记——模型只提语义标签（如 [[表情:开心]]），
 # 实际选图由素材检索层完成（模型不拼任何文件路径/URL）。
 _REACTION_RE = re.compile(r"\[\[表情[:：]([^\]\n]{1,20})\]\]")
-# 气泡分隔：任何 ◆ 一律视为分隔（独占一行/行首内联/句中夹带都认）。
+# 气泡分隔：代码围栏外的 ◆ 视为分隔（独占一行/行首内联/句中夹带都认）。
 # ◆ 不是正常中文用字，模型只会从规划提示里学到它——出现即标记。
 # 2026-11-01 两次修复：先放行首内联形态，再放开句中形态（生产实证
 # 「我在呢。◆ 八点起」这类句中夹带也曾泄漏）。
@@ -67,27 +71,12 @@ _ARTIFACT_REF_RE = re.compile(r"/api/v1/artifacts/[A-Za-z0-9_-]+")
 _IMAGE_RUN_RE = re.compile(r"(?:\s*\[图片\]){2,}")
 
 
-_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
-
-
 def _strip_media_refs(text: str) -> str:
     b = _MD_IMG_RE.sub("[图片]", text)
     b = _MD_MEDIA_LINK_RE.sub(r"[\1]", b)   # [语音](/api/…) → [语音]
     b = _OSS_URL_RE.sub("[图片]", b)
     b = _ARTIFACT_REF_RE.sub("[图片]", b)
     return _IMAGE_RUN_RE.sub("[图片]", b)
-
-
-def _map_outside_fences(text: str, fn) -> str:
-    """对 ``` 围栏**之外**的片段应用 fn；围栏块内容原样保留。"""
-    parts = _FENCE_RE.split(text)
-    fences = _FENCE_RE.findall(text)
-    out: list[str] = []
-    for i, part in enumerate(parts):
-        out.append(fn(part))
-        if i < len(fences):
-            out.append(fences[i])
-    return "".join(out)
 
 
 def _scrub(text: str) -> str:
@@ -98,10 +87,10 @@ def _scrub(text: str) -> str:
 def _tidy_bubble(text: str) -> str:
     """气泡定稿：折叠连续空行（聊天气泡里的空行读着 AI 味，owner 2026-11-01）；
     剥残留 [[…]] 规划标记与媒体引用（转 [图片]）。
-    含代码围栏的气泡：围栏块内原样保留（空行/[[…]]/链接都是代码内容），
+    含代码围栏（包括未闭合）的气泡：块内原样保留（空行/[[…]]/链接都是代码内容），
     块外照常净化；空行折叠整体跳过（无法区分空行是否在围栏内）。"""
     b = str(text or "").strip()
-    if "```" in b:
+    if has_code_fence(b):
         return _map_outside_fences(b, _scrub).strip()
     b = _scrub(b)
     # 剥标记可能留下的行尾空白/空行一并收拾
@@ -179,7 +168,7 @@ def plan_reply(text: str, *, is_group: bool, max_segments: int,
     # issue #57：反应图意图（语义标签，选图由宿主素材层完成）；与「稍后补充」
     # 同纪律——围栏代码块内不当标记，剥全部出现、带回第一个标签。
     reaction_tag = ""
-    parts = _FENCE_RE.split(raw)
+    parts = (p for code, p in fenced_parts(raw) if not code)
     first_reaction = next(
         (m for p in parts if (m := _REACTION_RE.search(p))), None)
     if first_reaction is not None:
@@ -189,7 +178,7 @@ def plan_reply(text: str, *, is_group: bool, max_segments: int,
     # 第一个原因带回给调用方（调用方决定是否真有后续事件）。
     # 围栏代码块内的 [[…]] 是代码内容，不当标记处理。
     follow_up = ""
-    outside = _FENCE_RE.split(raw)
+    outside = (p for code, p in fenced_parts(raw) if not code)
     first = next((m for p in outside if (m := _FOLLOW_RE.search(p))), None)
     if first is not None:
         follow_up = first.group(1).strip()
@@ -197,8 +186,9 @@ def plan_reply(text: str, *, is_group: bool, max_segments: int,
     if not raw and not reaction_tag:
         return _mk((), silent=True, follow_up=follow_up, planner="silent")
 
-    if _BUBBLE_SEP_RE.search(raw):
-        parts = [p.strip() for p in _BUBBLE_SEP_RE.split(raw) if p.strip()]
+    split_parts = split_outside_fences(raw, _BUBBLE_SEP_RE)
+    if len(split_parts) > 1:
+        parts = [p.strip() for p in split_parts if p.strip()]
         cap = max(1, int(max_segments))
         if len(parts) > cap:
             # 超出上限的尾部合并进最后一个气泡（内容不丢，不静默截断）

@@ -15,6 +15,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Optional, Sequence, Tuple
 
+from whale_core.life.message_text import has_code_fence
+
 #: 统计窗口：近期群友消息条数上限
 WINDOW = 40
 #: 至少多少条有效 peer 消息才采信中位；否则用 DEFAULT_MEDIAN
@@ -136,6 +138,9 @@ def soft_trim_text(text: str, ceiling: int) -> str:
     """句界软裁：不超过 ceiling 且非列表时原样；超出/列表则压平后再按句界裁。"""
     raw = str(text or "").strip()
     if not raw:
+        return raw
+    # A soft conversational budget must not damage executable examples.
+    if has_code_fence(raw):
         return raw
     # 多行列表先压成一两句（群聊读着像通知）
     if _is_listy(raw) or (ceiling > 0 and len(raw) > ceiling):

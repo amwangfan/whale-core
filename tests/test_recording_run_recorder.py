@@ -117,7 +117,7 @@ def test_full_run_produces_schema_valid_manifest_and_trace(store):
 
     # manifest 过 contracts/v2 objects/recording-manifest.schema.json
     manifest_schema = json.loads(
-        (SCHEMA_DIR / "objects" / "recording-manifest.schema.json").read_text()
+        (SCHEMA_DIR / "objects" / "recording-manifest.schema.json").read_text(encoding="utf-8")
     )
     jsonschema.Draft202012Validator(manifest_schema).validate(manifest)
     assert manifest["run_id"] == RUN_ID
@@ -130,7 +130,7 @@ def test_full_run_produces_schema_valid_manifest_and_trace(store):
 
     # 每条 trace 事件过 objects/run-trace-event.schema.json
     event_schema = json.loads(
-        (SCHEMA_DIR / "objects" / "run-trace-event.schema.json").read_text()
+        (SCHEMA_DIR / "objects" / "run-trace-event.schema.json").read_text(encoding="utf-8")
     )
     validator = jsonschema.Draft202012Validator(event_schema)
     assert [e["seq"] for e in trace] == [1, 2, 3]

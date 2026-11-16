@@ -1,7 +1,7 @@
 """G3：ResponsePlan / MessageSegment / 语义分段。
 
 纪律（PRD §5）：
-- 默认一次完整消息；偶发 2–3 条；群聊默认最多 1–2 条；
+- 默认一次完整消息；偶发 2–3 条；群聊最多 3 条；
 - 不拆破代码块、公式、Markdown 表格、长 URL、@引用、安全提示；
 - 同一 reply_group_id 在历史里只算一轮逻辑回复。
 """
@@ -12,11 +12,12 @@ import re
 from dataclasses import dataclass
 from typing import Tuple
 
+from whale_core.life.message_text import has_code_fence
+
 # 私有上限 3、群聊上限 2（首版默认）
 MAX_SEGMENTS_PRIVATE = 3
 MAX_SEGMENTS_GROUP = 3  # 2026-11-16：与「一泡一事」契约一致（2→3）
 
-_FENCE_RE = re.compile(r"```.*?```", re.S)
 _URL_RE = re.compile(r"https?://\S+")
 
 
@@ -42,7 +43,7 @@ def split_reply(text: str, *, is_group: bool = False,
     if not text or limit <= 1:
         return (text,) if text else ()
     # 保护区域：代码块（含未闭合 fence——拆一半更糟）/ 长 URL / 表格行不拆
-    if _FENCE_RE.search(text) or text.count("```") % 2 == 1 \
+    if has_code_fence(text) \
             or _URL_RE.search(text) or "\n|" in text:
         return (text,)
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
