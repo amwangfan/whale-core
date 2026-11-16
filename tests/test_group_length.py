@@ -122,9 +122,25 @@ def test_expression_group_leaves_tone_and_punctuation_to_persona():
 def test_expression_health_care_hint():
     policy = derive_policy("我感冒了好难受", is_group=True)
     assert policy.care_health is True
-    assert "身体不适" in policy.render() or "关心" in policy.render()
+    assert "共情一句就够" in policy.render()  # 2026-11-16 精简：不列建议清单
     # 私聊仍保留身体不适情境，但不强行覆盖人格语气。
     priv = derive_policy("我发烧了", is_group=False)
     assert priv.care_health is True
-    assert "身体不适" in priv.render()
+    assert "共情一句就够" in priv.render()  # 2026-11-16 精简
     assert "破折号" not in priv.render()
+
+
+def test_group_single_newline_splits_bubbles():
+    """2026-11-16 owner 实证：群聊里模型用单换行分句，拆分器只认空行 →
+    三件事糊成一段。修：群聊单 \n 也是气泡边界（私聊不拆）。"""
+    from whale_core.life.segments import split_reply
+    text = "全身疼还睡不着，这也太难受了\n舍友打呼噜、七点起床……这觉算白睡了\n先喝点热水好不好"
+    segs = split_reply(text, is_group=True)
+    assert len(segs) == 3, segs
+    # 私聊保持紧凑
+    one = split_reply(text, is_group=False)
+    assert len(one) == 1
+    # 空行分段行为不变（短段仍按既有合并纪律宁少勿滥）
+    long2 = "先这样。" + "长" * 170 + "\n\n" + "再说那个。"
+    two = split_reply(long2, is_group=True)
+    assert len(two) == 2

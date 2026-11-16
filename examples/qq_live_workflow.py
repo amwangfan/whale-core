@@ -1842,21 +1842,8 @@ def cmd_run(args) -> int:
             _tspan(_tid, "plan", "skipped", reason_code="silent_planned")
             _tfin(_tid, "silent")
             return
-        # 2026-11-13 owner 决策：接话/回复在群里 @ 被回应的人（比如安慰
-        # 刚发图的那位）。目标从来件 sender 元数据取，发送前一刻 prime。
-        if is_group and hasattr(send_port, "prime_group_at"):
-            _at_name = ""
-            _nd = globals().get("_name_directory_ref")
-            _sid = str(incoming.sender_id or incoming.account or "")
-            _suid = str(incoming.sender_uid or "")
-            if _nd is not None and (_sid or _suid):
-                try:
-                    _at_name = _nd.resolver()(incoming.conversation,
-                                              [(_sid, _suid)]).get(_sid, "")
-                except Exception:
-                    pass
-            send_port.prime_group_at(incoming.conversation, uid=_suid,
-                                     uin=_sid or 0, name=_at_name)
+        # 2026-11-16 owner 实证「一直at」收敛：join 接话不 @（接话是插嘴，
+        # @ 了显得点名）；@ 只留给定向回复路径（被 @/引用/点名时 @ 回去）。
         _sent_segs = 0
         _send_failed = False
         for i, seg in enumerate(segments):

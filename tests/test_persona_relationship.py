@@ -361,8 +361,8 @@ def test_rhythm_defaults_and_effective_caps():
     assert r.activity == "balanced" and r.max_segments == 0 and not r.dnd
     assert r.version == 0
     assert not rhythms.configured(GROUP_KEY)
-    # 默认分段：群 2 / 私 3
-    assert r.effective_max_segments(is_group=True) == 2
+    # 默认分段：群 3（2026-11-16「一泡一事」契约）/ 私 3
+    assert r.effective_max_segments(is_group=True) == 3
     assert r.effective_max_segments(is_group=False) == 3
     # quiet = 单气泡
     quiet = ConversationRhythm(activity="quiet", max_segments=5)

@@ -14,7 +14,7 @@ from typing import Tuple
 
 # 私有上限 3、群聊上限 2（首版默认）
 MAX_SEGMENTS_PRIVATE = 3
-MAX_SEGMENTS_GROUP = 2
+MAX_SEGMENTS_GROUP = 3  # 2026-11-16：与「一泡一事」契约一致（2→3）
 
 _FENCE_RE = re.compile(r"```.*?```", re.S)
 _URL_RE = re.compile(r"https?://\S+")
@@ -46,6 +46,15 @@ def split_reply(text: str, *, is_group: bool = False,
             or _URL_RE.search(text) or "\n|" in text:
         return (text,)
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    if is_group and len(paragraphs) == 1 and "\n" in paragraphs[0]:
+        # 2026-11-16 owner 实证：群聊里模型用单换行分句（「一个气泡一件事」
+        # 的自然节拍），拆分器只认空行 → 三件事糊成一段发出去。
+        # 群聊把单 \n 当气泡边界：每行一个气泡，超上限的行尾并进最后一泡。
+        lines = [l.strip() for l in paragraphs[0].split("\n") if l.strip()]
+        if len(lines) > 1:
+            if len(lines) > limit:
+                lines = lines[:limit - 1] + ["\n".join(lines[limit - 1:])]
+            return tuple(lines)
     if len(paragraphs) <= 1:
         # 单段落：短就不拆；长则按句号/问号/感叹号边界尝试拆两段
         if len(text) <= 240:
