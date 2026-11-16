@@ -44,12 +44,17 @@ class DeliveryRouter:
                 notification_id=event.notification_id, device_id=event.device_id,
                 provider="", created_at=self._now(), updated_at=self._now())
             record.advance(DeliveryStatus.QUEUED, at=self._now())
+        record, _ = self._queue.update_delivery(
+            event.device_id, event.notification_id, lambda _r: False,
+            event_id=event.event_id, initial=record)
+        if record is None:
+            raise ValueError("notification event does not match delivery record")
 
         # 1) WSS 首选（在线才调，离线返回哨兵不抛错）
         wss = self._find("whale_wss")
+        candidates = []
         if wss is not None and getattr(wss, "is_online", lambda _d: False)(event.device_id):
-            if await self._try_send(wss, event, record):
-                return record
+            candidates.append(wss)
 
         # 2) 外部出口兜底：仅显式开启（available）的参与
         for provider in self._providers:
@@ -57,14 +62,23 @@ class DeliveryRouter:
                 continue
             if not getattr(provider, "available", False):
                 continue  # 默认关闭的外部出口不参与
-            if await self._try_send(provider, event, record):
+            candidates.append(provider)
+
+        for provider in candidates:
+            record = self._queue.get_delivery(event.device_id, event.notification_id)
+            if record.revoked or record.status.terminal:
                 return record
+            if await self._try_send(provider, event):
+                return self._queue.get_delivery(event.device_id, event.notification_id)
 
         # 无通道可达：队列保留（等 sync 补传 / 过期清扫），台账记原因
-        if not record.last_error:
-            record.last_error = "no_route"
-        self._queue.put_delivery(record)
-        return record
+        def no_route(current):
+            if current.revoked or current.status.terminal or current.last_error:
+                return False
+            current.last_error = "no_route"
+            return True
+        return self._queue.update_delivery(
+            event.device_id, event.notification_id, no_route, event_id=event.event_id)[0]
 
     # ------------------------------------------------------------------
 
@@ -74,29 +88,35 @@ class DeliveryRouter:
                 return provider
         return None
 
-    async def _try_send(self, provider, event: NotificationEvent,
-                        record: DeliveryRecord) -> bool:
+    async def _try_send(self, provider, event: NotificationEvent) -> bool:
         """尝试经某 provider 送达；成功更新台账（DELIVERED）返回 True。"""
         try:
             delivery_id = await provider.send(event.device_id, event)
         except NotificationProviderError as exc:
-            record.attempts += 1
-            record.last_error = exc.code
-            self._queue.put_delivery(record)
+            self._record_attempt(event, error=exc.code)
             return False
         except Exception as exc:  # noqa: BLE001 —— 单通道失败不阻断选路
-            record.attempts += 1
-            record.last_error = type(exc).__name__
-            self._queue.put_delivery(record)
+            self._record_attempt(event, error=type(exc).__name__)
             return False
         if delivery_id == OFFLINE_DELIVERY_ID:
             return False  # 离线哨兵：队列保留，不计送达
-        record.attempts += 1
-        record.delivery_id = delivery_id
-        record.provider = provider.name
-        record.last_error = ""
-        record.advance(DeliveryStatus.DELIVERED, at=self._now())
-        self._queue.put_delivery(record)
+        self._record_attempt(event, provider=provider.name, delivery_id=delivery_id)
         # 记 sent_at（不出队——端侧回执才出队；sync 前重启仍有补传依据）
         self._queue.mark_sent(event.device_id, event.event_id)
         return True
+
+    def _record_attempt(self, event: NotificationEvent, *, error: str = "",
+                        provider: str = "", delivery_id: str = "") -> None:
+        def change(record):
+            # The attempt really happened, even if a receipt/revoke won first.
+            record.attempts += 1
+            if record.revoked or record.status.terminal:
+                return True
+            record.last_error = error
+            if not error:
+                record.delivery_id = delivery_id
+                record.provider = provider
+                record.advance(DeliveryStatus.DELIVERED, at=self._now())
+            return True
+        self._queue.update_delivery(event.device_id, event.notification_id, change,
+                                    event_id=event.event_id)

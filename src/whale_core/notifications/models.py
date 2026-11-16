@@ -280,6 +280,7 @@ class DeliveryRecord:
     attempts: int = 0          # 送达尝试次数（观测用）
     last_error: str = ""       # 末次失败原因（类型名/错误码，不含正文）
     revoked: bool = False      # 已被 notification.revoke 撤回
+    action_id: str = ""        # 已认领转交的首个按钮操作；仅本地台账，不进入协议
 
     def advance(self, status: DeliveryStatus, *, at: int, reason: str = "") -> bool:
         """按状态机推进；非法迁移/终态后翻案 → 返回 False 且不改动。
@@ -313,6 +314,7 @@ class DeliveryRecord:
             "attempts": self.attempts,
             "last_error": self.last_error,
             "revoked": self.revoked,
+            "action_id": self.action_id,
         }
 
     @classmethod
@@ -329,4 +331,5 @@ class DeliveryRecord:
             attempts=int(data.get("attempts") or 0),
             last_error=str(data.get("last_error") or ""),
             revoked=bool(data.get("revoked") or False),
+            action_id=str(data.get("action_id") or ""),
         )

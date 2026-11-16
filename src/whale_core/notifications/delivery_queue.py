@@ -52,7 +52,7 @@ def delivery_key(device_id: str, notification_id: str) -> str:
 
 
 class DeliveryQueue:
-    """待送达队列 + 送达台账。线程安全交给底层 store（InMemory/Sqlite 均有锁）。"""
+    """待送达队列 + 送达台账；复合状态更新走底层 store 原子事务。"""
 
     def __init__(self, store, *, max_per_device: int = MAX_QUEUE_PER_DEVICE,
                  now_fn: Callable[[], int] | None = None) -> None:
@@ -90,21 +90,25 @@ class DeliveryQueue:
     def mark_sent(self, device_id: str, event_id: str, *, at: int | None = None) -> bool:
         """标记已送达（记 sent_at，**不出队**——等端侧回执或过期才出队）。"""
         key = queue_key(device_id, event_id)
-        entry = self._store.get(key)
-        if not isinstance(entry, Mapping):
-            return False
-        entry = dict(entry)
-        entry["sent_at"] = self._now() if at is None else at
-        self._store.put(key, entry)
-        return True
+        def apply(tx):
+            entry = tx.get(key)
+            if not isinstance(entry, Mapping):
+                return False
+            entry = dict(entry)
+            entry["sent_at"] = self._now() if at is None else at
+            tx.put(key, entry)
+            return True
+        return self._store.transact(apply)
 
     def ack_event(self, device_id: str, event_id: str) -> bool:
         """端侧已确认（收到任意有效回执）→ 出队，后续 sync 不再补发。"""
         key = queue_key(device_id, event_id)
-        if self._store.get(key) is None:
-            return False
-        self._store.delete(key)
-        return True
+        def apply(tx):
+            if tx.get(key) is None:
+                return False
+            tx.delete(key)
+            return True
+        return self._store.transact(apply)
 
     def pending_events(self, device_id: str) -> list[NotificationEvent]:
         """该设备全部在队事件（按 event_id 升序 = 时间序）。"""
@@ -156,13 +160,23 @@ class DeliveryQueue:
                 continue  # 畸形项留给容量逐出，不在清扫路径上放大故障
             if event.expires_at > at:
                 continue
-            self._store.delete(key)
-            removed.append((event.device_id, event.event_id))
-            record = self.get_delivery(event.device_id, event.notification_id)
-            if record is not None:
-                record.advance(DeliveryStatus.EXPIRED, at=at,
-                               reason="ttl_elapsed")
-                self.put_delivery(record)
+            def expire(tx):
+                # Re-read inside the transaction; acknowledgement may have won.
+                current = tx.get(key)
+                if current != entry:
+                    return False
+                tx.delete(key)
+                dkey = delivery_key(event.device_id, event.notification_id)
+                data = tx.get(dkey)
+                if isinstance(data, Mapping):
+                    record = DeliveryRecord.from_dict(data)
+                    if record.event_id == event.event_id and not record.revoked \
+                            and not record.status.terminal:
+                        record.advance(DeliveryStatus.EXPIRED, at=at, reason="ttl_elapsed")
+                        tx.put(dkey, record.to_dict())
+                return True
+            if self._store.transact(expire):
+                removed.append((event.device_id, event.event_id))
         return removed
 
     def _enforce_capacity(self, device_id: str) -> None:
@@ -180,6 +194,72 @@ class DeliveryQueue:
     def put_delivery(self, record: DeliveryRecord) -> None:
         self._store.put(delivery_key(record.device_id, record.notification_id),
                         record.to_dict())
+
+    def update_delivery(self, device_id: str, notification_id: str,
+                        change: Callable[[DeliveryRecord], bool],
+                        *, event_id: str | None = None, acknowledge: bool = False,
+                        initial: DeliveryRecord | None = None) -> tuple[DeliveryRecord | None, bool]:
+        """Read/check/mutate/ack atomically; change must have no external effects.
+
+        Returns the latest matching snapshot and whether change accepted it.
+        External handlers/providers run only after this transaction commits.
+        """
+        key = delivery_key(device_id, notification_id)
+
+        def apply(tx):
+            data = tx.get(key)
+            created = not isinstance(data, Mapping) and initial is not None
+            if isinstance(data, Mapping):
+                record = DeliveryRecord.from_dict(data)
+            else:
+                record = DeliveryRecord.from_dict(initial.to_dict()) if initial is not None else None
+            if record is None or (event_id is not None and record.event_id != event_id):
+                return None, False
+            changed = change(record)
+            if changed or created:
+                tx.put(key, record.to_dict())
+            if acknowledge:
+                tx.delete(queue_key(device_id, record.event_id))
+            return record, changed
+
+        return self._store.transact(apply)
+
+    def accept_receipt(self, device_id: str, notification_id: str, event_id: str,
+                       status: DeliveryStatus, *, at: int, reason: str = "",
+                       action_id: str = "") -> tuple[DeliveryRecord | None, bool]:
+        """Accept a receipt, or claim one action callback, against current state."""
+        def change(record):
+            if record.revoked:
+                return False
+            if action_id:
+                if record.action_id or (record.status.terminal and
+                                        record.status is not DeliveryStatus.ACTION_SUBMITTED):
+                    return False
+            elif record.status.terminal or record.status is status:
+                return False
+            # A valid device receipt proves delivery even if send() is pending.
+            if record.status in (DeliveryStatus.CREATED, DeliveryStatus.QUEUED) and status in (
+                    DeliveryStatus.DISPLAYED, DeliveryStatus.OPENED, DeliveryStatus.DISMISSED,
+                    DeliveryStatus.ACTION_SUBMITTED):
+                record.advance(DeliveryStatus.DELIVERED, at=at)
+            if not record.advance(status, at=at, reason=reason):
+                return False
+            if action_id:
+                record.action_id = action_id
+            return True
+
+        return self.update_delivery(device_id, notification_id, change,
+                                    event_id=event_id, acknowledge=True)
+
+    def revoke_delivery(self, device_id: str, notification_id: str,
+                        *, at: int) -> DeliveryRecord | None:
+        def change(record):
+            if record.revoked:
+                return False
+            record.revoked = True
+            record.updated_at = at
+            return True
+        return self.update_delivery(device_id, notification_id, change, acknowledge=True)[0]
 
     def get_delivery(self, device_id: str,
                      notification_id: str) -> DeliveryRecord | None:

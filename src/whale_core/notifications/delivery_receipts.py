@@ -78,16 +78,10 @@ class DeliveryReceipts:
         status = RECEIPT_STATUS_MAP.get(status_word)
         if status is None:
             return None  # 未知状态词：静默忽略（前向兼容）
-        record = self._queue.get_delivery(device_id, notification_id)
-        if record is None or record.event_id != event_id:
-            return None  # 未知通知 / 事件错配：不写数据（防洪）
-        # 端侧确实拿到了该事件 → 出队，sync 不再补发
-        self._queue.ack_event(device_id, event_id)
         # receipt 无原因字段：端侧 failed 只能记「端侧报告失败」，不臆造细节
         reason = "device_reported_failed" if status is DeliveryStatus.FAILED else ""
-        record.advance(status, at=received_at, reason=reason)
-        self._queue.put_delivery(record)
-        return record
+        return self._queue.accept_receipt(
+            device_id, notification_id, event_id, status, at=received_at, reason=reason)[0]
 
     # ------------------------------------------------------------------
     # notification.action（通知按钮）
@@ -99,6 +93,8 @@ class DeliveryReceipts:
         按钮操作只是「用户意图回传」：本模块把它登记为 ACTION_SUBMITTED 并
         转交注入的处理口；**不产生任何本地授权**（审批裁决归 core §14）。
         handler 异常不影响状态推进（状态已落定，回调失败不改变事实）。
+        事务中先认领首个 action，再在提交后调用 handler；重复回传不重试。
+        这是至多一次转交，非事务 outbox：认领后崩溃可能使回调未执行。
         """
         device_id = str(payload.get("device_id") or "")
         notification_id = str(payload.get("notification_id") or "")
@@ -107,12 +103,11 @@ class DeliveryReceipts:
         submitted_at = int(payload.get("submitted_at") or 0) or self._now()
         if not device_id or not notification_id or not event_id or not action_id:
             return None
-        record = self._queue.get_delivery(device_id, notification_id)
-        if record is None or record.event_id != event_id:
-            return None
-        self._queue.ack_event(device_id, event_id)
-        record.advance(DeliveryStatus.ACTION_SUBMITTED, at=submitted_at)
-        self._queue.put_delivery(record)
+        record, claimed = self._queue.accept_receipt(
+            device_id, notification_id, event_id, DeliveryStatus.ACTION_SUBMITTED,
+            at=submitted_at, action_id=action_id)
+        if not claimed:
+            return record
         handler = self._action_handler
         if handler is not None:
             try:

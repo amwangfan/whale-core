@@ -92,3 +92,5 @@
 第45轮：[探索调度服务代次与取消](45-exploration-worker-generations.md)，服务切换隔离、tick去重、停止恢复与协作式取消检查。
 
 第46轮：[回复代码块完整性](46-reply-code-integrity.md)，同步最新QQ修复，统一围栏识别、代码内规划标记隔离及长度软裁保护。
+
+第47轮：[通知回执与按钮转交事务](47-notification-receipt-transactions.md)，迟到发送结果保护、按钮原子认领、撤回/出队及过期回滚。

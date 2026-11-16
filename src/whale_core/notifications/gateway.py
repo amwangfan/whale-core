@@ -145,12 +145,7 @@ class NotificationGateway:
         无论通道是否支持撤回：队列项立即出队（不再补传），台账标 revoked。
         通道不支持/设备离线时返回 False（诚实，不伪报）。
         """
-        record = self.queue.get_delivery(device_id, notification_id)
-        if record is not None:
-            self.queue.ack_event(device_id, record.event_id)  # 停止补传
-            record.revoked = True
-            record.updated_at = self._now()
-            self.queue.put_delivery(record)
+        self.queue.revoke_delivery(device_id, notification_id, at=self._now())
         delivered = False
         for provider in self.router.providers:
             try:
@@ -188,7 +183,7 @@ class NotificationGateway:
         sent = 0
         for event in events:
             record = await self.router.dispatch(event)
-            if record.status is DeliveryStatus.DELIVERED:
+            if not record.revoked and record.status is DeliveryStatus.DELIVERED:
                 sent += 1
         return sent
 
