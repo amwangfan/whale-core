@@ -94,3 +94,5 @@
 第46轮：[回复代码块完整性](46-reply-code-integrity.md)，同步最新QQ修复，统一围栏识别、代码内规划标记隔离及长度软裁保护。
 
 第47轮：[通知回执与按钮转交事务](47-notification-receipt-transactions.md)，迟到发送结果保护、按钮原子认领、撤回/出队及过期回滚。
+
+第48轮：[通知历史事务](48-notification-history-transactions.md)，并发添加/已读一致性、重复事件已读保留和容量校验。

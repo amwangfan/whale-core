@@ -31,7 +31,7 @@ class NotificationHistory:
                  now_fn=None) -> None:
         if store is None:
             raise ValueError("store 必填（MemoryStore kv 抽象）")
-        if limit <= 0:
+        if type(limit) is not int or limit <= 0:
             raise ValueError("limit 须为正整数")
         self._store = store
         self.limit = int(limit)
@@ -39,10 +39,7 @@ class NotificationHistory:
 
     def add(self, event: NotificationEvent) -> None:
         """记录一条通知（同 notification_id 覆盖更新，如分类内容修正重发）。"""
-        entries = self._load(event.device_id)
-        entries = [e for e in entries
-                   if e.get("notification_id") != event.notification_id]
-        entries.insert(0, {
+        entry = {
             "notification_id": event.notification_id,
             "event_id": event.event_id,
             "device_id": event.device_id,
@@ -53,9 +50,20 @@ class NotificationHistory:
             "created_at": event.created_at,
             "expires_at": event.expires_at,
             "read": False,
-        })
-        del entries[self.limit:]
-        self._store.put(history_key(event.device_id), entries)
+        }
+
+        def apply(tx):
+            entries = self._load(event.device_id, reader=tx)
+            previous = next((e for e in entries if eid_match(e, event.notification_id)), None)
+            # Re-ingesting the same event is not new content or a user unread action.
+            current = dict(entry)
+            if previous is not None and previous.get("event_id") == event.event_id:
+                current["read"] = bool(previous.get("read"))
+            entries = [e for e in entries if not eid_match(e, event.notification_id)]
+            entries.insert(0, current)
+            tx.put(history_key(event.device_id), entries[:self.limit])
+
+        self._store.transact(apply)
 
     def list(self, device_id: str, *, limit: int | None = None,
              unread_only: bool = False) -> list[dict]:
@@ -75,33 +83,37 @@ class NotificationHistory:
 
     def mark_read(self, device_id: str, notification_id: str) -> bool:
         """显式标记已读（用户动作）；不存在返回 False。"""
-        entries = self._load(device_id)
-        hit = False
-        for entry in entries:
-            if eid_match(entry, notification_id):
-                entry["read"] = True
-                hit = True
-        if hit:
-            self._store.put(history_key(device_id), entries)
-        return hit
+        def apply(tx):
+            entries = self._load(device_id, reader=tx)
+            hit = False
+            for entry in entries:
+                if eid_match(entry, notification_id):
+                    entry["read"] = True
+                    hit = True
+            if hit:
+                tx.put(history_key(device_id), entries)
+            return hit
+        return self._store.transact(apply)
 
     def mark_all_read(self, device_id: str) -> int:
         """全部标记已读，返回本次置位条数。"""
-        entries = self._load(device_id)
-        count = 0
-        for entry in entries:
-            if not entry.get("read"):
-                entry["read"] = True
-                count += 1
-        if count:
-            self._store.put(history_key(device_id), entries)
-        return count
+        def apply(tx):
+            entries = self._load(device_id, reader=tx)
+            count = 0
+            for entry in entries:
+                if not entry.get("read"):
+                    entry["read"] = True
+                    count += 1
+            if count:
+                tx.put(history_key(device_id), entries)
+            return count
+        return self._store.transact(apply)
 
     def unread_count(self, device_id: str) -> int:
         return sum(1 for e in self._load(device_id) if not e.get("read"))
 
-    def _load(self, device_id: str) -> list[dict]:
-        data = self._store.get(history_key(device_id))
+    def _load(self, device_id: str, *, reader=None) -> list[dict]:
+        data = (self._store if reader is None else reader).get(history_key(device_id))
         if not isinstance(data, list):
             return []
         return [dict(e) for e in data if isinstance(e, Mapping)]
