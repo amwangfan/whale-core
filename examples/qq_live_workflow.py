@@ -95,6 +95,36 @@ def load_secrets(path: Path) -> list[str]:
     return loaded
 
 
+class _FallbackBrain:
+    """回复脑回落（2026-11-20 紧急修，Tob 四条①④）：主脑 ModelError
+    （network/timeout/可重试类）→ 回落脑兜底回复；回落事件打点+计数。
+
+    性格性 skip 与故障性不回分离：本层只管故障兜底。
+    """
+
+    def __init__(self, primary, fallback, store=None):
+        self.primary, self.fallback, self._store = primary, fallback, store
+
+    def reply(self, text, **kwargs):
+        from whale_core.core.deepseek import ModelError
+        try:
+            return self.primary.reply(text, **kwargs)
+        except ModelError as exc:
+            if not (exc.retryable or exc.kind in ("network", "server")):
+                raise
+            print(f"  [回复回落] 主脑 {exc.kind} → 回落脑兜底", flush=True)
+            try:
+                if self._store is not None:
+                    k = "budget:reply_fallback_count"
+                    self._store.put(k, int(self._store.get(k) or 0) + 1)
+            except Exception:
+                pass
+            return self.fallback.reply(text, **kwargs)
+
+    def __getattr__(self, name):  # info 等属性透传主脑
+        return getattr(self.primary, name)
+
+
 class StubBrain:
     """无 DEEPSEEK_API_KEY 时的占位脑：验证管道，回复显式带 [stub] 标记。"""
 
@@ -117,7 +147,13 @@ def build_brain():
     if key:
         from whale_core.core.deepseek import DeepSeekCompanion
         print("[brain] 回复脑（base_url=%s, model=%s）" % (base, model))
-        return DeepSeekCompanion(model=model, base_url=base, api_key=key)
+        # 2026-11-20 紧急修：读超时按 agentscope 长上下文实测延迟定（默认 35s）
+        try:
+            _timeout = float(os.environ.get("WHALE_REPLY_TIMEOUT_S") or 35)
+        except ValueError:
+            _timeout = 35.0
+        return DeepSeekCompanion(model=model, base_url=base, api_key=key,
+                                 timeout=max(5.0, _timeout))
     print("[brain] [!] stub 脑（无可用 key；只验证管道，不产生真实回复）")
     return StubBrain()
 
@@ -503,7 +539,16 @@ def cmd_run(args) -> int:
     # 2026-11-05 owner 决策：默认不限（0）；显式设正整数才启用上限
     _stranger_limit = int(os.environ.get("WHALE_QQ_STRANGER_DAILY_LIMIT", "0"))
     from weq_channel.wq_push import resolve_pic_attachment_urls
-    workflow = QqInboundWorkflow(store, build_brain(), prefs=prefs,
+    _reply_brain = build_brain()
+    if (os.environ.get("WHALE_REPLY_FALLBACK") or "1").strip() not in ("0", "false", "off"):
+        try:
+            from whale_core.core.deepseek import DeepSeekCompanion as _DSC
+            if isinstance(_reply_brain, _DSC) and os.environ.get("DEEPSEEK_API_KEY"):
+                _reply_brain = _FallbackBrain(_reply_brain, _DSC(), store)
+                print("[brain] 回复回落已挂（主脑故障 → flash 兜底）")
+        except Exception as exc:
+            print(f"[brain] 回落装配失败 fail-soft：{type(exc).__name__}")
+    workflow = QqInboundWorkflow(store, _reply_brain, prefs=prefs,
                                  media_url_resolver=resolve_pic_attachment_urls,
                                  media_refresh=getattr(send_port, "refresh_media_rkeys", None),
                                  auth_service=auth_service,
