@@ -140,11 +140,15 @@ def test_render_merge_preserves_null_semantics(tmp_path):
 # ---------- 提醒 loop（约束②共享配额 + 静默 + 三态 + fail-soft） ----------
 
 def _loop(store, judge_out="沉默", notify_log=None):
+    # 静默窗设空（quiet_start==quiet_end）——测试不随真实时刻翻静默。
+    from datetime import time as _t
+    _OFF = _t(0, 0)
     sent = notify_log if notify_log is not None else []
     return ScheduleReminderLoop(
         store=store, judge=lambda p: judge_out,
         notify=lambda text, channel: notify_log.append((text, channel)) or {"ok": True},
-        facts_hint=lambda: ""), (notify_log if notify_log is not None else [])
+        facts_hint=lambda: "", quiet_start=_OFF, quiet_end=_OFF), \
+        (notify_log if notify_log is not None else [])
 
 
 def test_loop_silent_when_no_items():

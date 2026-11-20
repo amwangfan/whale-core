@@ -105,13 +105,39 @@ class StubBrain:
 
 
 def build_brain():
+    """直接回复脑（WHALE_REPLY_* 优先；回落 QQ_INTENT_*/DEEPSEEK_*）。"""
+    model = (os.environ.get("WHALE_REPLY_MODEL")
+             or os.environ.get("DEEPSEEK_MODEL") or "deepseek-chat").strip()
+    base = (os.environ.get("WHALE_REPLY_BASE_URL")
+            or os.environ.get("QQ_INTENT_BASE_URL")
+            or os.environ.get("DEEPSEEK_BASE_URL") or "").strip() or None
+    key = (os.environ.get("WHALE_REPLY_API_KEY")
+           or os.environ.get("QQ_INTENT_API_KEY")
+           or os.environ.get("DEEPSEEK_API_KEY") or "").strip() or None
+    if key:
+        from whale_core.core.deepseek import DeepSeekCompanion
+        print("[brain] 回复脑（base_url=%s, model=%s）" % (base, model))
+        return DeepSeekCompanion(model=model, base_url=base, api_key=key)
+    print("[brain] [!] stub 脑（无可用 key；只验证管道，不产生真实回复）")
+    return StubBrain()
+
+
+def build_vision_brain():
+    """视觉脑（图进模型唯一腿）：WHALE_VISION_MODEL 指定走 agentscope
+    （qwen4-max 实证视觉）；未设回落 DEEPSEEK_*（flash）。"""
+    model = (os.environ.get("WHALE_VISION_MODEL") or "").strip()
+    if model:
+        base = (os.environ.get("WHALE_VISION_BASE_URL")
+                or os.environ.get("QQ_INTENT_BASE_URL") or "").strip() or None
+        key = (os.environ.get("WHALE_VISION_API_KEY")
+               or os.environ.get("QQ_INTENT_API_KEY") or "").strip() or None
+        if key:
+            from whale_core.core.deepseek import DeepSeekCompanion
+            print("[brain] 视觉脑（model=%s）" % model)
+            return DeepSeekCompanion(model=model, base_url=base, api_key=key)
     if os.environ.get("DEEPSEEK_API_KEY"):
         from whale_core.core.deepseek import DeepSeekCompanion
-        print("[brain] DeepSeek（base_url=%s, model=%s）" % (
-            os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-            os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")))
         return DeepSeekCompanion()
-    print("[brain] [!] stub 脑（DEEPSEEK_API_KEY 未配置；只验证管道，不产生真实回复）")
     return StubBrain()
 
 
@@ -483,6 +509,7 @@ def cmd_run(args) -> int:
                                  auth_service=auth_service,
                                  context_resolver=context_resolver,
                                  stranger_daily_limit=_stranger_limit)
+    workflow.companion.vision_model = build_vision_brain()
 
     def _send_audio_artifacts(audio_ids, *, peer_type: str = "",
                               target: str = "") -> int:
@@ -1389,7 +1416,7 @@ def cmd_run(args) -> int:
 
                     def _cap_bg(_d=data, _m=mime):
                         try:
-                            caption_for(store, build_brain(), _d, _m)
+                            caption_for(store, build_vision_brain(), _d, _m)
                         except Exception:
                             pass
                     _th.Thread(target=_cap_bg, daemon=True).start()
