@@ -141,3 +141,22 @@ inbox（幂等/租约恢复/受控重试，issue #14）。
 1. 先稳定本文件与 Python 类型。  
 2. 再在基础设施仓加「契约消费者」适配（可选独立 DTO 包）。  
 3. 真连网关仅在本地配置注入，**永不**把 Token / 真实 IP 写入本仓。
+
+## 日程 API（whale-glasses 面，2026-11-20 起部署实况——唯一事实源）
+
+鉴权：全部 `Authorization: Bearer <WHALE_GLASSES_TOKEN>`（无/错 → 401）。
+
+| 端点 | 方法 | 说明 |
+|---|---|---|
+| `/v1/schedule/candidates` | GET | 候选列表（pending，带 source 溯源） |
+| `/v1/schedule/candidates` | POST | 候选裁决 `{id, action: "add"\|"reject"}` |
+| `/v1/schedule/list` | GET | 正式日程列表 |
+| `/v1/schedule/items` | POST | 手动建正式日程 `{title, date, time?}` |
+| `/v1/schedule/items` | DELETE | 删正式日程，body `{id}` |
+| `/v1/schedule/source?conversation=&messageId=` | GET | 来源消息 ±10 条上下文（owner-only） |
+
+键形状（部署实况）：
+- 候选：`{cand_id, title, date(ISO %Y-%m-%d), time("HH:MM"|""), status, created_at, source:{conversation, messageId, at, excerpt≤80}}`；列表响应键 `candidates`。
+- 正式条目：`{item_id, title, date, time, source, created_at}`；列表响应键 `items`；条目主键 `item_id`；时间全部 ISO 串。
+- source 上下文响应键 `context`：`[{messageId, at, sender, text}]`。
+- 裁决响应 `{ok:true, item}` / `{ok:true}`；删除 `{ok:true}`；未找到 `{ "error": "candidate not found or not pending" }`（404）。
