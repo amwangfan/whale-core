@@ -67,9 +67,9 @@ def apply_parallel_env(orch, env) -> None:
 def intent_brain_max_tokens(env) -> int | None:
     """意图脑输出上限（AgentScope kimi-k3 推理吃预算 → 空 content）；0 = 不传。"""
     try:
-        value = int((env or {}).get("WHALE_INTENT_MAX_TOKENS") or 4096)
+        value = int((env or {}).get("WHALE_INTENT_MAX_TOKENS") or 8192)
     except (TypeError, ValueError):
-        value = 4096
+        value = 8192
     return value if value > 0 else None
 
 

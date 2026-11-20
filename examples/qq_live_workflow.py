@@ -821,7 +821,7 @@ def cmd_run(args) -> int:
             api_key=os.environ.get("QQ_INTENT_API_KEY") or None,
             max_tokens=intent_brain_max_tokens(os.environ),
             # 2026-11-20 用户令：任务/工具路由 thinking 开 max（env 可配 high/xhigh）
-            reasoning_effort=(os.environ.get("WHALE_INTENT_EFFORT") or "max").strip()
+            reasoning_effort=(os.environ.get("WHALE_INTENT_EFFORT") or "high").strip()
             or None,
                 timeout=intent_brain_timeout(os.environ))
         globals()["_intent_brain_ref"] = intent_brain  # 群定向兜底判定器用
