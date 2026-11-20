@@ -88,6 +88,47 @@ def _spaces_include_vault(spaces) -> bool:
     except Exception:
         return False
 
+
+def _reply_current_record(record, now: datetime) -> bool:
+    from whale_core.memory.curation import _is_expired
+
+    return ("superseded" not in record.tags
+            and record.content.get("status", "active") in {"active", "accepted"}
+            and not _is_expired(record.content, now))
+
+
+def _scoped_curated_rule_candidates(curator, spaces):
+    """Read current rules within resolved spaces, outside ordinary recall Top-K."""
+    if spaces is None or not hasattr(curator, "store"):
+        return ()
+    from whale_core.memory.activation import MemoryCandidate
+    from whale_core.memory.curation import _space_ids
+    from whale_core.memory.roles import memory_role
+    from whale_core.memory.store import MemoryKind
+
+    space_ids = _space_ids(spaces)
+    if not space_ids:
+        return ()
+    now = datetime.now(timezone.utc)
+    records = (
+        curator.store.list_by_kind(
+            MemoryKind.PREFERENCE, space_ids=space_ids,
+            include_protected=_spaces_include_vault(spaces))
+        + curator.store.list_by_kind(
+            MemoryKind.EPISODE, space_ids=space_ids,
+            include_protected=_spaces_include_vault(spaces)))
+    out = []
+    for record in records:
+        if "curated" not in record.tags or not _reply_current_record(record, now):
+            continue
+        summary = str(record.content.get("summary") or "").strip()
+        if memory_role(summary) not in {"boundary", "access_permission", "constraint", "one_off"}:
+            continue
+        out.append(MemoryCandidate(
+            key=record.key, summary=summary, score=0.0, source="curated",
+            subject_id=str(record.content.get("subject_id") or "owner")))
+    return tuple(out)
+
 def _writeback_enabled() -> bool:
     import os
     raw = (os.environ.get("WHALE_INNER_STATE_WRITEBACK") or "1").strip().lower()
@@ -148,9 +189,9 @@ class WhaleCompanion:
         # Optional owner-confirmed recommendation delivery callback.
         self.exploration_delivery = exploration_delivery
 
-    def _owner_fact_memories(self, query: str, context, spaces,
-                             conversation_id: str) -> list:
-        """owner_fact_v1 召回注入（首批：可信 owner 私聊/眼镜路径）。
+    def _owner_fact_candidates(self, query: str, context, spaces,
+                               conversation_id: str) -> list:
+        """Authorized, current owner facts for the reply-time activation stage.
 
         纪律（冻结方案 §6/§8）：
         - ``context=None`` 的兼容调用**绝不**召回/采集（无可信授权即无记忆）；
@@ -194,13 +235,15 @@ class WhaleCompanion:
                 auth = self.owner_fact_authority.authorize_now(owner_id, space_id)
             if auth is None:
                 return []  # 实时授权不成立（pause/解绑/注销）：不召回
-            facts = self.owner_facts.retrieve(
-                auth, str(query or ""), limit=OWNER_FACT_INJECT_LIMIT)
+            from whale_core.memory.activation import MemoryCandidate
+            facts = self.owner_facts.retrieve(auth, str(query or ""), limit=24)
             out: list = []
-            for fact in facts or ():
+            for rank, fact in enumerate(facts or (), 1):
                 summary = str(getattr(fact, "summary", "") or "").strip()
                 if summary:
-                    out.append(f"长期记忆（用户自述）：{summary}")
+                    out.append(MemoryCandidate(
+                        key=f"owner_fact:{fact.fact_id}", summary=summary,
+                        score=1.0 / rank, source="owner_fact"))
             return out
         except Exception:
             import logging
@@ -351,19 +394,52 @@ class WhaleCompanion:
             # 非「用户：/Enxi：」结构的摘要：按句剥报时
             return scrub_transient_time(text_m)
 
-        # owner_fact_v1 召回注入（首批：可信 owner 私聊/眼镜；fail soft）。
-        owner_fact_snippets = self._owner_fact_memories(
+        # Both sources have completed their own authorization and state checks
+        # before the pure activation stage sees any candidate.
+        from whale_core.memory.activation import MemoryCandidate, activate
+        from whale_core.memory.rerank import rerank
+        candidates = self._owner_fact_candidates(
             original, context, spaces, conversation_id)
 
         if self.curator is not None:
-            memories = list(owner_fact_snippets)
             for hit in _recall(self.curator, original, spaces,
-                               include_protected=_spaces_include_vault(spaces)):
+                               include_protected=_spaces_include_vault(spaces),
+                               limit=12):
+                if not _reply_current_record(hit.record, datetime.now(timezone.utc)):
+                    continue
                 piece = _injectable_memory(
                     str(hit.record.content.get("summary", "")))
                 if piece:
+                    candidates.append(MemoryCandidate(
+                        key=hit.record.key, summary=piece, score=float(hit.score),
+                        source="curated",
+                        subject_id=str(hit.record.content.get("subject_id") or "owner")))
+            candidates.extend(_scoped_curated_rule_candidates(self.curator, spaces))
+            memories = []
+            seen_norm = set()
+            owner_used = 0
+            for selected in activate(
+                    original, rerank(original, candidates), limit=12,
+                    is_group=str(conversation_id).startswith("group:")):
+                item = selected.candidate
+                if item.source == "owner_fact":
+                    if owner_used >= OWNER_FACT_INJECT_LIMIT:
+                        continue
+                    owner_used += 1
+                    piece = f"长期记忆（用户自述）：{item.summary}"
+                else:
+                    piece = item.summary
+                if selected.decision == "CONSTRAIN":
+                    label = {"disclosure_boundary": "当前披露边界",
+                             "access_permission": "当前访问权限",
+                             "behavior_constraint": "当前行为约束",
+                             "retention_constraint": "当前记录保留约束"}.get(
+                                 selected.reason, "当前约束")
+                    piece = f"[{label}] {piece}"
+                norm = _norm_mem(item.summary)
+                if norm and norm not in seen_norm:
+                    seen_norm.add(norm)
                     memories.append(piece)
-            seen_norm = {_norm_mem(m) for m in memories}
             injected_keys: set[str] = set()
             # 召回断层修复（2026-11-11）：30 轮后旧经历（宠物名字/生日）掉出
             # 近期时间窗，curator 又只收 curated——按相关性补召本会话 chat 情节
@@ -423,7 +499,9 @@ class WhaleCompanion:
         else:
             # Legacy chat-only behavior kept for backwards compatibility; opt in
             # to curated retrieval to avoid injecting raw transcripts by default.
-            memories = list(owner_fact_snippets) + [
+            memories = [f"长期记忆（用户自述）：{row.candidate.summary}"
+                        for row in activate(original, rerank(original, candidates),
+                                            limit=OWNER_FACT_INJECT_LIMIT)] + [
                 m for m in (
                     _injectable_memory(str(r.content.get("summary", "")))
                     for r in ctx.recent_episodes)
