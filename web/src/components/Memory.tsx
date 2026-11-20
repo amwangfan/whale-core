@@ -1,3 +1,5 @@
+import MemoryGraph from './MemoryGraph';
+import GroupDigest from './GroupDigest';
 /**
  * 记忆管理面（主体优先视图）：
  * - 顶部按「主体」分组：主人空间 / 群友 / 群聊 / 其他空间（fork + 未分区遗留计数）；
@@ -81,6 +83,10 @@ export default function MemoryView() {
     catch (e) { throw new Error(friendlyError(e)); }
   }, []);
   const { data: subjects, loading: subjectsLoading, error: subjectsError, reload: loadSubjects } = useApi(fetchSubjects);
+  const archiveGroups = subjects?.groups.filter(g => /^group-\d+$/.test(g.space_id)) ?? [];
+  const graphGroup = sel ? archiveGroups.find(g=>g.space_id===sel.spaceId) :
+    archiveGroups.length===1 ? archiveGroups[0] : undefined;
+  const [groupRevision,setGroupRevision] = useState(0);
   useEffect(() => {
     if (!subjects) return;
     // Refresh pause state without changing the record query's identity.
@@ -428,6 +434,10 @@ export default function MemoryView() {
         </section>
       )}
 
+      {graphGroup && <section aria-label="群记忆空间">
+        <MemoryGraph key={graphGroup.space_id} revision={groupRevision} spaceId={graphGroup.space_id} groupId={graphGroup.space_id.slice(6)} />
+        <GroupDigest key={'digest:'+graphGroup.space_id} gid={graphGroup.space_id.slice(6)} onUpdated={()=>setGroupRevision(v=>v+1)} />
+      </section>}
       {!sel && subjects && (
         <div className="empty">选中上方任一主体或空间后，在此浏览其记忆记录。</div>
       )}

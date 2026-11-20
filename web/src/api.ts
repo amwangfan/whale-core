@@ -8,6 +8,39 @@
 
 import { readJsonEvents } from "./sse";
 
+export type PortraitExample = {message_id:string; sender_id:string; sent_at:string; text:string; reply_to:string};
+export type MemberPortrait = {
+  text_count:number; active_days:number; median_chars:number|null; no_end_punct:number; questions:number;
+  expressions:{term:string; count:number; days:number; other_count:number; other_total:number; examples:PortraitExample[]}[];
+  scenes:{label:string; count:number; examples:PortraitExample[]}[]; self_report_candidates:PortraitExample[];
+  topics?:{term:string; count:number; days:number; examples:PortraitExample[]}[];
+};
+export type StoredTrait = {kind:'expressions'|'topics'|'scenes'; label:string; count:number; days?:number; other_count?:number; other_total?:number; evidence_ids:string[]};
+export type StoredGroupProfile = {key:string; traits:StoredTrait[]; text_count:number; active_days:number; median_chars:number|null};
+export type ArchiveMember = {id:string; name:string; aliases:string[]; count:number; first:string; last:string; keywords:string[]; portrait?:MemberPortrait|null; stored_profile?:StoredGroupProfile; claims:{key:string; evidence_id:string; summary:string; status:string; expires_at?:string; current_preference?:boolean}[]};
+export type ArchiveSegment = {id:string; start:string; end:string; count:number; members:number; keywords:string[]; example_id:string};
+export type GroupDigest = {pending_messages?:number|null;members:ArchiveMember[]; segments:ArchiveSegment[]; messages:number; keyword_types?:Record<string,string>;keyword_extractor?:string;
+  group?:{name:string;description:string;people:number;archived_accounts:number;bots:{name:string;aliases:string[];count:number}[]}};
+export type ArchiveSpeech = {message_id:string; sender_name:string; display_name?:string; sender_id:string; sent_at:string; text:string};
+export interface MemoryGraphNode {
+  id: string; label: string; category: string; key?: string;
+  kind?: string; status?: string; space_id?: string; created_at?: string;
+  source?: string; role?: string; expires_at?: string; confidence?: number;
+  record_key?: string; evidence_id?: string;
+  observations?: string[];
+  entityType?: string;
+  occurrences?: number;
+}
+export type MemoryEvidence = { available: false; reason: string; message: string } | {
+  available: true; evidence_id: string; group_id: string; message_id: string;
+  sender_id: string; sender_name: string; sent_at: string; text: string; archive_note: string;
+};
+export interface MemoryGraphData {
+  nodes: MemoryGraphNode[];
+  links: { source: string; target: string; label: string; count?: number }[];
+  total_records: number; shown_records: number; truncated: boolean;
+}
+
 export const API_BASE = "/api/v1";
 
 export interface RetentionReport {
@@ -1341,6 +1374,14 @@ export const studioApi = {
     }),
 
   // ---- 记忆管理面（主体优先）：subjects 总览 + browse 浏览 + 治理操作 ----
+
+  groupDigest: (gid: string) => request<GroupDigest>('/studio/memory/group-digest?' + new URLSearchParams({group_id:gid})),
+  updateGroupMemory: (gid: string) => request<{processed:number;pending:number}>('/studio/memory/group-digest?' + new URLSearchParams({group_id:gid}), {method:'POST',body:'{}'}),
+  groupSpeech: (params: Record<string,string>) => request<{items:ArchiveSpeech[]; more:boolean}>('/studio/memory/group-digest?' + new URLSearchParams(params)),
+  memoryGraph: (spaceId: string) => request<MemoryGraphData>(
+    `/studio/memory/graph?space_id=${encodeURIComponent(spaceId)}`),
+  memoryEvidence: (recordKey: string, evidenceId: string) => request<MemoryEvidence>(
+    `/studio/memory/evidence?${new URLSearchParams({record_key: recordKey, evidence_id: evidenceId})}`),
 
   memorySubjects: (signal?: AbortSignal) =>
     request<MemorySubjects>("/studio/memory/subjects", { signal }),

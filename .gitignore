@@ -67,3 +67,13 @@ web/dist
 
 # 评测运行产物（保留报告，run/pairs 原始产物不入库）
 evals/live/out/
+
+# Private instance stores and QQ exports
+group_profiles/
+**/api_token
+**/onebot_token
+**/group_nlp_python.txt
+*.sqlite3-wal
+*.sqlite3-shm
+QQChatExporter/
+group_*_*.json

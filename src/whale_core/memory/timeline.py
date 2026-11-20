@@ -44,6 +44,9 @@ class GroupTimelineStore:
         """追加一条群消息。message_id 重复 → False（幂等）。返回是否新写入。"""
         if not message_id or not conversation_id:
             return False
+        if not is_self:
+            from whale_core.memory.group_refresh import stage_timeline
+            stage_timeline(self.store,conversation_id,message_id,sender_id,text,send_time,reply_to)
         key = _key(conversation_id)
         entries = self.store.get(key)
         entries = list(entries) if isinstance(entries, list) else []

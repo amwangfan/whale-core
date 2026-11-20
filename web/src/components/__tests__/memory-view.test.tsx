@@ -1,3 +1,4 @@
+import {within} from "@testing-library/react";
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -134,6 +135,50 @@ beforeEach(() => {
 });
 
 describe("MemoryView 主体优先记忆管理", () => {
+  it("直接显示唯一群的关键词，点击文字即可核查原话", async () => {
+    const segment={id:'s1',start:'2026-11-01T00:00:00Z',end:'2026-11-01T00:01:00Z',count:2,members:1,keywords:['星图','观测'],example_id:'m1'};
+    mockStudioFetch({
+      "/studio/memory/subjects": () => jsonResult({...SUBJECTS,groups:[{...SUBJECTS.groups[0],space_id:'group-123'}]}),
+      "/studio/memory/portrait": () => jsonResult({owners:[]}),
+      "/studio/memory/group-digest": call => new URL(call.url,'http://localhost').searchParams.has('segment_id')
+        ? jsonResult({items:[{message_id:'m1',sender_name:'甲',sender_id:'12',text:'今晚一起看星图',sent_at:segment.start}],more:false})
+        : jsonResult({messages:2,segments:[segment],members:[]})
+    });
+    render(<MemoryView/>);
+    const buttons=await screen.findByLabelText('可点击的群聊关键词');
+    fireEvent.click(within(buttons).getByRole('button',{name:'星图'}));
+    expect(await screen.findByText('今晚一起看星图')).toBeTruthy();
+    fireEvent.click(screen.getByLabelText('关闭节点详情'));
+    expect(screen.queryByLabelText('关键词相关群聊')).toBeNull();
+    fireEvent.change(screen.getByLabelText('搜索图谱'),{target:{value:'观测'}});
+    expect(within(buttons).getByRole('button',{name:'观测'})).toBeTruthy();
+    expect(within(buttons).queryByRole('button',{name:'星图'})).toBeNull();
+  });
+  it("只在主动点击时整合群消息，重复点击显示无新增", async () => {
+    let pending=2;
+    let writes=0;
+    mockStudioFetch({
+      "/studio/memory/subjects": () => jsonResult({...SUBJECTS,groups:[{...SUBJECTS.groups[0],space_id:'group-123'}]}),
+      "/studio/memory/portrait": () => jsonResult({owners:[]}),
+      "/studio/memory/group-digest": call => {
+        if(call.method==='POST') {
+          const processed=pending;
+          pending=0; writes++;
+          return jsonResult({processed,pending});
+        }
+        return jsonResult({messages:4-pending,pending_messages:pending,segments:[],members:[]});
+      }
+    });
+    render(<MemoryView/>);
+    const update=await screen.findByRole('button',{name:'更新群记忆'});
+    expect(writes).toBe(0);
+    fireEvent.click(update);
+    await screen.findByText('已处理 2 条新发言');
+    await waitFor(()=>expect(update.hasAttribute('disabled')).toBe(false));
+    fireEvent.click(update);
+    await screen.findByText('没有待处理的新发言');
+    expect(writes).toBe(2);
+  });
   it("加载主体总览：渲染主人/群友/群聊/其他空间四区及状态徽标", async () => {
     mockStudioFetch({
       "/studio/memory/subjects": () => jsonResult(SUBJECTS),

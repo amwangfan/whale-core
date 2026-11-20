@@ -26,6 +26,7 @@ class MemoryKind(str, Enum):
 
     EPISODE = "episode"
     PREFERENCE = "preference"
+    GROUP_PROFILE = "group_profile"
     PERSONA_CONTINUITY = "persona_continuity"
 
 

@@ -15,6 +15,8 @@ from whale_core.api.studio.capabilities_rhythm import (
     _put_rhythm,
 )
 from whale_core.api.studio.conversations import _list_conversations
+from whale_core.api.studio.group_digest import group_digest
+from whale_core.api.studio.memory_graph import graph as group_graph, evidence as group_evidence
 from whale_core.api.studio.graph import _graph
 from whale_core.api.studio.members import (
     _member_consent_grant,
@@ -121,6 +123,12 @@ def _dispatch_studio(handler, method: str, parts: list[str]) -> None:
         _put_global(handler, ctx, svc)
     elif rest == ["initiative", "channel"] and method == "PUT":
         _put_channel(handler, ctx, svc)
+    elif rest == ["memory", "group-digest"] and method in ("GET","POST"):
+        group_digest(handler, ctx, svc, update=method == "POST")
+    elif rest == ["memory", "graph"] and method == "GET":
+        group_graph(handler, ctx, svc)
+    elif rest == ["memory", "evidence"] and method == "GET":
+        group_evidence(handler, ctx, svc)
     elif rest == ["memory", "subjects"] and method == "GET":
         _memory_subjects(handler, ctx, svc)
     elif rest == ["memory", "browse"] and method == "GET":
@@ -198,6 +206,7 @@ def _path_known(rest: list[str]) -> bool:
                 ["members", "consent"], ["members", "consent", "revoke"],
                 ["members", "memory"], ["members", "memory", "correct"],
                 ["members", "memory", "delete"],
+                ["memory", "group-digest"], ["memory", "graph"], ["memory", "evidence"],
                 ["memory", "subjects"], ["memory", "browse"],
                 ["initiative"], ["initiative", "global"],
                 ["initiative", "channel"],
