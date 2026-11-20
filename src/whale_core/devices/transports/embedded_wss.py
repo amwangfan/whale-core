@@ -37,8 +37,10 @@ from whale_core.devices.transports.base import (
 
 log = logging.getLogger("whale.devices.transports.embedded_wss")
 
-#: observe 动作默认超时（端侧截屏+UI 树采集，宽于普通动作）
-_OBSERVE_TIMEOUT_S = 20.0
+#: observe 动作默认超时（端侧截屏+UI 树采集，宽于普通动作）。
+#: 2026-11-20 nova 真机实证：高负载 GSI 上 Agent2 无障碍树采集常超 20s，
+#: 放宽到 60s（仍远低于网关 600s 上限；调用方另有观察窗口自律）。
+_OBSERVE_TIMEOUT_S = 60.0
 #: read_output 默认查询超时
 _READ_TIMEOUT_S = 15.0
 

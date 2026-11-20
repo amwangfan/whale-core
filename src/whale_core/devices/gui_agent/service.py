@@ -48,7 +48,10 @@ class GuiTaskError(ValueError):
 
 
 def _new_task_id() -> str:
-    return uuid.uuid4().hex
+    """任务 ID 用 v2 协议形态（task_+ULID）——GUI 序列动作经 contracts/v2
+    下发时 task_id 有 schema pattern（^task_[0-9A-HJKMNP-TV-Z]{26}$），
+    纯 hex 会被协议预检 invalid_message（nova 真机实测踩中）。"""
+    return new_id("task")
 
 
 def make_llm_decision(env: Mapping[str, str] | None = None) -> LlmJsonDecision:
@@ -140,6 +143,7 @@ class GuiTaskService:
               task_timeout_s: int = DEFAULT_TASK_TIMEOUT_S,
               action_timeout_s: int = DEFAULT_ACTION_TIMEOUT_S,
               observe_timeout_s: int = DEFAULT_OBSERVE_TIMEOUT_S,
+              screenshot: bool = False,
               approval=None) -> dict:
         goal = str(goal or "").strip()
         if not 1 <= len(goal) <= 500:
@@ -151,6 +155,8 @@ class GuiTaskService:
         # 慢机（高负载/GSI）需要更宽的动作与观察窗口；设上下界防失控
         action_timeout_s = max(1, min(int(action_timeout_s), 120))
         observe_timeout_s = max(5, min(int(observe_timeout_s), 300))
+        # 截图默认关（UI 树驱动决策；部分设备无媒体投影授权，强求截图整轮失败）
+        screenshot = bool(screenshot)
         # 门控前置：设备状态/基本 scope 在编排层逐动作还会再查，这里先给
         # 调用方一个诚实的 409，而不是跑起来才撞墙。
         registry = self._gw2.registry
@@ -178,6 +184,7 @@ class GuiTaskService:
             "max_steps": max_steps, "task_timeout_s": task_timeout_s,
             "action_timeout_s": action_timeout_s,
             "observe_timeout_s": observe_timeout_s,
+            "screenshot": screenshot,
             "events": [{"at": time.time(), "kind": "pending"}],
         }
         self._put_record(record)
@@ -231,12 +238,16 @@ class GuiTaskService:
         record["phase"] = record["status"] = "running"
         self._event(record, "running")
         self._put_record(record)
+        from whale_core.devices.transports.base import ObserveRequest
         loop = GuiAgentLoop(
             GatewayV2Transport(self._gw2),
             max_steps=record["max_steps"],
             task_timeout_ms=record["task_timeout_s"] * 1000,
             action_timeout_ms=record["action_timeout_s"] * 1000,
-            observe_timeout_ms=record["observe_timeout_s"] * 1000)
+            observe_timeout_ms=record["observe_timeout_s"] * 1000,
+            observe_request=ObserveRequest(
+                screenshot=bool(record.get("screenshot", False)),
+                ui_tree=True))
         try:
             result: GuiRunResult = await loop.run(
                 device_id, goal=record["goal"], decision=decision,

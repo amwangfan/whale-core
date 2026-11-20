@@ -100,11 +100,17 @@ def wait_task(token: str, device_id: str, task_id: str,
 
 BILIBILI_STAGES = [
     ("launch", "打开哔哩哔哩应用（包名 tv.danmaku.bili），等到首页或推荐流出现"),
-    ("search", "在哔哩哔哩里搜索「鲸鱼」并确认出现搜索结果列表"),
-    ("feed", "返回哔哩哔哩首页推荐流，向下滑动浏览至少两条内容"),
-    ("playpause", "在推荐流点开第一个视频，等待播放器出现并开始播放，然后暂停播放"),
-    ("seek", "在当前视频把播放进度拖到大约一半位置（拖动进度条；不要点分享/下载/评论类按钮）"),
-    ("switch", "返回推荐流，点开另一个不同的视频并确认它正在播放（避免分享/下载类按钮）"),
+    ("search", "在哔哩哔哩搜索「鲸鱼」：点顶部搜索栏后，键盘弹出时直接用 "
+               "device.input_text 输入文字（不带 element_id），然后按回车键搜索，"
+               "看到结果列表即完成"),
+    ("feed", "返回哔哩哔哩首页推荐流（可用 device.key back 返回），"
+             "向下滑动浏览至少两条内容"),
+    ("playpause", "在推荐流点开第一个视频，等待播放器出现并开始播放，"
+                  "然后点屏幕中央唤出控制条后点暂停按钮暂停播放"),
+    ("seek", "在当前视频把播放进度拖到大约一半位置（先点屏幕唤出控制条，"
+             "再拖动进度条；不要点分享/下载/评论类按钮）"),
+    ("switch", "用 device.key back 返回推荐流，点开另一个不同的视频并确认它"
+               "正在播放（避免分享/下载类按钮）"),
     ("exit", "退出哔哩哔哩，回到桌面"),
 ]
 
@@ -168,8 +174,8 @@ def main() -> int:
         for stage, goal in BILIBILI_STAGES:
             status, body = api(token, "POST",
                                f"/api/v1/devices/{device_id}/gui_tasks",
-                               {"goal": goal, "max_steps": 20,
-                                "task_timeout_s": 600,
+                               {"goal": goal, "max_steps": 40,
+                                "task_timeout_s": 1200,
                                 "action_timeout_s": args.action_timeout,
                                 "observe_timeout_s": args.observe_timeout})
             if status != 202:

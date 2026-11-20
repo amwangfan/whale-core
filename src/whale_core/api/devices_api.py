@@ -393,7 +393,8 @@ def dispatch_devices(handler, method: str, parts: list[str],
                     max_steps=int(body.get("max_steps") or 50),
                     task_timeout_s=int(body.get("task_timeout_s") or 600),
                     action_timeout_s=int(body.get("action_timeout_s") or 10),
-                    observe_timeout_s=int(body.get("observe_timeout_s") or 45))
+                    observe_timeout_s=int(body.get("observe_timeout_s") or 45),
+                    screenshot=bool(body.get("screenshot", False)))
             except GuiTaskError as exc:
                 send(_GATEWAY_STATUS.get(exc.code, 400)
                      if exc.code != "bad_request" else 400,
