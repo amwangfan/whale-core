@@ -69,7 +69,8 @@ def _is_local_or_private_http(url: str) -> bool:
 class DeepSeekCompanion:
     def __init__(self, *, api_key: str | None = None, base_url: str | None = None,
                  model: str | None = None, timeout: float = 25.0,
-                 max_tokens: int | None = None):
+                 max_tokens: int | None = None,
+                 reasoning_effort: str | None = None):
         self.api_key = (api_key if api_key is not None else os.environ.get("DEEPSEEK_API_KEY", "")).strip()
         if any(ord(c) < 32 or ord(c) == 127 for c in self.api_key):
             raise ValueError("model API key contains invalid control characters")
@@ -91,6 +92,9 @@ class DeepSeekCompanion:
         # 可选输出上限：推理型模型（如 AgentScope kimi-k3）默认上限偏小时会
         # 把预算耗在思考上、content 为空（finish=length）；意图脑按需开大。
         self.max_tokens = int(max_tokens) if max_tokens else None
+        # 2026-11-20：推理档位透传（agentscope/kimi 系接受 reasoning_effort；
+        # None = 不带该参数，行为不变）。
+        self.reasoning_effort = (reasoning_effort or "").strip() or None
 
     def info(self) -> dict:
         """状态展示用（绝不含 api_key）。"""
@@ -142,6 +146,8 @@ class DeepSeekCompanion:
         payload = {"model": self.model, "messages": [{"role": "system", "content": system}, *clean_history,
                                                       {"role": "user", "content": user_content}],
                    "stream": on_delta is not None}
+        if self.reasoning_effort:
+            payload["reasoning_effort"] = self.reasoning_effort
         if getattr(self, "max_tokens", None):
             payload["max_tokens"] = self.max_tokens
         body = json.dumps(payload, ensure_ascii=False).encode()
