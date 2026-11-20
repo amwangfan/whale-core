@@ -882,8 +882,11 @@ class AdbTransport(DeviceTransport):
                                        str(x), str(y), str(duration)])
             return f"已长按 {label} ({x},{y}) {duration}ms", None
         if cap == "device.swipe":
-            x1 = self._int_arg(args, "x1", None, None, None)
-            y1 = self._int_arg(args, "y1", None, None, None)
+            # 坐标键别名：contracts/v2 Agent2 用 x/y（起点），本通道历史用 x1/y1
+            x1 = self._int_arg(args, "x1", None, None, None) if "x1" in args \
+                else self._int_arg(args, "x", None, None, None)
+            y1 = self._int_arg(args, "y1", None, None, None) if "y1" in args \
+                else self._int_arg(args, "y", None, None, None)
             x2 = self._int_arg(args, "x2", None, None, None)
             y2 = self._int_arg(args, "y2", None, None, None)
             duration = self._int_arg(args, "duration_ms", 300, 1, 60_000)

@@ -83,7 +83,7 @@ _AGENT_RULES = """你是手机 GUI 自主体。规则：
 3. 参数形状（严格，错名即失败）：
    - device.tap 点元素 {"element_id": N}；点坐标 {"x": 123, "y": 456}
    - device.long_press {"element_id": N} 或 {"x": 123, "y": 456, "duration_ms": 800}
-   - device.swipe {"x1": 540, "y1": 1800, "x2": 540, "y2": 600, "duration_ms": 300}
+   - device.swipe {"x": 540, "y": 1800, "x2": 540, "y2": 600, "duration_ms": 300}（x/y=起点，x2/y2=终点）
    - device.input_text {"text": "要输入的文字"}；可选 "element_id" 先聚焦
    - device.key {"key": "back|home|enter|delete|tab"}
    - device.wait {"duration_ms": 1500}
