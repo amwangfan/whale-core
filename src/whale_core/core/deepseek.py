@@ -194,15 +194,25 @@ class DeepSeekCompanion:
         stopped = False
         last_usage: dict | None = None
         finish_reason = ""
+        saw_data = False
+        raw_len = 0  # 体积上限守卫（流式下按累计字节计）
+        raw_buf = bytearray()  # 非 SSE 兼容兜底用
         try:
             with _open_model_request(req, timeout=self.timeout) as response:
                 for raw_line in response:
                     if should_stop is not None and should_stop():
                         stopped = True
                         break
+                    raw_len += len(raw_line)
+                    if raw_len > MAX_MODEL_RESPONSE_BYTES:
+                        raise ModelError("bad_response",
+                                         "model response exceeds size limit")
+                    if not saw_data:
+                        raw_buf += raw_line
                     line = raw_line.decode("utf-8", "replace").strip()
                     if not line or not line.startswith("data:"):
                         continue
+                    saw_data = True
                     payload = line[5:].strip()
                     if payload == "[DONE]":
                         break
@@ -249,6 +259,21 @@ class DeepSeekCompanion:
             raise ModelError("network",
                              f"model network error: {type(exc).__name__}",
                              retryable=not parts) from exc
+        if not saw_data and not parts:
+            # 兼容路径：服务端忽略 stream=true 回了单块 JSON（如部分网关）。
+            try:
+                data = json.loads(bytes(raw_buf).decode("utf-8"))
+                content = data["choices"][0]["message"]["content"]
+                if not isinstance(content, str):
+                    raise TypeError
+                parts.append(content)
+                u = data.get("usage")
+                if isinstance(u, dict):
+                    last_usage = u
+            except (json.JSONDecodeError, UnicodeDecodeError, KeyError,
+                    IndexError, TypeError) as exc:
+                raise ModelError("bad_response",
+                                 "model response shape unexpected") from exc
         if metrics is not None:
             metrics.update({
                 "ttft_ms": (round((first_token_at - started) * 1000)

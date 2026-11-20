@@ -187,18 +187,14 @@ def test_invalid_timeout(timeout):
 
 
 def test_oversized_response_stops_at_limit(monkeypatch):
+    """恒流式下：累计字节超上限 → bad_response（体积守卫按累计字节计）。"""
     from whale_core.core.deepseek import MAX_MODEL_RESPONSE_BYTES
-    reads = []
-    class Response(io.BytesIO):
-        def read(self, count=-1):
-            reads.append(count)
-            return b"x" * count
+    body = b"data: " + (b"x" * (MAX_MODEL_RESPONSE_BYTES + 8)) + b"\n\n"
     monkeypatch.setattr("whale_core.core.deepseek._open_model_request",
-                        lambda req, *, timeout: Response())
+                        lambda req, *, timeout: io.BytesIO(body))
     with pytest.raises(ModelError) as caught:
         DeepSeekCompanion(api_key="key").reply("hi")
     assert caught.value.kind == "bad_response"
-    assert reads == [MAX_MODEL_RESPONSE_BYTES + 1]
 
 
 def test_non_utf8_response_is_classified(monkeypatch):

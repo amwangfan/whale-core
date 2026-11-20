@@ -77,18 +77,16 @@ class TestReplyStream:
             assert reply == "你"  # 只保留已收到的部分，不假装完整
             assert metrics["stopped"] is True
 
-    def test_non_stream_unchanged(self):
-        """不传 on_delta 时仍走原非流式路径（stream=False）。"""
+    def test_no_callback_also_streams(self):
+        """治本令 2026-11-20：不传 on_delta 也走流式（弃整响应阻塞）。"""
         with _fake_model_server() as server:
             model = DeepSeekCompanion(
                 base_url=f"http://127.0.0.1:{server.server_address[1]}", timeout=5)
-            # 假服务要求 stream=True——非流式请求应 500；用异常证明没走流式
-            try:
-                model.reply("hi")
-            except Exception:
-                pass  # 关键是请求体 stream=False（假服务端断言）
-            else:
-                raise AssertionError("fake server should reject non-stream")
+            metrics: dict = {}
+            reply = model.reply("hi", metrics=metrics)
+            assert reply == "你好呀"
+            assert metrics["chunks"] == 3
+            assert metrics["ttft_ms"] is not None
 
 
 class _FakeOrchestrator:
