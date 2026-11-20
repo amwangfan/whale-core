@@ -1878,9 +1878,21 @@ def main(argv=None) -> int:
                     text, channel=channel, urgency="normal",
                     session_id="schedule-loop")
 
+            # 判断脑独立装配（不共享 quick 用户面）：effort=high（env 可配）
+            from whale_core.core.deepseek import DeepSeekCompanion
+            judge_brain = DeepSeekCompanion(
+                model=(env.get("WHALE_QUICK_MODEL") or env.get("QQ_INTENT_MODEL")
+                       or "").strip() or None,
+                base_url=(env.get("WHALE_QUICK_BASE_URL") or env.get("QQ_INTENT_BASE_URL")
+                          or "").strip() or None,
+                api_key=(env.get("WHALE_QUICK_API_KEY") or env.get("QQ_INTENT_API_KEY")
+                         or "").strip() or None,
+                reasoning_effort=(env.get("WHALE_SCHEDULE_JUDGE_EFFORT") or "high").strip()
+                or None)
+
             schedule_loop = ScheduleReminderLoop(
                 store=delegates["store"],
-                judge=lambda prompt: delegates["quick_chat"](prompt)[0],
+                judge=lambda prompt: judge_brain.reply(prompt),
                 notify=_notify,
                 facts_hint=lambda: request_context_hint(delegates["store"]))
             if schedule_loop.start_background():
