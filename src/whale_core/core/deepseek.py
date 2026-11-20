@@ -143,9 +143,12 @@ class DeepSeekCompanion:
             user_content: object = parts
         else:
             user_content = text[:4000]
+        # 2026-11-20 治本令：弃整响应阻塞，恒 SSE 流式（读超时按 chunk 间隔计，
+        # 长上下文/长思考不撞整响应阈值；usage/finish_reason 随末块解析）。
         payload = {"model": self.model, "messages": [{"role": "system", "content": system}, *clean_history,
                                                       {"role": "user", "content": user_content}],
-                   "stream": on_delta is not None}
+                   "stream": True,
+                   "stream_options": {"include_usage": True}}
         if self.reasoning_effort:
             payload["reasoning_effort"] = self.reasoning_effort
         if getattr(self, "max_tokens", None):
@@ -154,12 +157,10 @@ class DeepSeekCompanion:
         last: ModelError | None = None
         for attempt in (0, 1):  # 瞬时错误重试一次
             try:
-                if on_delta is None:
-                    return self._post(body)
-                # issue #45：流式路径——SSE 增量 + 可取消 + 真实耗时观测。
-                # 取消/中断后只在首个 token 前允许重试；已出流后失败不重试
-                # （部分输出如实返回，metrics 标注 stopped）。
-                return self._post_stream(body, on_delta=on_delta,
+                # 恒流式（治本令 2026-11-20）：无回调时用内部收集器；metrics
+                # 不传则建内部的（ttft/total 打点照常）。
+                cb = on_delta if on_delta is not None else (lambda _p: None)
+                return self._post_stream(body, on_delta=cb,
                                          should_stop=should_stop,
                                          metrics=metrics)
             except ModelError as exc:
@@ -191,6 +192,8 @@ class DeepSeekCompanion:
         chunks = 0
         parts: list[str] = []
         stopped = False
+        last_usage: dict | None = None
+        finish_reason = ""
         try:
             with _open_model_request(req, timeout=self.timeout) as response:
                 for raw_line in response:
@@ -205,11 +208,20 @@ class DeepSeekCompanion:
                         break
                     try:
                         data = json.loads(payload)
-                        delta = (data.get("choices") or [{}])[0] \
-                            .get("delta") or {}
-                        piece = delta.get("content") or ""
-                    except (json.JSONDecodeError, IndexError, TypeError):
+                    except (json.JSONDecodeError, TypeError):
                         continue
+                    usage = data.get("usage")
+                    if isinstance(usage, dict):
+                        last_usage = usage
+                    choices = data.get("choices") or []
+                    if choices and isinstance(choices[0], dict):
+                        fr = choices[0].get("finish_reason")
+                        if fr:
+                            finish_reason = str(fr)
+                        delta = choices[0].get("delta") or {}
+                        piece = delta.get("content") or ""
+                    else:
+                        piece = ""
                     if not piece:
                         continue
                     if first_token_at is None:
@@ -244,6 +256,8 @@ class DeepSeekCompanion:
                 "total_ms": round((time.monotonic() - started) * 1000),
                 "chunks": chunks,
                 "stopped": stopped,
+                "finish_reason": finish_reason or None,
+                "usage": last_usage,
             })
         return "".join(parts)
 
