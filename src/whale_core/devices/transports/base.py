@@ -148,6 +148,24 @@ class UiElement:
 
 
 @dataclasses.dataclass(frozen=True)
+class MediaState:
+    """活跃媒体会话段（观察负载的可选附加段，#96）。
+
+    使「正在播放」成为可观察事实：瞬态播放控制条会自隐，UI 树里的播放状态
+    不可见，但媒体会话状态恒在。字段与 whale-mobile Agent2 观察负载的
+    ``media`` 段逐字对齐（package/state/playing/position_ms/duration_ms/
+    title≤40 字）。
+    """
+
+    package: str = ""
+    state: str = ""
+    playing: bool = False
+    position_ms: int = 0
+    duration_ms: int = 0
+    title: str = ""
+
+
+@dataclasses.dataclass(frozen=True)
 class ObserveRequest:
     """观察请求。screenshot=False 时实现侧可省略截图（省带宽）。"""
 
@@ -172,6 +190,7 @@ class Observation:
     keyboard_shown: bool = False
     locked: bool = False
     truncated: bool = False
+    media: "MediaState | None" = None   # 活跃媒体会话（可空附加段，#96）
 
 
 # ---------------------------------------------------------------------------

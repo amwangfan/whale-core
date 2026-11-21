@@ -6,7 +6,14 @@ import hashlib
 import json
 import re
 
-from whale_core.devices.transports.base import Observation, ObserveRequest, UiElement, new_id, now_ms
+from whale_core.devices.transports.base import (
+    MediaState,
+    Observation,
+    ObserveRequest,
+    UiElement,
+    new_id,
+    now_ms,
+)
 
 
 def bounds(value) -> tuple[int, int, int, int]:
@@ -42,6 +49,30 @@ def validate_request(request: ObserveRequest) -> None:
     if (type(request.screenshot) is not bool or type(request.ui_tree) is not bool
             or type(request.max_elements) is not int or not 1 <= request.max_elements <= 2**31 - 1):
         raise ValueError("观察开关须为布尔值，max_elements 须为正整数")
+
+
+def media_state(payload: dict) -> MediaState | None:
+    """解析观察负载的可选 ``media`` 附加段（#96；未知/非法字段宽容忽略）。
+
+    mobile Agent2 附加 ``media`` 段（活跃媒体会话）；老版本无此段 → None。
+    """
+    raw = payload.get("media")
+    if not isinstance(raw, dict):
+        return None
+
+    def _text(key: str) -> str:
+        value = raw.get(key)
+        return value if isinstance(value, str) else ""
+
+    def _int(key: str) -> int:
+        value = raw.get(key)
+        return value if type(value) is int and value >= 0 else 0
+
+    return MediaState(
+        package=_text("package"), state=_text("state"),
+        playing=raw.get("playing") is True,
+        position_ms=_int("position_ms"), duration_ms=_int("duration_ms"),
+        title=_text("title")[:40])
 
 
 def observation(device_id: str, payload: dict, request: ObserveRequest) -> Observation:
@@ -84,4 +115,5 @@ def observation(device_id: str, payload: dict, request: ObserveRequest) -> Obser
         screen_width=integer(payload.get("screen_width", screen.get("w"))),
         screen_height=integer(payload.get("screen_height", screen.get("h"))),
         keyboard_shown=payload.get("keyboard_shown") is True,
-        locked=payload.get("locked") is True, truncated=truncated)
+        locked=payload.get("locked") is True, truncated=truncated,
+        media=media_state(payload))

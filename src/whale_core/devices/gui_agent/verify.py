@@ -39,6 +39,26 @@ def verify_action(
 
     if kind == "device.key":
         key = str(arguments.get("key") or "")
+        if key in ("media_play_pause", "media_next", "media_previous"):
+            # #96：媒体键用观察负载的 media 段做确定性验证（播放状态对 UI 树
+            # 不可见；无 media 段则 skipped，绝不伪报 passed）
+            bm = before.media if before else None
+            am = after.media if after else None
+            if bm is None or am is None:
+                return Verification(VerificationStatus.SKIPPED,
+                                    "无媒体段，无法确定性验证")
+            if key == "media_play_pause":
+                if bm.playing != am.playing:
+                    return Verification(
+                        VerificationStatus.PASSED,
+                        f"播放状态翻转 {bm.playing}→{am.playing}")
+                return Verification(VerificationStatus.FAILED,
+                                    f"播放状态未翻转（仍 {am.playing}）")
+            # next/previous：标题或进度位置变化为通过信号（语义由应用自定）
+            if am.title != bm.title or am.position_ms < bm.position_ms:
+                return Verification(VerificationStatus.PASSED, "媒体会话已切换")
+            return Verification(VerificationStatus.SKIPPED,
+                                "next/previous 语义由应用自定，无确定性判据")
         if key == "back":
             # back 的可验证信号：activity 变化或 UI 签名变化
             if before and (before.ui_signature != after.ui_signature

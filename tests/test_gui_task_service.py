@@ -137,7 +137,13 @@ class TestLifecycle:
             trace_dir="/tmp/gui-task-test-traces")
         record = svc.start(device_id, "一直观察", max_steps=50,
                            task_timeout_s=600)
-        time.sleep(0.5)
+        # 轮询到 running 再停（全量负载下固定 sleep 不稳）
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            current = svc.get(record["task_id"])
+            if current and current.get("status") == "running":
+                break
+            time.sleep(0.05)
         stopped = svc.stop(record["task_id"])
         assert stopped["stop_requested"] is True
         final = _wait_terminal(svc, record["task_id"])

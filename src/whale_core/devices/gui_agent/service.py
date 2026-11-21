@@ -216,6 +216,18 @@ class GuiTaskService:
             future = self._futures.get(task_id)
         if future is not None:
             future.cancel()
+            # 取消成功且协程从未启动 → _run 不会跑（无 CancelledError 路径），
+            # 记录立即落 stopped（否则永远挂 running/pending）
+            if future.cancelled():
+                fresh = self.get(task_id)
+                if fresh and fresh.get("status") not in (
+                        "succeeded", "failed", "stopped"):
+                    fresh["phase"] = fresh["status"] = "stopped"
+                    fresh["reason"] = "stop requested (cancelled before start)"
+                    self._event(fresh, "stopped",
+                                detail="cancelled before start")
+                    self._finish(fresh, result=None)
+                return self.get(task_id) or fresh or record
         # 急停 best-effort：取消设备侧在飞动作（scope 未授 device.stop 则跳过）
         registry = self._gw2.registry
         if registry is None or "device.stop" in set(

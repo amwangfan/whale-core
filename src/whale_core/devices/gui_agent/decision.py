@@ -85,10 +85,13 @@ _AGENT_RULES = """你是手机 GUI 自主体。规则：
    - device.long_press {"element_id": N} 或 {"x": 123, "y": 456, "duration_ms": 800}
    - device.swipe {"x": 540, "y": 1800, "x2": 540, "y2": 600, "duration_ms": 300}（x/y=起点，x2/y2=终点）
    - device.input_text {"text": "要输入的文字"}；可选 "element_id" 先聚焦
-   - device.key {"key": "back|home|enter|delete|tab"}
+   - device.key {"key": "back|home|enter|delete|tab|media_play_pause|media_next|media_previous"}
    - device.wait {"duration_ms": 1500}
    - device.app.launch {"package": "com.example.app"}
    - observe 无参数；finish {"success": true}
+ 4b. 播放/暂停/上一首/下一首选媒体键 device.key {"key":"media_play_pause"|"media_next"|"media_previous"}
+    （一步直达；播放控制条几秒后会自己隐藏，别去点瞬态控件）。观察里的「媒体：」段
+    给出当前播放状态与进度——播放/暂停是否生效看 media.playing 翻转，不用猜控件。
 4. 点击元素用 element_id；元素序号只对最近一次观察有效，不确定就先 observe
 5. 完成后 {"action":"finish","done":true,"success":true,"reason":"...","label":"任务完成的简述"}
 6. label 用简短中文说明这一步做什么（如「点击搜索按钮」），不要解释思考过程
@@ -133,6 +136,15 @@ class LlmJsonDecision:
                 f"{' 已锁屏' if observation.locked else ''}\n"
                 f"元素表：\n{serialize_elements(observation)}"
             )
+            # #96：媒体段渲染——播放状态对 UI 树不可见，media 段是模型判断
+            # 播放/暂停/切歌是否生效的确定性事实源
+            m = observation.media
+            if m is not None:
+                obs_text += (
+                    f"\n媒体：{m.package} 状态={m.state or '未知'} "
+                    f"播放中={'是' if m.playing else '否'} "
+                    f"进度={m.position_ms}/{m.duration_ms}ms"
+                    + (f" 标题={m.title}" if m.title else ""))
         hist = [
             {"step": h.get("step"), "action": h.get("action"),
              "outcome": h.get("outcome"), "summary": str(h.get("summary", ""))[:120]}
