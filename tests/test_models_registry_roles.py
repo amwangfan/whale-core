@@ -218,3 +218,33 @@ class TestWriteThrough:
             assert "role-intent" in entries
             assert entries["role-intent"]["model"] == "kimi-k3-0905"
             assert get_roles(api.ctx.store)["intent"] == "role-intent"
+
+class TestBindAndUpsert:
+    """③ 补充：角色绑定与注册表 upsert 端点（真实 REST 面）。"""
+
+    def test_bind_and_unbind(self, api):
+        status, body = _req(api, "POST", "/api/v1/models/roles/reply_slow",
+                            body={"name": "kimi-k3"})
+        assert status == 200 and body["result"]["name"] == "kimi-k3"
+        assert get_roles(api.ctx.store)["reply_slow"] == "kimi-k3"
+        status, body = _req(api, "POST", "/api/v1/models/roles/reply_slow",
+                            body={"name": None})
+        assert status == 200
+        assert "reply_slow" not in get_roles(api.ctx.store)
+
+    def test_bind_unknown_role_404(self, api):
+        status, _ = _req(api, "POST", "/api/v1/models/roles/nope", body={"name": "x"})
+        assert status == 404
+
+    def test_bind_entry_not_in_registry_400(self, api):
+        status, body = _req(api, "POST", "/api/v1/models/roles/intent",
+                            body={"name": "ghost-entry"})
+        assert status == 400
+
+    def test_upsert_entry(self, api):
+        status, body = _req(api, "POST", "/api/v1/models/registry",
+                            body={"name": "qwen4-turbo", "provider": "agentscope",
+                                  "model": "qwen4-turbo-0901", "effort": "medium"})
+        assert status == 200 and body["result"]["name"] == "qwen4-turbo"
+        names = [e["name"] for e in registry_entries(api.ctx.store)]
+        assert "qwen4-turbo" in names

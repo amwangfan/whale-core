@@ -2,6 +2,8 @@
 
 端点（统一 {result}/{error}；双认证由 server 层完成）：
 - GET  /models/registry            注册表条目 + 角色绑定视图（只读）
+- POST /models/registry            upsert 条目 {name, provider, model, effort, base_url?}
+- POST /models/roles/{role}        绑定角色→条目 {name}；{name:null|""} 解绑
 - POST /models/roles/{role}/test   逐角色连通测试（按注册表装配该角色的脑，
                                    真实一次短回复探活；失败回 error_kind）
 
@@ -26,6 +28,42 @@ def dispatch_models(handler, method: str, parts: list[str], query: dict | None =
             "entries": registry_entries(ctx.store),
             "roles": get_roles(ctx.store, ctx_env(ctx)),
         }}))
+        return
+
+    # POST /models/registry —— upsert 条目
+    if parts == ["models", "registry"] and method == "POST":
+        body = handler._body_json()
+        if body is None:
+            send(400, _error("bad_request", "JSON body required"))
+            return
+        from whale_core.life.model_registry import upsert_entry
+        try:
+            entry = upsert_entry(ctx.store, body)
+        except ValueError as exc:
+            send(400, _error("bad_request", str(exc)))
+            return
+        ctx.log_event("models:registry_upsert", str(entry.get("name", "")))
+        send(200, _json_bytes({"result": entry}))
+        return
+
+    # POST /models/roles/{role} —— 绑定/解绑角色
+    if len(parts) == 3 and parts[:2] == ["models", "roles"] and method == "POST":
+        role = parts[2]
+        body = handler._body_json()
+        if body is None:
+            send(400, _error("bad_request", "JSON body required"))
+            return
+        from whale_core.life.model_registry import ROLE_NAMES, set_role
+        if role not in ROLE_NAMES:
+            send(404, _error("not_found", f"未知模型角色 {role}（可选：{', '.join(ROLE_NAMES)}）"))
+            return
+        name = body.get("name")
+        name = str(name).strip() if name is not None else None
+        if not set_role(ctx.store, role, name or None):
+            send(400, _error("bad_request", "条目不在注册表内"))
+            return
+        ctx.log_event("models:role_bind", f"{role}→{name or '(unbound)'}")
+        send(200, _json_bytes({"result": {"role": role, "name": name}}))
         return
 
     # POST /models/roles/{role}/test —— 逐角色连通测试
