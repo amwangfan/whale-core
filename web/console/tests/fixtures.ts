@@ -9,6 +9,10 @@ export type FixtureState = {
   pluginsEnabled: Record<string, boolean>;
   approvals: unknown[];
   sessionsIssued: number;
+  modelsRegistry: {
+    entries: { name: string; provider: string; model: string; effort: string; base_url?: string }[];
+    roles: Record<string, string>;
+  };
   settings: {
     profile: string;
     model: { base_url: string; model: string; api_key_configured: boolean };
@@ -86,6 +90,14 @@ export function makeState(): FixtureState {
       },
     ],
     sessionsIssued: 0,
+    modelsRegistry: {
+      entries: [
+        { name: 'v4-pro-0813', provider: 'agentscope', model: 'deepseek-v4-pro-0813', effort: '' },
+        { name: 'qwen4-max', provider: 'agentscope', model: 'qwen4-max', effort: '' },
+        { name: 'kimi-k3', provider: 'agentscope', model: 'kimi-k3', effort: 'high' },
+      ],
+      roles: { reply_fast: 'v4-pro-0813', vision: 'qwen4-max', intent: 'kimi-k3' },
+    },
     settings: {
       profile: 'cloud',
       model: {
@@ -155,6 +167,8 @@ const err = (route: Route, status: number, code: string, message: string) =>
     contentType: 'application/json',
     body: JSON.stringify({ error: { code, message } }),
   });
+
+type RegistryEntryShape = { name: string; provider: string; model: string; effort?: string; base_url?: string };
 
 export function apiHandler(state: FixtureState) {
   return async (route: Route) => {
@@ -230,6 +244,40 @@ export function apiHandler(state: FixtureState) {
     }
     if (path === '/providers/test' && method === 'POST') {
       return json(route, { ok: true, latency_ms: 812 });
+    }
+    if (path === '/models/registry' && method === 'GET') {
+      return json(route, JSON.parse(JSON.stringify(state.modelsRegistry)));
+    }
+    if (path === '/models/registry' && method === 'POST') {
+      const body = req.postDataJSON() as RegistryEntryShape;
+      const entries = state.modelsRegistry.entries;
+      const idx = entries.findIndex((e) => e.name === body.name);
+      const clean = {
+        name: body.name,
+        provider: body.provider || 'agentscope',
+        model: body.model,
+        effort: body.effort || '',
+        ...(body.base_url ? { base_url: body.base_url } : {}),
+      };
+      if (idx >= 0) entries[idx] = clean;
+      else entries.push(clean);
+      state.providerWrites.push({ method: 'POST', path: '/models/registry', body });
+      return json(route, clean);
+    }
+    const roleBind = path.match(/^\/models\/roles\/([^/]+)$/);
+    if (roleBind && method === 'POST') {
+      const body = req.postDataJSON() as { name?: string | null };
+      state.modelsRegistry.roles[roleBind[1]] = body.name || '';
+      if (!body.name) delete state.modelsRegistry.roles[roleBind[1]];
+      state.providerWrites.push({ method: 'POST', path, body });
+      return json(route, { role: roleBind[1], name: body.name ?? null });
+    }
+    const roleTest = path.match(/^\/models\/roles\/([^/]+)\/test$/);
+    if (roleTest && method === 'POST') {
+      const bound = state.modelsRegistry.roles[roleTest[1]];
+      return json(route, bound
+        ? { ok: true, latency_ms: 402, role: roleTest[1], entry: bound }
+        : { ok: false, latency_ms: 0, error_kind: 'unbound', role: roleTest[1] });
     }
     if (path === '/studio/personas' && method === 'GET') {
       return json(route, { personas: state.personas });

@@ -588,6 +588,39 @@ export const fetchProviderModels = (c: Connection, id: string) =>
     `/providers/${encodeURIComponent(id)}/models`,
   );
 
+// ---------------------------------------------------------------- 模型注册表与角色（裁决①②③）
+export type RegistryEntry = {
+  name: string;
+  provider: string;
+  model: string;
+  effort: string;
+  base_url?: string;
+};
+export type ModelsRegistry = {
+  entries: RegistryEntry[];
+  roles: Record<string, string>;
+};
+export const fetchModelsRegistry = (c: Connection) =>
+  request<ModelsRegistry>(c, '/models/registry');
+export const upsertRegistryEntry = (
+  c: Connection,
+  entry: { name: string; provider: string; model: string; effort?: string; base_url?: string },
+) => request<RegistryEntry>(c, '/models/registry', 'POST', entry);
+export const bindRole = (c: Connection, role: string, name: string | null) =>
+  request<{ role: string; name: string | null }>(
+    c,
+    `/models/roles/${encodeURIComponent(role)}`,
+    'POST',
+    { name },
+  );
+export const testRole = (c: Connection, role: string) =>
+  request<{ ok: boolean; latency_ms: number; error_kind?: string; role: string; entry?: string }>(
+    c,
+    `/models/roles/${encodeURIComponent(role)}/test`,
+    'POST',
+    {},
+  );
+
 // ---------------------------------------------------------------- 角色与人格（/studio/personas 既有面）
 export type Persona = {
   id: string;

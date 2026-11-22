@@ -1,318 +1,226 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Compass, Cpu, ListTodo, Zap } from 'lucide-react';
+import { Compass, Cpu, Eye, ListTodo, Plus, Zap } from 'lucide-react';
 import {
+  bindRole,
+  fetchModelsRegistry,
   fetchSettings,
   saveSettings,
-  testProvider,
-  type ModelSettings,
-  type RoleModelConfig,
+  testRole,
+  upsertRegistryEntry,
+  type ModelsRegistry,
 } from './api';
+import type { Connection } from './api';
 import {
   Banner,
   Button,
-  CheckRow,
   Field,
   FocusCardTitle,
   FocusGrid,
   Input,
   Select,
+  SegmentedControl,
   Switch,
   Tag,
 } from './ds';
-import type { Connection } from './api';
-import { PageHeading } from './ui';
+import { Modal, PageHeading } from './ui';
 import { useWorkspace } from './workspace';
 
-type RoleKey = 'reply' | 'intent' | 'executor';
-type RoleDef = {
-  key: RoleKey;
-  name: string;
-  desc: string;
-  icon: typeof Zap;
-};
-const ROLES: RoleDef[] = [
-  {
-    key: 'reply',
-    name: '回复模型',
-    desc: '日常对话与任务的主回复脑',
-    icon: Zap,
-  },
-  {
-    key: 'intent',
-    name: '意图模型',
-    desc: '意图识别、路由与发送前审核（同一角色）',
-    icon: Compass,
-  },
-  {
-    key: 'executor',
-    name: '任务执行模型',
-    desc: '多轮工具循环的任务执行（部署侧 WHALE_EXECUTOR_ENABLED=1 启用）',
-    icon: ListTodo,
-  },
+type RoleKey = 'reply_fast' | 'reply_slow' | 'vision' | 'intent' | 'executor';
+const ROLES: { key: RoleKey; name: string; desc: string; icon: typeof Zap }[] = [
+  { key: 'reply_fast', name: '回复模型（快）', desc: '日常对话、即时响应', icon: Zap },
+  { key: 'reply_slow', name: '回复模型（慢）', desc: '复杂推理、深度思考', icon: Compass },
+  { key: 'vision', name: '视觉模型', desc: '图像理解、识别与分析', icon: Eye },
+  { key: 'intent', name: '意图模型', desc: '意图识别、路由与发送前审核', icon: Cpu },
+  { key: 'executor', name: '任务执行模型', desc: '多轮工具循环的任务执行', icon: ListTodo },
 ];
+const EFFORTS = ['', 'low', 'medium', 'high'] as const;
+const effortLabel = (e: string) => (e === '' ? '关闭' : e);
 
-function endpointHost(url?: string) {
-  if (!url) return '';
-  try {
-    return new URL(url).host;
-  } catch {
-    return url;
-  }
-}
-
-/** 单个角色卡的草稿与操作（在 ModelsPage 顶层以固定顺序调用，满足 Hooks 规则）。 */
-function useRoleCard(
-  def: RoleDef,
-  settings: ModelSettings | null,
-  connection: Connection | null,
-  onSaved: (next: ModelSettings, message: string) => void,
-) {
-  const isMain = def.key === 'reply';
-  const current: RoleModelConfig = isMain
-    ? (settings?.model ?? { base_url: '', model: '' })
-    : (settings?.models?.[def.key] ?? {});
-  const [baseUrl, setBaseUrl] = useState(current.base_url ?? '');
-  const [model, setModel] = useState(current.model ?? '');
-  const [apiKey, setApiKey] = useState('');
-  const [clearKey, setClearKey] = useState(false);
-  const [profile, setProfile] = useState<'cloud' | 'local'>(settings?.profile ?? 'cloud');
-  const [intentEnabled, setIntentEnabled] = useState(settings?.intent_model_enabled ?? false);
-  const [busy, setBusy] = useState<'save' | 'test' | ''>('');
+function RoleCard({
+  role,
+  registry,
+  connection,
+  onChanged,
+  notify,
+  focused,
+  intentEnabled,
+  onToggleIntent,
+}: {
+  role: (typeof ROLES)[number];
+  registry: ModelsRegistry;
+  connection: Connection;
+  onChanged: () => Promise<void>;
+  notify: (t: string, e?: boolean) => void;
+  focused: boolean;
+  intentEnabled?: boolean;
+  onToggleIntent?: (v: boolean) => Promise<void>;
+}) {
+  const boundName = registry.roles[role.key] || '';
+  const entry = registry.entries.find((e) => e.name === boundName) || null;
+  const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
-  const [testResult, setTestResult] = useState('');
-
-  // 服务端数据变化（保存后回读/外部变更）时同步草稿
+  const [testMsg, setTestMsg] = useState('');
+  const [effort, setEffort] = useState(entry?.effort ?? '');
   useEffect(() => {
-    setBaseUrl(current.base_url ?? '');
-    setModel(current.model ?? '');
-    setApiKey('');
-    setClearKey(false);
-    setProfile(settings?.profile ?? 'cloud');
-    setIntentEnabled(settings?.intent_model_enabled ?? false);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settings]);
+    setEffort(entry?.effort ?? '');
+  }, [entry?.name, entry?.effort]);
 
-  const dirty =
-    baseUrl !== (current.base_url ?? '') ||
-    model !== (current.model ?? '') ||
-    apiKey !== '' ||
-    clearKey ||
-    (isMain && profile !== settings?.profile) ||
-    (def.key === 'intent' && intentEnabled !== settings?.intent_model_enabled);
-
-  const reset = () => {
-    setBaseUrl(current.base_url ?? '');
-    setModel(current.model ?? '');
-    setApiKey('');
-    setClearKey(false);
-    setProfile(settings?.profile ?? 'cloud');
-    setIntentEnabled(settings?.intent_model_enabled ?? false);
-    setError('');
-    setTestResult('');
-  };
-
-  const save = async () => {
-    if (!connection) return;
-    setBusy('save');
-    setError('');
-    setTestResult('');
-    try {
-      if (isMain && (!baseUrl.trim() || !model.trim()))
-        throw new Error('主回复模型的端点与模型名不能为空。');
-      const keyPart = clearKey
-        ? { api_key: null as string | null }
-        : apiKey.trim()
-          ? { api_key: apiKey.trim() }
-          : {};
-      const patch: Parameters<typeof saveSettings>[1] = isMain
-        ? { profile, model: { base_url: baseUrl.trim(), model: model.trim(), ...keyPart } }
-        : {
-            models: {
-              [def.key]: {
-                // 角色覆盖：留空项不写入补丁（保持现状；未配置角色跟随主模型）
-                ...(baseUrl.trim() ? { base_url: baseUrl.trim() } : {}),
-                ...(model.trim() ? { model: model.trim() } : {}),
-                ...keyPart,
-              },
-            },
-            ...(def.key === 'intent' ? { intent_model_enabled: intentEnabled } : {}),
-          };
-      onSaved(await saveSettings(connection, patch), `${def.name}配置已保存并生效。`);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy('');
-    }
-  };
-
-  const test = async () => {
-    if (!connection) return;
-    setBusy('test');
-    setError('');
-    setTestResult('');
-    try {
-      const r = await testProvider(connection);
-      if (r.ok) setTestResult(`主模型连接成功 · ${r.latency_ms} ms`);
-      else setError(`主模型连接失败：${r.error_kind || '无有效回复'}。请检查端点、模型名与密钥。`);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy('');
-    }
-  };
-
-  const head = (
-    <FocusCardTitle
-      icon={<def.icon size={19} />}
-      name={def.name}
-      desc={def.desc}
-      aside={
-        isMain ? (
-          <Tag tone={current.api_key_configured || current.base_url ? 'mint' : 'amber'} dot>
-            {current.api_key_configured || current.base_url ? '已配置' : '未配置'}
-          </Tag>
-        ) : current.model || current.base_url ? (
-          <Tag tone="blue" dot>
-            已覆盖
-          </Tag>
-        ) : (
-          <Tag tone="slate">跟随主模型</Tag>
-        )
-      }
-    />
-  );
-
-  const focusedBody = (
-    <div className="model-form">
-      {isMain && (
-        <Field label="运行方式" hint="切换运行方式后，另一配置档的旧密钥不会沿用。">
-          <Select
-            aria-label="运行方式"
-            value={profile}
-            onChange={(e) => setProfile(e.target.value as 'cloud' | 'local')}
-          >
-            <option value="cloud">云端模型 / OpenAI 兼容服务</option>
-            <option value="local">本地模型 / OpenAI 兼容服务</option>
-          </Select>
-        </Field>
-      )}
-      {isMain && settings && profile !== settings.profile && (
-        <Banner tone="warn">
-          切换运行方式后，另一配置档的旧密钥不会沿用。请核对端点、模型，并按需填写新的 API 密钥。
-        </Banner>
-      )}
-      <div className="model-form-grid">
-        <Field label="供应商端点" hint={isMain ? 'OpenAI 兼容服务的基础 URL。' : '留空跟随主模型端点。'}>
-          <Input
-            aria-label={`${def.name}供应商端点`}
-            type="url"
-            value={baseUrl}
-            placeholder={isMain ? 'https://api.deepseek.com' : '留空跟随主模型'}
-            onChange={(e) => setBaseUrl(e.target.value)}
-          />
-        </Field>
-        <Field label="模型名" hint={isMain ? 'OpenAI 兼容模型 ID。' : '留空跟随主回复模型。'}>
-          <Input
-            aria-label={`${def.name}模型名`}
-            value={model}
-            placeholder={isMain ? 'deepseek-chat' : '留空跟随主模型'}
-            onChange={(e) => setModel(e.target.value)}
-          />
-        </Field>
+  if (!focused) {
+    return (
+      <div className="model-compact">
+        <span className="model-compact-row">
+          <em>条目</em>
+          {entry ? entry.name : '未绑定'}
+        </span>
+        <span className="model-compact-row">
+          <em>模型</em>
+          {entry ? entry.model : '—'}
+        </span>
+        {entry?.effort ? (
+          <span className="model-compact-row">
+            <em>思考强度</em>
+            {effortLabel(entry.effort)}
+          </span>
+        ) : null}
       </div>
-      <Field
-        label={
-          <>
-            API 密钥{' '}
-            <Tag tone={current.api_key_configured ? 'mint' : 'slate'}>
-              {current.api_key_configured ? '已配置' : '未配置'}
-            </Tag>
-          </>
-        }
-        hint="密钥保存后不回显。输入新密钥将替换原值；留空保持原值。"
-      >
-        <Input
-          aria-label={`${def.name} API 密钥`}
-          type="password"
-          autoComplete="new-password"
-          value={apiKey}
-          disabled={clearKey}
-          placeholder={current.api_key_configured ? '留空保留已配置的密钥' : '输入 API Key'}
-          onChange={(e) => setApiKey(e.target.value)}
-        />
+    );
+  }
+
+  const bind = async (name: string) => {
+    setBusy('bind');
+    setError('');
+    try {
+      await bindRole(connection, role.key, name || null);
+      await onChanged();
+      notify(name ? `已绑定「${name}」。` : '已解绑。');
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy('');
+    }
+  };
+  const saveEffort = async (next: string) => {
+    if (!entry) return;
+    setBusy('effort');
+    setError('');
+    try {
+      await upsertRegistryEntry(connection, {
+        name: entry.name,
+        provider: entry.provider,
+        model: entry.model,
+        effort: next,
+        ...(entry.base_url ? { base_url: entry.base_url } : {}),
+      });
+      await onChanged();
+      notify('思考强度已保存。');
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy('');
+    }
+  };
+  const test = async () => {
+    setBusy('test');
+    setTestMsg('');
+    try {
+      const r = await testRole(connection, role.key);
+      setTestMsg(
+        r.ok
+          ? `连接成功 · ${r.latency_ms} ms`
+          : `连接失败：${r.error_kind || '无有效回复'}${r.error_kind === 'unbound' ? '（未绑定条目）' : r.error_kind === 'config' ? '（凭据未配置）' : ''}`,
+      );
+    } catch (e) {
+      setTestMsg(`连接失败：${(e as Error).message}`);
+    } finally {
+      setBusy('');
+    }
+  };
+
+  return (
+    <div className="model-form">
+      <Field label="绑定注册表条目" hint="该角色生效的模型来自注册表条目。">
+        <div className="model-bind-row">
+          <Select
+            aria-label={`${role.name}绑定条目`}
+            value={boundName}
+            disabled={busy !== ''}
+            onChange={(e) => void bind(e.target.value)}
+          >
+            <option value="">未绑定</option>
+            {registry.entries.map((en) => (
+              <option key={en.name} value={en.name}>
+                {en.name}（{en.model} · {en.provider}）
+              </option>
+            ))}
+          </Select>
+        </div>
       </Field>
-      {current.api_key_configured ? (
-        <CheckRow
-          label="保存时清除已配置的密钥"
-          checked={clearKey}
-          onChange={(v) => {
-            setClearKey(v);
-            if (v) setApiKey('');
-          }}
-        />
-      ) : null}
-      {def.key === 'intent' && (
+      {entry && (
+        <Field label="思考强度" hint="按模型能力配置推理档位；不支持的模型请留「关闭」。">
+          <SegmentedControl
+            label="思考强度"
+            value={effort}
+            onChange={(v) => {
+              setEffort(v);
+              void saveEffort(v);
+            }}
+            options={EFFORTS.map((e) => ({ value: e, label: effortLabel(e) }))}
+          />
+        </Field>
+      )}
+      {role.key === 'intent' && onToggleIntent && (
         <div className="model-intent-toggle">
           <div>
             <strong>启用模型意图规划</strong>
-            <small>让模型辅助理解工具与复杂任务；会产生额外模型调用。</small>
+            <small>让意图模型辅助理解工具与复杂任务；会产生额外模型调用。</small>
           </div>
-          <Switch label="启用模型意图规划" checked={intentEnabled} onChange={setIntentEnabled} />
+          <Switch
+            label="启用模型意图规划"
+            checked={intentEnabled ?? false}
+            onChange={(v) => void onToggleIntent(v)}
+          />
         </div>
       )}
-      {def.key === 'executor' && (
-        <Banner tone="info">
-          任务执行模型的生效还需部署侧设置 WHALE_EXECUTOR_ENABLED=1；此处配置其端点与模型覆盖。
-        </Banner>
-      )}
       {error && <Banner tone="error">{error}</Banner>}
-      {testResult && <Banner tone="ok">{testResult}</Banner>}
+      {testMsg && (
+        <Banner tone={testMsg.startsWith('连接成功') ? 'ok' : 'error'}>{testMsg}</Banner>
+      )}
       <div className="model-form-actions">
-        {isMain && (
-          <Button variant="secondary" size="sm" busy={busy === 'test'} onClick={test}>
-            测试主模型连接
+        <Button variant="secondary" size="sm" busy={busy === 'test'} onClick={test}>
+          测试该角色
+        </Button>
+        {boundName && (
+          <Button variant="ghost" size="sm" disabled={busy !== ''} onClick={() => void bind('')}>
+            解绑
           </Button>
         )}
-        <span className="model-form-gap" />
-        <Button variant="ghost" size="sm" disabled={!dirty || busy !== ''} onClick={reset}>
-          重置
-        </Button>
-        <Button variant="primary" size="sm" busy={busy === 'save'} disabled={!dirty} onClick={save}>
-          保存配置
-        </Button>
       </div>
     </div>
   );
-
-  const compactBody = (
-    <div className="model-compact">
-      <span className="model-compact-row">
-        <em>供应商</em>
-        {endpointHost(current.base_url) || (isMain ? '未配置' : '跟随主模型')}
-      </span>
-      <span className="model-compact-row">
-        <em>模型</em>
-        {current.model || (isMain ? '未配置' : '跟随主模型')}
-      </span>
-    </div>
-  );
-
-  return { def, head, focusedBody, compactBody };
 }
 
 export default function ModelsPage() {
   const { connection, notify } = useWorkspace();
-  const [settings, setSettings] = useState<ModelSettings | null>(null);
-  const [error, setError] = useState('');
+  const [registry, setRegistry] = useState<ModelsRegistry | null>(null);
+  const [intentEnabled, setIntentEnabled] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
   const [focused, setFocused] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [form, setForm] = useState({ name: '', provider: 'agentscope', model: '', effort: '', base_url: '' });
+  const [createBusy, setCreateBusy] = useState(false);
 
   const load = useCallback(async () => {
     if (!connection) return;
     setLoading(true);
     setError('');
     try {
-      setSettings(await fetchSettings(connection));
+      const [reg, st] = await Promise.all([
+        fetchModelsRegistry(connection),
+        fetchSettings(connection).catch(() => null),
+      ]);
+      setRegistry(reg);
+      if (st) setIntentEnabled(st.intent_model_enabled);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -322,44 +230,156 @@ export default function ModelsPage() {
   useEffect(() => {
     void load();
   }, [load]);
-  const onSaved = useCallback(
-    (next: ModelSettings, message: string) => {
-      setSettings(next);
-      notify(message);
-    },
-    [notify],
-  );
 
-  const reply = useRoleCard(ROLES[0], settings, connection, onSaved);
-  const intent = useRoleCard(ROLES[1], settings, connection, onSaved);
-  const executor = useRoleCard(ROLES[2], settings, connection, onSaved);
-  const cards = [reply, intent, executor];
-
+  if (!connection) return null;
+  const c = connection;
   return (
     <div className="page-enter">
-      <PageHeading page="models" />
+      <PageHeading
+        page="models"
+        action={
+          <Button variant="primary" size="sm" icon={<Plus size={14} />} onClick={() => setCreating(true)}>
+            添加模型条目
+          </Button>
+        }
+      />
       <Banner tone="info">
-        当前运行方式：{settings?.profile === 'local' ? '本地模型' : '云端模型'}
-        。模型注册表（快/慢档与视觉角色）、独立供应商管理与逐角色测试为已裁决的后端扩展项，将逐条报批后开放。
+        模型注册表是唯一事实源：五个角色经它装配。点卡聚焦配置绑定与思考强度，逐角色测试连通。
       </Banner>
       {error && <Banner tone="error">{error}</Banner>}
-      {loading && !settings && <p className="muted padded">正在读取模型配置…</p>}
-      {settings && (
+      {loading && !registry && <p className="muted padded">正在读取模型注册表…</p>}
+      {registry && (
         <FocusGrid
           focused={focused}
           onFocus={setFocused}
-          items={cards.map((card) => ({
-            key: card.def.key,
-            ariaLabel: card.def.name,
-            head: () => card.head,
-            body: (isFocused) => (isFocused ? card.focusedBody : card.compactBody),
+          items={ROLES.map((role) => ({
+            key: role.key,
+            ariaLabel: role.name,
+            head: () => (
+              <FocusCardTitle
+                icon={<role.icon size={19} />}
+                name={role.name}
+                desc={role.desc}
+                aside={
+                  registry.roles[role.key] ? (
+                    <Tag tone="mint" dot>
+                      {registry.roles[role.key]}
+                    </Tag>
+                  ) : (
+                    <Tag tone="slate">未绑定</Tag>
+                  )
+                }
+              />
+            ),
+            body: (f) => (
+              <RoleCard
+                role={role}
+                registry={registry}
+                connection={c}
+                onChanged={load}
+                notify={notify}
+                focused={f}
+                intentEnabled={intentEnabled}
+                onToggleIntent={async (v) => {
+                  await saveSettings(c, { intent_model_enabled: v });
+                  setIntentEnabled(v);
+                  notify(v ? '模型意图规划已启用。' : '模型意图规划已停用。');
+                }}
+              />
+            ),
           }))}
         />
       )}
-      <p className="footnote">
-        <Cpu size={13} />
-        保存采用补丁合并：只写入本卡片修改的字段，其他配置（预算、人格禁忌、服务密钥等）不受影响。
-      </p>
+
+      {creating && (
+        <Modal title="添加模型条目" onClose={() => !createBusy && setCreating(false)}>
+          <div className="model-form">
+            <Field label="条目名" hint="唯一标识，角色按它绑定。">
+              <Input
+                aria-label="条目名"
+                value={form.name}
+                placeholder="如 v4-pro-0813"
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+              />
+            </Field>
+            <div className="model-form-grid">
+              <Field label="供应商">
+                <Input
+                  aria-label="供应商"
+                  value={form.provider}
+                  placeholder="agentscope / deepseek / …"
+                  onChange={(e) => setForm({ ...form, provider: e.target.value })}
+                />
+              </Field>
+              <Field label="模型 id">
+                <Input
+                  aria-label="模型 id"
+                  value={form.model}
+                  placeholder="deepseek-v4-pro-0813"
+                  onChange={(e) => setForm({ ...form, model: e.target.value })}
+                />
+              </Field>
+            </div>
+            <div className="model-form-grid">
+              <Field label="思考强度">
+                <Select
+                  aria-label="思考强度"
+                  value={form.effort}
+                  onChange={(e) => setForm({ ...form, effort: e.target.value })}
+                >
+                  <option value="">关闭</option>
+                  <option value="low">Low</option>
+                  <option value="medium">Medium</option>
+                  <option value="high">High</option>
+                </Select>
+              </Field>
+              <Field label="自定义端点（可选）">
+                <Input
+                  aria-label="自定义端点"
+                  type="url"
+                  value={form.base_url}
+                  placeholder="留空用供应商默认"
+                  onChange={(e) => setForm({ ...form, base_url: e.target.value })}
+                />
+              </Field>
+            </div>
+            <div className="model-form-actions">
+              <Button variant="ghost" size="sm" onClick={() => setCreating(false)}>
+                取消
+              </Button>
+              <span className="model-form-gap" />
+              <Button
+                variant="primary"
+                size="sm"
+                busy={createBusy}
+                disabled={!form.name.trim() || !form.model.trim()}
+                onClick={async () => {
+                  setCreateBusy(true);
+                  try {
+                    await upsertRegistryEntry(c, {
+                      name: form.name.trim(),
+                      provider: form.provider.trim() || 'agentscope',
+                      model: form.model.trim(),
+                      effort: form.effort,
+                      ...(form.base_url.trim() ? { base_url: form.base_url.trim() } : {}),
+                    });
+                    setCreating(false);
+                    setForm({ name: '', provider: 'agentscope', model: '', effort: '', base_url: '' });
+                    await load();
+                    notify('模型条目已保存。');
+                  } catch (e) {
+                    notify((e as Error).message, true);
+                  } finally {
+                    setCreateBusy(false);
+                  }
+                }}
+              >
+                创建条目
+              </Button>
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

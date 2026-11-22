@@ -219,52 +219,42 @@ test('settings: session info, diagnostics, classic link', async ({ page }) => {
   await expect(page.locator('.diagnostic-list > div')).toHaveCount(2);
 });
 
-test('models page: role cards, patch save, reset and provider test', async ({ page }) => {
+test('models page: five role cards, bind, effort, per-role test, add entry', async ({ page }) => {
   await boot(page);
   await page.goto('/#models');
   await expect(page.getByRole('heading', { name: '模型配置', exact: true })).toBeVisible();
-  // 三张角色卡平级
-  const cards = page.locator('.focus-card');
-  await expect(cards).toHaveCount(3);
-  await expect(cards.nth(0)).toContainText('已配置');
-  await expect(cards.nth(1)).toContainText('已覆盖');
-  await expect(cards.nth(2)).toContainText('跟随主模型');
-  // 聚焦回复模型 → 完整表单
-  await cards.nth(0).click();
-  const replyCard = page.getByRole('region', { name: '回复模型' });
-  await expect(replyCard.getByLabel('供应商端点')).toHaveValue('https://api.deepseek.com');
-  await expect(replyCard.getByLabel('模型名')).toHaveValue('deepseek-chat');
-  // 编辑模型名 → 保存 → 补丁只含改动字段
-  await replyCard.getByLabel('模型名').fill('deepseek-v4-pro-0813');
-  await replyCard.getByRole('button', { name: '保存配置' }).click();
-  await expect(page.locator('.toast')).toContainText('已保存');
-  const patch = state.settingsPatches.at(-1) as Record<string, never>;
-  expect(Object.keys(patch)).toEqual(['profile', 'model']);
-  expect((patch as { model: { model: string } }).model.model).toBe('deepseek-v4-pro-0813');
-  // 保存后草稿同步为已存值（输入框值回读）
-  await expect(replyCard.getByLabel('模型名')).toHaveValue('deepseek-v4-pro-0813');
-  // 意图卡：关意图规划 + 改模型 → 补丁含 models.intent 与 intent_model_enabled
-  await cards.nth(1).click();
+  // 五张角色卡平级
+  await expect(page.locator('.focus-card')).toHaveCount(5);
+  // 绑定态：回复快=v4-pro-0813、意图=kimi-k3、视觉=qwen4-max；慢档/执行未绑定
+  await expect(page.locator('.focus-card').nth(0)).toContainText('v4-pro-0813');
+  await expect(page.locator('.focus-card').nth(1)).toContainText('未绑定');
+  await expect(page.locator('.focus-card').nth(3)).toContainText('kimi-k3');
+  // 聚焦回复慢档 → 绑定 kimi-k3
+  await page.locator('.focus-card').nth(1).click();
+  const slowCard = page.getByRole('region', { name: '回复模型（慢）' });
+  await slowCard.getByLabel('回复模型（慢）绑定条目').selectOption('kimi-k3');
+  await expect(page.locator('.toast')).toContainText('已绑定');
+  await expect(page.locator('.focus-card').nth(1)).toContainText('kimi-k3');
+  // 思考强度（条目级）：意图卡聚焦改档位
+  await page.locator('.focus-card').nth(3).click();
   const intentCard = page.getByRole('region', { name: '意图模型' });
-  await intentCard.getByRole('switch', { name: '启用模型意图规划' }).click();
-  await intentCard.getByLabel('意图模型模型名').fill('kimi-k3-0905');
-  await intentCard.getByRole('button', { name: '保存配置' }).click();
-  const patch2 = state.settingsPatches.at(-1) as {
-    models: { intent: { model: string } };
-    intent_model_enabled: boolean;
-  };
-  expect(patch2.models.intent.model).toBe('kimi-k3-0905');
-  expect(patch2.intent_model_enabled).toBe(false);
-  // 重置丢弃草稿
-  await cards.nth(2).click();
+  await expect(intentCard.getByRole('radio', { name: 'High' })).toHaveAttribute('aria-checked', 'true');
+  await intentCard.getByRole('radio', { name: 'Medium' }).click();
+  await expect(page.locator('.toast')).toContainText('思考强度已保存');
+  // 逐角色测试（已绑定意图）
+  await intentCard.getByRole('button', { name: '测试该角色' }).click();
+  await expect(intentCard).toContainText('连接成功');
+  // 未绑定角色测试 → unbound 提示
+  await page.locator('.focus-card').nth(4).click();
   const execCard = page.getByRole('region', { name: '任务执行模型' });
-  await execCard.getByLabel('任务执行模型模型名').fill('o4-mini');
-  await execCard.getByRole('button', { name: '重置' }).click();
-  await expect(execCard.getByLabel('任务执行模型模型名')).toHaveValue('');
-  // 测试主模型连接
-  await cards.nth(0).click();
-  await replyCard.getByRole('button', { name: '测试主模型连接' }).click();
-  await expect(replyCard).toContainText('主模型连接成功 · 812 ms');
+  await execCard.getByRole('button', { name: '测试该角色' }).click();
+  await expect(execCard).toContainText('未绑定条目');
+  // 添加模型条目
+  await page.getByRole('button', { name: '添加模型条目' }).click();
+  await page.getByLabel('条目名').fill('qwen4-turbo');
+  await page.getByLabel('模型 id').fill('qwen4-turbo-0901');
+  await page.getByRole('button', { name: '创建条目' }).click();
+  await expect(page.locator('.toast')).toContainText('模型条目已保存');
 });
 
 test('personas page: cards, edit-save, create, import, playtest, effective', async ({ page }) => {
