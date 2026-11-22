@@ -45,6 +45,30 @@ def register_openai_compatible(
     return companion
 
 
+def register_brain(
+    registry: PluginRegistry,
+    brain,
+    *,
+    plugin_id: str = "reply_brain",
+    name: str = "回复模型（注册表）",
+    capability: str | tuple[str, ...] = LLM_CHAT,
+):
+    """把已装配的脑（DeepSeekCompanion 等）注册为 model 插件。
+
+    供注册表驱动装配使用（2026-11-22 裁决①）：resolve_brain 的产物直接注册，
+    凭据不进 manifest。
+    """
+    registry.register(
+        PluginManifest(
+            plugin_id=plugin_id, name=name, version="1.0.0", kind="model",
+            provides=(capability,) if isinstance(capability, str) else tuple(capability),
+            description="模型注册表（models.registry）装配的脑；供应商/模型/档位在模型配置页管理",
+        ),
+        provider=brain,
+    )
+    return brain
+
+
 def resolve_chat_model(registry: PluginRegistry):
     """解析 llm.chat 能力的 provider；未注册返回 None（契约先行，调用方决定回退）。"""
     for _pid, provider in registry.providers_for(LLM_CHAT):

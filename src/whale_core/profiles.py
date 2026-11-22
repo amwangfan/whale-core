@@ -184,20 +184,39 @@ def assemble_runtime(
         env = configured_env(profile, config_dir, env)
     store = store or _default_store(config_dir)
     registry = PluginRegistry()
+    # 裁决①②：注册表为模型唯一事实源（model_registry：resolve_brain/角色映射）
+    from whale_core.life.model_registry import get_roles, resolve_brain
+    from whale_core.plugins.model_provider import register_brain
     manager = PluginManager(registry, store,
                             secret_dir=(Path(config_dir) / 'secrets') if config_dir else None)
     tools = _ManagedTools(registry)
     notes: list[str] = []
 
     if profile == "cloud":
-        model = register_openai_compatible(
-            registry, api_key=env.get("DEEPSEEK_API_KEY", ""),
-            base_url=env.get("DEEPSEEK_BASE_URL") or "https://api.deepseek.com",
-            model=env.get("DEEPSEEK_MODEL") or "deepseek-chat",
-        )
-        notes.append("cloud 档：DeepSeek（OpenAI 兼容）模型已注册（llm.chat）")
-        if not (env.get("DEEPSEEK_API_KEY") or "").strip():
-            notes.append("[warn] DEEPSEEK_API_KEY 未配置——模型调用会以 config 错误失败")
+        # 裁决①：注册表优先——回复脑按 models.roles.reply_fast / WHALE_REPLY_MODEL
+        # 经 resolve_brain 装配；未命中回落既有 DEEPSEEK_* 路径（行为不变）。
+        reply_ref = get_roles(store, env).get("reply_fast") or \
+            (env.get("WHALE_REPLY_MODEL") or "").strip()
+        brain = None
+        if reply_ref:
+            try:
+                brain = resolve_brain(reply_ref, env=env, store=store)
+            except Exception:  # noqa: BLE001 — 注册表解析失败走回落
+                brain = None
+        if brain is not None:
+            register_brain(registry, brain, plugin_id="reply_brain",
+                           name="回复模型（注册表）")
+            model = brain  # 供下方角色回落段复用端点/凭据
+            notes.append(f"cloud 档：回复脑按注册表解析（{reply_ref} → llm.chat）")
+        else:
+            model = register_openai_compatible(
+                registry, api_key=env.get("DEEPSEEK_API_KEY", ""),
+                base_url=env.get("DEEPSEEK_BASE_URL") or "https://api.deepseek.com",
+                model=env.get("DEEPSEEK_MODEL") or "deepseek-chat",
+            )
+            notes.append("cloud 档：DeepSeek（OpenAI 兼容）模型已注册（llm.chat）")
+            if not (env.get("DEEPSEEK_API_KEY") or "").strip():
+                notes.append("[warn] DEEPSEEK_API_KEY 未配置——模型调用会以 config 错误失败")
     else:  # local
         base_url = env.get("LOCAL_MODEL_BASE_URL", "http://127.0.0.1:11434/v1")
         model_name = env.get("LOCAL_MODEL_NAME", "")
@@ -254,6 +273,21 @@ def assemble_runtime(
                 env[k.replace('WHALE_SAFETY_', 'WHALE_INTENT_')] = v
             notes.append('旧 WHALE_SAFETY_* 配置已迁移为意图角色（审核=规划同模型）')
     for role, capability in ROLE_CAPABILITIES.items():
+        # 裁决①：注册表角色映射优先（models.roles），未绑定回落既有 env 路径。
+        role_ref = get_roles(store, env).get(role)
+        if role_ref:
+            try:
+                role_brain = resolve_brain(role_ref, env=env, store=store)
+            except Exception:  # noqa: BLE001
+                role_brain = None
+            if role_brain is not None:
+                register_brain(
+                    registry, role_brain, plugin_id=f"llm_{role}",
+                    name={"intent": "意图模型（规划+审核）", "executor": "任务执行模型"}.get(
+                        role, f"{role} 模型"),
+                    capability=capability)
+                notes.append(f"角色模型按注册表装配：{role} → {role_ref}")
+                continue
         r_base = env.get(f"WHALE_{role.upper()}_BASE_URL", "").strip()
         r_model = env.get(f"WHALE_{role.upper()}_MODEL", "").strip()
         r_key = env.get(f"WHALE_{role.upper()}_API_KEY", "")

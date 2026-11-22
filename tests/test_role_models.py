@@ -81,22 +81,34 @@ def test_safety_reviewer_none_default_unchanged():
 
 
 def test_settings_models_roundtrip(tmp_path):
-    """设置 API 的 models 矩阵：写入 → 脱敏视图 → 不落盘明文 key。"""
+    """设置 API 的 models 矩阵：写入 → 脱敏视图 → 不落盘明文 key。
+
+    裁决②（2026-11-22）：写穿注册表（唯一事实源）——key 进供应商密钥槽
+    （provider:key:*，只进不出），不再落 settings 私密文件的 models_*_api_key。
+    """
     from whale_core.configuration import SettingsController, read_models_view
-    bundle = assemble_runtime("local", env={}, store=InMemoryStore())
+    from whale_core.life.model_registry import get_roles, registry_entries
+    store = InMemoryStore()
+    bundle = assemble_runtime("local", env={}, store=store)
     ctl = SettingsController(tmp_path, bundle, env={})
     ctl.update({"models": {"intent": {"base_url": "http://127.0.0.1:9999/v1",
                                       "model": "qwen3.8-flash", "api_key": "sekrit"}}})
-    view = read_models_view(tmp_path)
+    # 写穿注册表：role-intent 条目 + intent 绑定
+    entries = {e["name"]: e for e in registry_entries(store)}
+    assert entries["role-intent"]["model"] == "qwen3.8-flash"
+    assert get_roles(store)["intent"] == "role-intent"
+    # 视图读穿注册表
+    view = read_models_view(tmp_path, store=store)
     assert view["intent"]["model"] == "qwen3.8-flash"
     assert view["intent"]["api_key_configured"] is True
     # key 本体不落公共配置
     import json
     raw = (tmp_path / "config.json").read_text(encoding="utf-8")
     assert "sekrit" not in raw
-    import json as _j
-    private = _j.loads((tmp_path / "secrets" / "settings.json").read_text(encoding="utf-8"))
-    assert private["private"]["models_intent_api_key"] == "sekrit"
+    # key 在供应商密钥槽（只进不出），不再落 settings 私密文件
+    key_slots = [k for k in store.keys() if k.startswith("provider:key:")]
+    assert key_slots, "provider key slot must exist"
+    assert any(str(store.get(k)) == "sekrit" for k in key_slots)
 
 
 def test_settings_models_unknown_role_rejected(tmp_path):

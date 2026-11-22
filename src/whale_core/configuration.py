@@ -17,12 +17,17 @@ SECRET_FIELDS = frozenset(k for k in SERVICE_FIELDS if k.endswith(('API_KEY', 'T
 # 旧配置里的 models.safety 在读取时迁移为 intent（见 read_models_view）。
 MODEL_ROLES = frozenset({'chat', 'intent', 'executor'})
 
+# 裁决②：设置面 models{} 角色 → 注册表角色（models.roles）映射。
+# chat（主回复）对应注册表 reply_fast；reply_slow/vision 由注册表面管理。
+_ROLE_TO_REGISTRY = {'chat': 'reply_fast', 'intent': 'intent', 'executor': 'executor'}
 
-def read_models_view(config_dir, env: Mapping[str, str] | None = None) -> dict:
+
+def read_models_view(config_dir, env: Mapping[str, str] | None = None,
+                     store=None) -> dict:
     """分角色模型配置的脱敏视图（key 只报已配置与否）。
 
-    配置文件为空时回落到环境变量派生的有效配置（WHALE_<ROLE>_* 或
-    runner 侧 QQ_INTENT_MODEL 经启动器投影）——视图永远反映实际生效值。
+    裁决②（registry 唯一事实源）：角色已在注册表绑定 → 视图读穿注册表
+    （role_view）；未绑定才回落配置文件/环境变量派生值（向后兼容）。
     """
     import os
     env = os.environ if env is None else env
@@ -32,7 +37,19 @@ def read_models_view(config_dir, env: Mapping[str, str] | None = None) -> dict:
     if 'safety' in models and 'intent' not in models:
         models['intent'] = models['safety']
     out = {}
+    from whale_core.life.model_registry import role_view
     for role in sorted(MODEL_ROLES):
+        reg_role = _ROLE_TO_REGISTRY.get(role, role)
+        rv = role_view(store, env, reg_role) if store is not None else None
+        if rv is not None:
+            out[role] = {
+                'model': rv['model'],
+                'base_url': rv['base_url'],
+                'api_key_configured': rv['api_key_configured'],
+                'registry_entry': rv['name'],
+                **({'effort': rv['effort']} if rv.get('effort') else {}),
+            }
+            continue
         cfg = dict(models.get(role) or {})
         prefix = f'WHALE_{role.upper()}'
         if not cfg.get('model') and env.get(f'{prefix}_MODEL'):
@@ -187,7 +204,8 @@ class SettingsController:
             'intent_model_enabled': env.get('WHALE_INTENT_MODEL_ENABLED') == '1',
             'persona_taboos': list(get_custom_taboos(bundle.store)),
             'budget': budget_view(bundle.store),
-            'models': read_models_view(self.config_dir, env=self.env),
+            'models': read_models_view(self.config_dir, env=self.env,
+                                       store=self.bundle.store),
             'capabilities': sorted({s.capability for s in bundle.tools.specs()} | {c for m in bundle.registry.manifests() for c in m.provides}),
             'services': {key: (bool(env.get(key)) if key in SECRET_FIELDS else env.get(key, ''))
                          for key in sorted(SERVICE_FIELDS)},
@@ -266,25 +284,33 @@ class SettingsController:
             for role, mcfg in models_patch.items():
                 if not isinstance(mcfg, dict) or set(mcfg) - {'base_url', 'model', 'api_key'}:
                     raise ValueError(f'invalid model settings for role {role}')
-                role_cfg = dict((config.setdefault('models', {})).get(role) or {})
-                for key in ('base_url', 'model'):
-                    if key in mcfg:
-                        value = mcfg[key]
-                        if not isinstance(value, str) or len(value) > 2000:
-                            raise ValueError(f'invalid {role} {key}')
-                        if key == 'base_url' and value.strip():
-                            validate_endpoint(value)
-                        if value.strip():
-                            role_cfg[key] = value.strip()
+                # 裁决②：写穿注册表（唯一事实源），config 文件 models{} 不再写
+                # （防双写漂移）；注册表条目名 role-<role>，角色映射同步绑定。
+                from whale_core.life.model_registry import (
+                    put_provider_credential, set_role, upsert_entry)
+                reg_role = _ROLE_TO_REGISTRY.get(role, role)
+                entry_name = f"role-{role}"
+                new_model = str(mcfg.get('model') or '').strip()
+                new_base = str(mcfg.get('base_url') or '').strip()
+                if new_base:
+                    validate_endpoint(new_base)
+                provider_name = f"role-{role}-provider"
+                upsert_entry(self.bundle.store, {
+                    'name': entry_name,
+                    'provider': provider_name,
+                    'model': new_model or entry_name,
+                    **({'base_url': new_base} if new_base else {}),
+                })
+                if new_base:
+                    put_provider_credential(self.bundle.store, provider_name,
+                                            new_base, None)
                 if 'api_key' in mcfg:
                     k = mcfg['api_key']
                     if k is not None and not isinstance(k, str):
                         raise ValueError(f'{role} api_key must be a string or null')
-                    if k is None:
-                        private[f'models_{role}_api_key'] = ''
-                    elif k:
-                        private[f'models_{role}_api_key'] = k
-                config['models'][role] = role_cfg
+                    put_provider_credential(self.bundle.store, provider_name,
+                                            new_base or None, k if k else '')
+                set_role(self.bundle.store, reg_role, entry_name)
             services = patch.get('services', {})
             if not isinstance(services, dict) or set(services) - SERVICE_FIELDS:
                 raise ValueError('unknown service setting')
