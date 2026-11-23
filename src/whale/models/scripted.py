@@ -34,8 +34,10 @@ class ScriptedModel:
 
     async def complete(self, messages: list[Message], *, tools: list[dict[str, Any]] | None = None,
                        temperature: float = 0.7, max_tokens: int = 1024,
-                       on_delta: DeltaFn | None = None, json_mode: bool = False) -> Completion:
-        self.calls.append({"messages": messages, "tools": tools, "json_mode": json_mode})
+                       on_delta: DeltaFn | None = None, json_mode: bool = False,
+                       reasoning_effort: str = "") -> Completion:
+        self.calls.append({"messages": messages, "tools": tools, "json_mode": json_mode,
+                           "max_tokens": max_tokens, "reasoning_effort": reasoning_effort})
         if self.script:
             item = self.script.pop(0)
             out = item if isinstance(item, Completion) else Completion(text=item)

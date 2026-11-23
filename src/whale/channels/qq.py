@@ -383,9 +383,12 @@ class QQChannel(Channel):
         prompt = f"最近群聊（“我”是{name}）：\n{lines}\n\n最新一条：{nick}：{text[:300]}"
         try:
             model = self.app.models.chat("fast")
+            # judge 是快分类：不需深 reasoning（effort=minimal；kimi-k3 默认推理会吃光小 max_tokens
+            # 导致空输出 judge_error），max_tokens 留 200 余量。服务商不识 minimal 档由
+            # openai_compat 的 400 降级兜住（去掉重试，行为同不下发）。
             out = await asyncio.wait_for(model.complete(
                 [Message("system", JUDGE_SYSTEM.replace("<NAME>", name)), Message("user", prompt)],
-                json_mode=True, temperature=0, max_tokens=80), 12)
+                json_mode=True, temperature=0, max_tokens=200, reasoning_effort="minimal"), 12)
             data = parse_json_loose(out.text)
             decision = str(data.get("decision") or "").strip().lower() if isinstance(data, dict) else ""
         except Exception as exc:

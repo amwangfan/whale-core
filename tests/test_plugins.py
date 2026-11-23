@@ -292,6 +292,8 @@ class QQTests(unittest.IsolatedAsyncioTestCase):
         chat = scripted(self.app, "哈哈我也觉得食堂今天不错")
         self.assertEqual(await self.bridge.handle_event(group(777, 1, "你们中午吃的啥", mid=1)), "skip:judge_skip")
         self.assertTrue(fast.calls[0]["json_mode"])
+        self.assertEqual(fast.calls[0]["reasoning_effort"], "minimal")   # judge 快分类：不深推理
+        self.assertEqual(fast.calls[0]["max_tokens"], 200)               # 留余量防推理吃光预算
         self.assertIn("你们中午吃的啥", fast.calls[0]["messages"][-1].text)
         self.assertEqual(chat.calls, [])
         fast.script.append('{"decision": "reply", "reason": "可以接话"}')

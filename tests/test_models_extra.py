@@ -64,6 +64,31 @@ class ReasoningEffortTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("reasoning_effort", seen[-1])                   # 未设即不下发该参数
         app.db.close()
 
+    async def test_reasoning_effort_400_falls_back_to_omitted(self):
+        """服务商 400 拒 reasoning 参数 → 自动去掉重试一次（降级为不下发），不重炸调用方。"""
+        seen = []
+
+        def handler(request):
+            body = json.loads(request.content)
+            seen.append(body)
+            if "reasoning_effort" in body:
+                return httpx.Response(400, json={"error": {"message": "unknown field reasoning_effort"}})
+            data = {"choices": [{"delta": {"content": "在线"}, "finish_reason": "stop"}]}
+            return httpx.Response(200, content=("data: " + json.dumps(data) + "\n\ndata: [DONE]\n\n").encode(),
+                                  headers={"content-type": "text/event-stream"})
+
+        app = make_app(models={"providers": [{"id": "kimi", "kind": "openai",
+                                              "base_url": "https://api.moonshot.cn/v1"}],
+                               "chat": {"provider": "kimi", "model": "kimi-k3", "reasoning_effort": "minimal"}})
+        app.config.set_secret("provider.kimi", "sk-test")
+        app.http_transport = httpx.MockTransport(handler)
+        out = await app.models.test("chat")
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(len(seen), 2)                                   # 恰好重试一次
+        self.assertEqual(seen[0].get("reasoning_effort"), "minimal")
+        self.assertNotIn("reasoning_effort", seen[1])
+        app.db.close()
+
 
 class ReplyGearTests(unittest.IsolatedAsyncioTestCase):
     async def test_slow_gear_buffers_deltas(self):

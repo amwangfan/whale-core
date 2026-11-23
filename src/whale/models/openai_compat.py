@@ -65,6 +65,11 @@ class OpenAICompatChat:
         try:
             return await self._stream(body, on_delta)
         except ModelError as exc:
+            if reasoning_effort and exc.status == 400 and "reasoning" in str(exc).lower():
+                # 服务商不识该 reasoning 档位：去掉重试（等价于不下发），其余 fallback 链照旧生效
+                return await self.complete(messages, tools=tools, temperature=temperature,
+                                           max_tokens=max_tokens, on_delta=on_delta,
+                                           json_mode=json_mode, reasoning_effort="")
             if tools and exc.status == 400 and "tool" in str(exc).lower():
                 self.native_tools = False
                 return await self._complete_prompt_tools(messages, tools, temperature, max_tokens, on_delta)
