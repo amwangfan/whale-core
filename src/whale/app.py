@@ -71,8 +71,10 @@ class App:
         self.devices = DeviceService(self)
         self.channels = Channels(self)
         from .groups import GroupService
+        from .setup import Setup
 
         self.groups = GroupService(self)
+        self.setup = Setup(self)
         builtin.register(self)
         task_engine.register(self)
         api.register(self)

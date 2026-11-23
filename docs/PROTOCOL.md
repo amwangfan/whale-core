@@ -68,10 +68,12 @@ Core 与所有客户端（控制台、手机 App、眼镜桥、IO 渠道桥、�
 
 | 领域 | 方法 |
 | --- | --- |
-| system | `system.status` · `system.schema` · `events.query` |
+| system | `system.status` · `system.schema` · `events.query` · `system.network` · `system.set_lan` · `system.restart` |
+| setup | `setup.status` · `setup.quick_model` · `setup.complete` · `models.presets` |
 | chat | `chat.send` · `chat.cancel` · `conversations.list/messages/update/delete` |
 | runs | `runs.list` · `runs.get`（含全部 Step 与子 Run） |
-| memory | `memory.list/get/search/remember/update/forget/graph/stats/maintain` |
+| memory | `memory.list/get/search/remember/update/forget/graph/stats/maintain/evidence` |
+| groups | `groups.list/get/enable/update/set_paused/set_opt_out/import/refresh/messages/context/delete` |
 | capabilities | `capabilities.list` · `capabilities.invoke` · `policy.set` |
 | approvals | `approvals.list` · `approvals.resolve` |
 | tasks | `tasks.create/list/get/start/cancel/delete` · `schedule.list/set_enabled/run_now/delete` |
@@ -121,6 +123,10 @@ Core 与所有客户端（控制台、手机 App、眼镜桥、IO 渠道桥、�
 | `notify` | `{title, body, meta, delivered_to}`：Agent 主动给主人的消息 |
 | `plugin.changed` · `config.changed` · `clients.changed` · `capability.registered/unregistered` | 系统状态 |
 | `autonomy.exploring/explored/proactive` | 自主行为 |
+| `group.updated/archived/refreshed/deleted` | 群聊记忆空间 |
+| `setup.completed` | 首次设置完成 |
+| `group.updated/archived/refreshed/deleted` | 群聊记忆空间 |
+| `setup.completed` | 首次设置完成 |
 
 非临时事件写入事件日志，`events.query {pattern, limit, before}` 可回放。
 

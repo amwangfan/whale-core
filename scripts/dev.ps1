@@ -1,4 +1,4 @@
-# Whale-Core 本地开发启动（Windows PowerShell）
+﻿# Whale-Core 本地开发启动（Windows PowerShell）
 #   powershell -ExecutionPolicy Bypass -File scripts\dev.ps1            # 安装依赖、跑测试、启动
 #   powershell -ExecutionPolicy Bypass -File scripts\dev.ps1 -NoTest    # 跳过测试
 param([switch]$NoTest, [int]$Port = 8080, [string]$Data = "$PSScriptRoot\..\.whale-dev")

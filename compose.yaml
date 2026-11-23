@@ -1,0 +1,11 @@
+services:
+  whale:
+    build: .
+    container_name: whale
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./whale-data:/data
+    environment:
+      TZ: Asia/Shanghai

@@ -1,0 +1,7 @@
+.git
+.venv
+legacy
+tests
+**/__pycache__
+web/tests
+whale-data

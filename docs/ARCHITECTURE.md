@@ -59,6 +59,8 @@ src/whale/
   link/          envelope · rpc(方法注册，REST 与 WS 共用) · hub(连接、订阅、能力声明)
   devices/       registry(配对/Ed25519/scope) · v2(与 whale-mobile V2 线协议的边缘适配)
   channels/      Channel 抽象 · QQ 渠道（backend：onebot / weq，config 驱动）
+  groups/        群聊记忆空间：本机归档 · 手动/定时更新 · 话题段与关键词 · 成员画像与喜好（带消息依据）
+  setup.py       首次设置：模型预设与一步连接 · 局域网访问 · 进程内重启
   server/        Starlette 应用：/api/rpc、/api/link(WS)、/api/events(SSE)、静态控制台
 web/             无构建步骤的控制台（ES Modules + Preact/htm，随 Python 包分发）
 ```
