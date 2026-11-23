@@ -191,7 +191,8 @@ class QQChannel(Channel):
     backend_name = "abstract"
 
     def __init__(self, app: Any, channel_id: str, config: dict[str, Any], *, token: str = "",
-                 sink: Any = None) -> None:
+                 web_token: str = "", sink: Any = None) -> None:
+        # web_token：双 token 部署的出站侧（WeQ）；onebot 忽略
         super().__init__(app, channel_id, sink)
         cfg = config
         self.token = token

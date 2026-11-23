@@ -158,7 +158,7 @@ class OneBotChannel(QQChannel):
     backend_name = "onebot"
 
     def __init__(self, app: Any, channel_id: str, config: dict[str, Any], *, token: str = "",
-                 sink: Sink | None = None) -> None:
+                 web_token: str = "", sink: Sink | None = None) -> None:
         super().__init__(app, channel_id, config, token=token, sink=sink)
         cfg = config
         self.api_base, self.ws_url = validate_endpoints(str(cfg.get("api_base") or ""),

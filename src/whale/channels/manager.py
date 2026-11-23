@@ -89,7 +89,8 @@ class Channels:
         sink = CoreSink(self.app, cid)
         try:
             channel = cls(self.app, cid, {k: v for k, v in cfg.items() if k not in ("kind", "enabled")},
-                          token=self.app.config.secret(f"channel.{cid}.access_token"), sink=sink)
+                          token=self.app.config.secret(f"channel.{cid}.access_token"),
+                          web_token=self.app.config.secret(f"channel.{cid}.web_token"), sink=sink)
             await channel.open()
         except Exception as exc:
             self._errors[cid] = (f"{exc.code}: {exc.message}" if isinstance(exc, WhaleError)
