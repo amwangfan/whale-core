@@ -30,6 +30,8 @@ const initial = {
   trayOpen: false,
   navOpen: false,
   authReason: '',
+  /** setup.status result; null until loaded */ setup: /** @type {any} */ (null),
+  /** the owner chose 「稍后再说」 in the first-run wizard */ setupLater: readLater(),
 };
 
 const micro = globalThis.queueMicrotask ? (fn) => globalThis.queueMicrotask(fn) : (fn) => Promise.resolve().then(fn);
@@ -216,8 +218,30 @@ export async function refreshStatus() {
   } catch { /* connection indicator covers it */ }
 }
 
+function readLater() {
+  try { return globalThis.localStorage?.getItem('whale.setup.later') === '1'; } catch { return false; }
+}
+/** Close the first-run wizard without completing it (it stays reachable from 设置 and the palette). */
+export function snoozeSetup() {
+  try { globalThis.localStorage?.setItem('whale.setup.later', '1'); } catch { /* ignore */ }
+  store.set({ setupLater: true });
+}
+/** Load `setup.status`; an older backend without it never blocks the console. */
+export async function refreshSetup() {
+  try {
+    const setup = await rpc('setup.status');
+    store.set({ setup });
+    return setup;
+  } catch (e) {
+    const code = /** @type {any} */ (e)?.code;
+    if (code === 'not_found' || code === 'invalid_params') store.set({ setup: { completed: true, unsupported: true, steps: {} } });
+    return null;
+  }
+}
+
 async function snapshot() {
   await refreshStatus();
+  refreshSetup();
   try {
     const [ap, ev] = await Promise.all([rpc('approvals.list', { status: 'pending' }), rpc('events.query', { pattern: '*', limit: 80 })]);
     const activity = (ev.events || []).filter((e) => !ACTIVITY_SKIP.test(e.topic) && !(e.topic === 'run.step' && e.data?.step?.status === 'running'))
@@ -252,7 +276,7 @@ export function logout(reason) {
   clearToken();
   link.close();
   started = false;
-  store.set({ token: '', status: null, approvals: [], activity: [], runs: {}, conn: 'idle', authReason: reason || '' });
+  store.set({ token: '', status: null, setup: null, approvals: [], activity: [], runs: {}, conn: 'idle', authReason: reason || '' });
 }
 
 /**

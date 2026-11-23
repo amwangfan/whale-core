@@ -370,10 +370,35 @@ class MemoryService:
         await self.bus.emit("memory.updated", {"item": item.to_dict(self.half_life)})
         return item.to_dict(self.half_life)
 
-    def graph(self, limit: int = 300, kind: str | None = None) -> dict[str, Any]:
-        items, _ = self.store.list(status=None, kind=kind, limit=limit, order="importance DESC")
+    def graph(self, limit: int = 300, kind: str | None = None, scope: str | None = None,
+              sources: bool = False) -> dict[str, Any]:
+        items, total = self.store.list(status=None, kind=kind, limit=limit, order="importance DESC", scope=scope)
         items = [i for i in items if i.status in ("active", "candidate", "superseded")]
         ids = [i.id for i in items]
         idset = set(ids)
         edges = [l for l in self.store.links(ids) if l["src"] in idset and l["dst"] in idset]
-        return {"nodes": [i.to_dict(self.half_life) for i in items], "edges": edges}
+        extra_nodes: dict[str, dict[str, Any]] = {}
+        extra_edges: list[dict[str, Any]] = []
+        if sources:
+            # Projection of stored fields only (PR #95): space contains memory, person is its subject,
+            # evidence is what it cites. No new relations are inferred.
+            for i in items:
+                sid = "space:" + i.scope
+                extra_nodes.setdefault(sid, {"id": sid, "label": label(i.scope), "category": "space", "scope": i.scope})
+                extra_edges.append({"src": sid, "dst": i.id, "relation": "包含"})
+                if i.subject and i.subject not in ("user", "self"):
+                    pid = "person:" + i.scope + ":" + i.subject
+                    extra_nodes.setdefault(pid, {"id": pid, "label": str(i.source.get("member") or i.subject),
+                                                 "category": "person", "subject": i.subject, "scope": i.scope})
+                    extra_edges.append({"src": pid, "dst": i.id, "relation": "主体"})
+                refs = list(i.source.get("evidence_ids") or [])
+                if i.source.get("evidence_id"):
+                    refs.append(i.source["evidence_id"])
+                for ref in list(dict.fromkeys(str(r) for r in refs if r))[:12]:
+                    eid = "evidence:" + ref
+                    extra_nodes.setdefault(eid, {"id": eid, "label": ref.rsplit(":", 1)[-1], "category": "evidence",
+                                                 "evidence_id": ref, "memory_id": i.id})
+                    extra_edges.append({"src": i.id, "dst": eid, "relation": "依据"})
+        return {"nodes": [i.to_dict(self.half_life) for i in items], "edges": edges,
+                "extra_nodes": list(extra_nodes.values()), "extra_edges": extra_edges,
+                "total": total, "truncated": total > limit}

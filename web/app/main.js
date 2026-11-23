@@ -1,7 +1,7 @@
 // @ts-check
 /**
  * Bootstrap: token from URL → theme → live connection → shell + router.
- * Routes: /  /chat[/:id]  /memory[/:id]  /tasks[/:id]  /capabilities  /devices[/:id]  /persona  /settings[/:section]
+ * Routes: /  /chat[/:id]  /memory[/:id]  /groups[/:id]  /tasks[/:id]  /capabilities  /devices[/:id]  /persona  /settings[/:section]  /setup
  */
 import { html, render, useEffect, useErrorBoundary } from '/vendor/preact-htm.js';
 import { consumeUrlToken, getToken } from './lib/api.js';
@@ -19,10 +19,12 @@ import { CapabilitiesPage } from './pages/capabilities.js';
 import { DevicesPage } from './pages/devices.js';
 import { PersonaPage } from './pages/persona.js';
 import { SettingsPage } from './pages/settings.js';
+import { GroupsPage } from './pages/groups.js';
+import { SetupWizard } from './pages/setup.js';
 
 /** @type {Record<string, any>} */
 export const ROUTES = {
-  bridge: BridgePage, chat: ChatPage, memory: MemoryPage, tasks: TasksPage, capabilities: CapabilitiesPage,
+  bridge: BridgePage, chat: ChatPage, memory: MemoryPage, groups: GroupsPage, tasks: TasksPage, capabilities: CapabilitiesPage,
   devices: DevicesPage, persona: PersonaPage, settings: SettingsPage,
 };
 
@@ -46,9 +48,17 @@ export function Shell() {
   const Page = ROUTES[route.page] || NotFound;
   const meta = PAGES.find((p) => p.id === route.page);
   const name = useStore((s) => s.status?.agent?.persona?.name || s.status?.agent?.name || '鲸鱼');
+  // first-run wizard: /setup, or automatically while setup is incomplete (until 「稍后再说」)
+  const wizard = useStore((s) => route.page === 'setup' || (!!s.setup && !s.setup.completed && !s.setup.unsupported && !s.setupLater));
   useEffect(() => {
-    if (globalThis.document) document.title = `${meta ? meta.label + ' · ' : ''}${name} · Whale`;
-  }, [meta, name]);
+    if (globalThis.document) document.title = `${wizard ? '首次设置 · ' : meta ? meta.label + ' · ' : ''}${name} · Whale`;
+  }, [meta, name, wizard]);
+  if (wizard) {
+    return html`<div class="shell shell-wizard">
+      <${PageBoundary} key="setup" page="setup"><${SetupWizard} /><//>
+      <${Toasts} />
+    </div>`;
+  }
   return html`<div class="shell">
     <a class="skip-link" href="#content">跳到主要内容</a>
     <${Nav} page=${route.page} />

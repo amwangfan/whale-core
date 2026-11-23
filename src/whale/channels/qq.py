@@ -30,6 +30,7 @@ from ..models.base import Message, parse_json_loose
 from .base import Channel
 
 MAX_TEXT = 4000
+
 MAX_BUBBLE = 1500
 DEDUPE_SIZE = 4000
 
@@ -282,6 +283,14 @@ class QQChannel(Channel):
         nick = clean_name(ev.nick)
         if not nick:
             nick = await self.names.resolve(ev.kind, ev.uin, ev.group_id) or ev.uin
+        if ev.kind == "group" and ev.group_id and ev.text:
+            groups = getattr(self.app, "groups", None)
+            if groups is not None:
+                try:
+                    await groups.capture("qq", ev.group_id, ev.message_id, ev.uin, nick, ev.text, ev.reply_id,
+                                         ev.meta.get("sent_at") if isinstance(ev.meta, dict) else None)
+                except Exception as exc:  # archiving must never break replying
+                    self.log.warning("group archive failed: %s", repr(exc)[:200])
         if ev.kind == "private":
             return await self._private(ev, nick)
         if ev.kind == "group":

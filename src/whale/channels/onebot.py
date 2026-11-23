@@ -372,6 +372,10 @@ class OneBotChannel(QQChannel):
             qev = QQEvent(kind="group", message_id=mid, uin=uid, nick=nick, text=parsed.text,
                           images=parsed.images, group_id=str(ev.get("group_id") or ""),
                           mentioned=parsed.mentioned, reply_id=parsed.reply_id, reply_to_bot=reply_bot)
+            try:
+                qev.meta["sent_at"] = int(ev["time"]) * 1000   # OneBot ``time`` is Unix seconds
+            except (KeyError, TypeError, ValueError):
+                pass
         else:
             return "ignored"
         return await self.ingest(qev)

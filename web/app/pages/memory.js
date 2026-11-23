@@ -1,16 +1,20 @@
 // @ts-check
 /**
- * 记忆 Memory: stats header · relationship graph / list / candidate inbox · search with
- * explanations · client-side scope filter · detail side panel (/memory/:id).
+ * 记忆 Memory: stats header · relationship graph (平面 2D / 星空 3D, optional 来源 nodes) / list /
+ * candidate inbox · search with explanations · scope filter (server-side for the graph when one
+ * scope is chosen) · 导入图谱 preview · detail side panel (/memory/:id).
  */
 import { html, useMemo, useState, useEffect } from '/vendor/preact-htm.js';
 import { Icon } from '../components/icons.js';
 import { Badge, Button, AsyncButton, Chip, Empty, Segmented, Skeleton, ErrorBox, PageHead, Stat, cx, When, Drawer } from '../components/ui.js';
-import { MemoryGraph } from '../components/memory-graph.js';
+import { MemoryGraph, graphData } from '../components/memory-graph.js';
+import { StarView } from '../components/star-view.js';
+import { GraphImportButton, ImportPreview } from '../components/graph-import.js';
+import { EvidenceModal } from '../components/evidence.js';
 import { MemoryDetail, AddMemory } from '../components/memory-detail.js';
 import { act, tryAct, useTopic } from '../lib/store.js';
 import { useRpc, navigate, useDebounced, useDebouncedCallback, useLocal, useMedia } from '../lib/hooks.js';
-import { KINDS, SCOPES, SCOPE_RULE, MEM_STATUS, scopeCat, scopeLabel, kindLabel, clip, timeAgo } from '../lib/format.js';
+import { KINDS, SCOPES, SCOPE_RULE, MEM_STATUS, scopeCat, scopeLabel, kindLabel, timeAgo, groupHref } from '../lib/format.js';
 
 const SORTS = [
   { value: 'updated_at DESC', label: '最近更新' }, { value: 'created_at DESC', label: '最新创建' },
@@ -57,6 +61,10 @@ function StatsHeader({ stats }) {
 export function MemoryPage({ route }) {
   const selected = route.id || '';
   const [view, setView] = useLocal('memory.view', 'graph');
+  const [dim, setDim] = useLocal('memory.dim', '2d');
+  const [sources, setSources] = useLocal('memory.sources', false);
+  const [imported, setImported] = useState(/** @type {any} */ (null));
+  const [ev, setEv] = useState(/** @type {{memoryId: string, evidenceId: string}|null} */ (null));
   const v = route.query.view === 'inbox' ? 'inbox' : view;
   const [kinds, setKinds] = useState(/** @type {string[]} */ ([]));
   const [scopes, setScopes] = useState(/** @type {string[]} */ ([]));
@@ -69,7 +77,10 @@ export function MemoryPage({ route }) {
   useEffect(() => { if (route.query.q != null) setQ(route.query.q); }, [route.query.q]);
 
   const stats = useRpc('memory.stats');
-  const graph = useRpc(v === 'graph' ? 'memory.graph' : null, { limit: 400 }, [v]);
+  const serverScope = scopes.length === 1 ? scopes[0] : '';
+  const graph = useRpc(v === 'graph' ? 'memory.graph' : null, { limit: 400, ...(sources ? { sources: true } : {}), ...(serverScope ? { scope: serverScope } : {}) },
+    [v, sources, serverScope]);
+  const gd = useMemo(() => graphData(graph.data), [graph.data]);
   const list = useRpc(v === 'list' && !query ? 'memory.list' : null,
     { status: status || null, kind: kinds.length === 1 ? kinds[0] : null, limit: 300, order: order === 'access_count DESC' ? 'updated_at DESC' : order }, [v, status, kinds.join(), order, query]);
   const inbox = useRpc(v === 'inbox' ? 'memory.list' : null, { status: 'candidate', limit: 200, order: 'created_at DESC' }, [v]);
@@ -81,6 +92,14 @@ export function MemoryPage({ route }) {
   const matches = useMemo(() => (m) => (!kinds.length || kinds.includes(m.kind)) && (!scopes.length || scopes.includes(scopeCat(m.scope))), [kinds.join(), scopes.join()]);
   const toggle = (arr, set, k) => set(arr.includes(k) ? arr.filter((x) => x !== k) : [...arr, k]);
   const open = (id) => navigate(id ? `/memory/${id}${v === 'inbox' ? '?view=inbox' : ''}` : '/memory', { replace: !!selected });
+  /** Source nodes: evidence opens the original message; a group space opens its 群聊 page. @param {any} n */
+  const onExtra = (n) => {
+    if (n.category === 'evidence') setEv({ memoryId: n.memory_id, evidenceId: n.evidence_id });
+    else if (n.category === 'space' && String(n.id).startsWith('space:group:')) navigate(groupHref(String(n.id).slice('space:group:'.length)));
+  };
+  /** 3D view click: memory → detail, source node → as above. @param {any} n */
+  const onPick = (n) => { if (!n) return; if (n.category) onExtra(n); else open(n.id); };
+  const graphFilter = kinds.length || scopes.length > 1 ? matches : null;
 
   const filters = html`<div class="mem-filters">
     <div class="chips" role="group" aria-label="类型">${Object.entries(KINDS).map(([k, x]) => html`<${Chip} key=${k} color=${x.color} active=${kinds.includes(k)} title=${x.hint}
@@ -103,10 +122,15 @@ export function MemoryPage({ route }) {
         : html`<${Empty} icon="search" title=${`没有想起与「${query}」相关的记忆`} compact />`}
     </div>`;
   } else if (v === 'graph') {
-    body = graph.error ? html`<${ErrorBox} error=${graph.error} onRetry=${() => graph.reload()} />`
-      : !graph.data ? html`<${Skeleton} rows=${8} height=${30} />`
-        : html`<${MemoryGraph} nodes=${graph.data.nodes} edges=${graph.data.edges} selected=${selected} filter=${kinds.length || scopes.length ? matches : null}
-          onSelect=${(id) => open(id)} kindFilter=${kinds} onToggleKind=${(k) => toggle(kinds, setKinds, k)} />`;
+    const shown = graph.data?.nodes?.length || 0;
+    body = imported ? html`<${ImportPreview} data=${imported} onClose=${() => setImported(null)} />`
+      : graph.error ? html`<${ErrorBox} error=${graph.error} onRetry=${() => graph.reload()} />`
+        : !graph.data ? html`<${Skeleton} rows=${8} height=${30} />`
+          : html`${dim === '3d'
+            ? html`<${StarView} nodes=${gd.nodes} edges=${gd.edges} selected=${selected} filter=${graphFilter} onPick=${onPick} />`
+            : html`<${MemoryGraph} nodes=${gd.nodes} edges=${gd.edges} selected=${selected} filter=${graphFilter}
+              onSelect=${(id) => open(id)} onExtra=${onExtra} kindFilter=${kinds} onToggleKind=${(k) => toggle(kinds, setKinds, k)} />`}
+            ${graph.data.truncated ? html`<p class="muted small pad-x">图上显示了最重要的 ${shown} 条记忆（共 ${graph.data.total ?? shown} 条）。用筛选或搜索查看其余的。</p>` : null}`;
   } else if (v === 'inbox') {
     const items = (inbox.data?.items || []).filter(matches);
     body = html`<div class="mem-list-wrap">
@@ -137,7 +161,7 @@ export function MemoryPage({ route }) {
     <${StatsHeader} stats=${stats.data} />
     <p class="rule-hint"><${Icon} name="lock" size=${14} />${SCOPE_RULE}</p>
     <div class="mem-toolbar">
-      <${Segmented} label="视图" value=${query ? '' : v} onChange=${(x) => { setQ(''); setView(x); if (route.query.view) navigate('/memory', { replace: true }); }}
+      <${Segmented} label="视图" value=${query ? '' : v} onChange=${(x) => { setQ(''); setView(x); setImported(null); if (route.query.view) navigate('/memory', { replace: true }); }}
         options=${[{ value: 'graph', label: html`<${Icon} name="graph" size=${15} /> 图谱` }, { value: 'list', label: html`<${Icon} name="rows" size=${15} /> 列表` },
           { value: 'inbox', label: html`<${Icon} name="inbox" size=${15} /> 候选${stats.data?.candidates ? html` <span class="seg-count">${stats.data.candidates}</span>` : ''}` }]} />
       <div class="search-box"><${Icon} name="search" size=${16} />
@@ -145,6 +169,16 @@ export function MemoryPage({ route }) {
         ${q ? html`<button type="button" class="icon-btn" aria-label="清除" onClick=${() => setQ('')}><${Icon} name="x" size=${14} /></button>` : null}</div>
     </div>
     ${filters}
+    ${v === 'graph' && !query ? html`<div class="graph-bar" role="toolbar" aria-label="图谱选项">
+      ${imported ? html`<span class="muted small"><${Icon} name="eye" size=${14} /> 正在预览导入的图谱</span>` : html`
+        <${Segmented} size="sm" label="图谱样式" value=${dim} onChange=${setDim}
+          options=${[{ value: '2d', label: html`<${Icon} name="graph" size=${14} /> 平面` }, { value: '3d', label: html`<${Icon} name="stars" size=${14} /> 星空` }]} />
+        <label class="check-inline small" title="加入记忆的主体（人物）、依据（原始消息）和所在空间">
+          <input type="checkbox" checked=${!!sources} onChange=${(e) => setSources(e.currentTarget.checked)} />来源</label>
+        ${serverScope ? html`<span class="muted small">只看「${SCOPES[serverScope]?.label || serverScope}」范围</span>` : null}`}
+      <span class="grow"></span>
+      <${GraphImportButton} onLoaded=${(d) => setImported(d)} />
+    </div>` : null}
     <div class="mem-body">
       <div class="mem-view">${body}</div>
       ${wide && selected ? html`<aside class="mem-side card" aria-label="记忆详情">
@@ -154,5 +188,6 @@ export function MemoryPage({ route }) {
     </div>
     ${!wide ? html`<${Drawer} open=${!!selected} onClose=${() => open('')} title="记忆详情">${detail}<//>` : null}
     <${AddMemory} open=${adding} onClose=${() => { setAdding(false); if (route.query.add) navigate('/memory', { replace: true }); }} onCreated=${(res) => { reloadAll(); if (res?.item?.id) open(res.item.id); }} />
+    <${EvidenceModal} open=${!!ev} onClose=${() => setEv(null)} memoryId=${ev?.memoryId} evidenceId=${ev?.evidenceId} />
   </div>`;
 }

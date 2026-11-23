@@ -70,6 +70,9 @@ class App:
         self.plugins = PluginManager(self)
         self.devices = DeviceService(self)
         self.channels = Channels(self)
+        from .groups import GroupService
+
+        self.groups = GroupService(self)
         builtin.register(self)
         task_engine.register(self)
         api.register(self)

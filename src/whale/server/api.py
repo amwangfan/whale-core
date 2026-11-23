@@ -121,6 +121,8 @@ class MemEdit(BaseModel):
 class Graph(BaseModel):
     limit: int = Field(300, ge=1, le=2000)
     kind: str | None = None
+    scope: str | None = None
+    sources: bool = False
 
 class PolicySet(BaseModel):
     pattern: str
@@ -371,7 +373,7 @@ def register(app: Any) -> None:  # noqa: C901 - a flat list of small handlers re
 
     @m("memory.graph", Graph, "Nodes and relation edges for the graph view")
     async def mem_graph(p: Graph, c: Client | None) -> Any:
-        return app.memory.graph(p.limit, p.kind)
+        return app.memory.graph(p.limit, p.kind, p.scope, p.sources)
 
     @m("memory.stats")
     async def mem_stats(p: NoParams, c: Client | None) -> Any:

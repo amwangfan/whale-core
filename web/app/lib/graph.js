@@ -27,7 +27,8 @@ function scopeCat(scope) {
 export class ForceGraph {
   /**
    * @param {HTMLCanvasElement} canvas
-   * @param {{onHover?: (n: MemNode|null, x: number, y: number) => void, onClick?: (n: MemNode|null) => void, reduceMotion?: boolean}} [opts]
+   * @param {{onHover?: (n: MemNode|null, x: number, y: number) => void, onClick?: (n: MemNode|null) => void, reduceMotion?: boolean,
+   *   colorOf?: (n: any) => string, groups?: string[]}} [opts]  colorOf/groups: colour and neighbourhood anchors for non-memory graphs (import preview)
    */
   constructor(canvas, opts = {}) {
     this.canvas = canvas;
@@ -64,6 +65,7 @@ export class ForceGraph {
       scope: Object.fromEntries(Object.entries(SCOPE_VAR).map(([k, name]) => [k, v(name, '#fff')])),
       text: v('--text', '#e3f1fb'), text3: v('--text-3', '#6f8aa5'), edge: v('--border-strong', 'rgba(125,211,252,.24)'),
       accent: v('--accent', '#2ee6d6'), bg: v('--panel-solid', '#0c1e38'),
+      person: v('--k-person', '#fb923c'), evidence: v('--text-2', '#a9c2d8'), space: v('--sc-group', '#a78bfa'),
     };
     this.dirty = true;
   }
@@ -75,10 +77,12 @@ export class ForceGraph {
     const anchors = this.anchors();
     this.nodes = nodes.map((n, i) => {
       const prev = old.get(n.id);
-      const a = anchors[n.kind] || { x: 0, y: 0 };
+      const a = anchors[n.kind] || anchors[/** @type {any} */ (n).category] || { x: 0, y: 0 };
       const ang = (i * 2.399) % (Math.PI * 2);
+      const cat = /** @type {any} */ (n).category;
+      const r = cat === 'person' ? 9 : cat === 'space' ? 13 : cat === 'evidence' ? 3.5 : 5 + Math.max(0, Math.min(1, n.importance ?? 0.5)) * 11;
       /** @type {SimNode} */
-      const sn = { ...n, data: n, r: 5 + Math.max(0, Math.min(1, n.importance ?? 0.5)) * 11,
+      const sn = { ...n, data: n, r,
         x: prev ? prev.x : a.x + Math.cos(ang) * (20 + (i % 7) * 9), y: prev ? prev.y : a.y + Math.sin(ang) * (20 + (i % 5) * 9),
         vx: 0, vy: 0, fx: null, fy: null };
       this.byId.set(n.id, sn);
@@ -89,24 +93,27 @@ export class ForceGraph {
     for (const e of edges) {
       const s = this.byId.get(e.src); const t = this.byId.get(e.dst);
       if (!s || !t || s === t) continue;
-      this.edges.push({ s, t, relation: e.relation, weight: e.weight ?? 0.5 });
+      this.edges.push({ s, t, relation: e.relation, weight: e.weight ?? 0.5, extra: !!(/** @type {any} */ (e).extra) });
       if (!this.adj.has(s.id)) this.adj.set(s.id, new Set());
       if (!this.adj.has(t.id)) this.adj.set(t.id, new Set());
       /** @type {Set<string>} */ (this.adj.get(s.id)).add(t.id);
       /** @type {Set<string>} */ (this.adj.get(t.id)).add(s.id);
     }
     this.alpha = old.size ? 0.5 : 1;
-    if (this.opts.reduceMotion) { for (let i = 0; i < 260; i++) this.tick(); this.alpha = 0; }
+    // reduced motion: lay out synchronously (fewer passes for big imported graphs)
+    if (this.opts.reduceMotion) { const passes = this.nodes.length > 500 ? 70 : 260; for (let i = 0; i < passes; i++) this.tick(); this.alpha = 0; }
     this.dirty = true;
   }
 
   anchors() {
     const R = 150;
+    const order = this.opts.groups || KIND_ORDER;
     /** @type {Record<string, {x: number, y: number}>} */
     const out = {};
-    KIND_ORDER.forEach((k, i) => {
-      const a = (i / KIND_ORDER.length) * Math.PI * 2 - Math.PI / 2;
-      out[k] = { x: Math.cos(a) * R, y: Math.sin(a) * R };
+    const RR = order.length > 8 ? R * 1.6 : R;
+    order.forEach((k, i) => {
+      const a = (i / order.length) * Math.PI * 2 - Math.PI / 2;
+      out[k] = { x: Math.cos(a) * RR, y: Math.sin(a) * RR };
     });
     return out;
   }
@@ -174,7 +181,7 @@ export class ForceGraph {
     for (const e of this.edges) {
       const dx = e.t.x - e.s.x; const dy = e.t.y - e.s.y;
       const d = Math.sqrt(dx * dx + dy * dy) || 1;
-      const L = 46 + e.s.r + e.t.r;
+      const L = (e.extra ? 22 : 46) + e.s.r + e.t.r;
       const f = ((d - L) / d) * 0.05 * a * (0.5 + e.weight);
       e.s.vx += dx * f; e.s.vy += dy * f; e.t.vx -= dx * f; e.t.vy -= dy * f;
     }
@@ -212,11 +219,11 @@ export class ForceGraph {
     for (const e of this.edges) {
       const show = this.visible(e.s) && this.visible(e.t);
       const on = near ? (e.s.id === focusId || e.t.id === focusId) : true;
-      ctx.globalAlpha = !show ? 0.04 : on ? (near ? 0.9 : 0.45) : 0.08;
+      ctx.globalAlpha = !show ? 0.04 : on ? (near ? 0.9 : e.extra ? 0.28 : 0.45) : 0.08;
       ctx.strokeStyle = on && near ? this.colors.accent : this.colors.edge;
-      ctx.lineWidth = (0.8 + e.weight * 1.4) / Math.sqrt(view.k);
+      ctx.lineWidth = (e.extra ? 0.7 : 0.8 + e.weight * 1.4) / Math.sqrt(view.k);
       const sup = e.relation === 'supersedes';
-      ctx.setLineDash(sup ? [5, 4] : []);
+      ctx.setLineDash(sup ? [5, 4] : e.extra ? [2, 3] : []);
       ctx.beginPath(); ctx.moveTo(e.s.x, e.s.y); ctx.lineTo(e.t.x, e.t.y); ctx.stroke();
       if (sup || e.relation === 'derived_from') this.arrow(e.s, e.t);
     }
@@ -226,16 +233,22 @@ export class ForceGraph {
       const vis = this.visible(n);
       const strength = Math.max(0.2, Math.min(1, n.strength_now ?? 0.6));
       ctx.globalAlpha = !vis ? 0.07 : lit(n) ? 0.3 + strength * 0.7 : 0.12;
-      const color = this.colors.kind[n.kind] || this.colors.accent;
-      ctx.beginPath(); ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
-      if (n.status === 'superseded') { ctx.fillStyle = this.colors.bg; ctx.fill(); ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.stroke(); }
-      else { ctx.fillStyle = color; ctx.fill(); }
-      // scope ring
-      ctx.strokeStyle = this.colors.scope[scopeCat(n.scope || 'owner')];
-      ctx.lineWidth = 1.6;
-      if (n.status === 'candidate') ctx.setLineDash([2.5, 2.5]);
-      ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 3, 0, Math.PI * 2); ctx.stroke();
-      ctx.setLineDash([]);
+      const cat = /** @type {any} */ (n).category;
+      const color = this.colorOf(n);
+      if (cat === 'person' || cat === 'evidence' || cat === 'space') this.shape(n, cat, color);
+      else {
+        ctx.beginPath(); ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
+        if (n.status === 'superseded') { ctx.fillStyle = this.colors.bg; ctx.fill(); ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.stroke(); }
+        else { ctx.fillStyle = color; ctx.fill(); }
+        if (cat !== 'entity') {
+          // scope ring
+          ctx.strokeStyle = this.colors.scope[scopeCat(n.scope || 'owner')];
+          ctx.lineWidth = 1.6;
+          if (n.status === 'candidate') ctx.setLineDash([2.5, 2.5]);
+          ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 3, 0, Math.PI * 2); ctx.stroke();
+          ctx.setLineDash([]);
+        }
+      }
       if (n.id === focusId) {
         ctx.globalAlpha = 0.9; ctx.strokeStyle = this.colors.text; ctx.lineWidth = 2;
         ctx.beginPath(); ctx.arc(n.x, n.y, n.r + 7, 0, Math.PI * 2); ctx.stroke();
@@ -243,17 +256,60 @@ export class ForceGraph {
     }
     // labels
     ctx.font = `${12 / Math.max(0.8, view.k)}px ${getComputedStyle(this.canvas).fontFamily}`;
+    if (near) {
+      // relation names of the focused node's source edges (主体 / 依据 / 包含), at the midpoint
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.globalAlpha = 0.85; ctx.fillStyle = this.colors.text3;
+      for (const e of this.edges) if (e.extra && (e.s.id === focusId || e.t.id === focusId)) ctx.fillText(e.relation, (e.s.x + e.t.x) / 2, (e.s.y + e.t.y) / 2 - 6 / view.k);
+    }
     ctx.textAlign = 'center'; ctx.textBaseline = 'top';
     for (const n of this.nodes) {
-      const important = (n.importance ?? 0) >= 0.8;
+      const cat = /** @type {any} */ (n).category;
+      const important = (n.importance ?? 0) >= 0.8 || cat === 'space' || cat === 'person';
       const showLabel = n.id === focusId || (near && near.has(n.id)) || (view.k > 1.35 && this.visible(n)) || (important && view.k > 0.8 && !near);
       if (!showLabel) continue;
       ctx.globalAlpha = n.id === focusId ? 1 : 0.82;
       ctx.fillStyle = this.colors.text;
-      const t = String(n.content || '');
+      const t = String(n.content || /** @type {any} */ (n).label || '');
       ctx.fillText(t.length > 16 ? t.slice(0, 15) + '…' : t, n.x, n.y + n.r + 6);
     }
     ctx.globalAlpha = 1;
+  }
+
+  /** @param {any} n */
+  colorOf(n) {
+    if (this.opts.colorOf) return this.opts.colorOf(n);
+    if (n.category && this.colors[n.category]) return this.colors[n.category];
+    return this.colors.kind[n.kind] || this.colors.accent;
+  }
+
+  /** Source nodes: person = ring + glyph, evidence = small square, space = hexagon. @param {SimNode} n @param {string} cat @param {string} color */
+  shape(n, cat, color) {
+    const { ctx } = this;
+    const r = n.r;
+    ctx.lineWidth = 1.6;
+    ctx.strokeStyle = color;
+    if (cat === 'evidence') {
+      ctx.fillStyle = color;
+      ctx.fillRect(n.x - r, n.y - r, r * 2, r * 2);
+      return;
+    }
+    if (cat === 'space') {
+      ctx.beginPath();
+      for (let i = 0; i < 6; i++) {
+        const a = (Math.PI / 3) * i + Math.PI / 6;
+        const x = n.x + Math.cos(a) * r; const y = n.y + Math.sin(a) * r;
+        if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+      }
+      ctx.closePath();
+      ctx.fillStyle = this.colors.bg; ctx.fill(); ctx.lineWidth = 2.2; ctx.stroke();
+      ctx.beginPath(); ctx.arc(n.x, n.y, r * 0.35, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill();
+      return;
+    }
+    // person: filled disc with a head-and-shoulders glyph
+    ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill();
+    ctx.fillStyle = this.colors.bg;
+    ctx.beginPath(); ctx.arc(n.x, n.y - r * 0.28, r * 0.3, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(n.x, n.y + r * 0.62, r * 0.52, Math.PI, 0); ctx.fill();
   }
 
   /** @param {SimNode} s @param {SimNode} t */

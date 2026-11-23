@@ -226,8 +226,52 @@ export function humanize(ev) {
     case 'persona.activated': return { icon: 'user', tone: 'accent', text: '切换了人格', href: '/persona' };
     case 'persona.saved': return { icon: 'user', tone: 'muted', text: `保存了人格：${data.name || ''}`, href: '/persona' };
     case 'system.started': return { icon: 'power', tone: 'ok', text: `Whale ${data.version || ''} 已启动` };
+    case 'group.updated': return { icon: 'group', tone: 'muted', text: `群空间「${data.name || data.id || ''}」设置已更新`, href: groupHref(data.id) };
+    case 'group.refreshed': return { icon: 'sparkles', tone: 'violet', text: `整理了群「${data.name || data.id || ''}」${data.counts ? `：新增 ${data.counts.profiles_added ?? 0} 份画像、${data.counts.preferences_added ?? 0} 条喜好` : ''}`, href: groupHref(data.id) };
+    case 'group.archived': return { icon: 'group', tone: 'muted', text: `群「${data.name || data.id || ''}」存档了 ${data.count ?? 0} 条新消息`, href: groupHref(data.id) };
+    case 'setup.completed': return { icon: 'check', tone: 'ok', text: '完成了首次设置' };
     default: return { icon: 'dot', tone: 'muted', text: topic };
   }
+}
+/** @param {string} [id] */
+export function groupHref(id) { return id ? `/groups/${encodeURIComponent(id)}` : '/groups'; }
+
+// -- group memory spaces --------------------------------------------------------------------------------
+export const AUTO_REFRESH = [
+  { value: 0, label: '手动' }, { value: 30, label: '每 30 分钟' }, { value: 120, label: '每 2 小时' }, { value: 1440, label: '每天' },
+];
+/** @param {number} min */
+export function autoRefreshLabel(min) {
+  const hit = AUTO_REFRESH.find((o) => o.value === min);
+  if (hit) return hit.label;
+  return min >= 60 ? `每 ${Math.round(min / 60)} 小时` : `每 ${min} 分钟`;
+}
+export const TRAIT_KINDS = {
+  expressions: { label: '口头禅', hint: '反复出现的说法', icon: 'chat' },
+  topics: { label: '常聊', hint: '经常聊起的话题', icon: 'sparkles' },
+  scenes: { label: '典型反应', hint: '在某类场景下的典型回应', icon: 'wave' },
+};
+/** keyword type → colour token */
+export const KEYWORD_TYPES = {
+  名词: 'var(--k-fact)', 动词: 'var(--k-knowledge)', 作品名: 'var(--k-preference)', 原文短语: 'var(--k-episode)',
+  专名: 'var(--k-person)', 词组: 'var(--k-diary)',
+};
+export const EVIDENCE_REASONS = {
+  unsupported_source: '这条记忆的来源不支持查看原文',
+  source_missing: '原始消息已不在存档里（可能已被删除，或该成员已退出记录）',
+};
+/** "11-20 21:00 – 22:10" style span. @param {number} a @param {number} [b] */
+export function fmtSpan(a, b) {
+  if (!a) return '—';
+  const s = fmtTime(a);
+  if (!b || b === a) return s;
+  const sameDay = new Date(a).toDateString() === new Date(b).toDateString();
+  return `${s} – ${sameDay ? fmtTime(b, false) : fmtTime(b)}`;
+}
+/** Whole days covered by two ms timestamps (≥ 1). @param {number} a @param {number} b */
+export function daySpan(a, b) {
+  if (!a || !b) return 0;
+  return Math.max(1, Math.round((b - a) / 86400000) + 1);
 }
 /** @param {any} run */
 function runHref(run) {

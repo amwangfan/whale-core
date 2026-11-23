@@ -4,6 +4,7 @@ import { html, useEffect, useState } from '/vendor/preact-htm.js';
 import { Icon } from './icons.js';
 import { Badge, Button, AsyncButton, ConfirmButton, Field, TagEditor, Meter, Skeleton, ErrorBox, Chip, Modal, When } from './ui.js';
 import { act, toast } from '../lib/store.js';
+import { EvidenceList, evidenceIdsOf } from './evidence.js';
 import { useRpc, linkClick, navigate } from '../lib/hooks.js';
 import { KINDS, MEM_STATUS, SCOPES, scopeCat, scopeLabel, kindLabel, clip, timeAgo, fmtTime } from '../lib/format.js';
 
@@ -30,6 +31,10 @@ function Evidence({ source }) {
   if (s.autonomy || s.topic) rows.push(html`<li key="a"><${Icon} name="compass" size=${14} />自主探索${s.topic ? `「${clip(s.topic, 30)}」` : ''}</li>`);
   if (s.url) rows.push(html`<li key="u"><${Icon} name="external" size=${14} /><a href=${/^https?:\/\//.test(s.url) ? s.url : undefined} target="_blank" rel="noopener noreferrer">${clip(s.url, 60)}</a></li>`);
   if (s.manual) rows.push(html`<li key="m"><${Icon} name="edit" size=${14} />你手动添加</li>`);
+  if (s.group_id || String(s.evidence_id || s.evidence_ids?.[0] || '').startsWith('qq:group:')) {
+    const gid = s.group_id || String(s.evidence_id || s.evidence_ids[0]).split(':')[2];
+    rows.push(html`<li key="g"><${Icon} name="group" size=${14} />来自群聊 <a href=${`/groups/${encodeURIComponent('qq:' + gid)}`} onClick=${linkClick}>QQ 群 ${gid}</a>${s.subject_name ? html` · 关于 ${s.subject_name}` : null}</li>`);
+  }
   if (!rows.length && !s.quote) return html`<p class="muted small">没有记录来源。</p>`;
   return html`<div class="evidence">
     ${s.quote ? html`<blockquote class="evidence-quote">“${s.quote}”<small>原话 —— 没有原话的推断不会被记住</small></blockquote>` : null}
@@ -92,6 +97,9 @@ export function MemoryDetail({ id, onClose, onChanged }) {
 
     <h4>来源与证据</h4>
     <${Evidence} source=${it.source} />
+    ${evidenceIdsOf(it.source).length && !forgotten ? html`<h4>依据 <span class="muted">${evidenceIdsOf(it.source).length}</span></h4>
+      <p class="muted small">这条记忆是从下面这些真实消息里整理出来的（原文只保存在本机存档）：</p>
+      <${EvidenceList} memoryId=${it.id} ids=${evidenceIdsOf(it.source)} max=${3} />` : null}
 
     <h4>关系 ${links.length ? html`<span class="muted">${links.length}</span>` : null}</h4>
     ${links.length ? html`<ul class="relations">${links.map((l) => {

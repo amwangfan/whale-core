@@ -106,23 +106,41 @@ export function useEscape(open, onClose) {
 }
 
 // -- router (history API) -------------------------------------------------------------------------------
+// Hash mode (`#/memory`) is used where the history API cannot rewrite the path: file:// pages (the
+// self-contained demo) or when `globalThis.WHALE_HASH_ROUTES` is set before boot.
 const routeFns = new Set();
+function hashMode() {
+  return !!globalThis.WHALE_HASH_ROUTES || globalThis.location?.protocol === 'file:';
+}
 function currentPath() {
   const loc = globalThis.location;
-  return loc ? loc.pathname + loc.search : '/';
+  if (!loc) return '/';
+  if (hashMode()) {
+    const h = String(loc.hash || '').replace(/^#/, '');
+    return h.startsWith('/') ? h : '/';
+  }
+  return loc.pathname + loc.search;
 }
 let current = currentPath();
 
 /** @param {string} to @param {{replace?: boolean}} [opts] */
 export function navigate(to, opts = {}) {
   if (to === current) return;
-  if (opts.replace) globalThis.history?.replaceState(null, '', to);
-  else globalThis.history?.pushState(null, '', to);
+  const url = hashMode() ? '#' + to : to;
+  if (opts.replace) globalThis.history?.replaceState(null, '', url);
+  else globalThis.history?.pushState(null, '', url);
   current = to;
   routeFns.forEach((fn) => fn(to));
   globalThis.scrollTo?.(0, 0);
 }
-globalThis.addEventListener?.('popstate', () => { current = currentPath(); routeFns.forEach((fn) => fn(current)); });
+const onPop = () => {
+  const next = currentPath();
+  if (next === current) return;
+  current = next;
+  routeFns.forEach((fn) => fn(current));
+};
+globalThis.addEventListener?.('popstate', onPop);
+globalThis.addEventListener?.('hashchange', onPop);
 
 /** @param {string} path */
 export function parseRoute(path) {

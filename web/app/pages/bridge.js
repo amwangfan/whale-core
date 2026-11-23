@@ -21,9 +21,27 @@ const TILES = [
   { id: 'devices', label: '设备', icon: 'phone', href: '/devices' },
 ];
 
+/** Gentle nudge while the first-run setup has no model yet. */
+export function SetupCard() {
+  const setup = useStore((s) => s.setup);
+  if (!setup || setup.unsupported || setup.steps?.model) return null;
+  const st = setup.steps || {};
+  const steps = [['model', '选择大脑'], ['persona', '人格'], ['phone', '连接手机'], ['qq', '连接 QQ']];
+  return html`<section class="setup-card card" aria-label="完成设置">
+    <span class="setup-card-icon"><${Icon} name="wand" size=${22} /></span>
+    <div class="setup-card-main">
+      <strong>完成设置，让鲸鱼真正思考</strong>
+      <p class="muted small">还差一步：给它选一个大脑（DeepSeek、通义千问、Kimi、本机 Ollama…）。只要一分钟。</p>
+      <ol class="setup-card-steps">${steps.map(([k, l]) => html`<li key=${k} class=${st[k] ? 'is-done' : ''}><${Icon} name=${st[k] ? 'check' : 'dot'} size=${12} />${l}</li>`)}</ol>
+    </div>
+    <${Button} variant="primary" icon="chevron" href="/setup">继续设置<//>
+  </section>`;
+}
+
 export function ModelsOfflineBanner() {
   const offline = useStore((s) => !!s.status?.models?.offline);
-  if (!offline) return null;
+  const setupCard = useStore((s) => !!s.setup && !s.setup.unsupported && !s.setup.steps?.model);
+  if (!offline || setupCard) return null;
   return html`<div class="banner banner-warn" role="status">
     <${Icon} name="alert" />
     <div><strong>还没有配置对话模型</strong><p>鲸鱼现在只能用离线脑回答。去 设置 → 模型 添加一个 OpenAI 兼容服务（如 DeepSeek、通义、Ollama），它就能真正思考了。</p></div>
@@ -242,6 +260,7 @@ export function BridgePage() {
   const activity = useStore((s) => s.activity);
   const conn = useStore((s) => s.conn);
   return html`<div class="page bridge">
+    <${SetupCard} />
     <${ModelsOfflineBanner} />
     <div class="bridge-grid">
       <div class="bridge-main">

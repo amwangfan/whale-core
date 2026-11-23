@@ -7,8 +7,9 @@ import { html, useEffect, useState } from '/vendor/preact-htm.js';
 import { Icon } from '../components/icons.js';
 import { Badge, Button, AsyncButton, Card, ConfirmButton, Field, Meter, PageHead, Skeleton, Switch, TagEditor, ErrorBox, Segmented, cx, When } from '../components/ui.js';
 import { ActivityStream } from '../components/live.js';
+import { NetworkPanel, useRestart, RestartState } from '../components/network.js';
 import { act, tryAct, useTopic, useStore, applyTheme, logout, store } from '../lib/store.js';
-import { useRpc, linkClick } from '../lib/hooks.js';
+import { useRpc, linkClick, navigate } from '../lib/hooks.js';
 import { fmtUptime, timeAgo, CLIENT_ROLES } from '../lib/format.js';
 
 const SECTIONS = [
@@ -216,13 +217,23 @@ function ServiceCard() {
   const status = useStore((s) => s.status);
   const theme = useStore((s) => s.theme);
   const conn = useStore((s) => s.conn);
+  const setup = useStore((s) => s.setup);
   const clients = useRpc('link.clients');
+  const restart = useRestart(() => clients.reload(true));
   useTopic('clients.changed', (ev) => clients.setData({ clients: ev.data.clients || [] }));
   return html`<${Card} id="service" title="服务" icon="power">
     <dl class="kv kv-meta">
       <div><dt>版本</dt><dd>Whale ${status?.version || '—'}</dd></div><div><dt>Python</dt><dd>${status?.python || '—'}</dd></div>
       <div><dt>已运行</dt><dd>${status ? fmtUptime(status.uptime_s) : '—'}</dd></div><div><dt>实时连接</dt><dd>${conn === 'online' ? '正常' : conn}</dd></div>
     </dl>
+    <div class="inline-form">
+      <${ConfirmButton} variant="soft" icon="power" confirmText="确定重启？正在进行的回复会中断" disabled=${restart.phase === 'restarting'} onConfirm=${restart.start}>重启服务<//>
+      <${Button} variant="ghost" icon="wand" onClick=${() => navigate('/setup')}>重新运行引导<//>
+      ${setup && !setup.completed && !setup.unsupported ? html`<${Badge} tone="warn">首次设置还没完成<//>` : null}
+    </div>
+    <${RestartState} phase=${restart.phase} />
+    <h4>手机连接</h4>
+    <${NetworkPanel} confirmRestart />
     <h4>已连接的客户端</h4>
     ${clients.data ? html`<ul class="mini-list">${clients.data.clients.map((c) => html`<li key=${c.id}><strong>${c.name}</strong><${Badge} tone="info">${CLIENT_ROLES[c.role] || c.role}<//>
       <span class="muted small"><${When} ms=${c.connected_at} fmt=${timeAgo} /></span></li>`)}</ul>` : html`<${Skeleton} rows=${2} />`}
@@ -236,7 +247,8 @@ function ServiceCard() {
 
 export function SettingsPage({ route }) {
   const res = useRpc('config.get');
-  const [cfg, setCfg] = useState(/** @type {any} */ (null));
+  const [cfgLocal, setCfg] = useState(/** @type {any} */ (null));
+  const cfg = cfgLocal || res.data;
   useEffect(() => { if (res.data) setCfg(res.data); }, [res.data]);
   useTopic('config.changed', () => res.reload(true));
   const section = route.id || '';

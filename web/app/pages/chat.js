@@ -173,7 +173,7 @@ export function ChatPage({ route }) {
   const msgs = useRpc(convId ? 'conversations.messages' : null, { id: convId, limit: 120 }, [convId]);
   const [pending, setPending] = useState(/** @type {any} */ (null));
   const [images, setImages] = useState(/** @type {string[]} */ ([]));
-  const [trace, setTrace] = useState('');
+  const [trace, setTrace] = useState(route.query.trace || '');
   const [sendErr, setSendErr] = useState('');
   const [editing, setEditing] = useState('');
   const [settling, setSettling] = useState('');
@@ -204,7 +204,7 @@ export function ChatPage({ route }) {
     } else convs.reload(true);
   });
 
-  useEffect(() => { setTrace(''); setSendErr(''); setSettling(''); }, [convId]);
+  useEffect(() => { setTrace(route.query.trace || ''); setSendErr(''); setSettling(''); }, [convId]); // ?trace=<run_id> opens the drawer
   useEffect(() => {
     const el = scroller.current;
     if (el) el.scrollTop = el.scrollHeight;

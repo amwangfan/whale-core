@@ -9,6 +9,7 @@ import { Icon } from '../components/icons.js';
 import { Badge, Button, AsyncButton, Card, Chip, ConfirmButton, Empty, Field, PageHead, Segmented, Skeleton, Switch, ErrorBox, Modal, cx, When, Disclosure } from '../components/ui.js';
 import { Phone, BatteryGauge, appName } from '../components/phone.js';
 import { PrivacyPanel } from '../components/device-privacy.js';
+import { PhoneAddressHint } from '../components/network.js';
 import { act, tryAct, useTopic, toast } from '../lib/store.js';
 import { useRpc, navigate, linkClick, useNow, useDebouncedCallback } from '../lib/hooks.js';
 import { DEVICE_ROLES, CLIENT_ROLES, FILTER_REASONS, timeAgo, fmtTime, clip, brief } from '../lib/format.js';
@@ -45,12 +46,14 @@ function DeviceCard({ d, selected }) {
 function PairCard({ autoStart, onApproved }) {
   const [code, setCode] = useState(/** @type {any} */ (null));
   const [name, setName] = useState('');
+  const net = useRpc('system.network');
   const now = useNow(1000);
   const start = async () => setCode(await act('devices.pair_start', { name: name.trim(), ttl_s: 600 }));
   useEffect(() => { if (autoStart) start().catch(() => {}); }, [autoStart]);
   useTopic('device.paired', (ev) => { if (code) { toast({ kind: 'ok', title: `已配对：${ev.data.device?.name || '新设备'}` }); setCode(null); onApproved(); } });
   const left = code ? Math.max(0, Math.round((code.expires_at - now) / 1000)) : 0;
   return html`<${Card} title="配对新设备" icon="link" class="pair-card" subtitle="手机安装 whale-mobile 后，在 App 里输入这个 6 位码。配对使用 Ed25519 设备身份，码只能用一次。">
+    ${net.data ? html`<${PhoneAddressHint} net=${net.data} />` : null}
     ${code && left > 0 ? html`<div class="pair-code" aria-live="polite">
       <div class="pair-digits" aria-label=${'配对码 ' + code.code.split('').join(' ')}>${code.code.split('').map((c, i) => html`<span key=${i}>${c}</span>`)}</div>
       <div class="pair-timer"><span class="pair-ring" style=${{ '--p': left / (code.ttl_s || 600) }}></span>${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')} 后过期</div>
