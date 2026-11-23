@@ -1,0 +1,62 @@
+/* Polish（视觉增量层，2026-11-24）：只叠加质感与微交互——不动布局、不动 IA。
+   全部规则后置同优先级覆盖，整文件可单独回滚。动效受全局 reduced-motion 约束。 */
+
+:root {
+  /* 顶缘高光色：深色给冷光，浅色给纸感 */
+  --card-hi: rgba(255, 255, 255, .055);
+  --card-hi-strong: rgba(255, 255, 255, .085);
+}
+:root[data-theme="light"], :root[data-theme="auto"].prefers-light {
+  --card-hi: rgba(255, 255, 255, .75);
+  --card-hi-strong: rgba(255, 255, 255, .95);
+}
+
+/* 1. 玻璃面顶缘高光：浮层有厚度（各自阴影层级保持不变；is-active/is-focus 的
+      更高优先级阴影不受影响） */
+.card, .peer, .chat-main, .hero, .cap, .plugin, .persona-card {
+  box-shadow: inset 0 1px 0 var(--card-hi), var(--shadow-1);
+}
+.login-card, .modal, .drawer, .tray-panel, .palette, .toast {
+  box-shadow: inset 0 1px 0 var(--card-hi-strong), var(--shadow-2);
+}
+
+/* 2. 滚动条悬停提亮（WebKit；Firefox 的 scrollbar-color 无悬停态，忽略） */
+*::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--accent) 55%, var(--border-strong));
+  background-clip: padding-box;
+}
+
+/* 3. 导航激活指示条：生长入场（替换突兀的瞬时出现） */
+.nav-item.is-active::before { animation: navBarIn var(--t) var(--ease-spring); }
+@keyframes navBarIn { from { transform: scaleY(.2); opacity: 0; } to { transform: scaleY(1); opacity: 1; } }
+
+/* 4. 对话输入区：玻璃悬浮感 */
+.composer { backdrop-filter: blur(var(--glass-blur)); -webkit-backdrop-filter: blur(var(--glass-blur)); }
+
+/* 5. 助手气泡：顶亮底稳的极浅纵向渐变，增加层次（双色自适应深浅主题） */
+.msg-assistant .msg-bubble {
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--panel-solid) 96%, var(--text) 4%), var(--panel-solid));
+}
+
+/* 6. 总览 hero 环境光：缓慢漂移，页面更有生气 */
+.hero::after { animation: heroDrift 14s ease-in-out infinite alternate; }
+@keyframes heroDrift {
+  from { transform: translate3d(0, 0, 0) scale(1); }
+  to { transform: translate3d(-28px, -18px, 0) scale(1.12); }
+}
+
+/* 7. 可交互磁贴：悬停微浮（flex 过渡保持不变，只追加 transform） */
+.peer { transition: flex-grow var(--t-slow) var(--ease), flex-basis var(--t-slow) var(--ease),
+  border-color var(--t), box-shadow var(--t), transform var(--t) var(--ease); }
+.peer:hover { transform: translateY(-2px); }
+
+/* 8. 实时活动行：悬停时图标轻轻一跳 */
+.act-icon { transition: transform var(--t-fast) var(--ease-spring); }
+.act-row:hover .act-icon { transform: scale(1.1); }
+
+/* 9. 大数字：文字渐变，指标更有光泽 */
+.tile-big {
+  background: linear-gradient(180deg, var(--text), color-mix(in srgb, var(--text) 68%, var(--accent) 32%));
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
