@@ -34,6 +34,7 @@ log = logging.getLogger("whale")
 class App:
     def __init__(self, data_dir: str | Path | None = None, config: dict[str, Any] | None = None) -> None:
         from .devices import DeviceService  # registers migrations
+        from .groups import GroupService    # registers migrations（须在下方 db.migrate() 前导入）
         from .server import api
 
         self.version = __version__
@@ -70,7 +71,6 @@ class App:
         self.plugins = PluginManager(self)
         self.devices = DeviceService(self)
         self.channels = Channels(self)
-        from .groups import GroupService
         from .setup import Setup
 
         self.groups = GroupService(self)

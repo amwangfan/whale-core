@@ -21,22 +21,43 @@ from helpers import make_app, scripted
 WEQ_CFG = {"kind": "qq", "backend": "weq", "weq_web_url": "http://127.0.0.1:19000",
            "owner_qq": "10001", "bot_qq": "99999", "bot_uid": "u_bot",
            "accept_group": True, "allowed_groups": ["777"], "bubble_delay_ms": 0,
-           "group_mode": "mention", "judge_interval_s": 0, "smart_cooldown_s": 120}
+           "group_mode": "mention", "judge_interval_s": 0, "smart_cooldown_s": 120,
+           "fullmode_grace_s": 0}
 
 
 class FakeWeQWeb:
-    """WeQ 内置 Web tRPC 的假实现：登录发 cookie，发送记调用，回执带真 sequence。"""
+    """WeQ 内置 Web tRPC 的假实现：登录发 cookie，发送记调用，回执带真 sequence。
+    完整模式窗口：默认就绪（allowed=ready=True）；setAutoAttachQq 写 False 后变关窗态。"""
 
     def __init__(self):
         self.sent = []
         self.seq = 0
         self.fail = None
         self.brief_calls = 0
+        self.fm_allowed = True
+        self.fm_ready = True
+        self.fm_attach_calls = []       # setAutoAttachQq 的 enabled 序列
+        self.fm_state_calls = 0
+        self.fm_fail_attach = False     # True → setAutoAttachQq 回 500
+        self.fm_never_ready = False     # True → attach 后 ready 仍 False（就绪超时场景）
 
     def handler(self, request):
         path = request.url.path
         if path == "/_auth/login":
             return httpx.Response(200, json={"ok": True}, headers={"set-cookie": "weq_session=s1; Path=/"})
+        if path == "/trpc/bootstrap.getFullModeState":
+            self.fm_state_calls += 1
+            return httpx.Response(200, json={"result": {"data": {"json": {
+                "allowed": self.fm_allowed, "ready": self.fm_ready}}}})
+        if path == "/trpc/bootstrap.setAutoAttachQq":
+            body = json.loads(request.content)
+            if self.fm_fail_attach:
+                return httpx.Response(500, json={"error": {"json": {"message": "boom"}}})
+            enabled = bool(body["json"]["enabled"])
+            self.fm_attach_calls.append(enabled)
+            self.fm_allowed = enabled
+            self.fm_ready = enabled and not self.fm_never_ready
+            return httpx.Response(200, json={"result": {"data": {"json": {"ok": True}}}})
         if path == "/trpc/account.memberBriefs":
             self.brief_calls += 1
             return httpx.Response(200, json={"result": {"data": {"json": {"members": [
@@ -237,6 +258,144 @@ class WeQChannelTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("qq:owner", delivered)
         self.assertEqual(self.weq.texts(), ["【提醒】该喝水了"])
         await self.teardown()
+
+
+class WeQFullModeWindowTests(unittest.IsolatedAsyncioTestCase):
+    """按需完整模式窗口纪律：发时开窗、空闲关窗、开窗失败不阻断、state_file 跨进程协调。"""
+
+    async def setup_weq(self, tmp, **extra):
+        cfg = {**WEQ_CFG, "fullmode_state_file": str(tmp / "w.ts"), **extra, "enabled": True}
+        self.app = make_app(channels={"qq": cfg})
+        self.app.config.set_secret("channel.qq.access_token", "weq-tok")
+        self.weq = FakeWeQWeb()
+        self.app.http_transport = httpx.MockTransport(self.weq.handler)
+        self.app.memory.start()
+        await self.app.channels.start()
+        return self.app.channels.get("qq")
+
+    async def teardown(self):
+        await self.app.channels.stop()
+        await self.app.memory.stop()
+        self.app.db.close()
+
+    async def test_startup_baseline_close(self):
+        tmp = self._mk_tmp()
+        ch = await self.setup_weq(tmp)
+        self.assertEqual(self.weq.fm_attach_calls, [False])     # 启动即基线关窗（幂等）
+        self.assertFalse((tmp / "w.ts").exists())
+        self.assertIsNotNone(ch._closer_task)
+        st = (await self.app.rpc.call("channels.list", {}))["channels"][0]
+        self.assertEqual(st["fullmode"]["opens"], 0)
+        await self.teardown()
+
+    async def test_send_auto_opens_window_then_reuses(self):
+        tmp = self._mk_tmp()
+        ch = await self.setup_weq(tmp)
+        self.weq.fm_attach_calls.clear()
+        scripted(self.app, "在的主人～")
+        ev = weq_event_to_qq(c2c(), bot_uin="99999", bot_uid="u_bot", accept_group=True,
+                             allowed_groups=frozenset())
+        self.assertEqual(await ch.ingest(ev), "replied")
+        self.assertEqual(self.weq.fm_attach_calls, [True])      # 发送触发开窗
+        self.assertTrue((tmp / "w.ts").exists())                # 落 state_file
+        self.assertEqual(self.weq.texts(), ["在的主人～"])
+        self.assertEqual(ch.win_opens, 1)
+        # 第二次发送：窗口已就绪，不重复开
+        self.app.models.overrides["chat"].script.append("还在")
+        await ch.ingest(weq_event_to_qq(c2c(mid="m2"), bot_uin="99999", bot_uid="u_bot",
+                                        accept_group=True, allowed_groups=frozenset()))
+        self.assertEqual(self.weq.fm_attach_calls, [True])
+        self.assertEqual(ch.win_opens, 1)
+        await self.teardown()
+
+    async def test_open_failure_does_not_block_send(self):
+        tmp = self._mk_tmp()
+        ch = await self.setup_weq(tmp)
+        self.weq.fm_fail_attach = True                          # 开窗一律 500
+        res = await ch.send_text("group", "777", "", "大家好")
+        self.assertEqual(res["status"], "ok")                   # 红线：开窗失败不阻断发送
+        self.assertEqual(ch.win_open_errors, 1)
+        self.assertEqual(len(self.weq.sent), 1)
+        self.assertTrue((tmp / "w.ts").exists())                # 失败发送也 touch 续期
+        await self.teardown()
+
+    async def test_ready_timeout_still_sends(self):
+        tmp = self._mk_tmp()
+        ch = await self.setup_weq(tmp, fullmode_ready_timeout_s=0.05)
+        self.weq.fm_never_ready = True
+        res = await ch.send_text("group", "777", "", "还在吗")
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(ch.win_open_errors, 1)
+        self.assertEqual(len(self.weq.sent), 1)
+        await self.teardown()
+
+    async def test_closer_closes_after_idle(self):
+        tmp = self._mk_tmp()
+        ch = await self.setup_weq(tmp, fullmode_idle_min=10)
+        await ch.send_text("group", "777", "", "大家好")
+        self.assertTrue((tmp / "w.ts").exists())
+        now = time.time()
+        # 未越 idle：不关
+        self.assertFalse(await ch._window_closer_step(now + 60))
+        self.assertTrue((tmp / "w.ts").exists())
+        # 越过 idle：关窗 + 清 state_file
+        self.assertTrue(await ch._window_closer_step(now + 601))
+        self.assertEqual(self.weq.fm_attach_calls[-1], False)
+        self.assertFalse((tmp / "w.ts").exists())
+        self.assertEqual(ch.win_closes, 1)
+        # 已关：幂等不再关
+        self.assertFalse(await ch._window_closer_step(now + 1200))
+        self.assertEqual(ch.win_closes, 1)
+        await self.teardown()
+
+    async def test_closer_respects_fresh_touch_from_elsewhere(self):
+        tmp = self._mk_tmp()
+        ch = await self.setup_weq(tmp, fullmode_idle_min=10)
+        await ch.send_text("group", "777", "", "大家好")
+        later = time.time() + 500                               # 模拟另一进程刚 touch 过
+        (tmp / "w.ts").write_text(str(int(later)), encoding="ascii")
+        self.assertFalse(await ch._window_closer_step(later + 60))
+        self.assertTrue((tmp / "w.ts").exists())
+        await self.teardown()
+
+    async def test_corrupt_state_file_is_safe(self):
+        tmp = self._mk_tmp()
+        ch = await self.setup_weq(tmp, fullmode_idle_min=10)
+        (tmp / "w.ts").write_text("junk", encoding="ascii")
+        self.assertEqual(ch.window.last_send_epoch(), 0.0)      # 损坏 → 0 不抛
+        self.assertTrue(await ch._window_closer_step(time.time() + 601))
+        await self.teardown()
+
+    async def test_ondemand_disabled_sends_directly(self):
+        tmp = self._mk_tmp()
+        ch = await self.setup_weq(tmp, fullmode_ondemand=False)
+        self.assertIsNone(ch.window)
+        res = await ch.send_text("group", "777", "", "大家好")
+        self.assertEqual(res["status"], "ok")
+        self.assertEqual(self.weq.fm_attach_calls, [])           # 零窗口调用（旧行为）
+        self.assertFalse((tmp / "w.ts").exists())
+        await self.teardown()
+
+    async def test_token_hygiene_in_state_and_errors(self):
+        tmp = self._mk_tmp()
+        ch = await self.setup_weq(tmp)
+        await ch.send_text("group", "777", "", "大家好")
+        content = (tmp / "w.ts").read_text(encoding="ascii")
+        self.assertTrue(content.strip().isdigit())               # state_file 只有 epoch
+        self.assertNotIn("weq-tok", content)
+        self.weq.fm_fail_attach = True
+        self.weq.fm_allowed = False
+        self.weq.fm_ready = False
+        res = await ch.send_text("group", "777", "", "再来")
+        self.assertNotIn("weq-tok", res.get("error", ""))
+        await self.teardown()
+
+    def _mk_tmp(self):
+        import tempfile as tf
+        from pathlib import Path
+        d = tf.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
 
 
 class WeQWebhookTests(unittest.TestCase):
