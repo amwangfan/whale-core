@@ -186,6 +186,13 @@ class ChannelManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res.status, "error")
         await self.teardown()
 
+    async def test_group_send_exempt_from_approval_by_owner_decree(self):
+        """主人令 2026-11-24：群发送免审核（write→allow）；私聊维持 external→ask 不动。"""
+        await self.setup_channel()
+        self.assertEqual(self.app.policy.decide(self.app.capabilities.get("qq.send_group")), "allow")
+        self.assertEqual(self.app.policy.decide(self.app.capabilities.get("qq.send_private")), "ask")
+        await self.teardown()
+
     async def test_notifier_and_close_cleanup(self):
         await self.setup_channel()
         delivered = await self.app.hub.notify("提醒", "该喝水了", {})

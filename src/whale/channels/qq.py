@@ -204,6 +204,8 @@ class QQChannel(Channel):
         self.bubble_delay = max(0, int(cfg.get("bubble_delay_ms", 800) or 0)) / 1000
         self.join_cooldown = float(cfg.get("smart_cooldown_s", 120) or 0)
         self.judge_interval = float(cfg.get("judge_interval_s", 15) or 0)
+        # 判官整体超时：推理模型在平台繁忙时流式生成可能 >12s（生产实证 5 连 TimeoutError），放宽到 25s
+        self.judge_timeout = float(cfg.get("judge_timeout_s", 25) or 25)
         self.seen: OrderedDict[str, None] = OrderedDict()
         self.history: dict[str, deque[tuple[str, str]]] = {}
         self.last_judge: dict[str, float] = {}
@@ -249,9 +251,10 @@ class QQChannel(Channel):
             return _receipt_result(await self.send_private_by_uin(str(args["user_id"]), str(args["text"])),
                                    "私聊")
 
+        # 主人令 2026-11-24：群消息免审核（write→默认 allow）；私聊维持 external→ask 不动
         @sink.capability("qq.send_group", "在 QQ 群里发一条消息。", params=obj(
             ["group_id", "text"], group_id=i("群号"), text=s("消息内容")),
-            risk="external", title="QQ 群消息", modes=("chat", "goal"), timeout_s=60, owner_only=True)
+            risk="write", title="QQ 群消息", modes=("chat", "goal"), timeout_s=60, owner_only=True)
         async def send_group(args: dict[str, Any], ctx: Any) -> Any:
             gid = str(args["group_id"])
             if self.allowed_groups and gid not in self.allowed_groups:
@@ -388,7 +391,8 @@ class QQChannel(Channel):
             # openai_compat 的 400 降级兜住（去掉重试，行为同不下发）。
             out = await asyncio.wait_for(model.complete(
                 [Message("system", JUDGE_SYSTEM.replace("<NAME>", name)), Message("user", prompt)],
-                json_mode=True, temperature=0, max_tokens=200, reasoning_effort="minimal"), 12)
+                json_mode=True, temperature=0, max_tokens=200, reasoning_effort="minimal"),
+                self.judge_timeout)
             data = parse_json_loose(out.text)
             decision = str(data.get("decision") or "").strip().lower() if isinstance(data, dict) else ""
         except Exception as exc:
