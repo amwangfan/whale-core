@@ -32,6 +32,8 @@ from .base import Channel
 MAX_TEXT = 4000
 
 MAX_BUBBLE = 1500
+GROUP_HISTORY_MAX = 20            # 每群最近消息缓冲深度（判官取 12、背景取 10，语义不变）
+GROUP_HISTORY_NS = "qq_group_history"   # kv 命名空间：群缓冲持久化（按 gid 严格隔离）
 DEDUPE_SIZE = 4000
 
 PRIVATE_GUIDE = ("## QQ 私聊\n你在 QQ 上聊天。QQ 不渲染 Markdown：不要用标题、加粗、表格，"
@@ -239,9 +241,38 @@ class QQChannel(Channel):
     def _learn_identity(self, ev: "QQEvent") -> None:
         """backend 钩子：从入站事件学习身份映射（WeQ 的 uin↔uid）。缺省无操作。"""
 
+    # -- 群缓冲持久化（主人令 2026-11-24：重启不再丢「最近群聊背景」；语义不变：20 深/用时截 120 字） ----
+    def _restore_history(self) -> None:
+        """启动时从 kv 恢复各群缓冲；损坏条目跳过、整体失败从空开始，不阻断渠道上线。"""
+        try:
+            stored = self.app.db.kv_all(GROUP_HISTORY_NS)
+        except Exception as exc:
+            self.log.warning("qq 群缓冲恢复失败（从空开始）：%s", repr(exc)[:120])
+            return
+        for gid, rec in stored.items():
+            items = rec.get("items") if isinstance(rec, dict) else None
+            if not isinstance(items, list):
+                continue
+            dq: deque[tuple[str, str]] = deque(maxlen=GROUP_HISTORY_MAX)
+            for item in items[-GROUP_HISTORY_MAX:]:
+                if isinstance(item, (list, tuple)) and len(item) == 2:
+                    dq.append((str(item[0]), str(item[1])))
+            if dq:
+                self.history[str(gid)] = dq
+
+    def _note_group_message(self, gid: str, nick: str, text: str) -> None:
+        """进群缓冲并落 kv；持久化失败降级为纯内存（行为同旧版），绝不阻断回复。"""
+        dq = self.history.setdefault(gid, deque(maxlen=GROUP_HISTORY_MAX))
+        dq.append((nick, text))
+        try:
+            self.app.db.kv_set(GROUP_HISTORY_NS, gid, {"items": list(dq)})
+        except Exception as exc:
+            self.log.warning("qq 群缓冲持久化失败（仅内存）：%s", repr(exc)[:120])
+
     # -- 生命周期 ---------------------------------------------------------------------------
     async def open(self) -> None:
         await super().open()
+        self._restore_history()
         sink = self.sink
         if sink is None:
             raise WhaleError("internal", "QQChannel needs a sink to register its surface")
@@ -328,16 +359,16 @@ class QQChannel(Channel):
             return "skip:group_off"
         if self.allowed_groups and gid not in self.allowed_groups:
             return "skip:not_allowed"
-        history = self.history.setdefault(gid, deque(maxlen=20))
+        history = self.history.setdefault(gid, deque(maxlen=GROUP_HISTORY_MAX))
         text = ev.text or ("[图片]" if ev.images else "")
         directed = ev.mentioned or ev.reply_to_bot
         if not directed:
             if self.group_mode != "smart":
-                history.append((nick, text))
+                self._note_group_message(gid, nick, text)
                 return "skip:not_mentioned"
             verdict = await self.judge(gid, nick, text, list(history))
             if verdict != "reply":
-                history.append((nick, text))
+                self._note_group_message(gid, nick, text)
                 return f"skip:{verdict}"
         if not text:
             return "skip:empty"
@@ -347,7 +378,7 @@ class QQChannel(Channel):
         extra = GROUP_GUIDE + (f"\n\n最近的群聊（只作背景）：\n{context}" if context else "")
         if not directed:
             extra += "\n\n" + JOIN_NOTE
-        history.append((nick, text))
+        self._note_group_message(gid, nick, text)
         body = await self.quoted_text(ev) + f"{nick}：{text}"
         cid = f"qq:group:{gid}"
         self.app.conversations.ensure(cid, channel="qq", peer=f"qq:group:{gid}", title=f"QQ 群 {gid}")
@@ -362,7 +393,7 @@ class QQChannel(Channel):
         result = await self._deliver(out.text, "group", ev, reply_to=ev.message_id if directed else "",
                                      nick=nick)
         if result == "replied":
-            history.append(("我", out.text))
+            self._note_group_message(gid, "我", out.text)
         return result
 
     async def _deliver(self, text: str, kind: str, ev: QQEvent, reply_to: str = "",

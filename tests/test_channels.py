@@ -193,6 +193,68 @@ class ChannelManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.app.policy.decide(self.app.capabilities.get("qq.send_private")), "ask")
         await self.teardown()
 
+    async def test_group_history_persisted_and_restored_after_restart(self):
+        """主人令 2026-11-24：群缓冲落 kv，重启（同数据目录新 App）后恢复；群间严格隔离。"""
+        import tempfile
+
+        from whale.app import App
+        cfg = {"channels": {"qq": dict(QQ_CFG, enabled=True)}}
+        with tempfile.TemporaryDirectory() as td:
+            app1 = App(td, cfg)
+            app1.config.set_secret("channel.qq.access_token", "tok")
+            app1.memory.start()
+            await app1.channels.start()
+            ch1 = app1.channels.get("qq")
+            await ch1.handle_event(group("777", "30003", "第一条", mid=1))
+            await ch1.handle_event(group("777", "30003", "第二条", mid=2))
+            await ch1.handle_event(group("888", "30004", "别群的话", mid=3))
+            stored = app1.db.kv_all("qq_group_history")                      # 存
+            self.assertEqual([t for _, t in stored["777"]["items"]], ["第一条", "第二条"])
+            self.assertEqual([t for _, t in stored["888"]["items"]], ["别群的话"])
+            await app1.channels.stop()
+            await app1.memory.stop()
+            app1.db.close()
+            # 重启：新 App 同数据目录 → open 时恢复
+            app2 = App(td, cfg)
+            app2.config.set_secret("channel.qq.access_token", "tok")
+            app2.memory.start()
+            await app2.channels.start()
+            ch2 = app2.channels.get("qq")
+            self.assertEqual([t for _, t in ch2.history["777"]], ["第一条", "第二条"])
+            self.assertEqual([t for _, t in ch2.history["888"]], ["别群的话"])
+            self.assertNotIn("999", ch2.history)                             # 无消息群不存在缓冲
+            self.assertEqual(ch2.history["777"].maxlen, 20)                  # 深度语义不变
+            await app2.channels.stop()
+            await app2.memory.stop()
+            app2.db.close()
+
+    async def test_group_history_capped_at_20(self):
+        """20 深封顶：最旧挤出，kv 与内存一致。"""
+        channel = await self.setup_channel()
+        for n in range(25):
+            await channel.handle_event(group("777", "30003", f"消息{n}", mid=100 + n))
+        items = self.app.db.kv_get("qq_group_history", "777")["items"]
+        self.assertEqual(len(items), 20)
+        self.assertEqual(items[0][1], "消息5")                               # 最旧五条已挤出
+        self.assertEqual(items[-1][1], "消息24")
+        self.assertEqual(len(channel.history["777"]), 20)
+        await self.teardown()
+
+    async def test_group_history_restore_tolerates_corruption(self):
+        """损坏条目跳过：好行留下、坏行丢弃、坏群不留，绝不阻断上线。"""
+        self.app = make_app(channels={"qq": dict(QQ_CFG, enabled=True)})
+        self.app.config.set_secret("channel.qq.access_token", "tok")
+        self.app.db.kv_set("qq_group_history", "777", {"items": "not-a-list"})
+        self.app.db.kv_set("qq_group_history", "888", {"items": [["群友A", "好"], ["坏行"], ["群友A", "行"]]})
+        self.bot = FakeOneBot()
+        self.app.http_transport = httpx.MockTransport(self.bot.handler)
+        self.app.memory.start()
+        await self.app.channels.start()
+        channel = self.app.channels.get("qq")
+        self.assertNotIn("777", channel.history)
+        self.assertEqual([t for _, t in channel.history["888"]], ["好", "行"])
+        await self.teardown()
+
     async def test_notifier_and_close_cleanup(self):
         await self.setup_channel()
         delivered = await self.app.hub.notify("提醒", "该喝水了", {})
