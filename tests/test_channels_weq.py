@@ -215,18 +215,35 @@ class WeQChannelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(res["status"], "unknown")        # 超时=可能已发出，不重试
         await self.teardown()
 
-    async def test_group_mention_replies_with_at(self):
+    async def test_group_reply_at_is_model_choice(self):
+        """主人令 2026-11-24：群回复默认不 @；模型开头写「@发送者昵称」才真 @（前缀剥掉）。"""
         ch = await self.setup_weq()
-        scripted(self.app, "我在！")
+        scripted(self.app, "我在！")                       # 没写 @昵称 → 默认不 @
         ev = weq_event_to_qq(group_msg(), bot_uin="99999", bot_uid="u_bot", accept_group=True,
                              allowed_groups=frozenset({"777"}))
         self.assertEqual(await ch.ingest(ev), "replied")
         body = self.weq.sent[0]
         self.assertEqual(body["peerType"], "group")
-        self.assertEqual(body["elements"][0]["kind"], "at")
-        self.assertEqual(body["elements"][0]["atTargetUid"], "u_30003")
+        self.assertEqual(body["elements"][0]["kind"], "text")
+        self.assertEqual(body["elements"][0]["textContent"], "我在！")
+        self.assertEqual([e["kind"] for e in body["elements"]], ["text"])
         conv = self.app.conversations.get("qq:group:777")
         self.assertEqual(conv["channel"], "qq")
+        # 模型选择 @：开头写对发送者昵称 → at 元素 + 正文剥前缀
+        self.app.models.overrides["chat"].script.append("@群名片A 听到啦")
+        await ch.ingest(weq_event_to_qq(group_msg(mid="g2"), bot_uin="99999", bot_uid="u_bot",
+                                        accept_group=True, allowed_groups=frozenset({"777"})))
+        body2 = self.weq.sent[-1]
+        self.assertEqual(body2["elements"][0]["kind"], "at")
+        self.assertEqual(body2["elements"][0]["atTargetUid"], "u_30003")
+        self.assertEqual(body2["elements"][1], {"kind": "text", "textContent": "听到啦"})
+        # 模型 @ 了别人（非本条发送者）：不伪造 @，原文照发
+        self.app.models.overrides["chat"].script.append("@阿杰 说得对")
+        await ch.ingest(weq_event_to_qq(group_msg(mid="g3"), bot_uin="99999", bot_uid="u_bot",
+                                        accept_group=True, allowed_groups=frozenset({"777"})))
+        body3 = self.weq.sent[-1]
+        self.assertEqual([e["kind"] for e in body3["elements"]], ["text"])
+        self.assertEqual(body3["elements"][0]["textContent"], "@阿杰 说得对")
         await self.teardown()
 
     async def test_name_directory_via_member_briefs(self):
