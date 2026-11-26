@@ -143,9 +143,9 @@ class CallCapabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(spec.owner_only)                                # 只准主人被叫
         res = await app.capabilities.invoke("phone.call.start", {}, ToolContext(app=app))
         self.assertEqual(res.status, "ok")
-        q = parse_qs(self.hub.calls[0].url.query.decode())
+        q = parse_qs(self.hub.calls[0].url.query.decode(), keep_blank_values=True)
         self.assertEqual(q["device_id"], ["dev-test-01"])
-        self.assertEqual(q["name"], ["鲸鱼"])                            # 默认来电显示名=智能体名
+        self.assertEqual(q["name"], [""])   # 主人令 2026-11-26：默认匿名——空名恒传（hub 门：未传→AI 助手/显式空→匿名）
         await self.teardown()
 
     async def test_call_start_queued_is_unknown(self):

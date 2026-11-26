@@ -251,11 +251,11 @@ class DeviceService:
 
     def _register_call_bridge(self) -> None:
         @capability(self.app.capabilities, "phone.call.start",
-                    "给主人手机打一通鲸鱼 VoIP 来电（接听即与鲸鱼通话）。",
-                    params=obj(name=str_param("来电显示名（默认鲸鱼）")),
+                    "给主人手机打一通鲸鱼 VoIP 来电（接听即与鲸鱼通话）。来电匿名显示（不显名称）。",
+                    params=obj(name=str_param("来电显示名（默认空=匿名不显名）")),
                     risk=Risk.external, title="打电话给主人", group="phone", owner_only=True)
         async def phone_call_start(args: dict[str, Any], ctx: ToolContext) -> Any:
-            name = str(args.get("name") or self.app.config.value.agent.name)
+            name = str(args.get("name") or "")           # 主人令 2026-11-26：默认匿名（空名恒传）
             return await self.call_start(name)
 
         @capability(self.app.capabilities, "phone.call.stop",

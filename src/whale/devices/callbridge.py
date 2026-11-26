@@ -79,10 +79,9 @@ class BridgeSignalClient:
         return {"Authorization": f"Bearer {self._token}"}
 
     async def ring(self, device_id: str, *, name: str = "", number: str = "") -> dict[str, Any]:
-        """触发 device_id 手机的「鲸鱼来电」。返回 accept_ring_outcome 三态。"""
-        params = {"device_id": device_id}
-        if name:
-            params["name"] = name
+        """触发 device_id 手机的「鲸鱼来电」。返回 accept_ring_outcome 三态。
+        name 恒传（含空串=来电匿名：hub 区分未传/显式空后生效）；number 空即不传（保持 0/空显示）。"""
+        params = {"device_id": device_id, "name": name}
         if number:
             params["number"] = number
         body = await request_json(self.http, "POST", self.base_url + "/v1/ring", SERVICE,
