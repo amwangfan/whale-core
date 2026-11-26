@@ -14,6 +14,7 @@ PCM TCP 媒体面，不经核心），hangup 挂断/取消。手机侧零改动�
 
 from __future__ import annotations
 
+import ipaddress
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -21,10 +22,22 @@ from ..kernel.errors import WhaleError
 from ..kernel.http import http_client, is_private_http, request_json
 
 SERVICE = "呼叫桥"
+TAILNET_V4 = ipaddress.ip_network("100.64.0.0/10")   # tailscale CGNAT 覆盖网（加密 overlay）
+
+
+def _is_tailnet_host(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host) in TAILNET_V4
+    except ValueError:
+        return False
 
 
 def validate_bridge_url(raw: str) -> str:
-    """构造期校验信令桥地址；不安全即 WhaleError(invalid_params)，错误文本不含凭据。"""
+    """构造期校验信令桥地址；不安全即 WhaleError(invalid_params)，错误文本不含凭据。
+
+    http 放行面：回环/内网（is_private_http）+ tailnet 覆盖网（100.64.0.0/10，
+    wireguard 自带加密——注意 CGNAT 段在 ipaddress.is_private 里是 False，须显式放行）。
+    """
     url = (raw or "").strip().rstrip("/")
     parts = urlsplit(url)
     if parts.scheme not in ("http", "https") or not parts.hostname:
@@ -33,8 +46,8 @@ def validate_bridge_url(raw: str) -> str:
         raise WhaleError("invalid_params", "call_bridge.url 不得内嵌凭据（token 请放在 secrets）")
     if parts.query or parts.fragment:
         raise WhaleError("invalid_params", "call_bridge.url 不得带 query/fragment")
-    if parts.scheme == "http" and not is_private_http(url):
-        raise WhaleError("invalid_params", "call_bridge.url 远程地址必须 HTTPS（http 仅限本机/内网）")
+    if parts.scheme == "http" and not (is_private_http(url) or _is_tailnet_host(parts.hostname)):
+        raise WhaleError("invalid_params", "call_bridge.url 远程地址必须 HTTPS（http 仅限本机/内网/tailnet）")
     return url
 
 

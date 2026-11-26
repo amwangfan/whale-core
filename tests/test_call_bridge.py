@@ -47,6 +47,9 @@ class BridgeUrlTests(unittest.TestCase):
     def test_url_validation(self):
         self.assertEqual(validate_bridge_url("http://192.0.2.10:18799/"), "http://192.0.2.10:18799")
         self.assertEqual(validate_bridge_url("https://bridge.example.com"), "https://bridge.example.com")
+        # tailnet CGNAT 段（100.64.0.0/10）放行：wireguard 自带加密（生产实测：
+        # ipaddress.is_private 对 CGNAT 段为 False，曾误拒 tailnet 桥地址）
+        self.assertEqual(validate_bridge_url("http://100.64.0.1:18800"), "http://100.64.0.1:18800")
         with self.assertRaises(WhaleError):
             validate_bridge_url("")                                      # 空
         with self.assertRaises(WhaleError):
