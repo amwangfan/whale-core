@@ -79,6 +79,14 @@ class ServerConfig(BaseModel):
     cors_origins: list[str] = Field(default_factory=list)
 
 
+class CallBridgeConfig(BaseModel):
+    """东京呼叫信令桥（whale-io call-bridge ring_hub）：url 构造期校验在 devices/callbridge.py。
+    token 不入 config——放 secrets 的 devices.call_bridge.token。"""
+
+    url: str = ""            # 如 http://100.x.y.z:18799（tailnet 内网）或 https 反代
+    device_id: str = ""      # 桥侧设备名（addon 轮询用同一个，如手机在桥上的注册名）
+
+
 class DevicesConfig(BaseModel):
     heartbeat_interval_s: int = 30
     heartbeat_timeout_s: int = 90
@@ -86,6 +94,7 @@ class DevicesConfig(BaseModel):
     receipt_grace_s: float = 3.0
     pair_ttl_s: int = 600
     digest_interval_min: int = 30
+    call_bridge: CallBridgeConfig = Field(default_factory=CallBridgeConfig)
 
 
 class PolicyConfig(BaseModel):

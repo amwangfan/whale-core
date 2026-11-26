@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 from ..capabilities.spec import CapabilitySpec, Risk, ToolContext, ToolResult, capability, obj
 from ..capabilities.spec import i as int_param
 from ..capabilities.spec import s as str_param
+from .callbridge import BridgeSignalClient
 from ..kernel.errors import WhaleError
 from ..kernel.ids import new_id, now_ms, ulid
 from ..link.protocol import Client, NoParams
@@ -146,6 +147,7 @@ class DeviceService:
         self.digest = PhoneDigest(self)
         app.scheduler.handler("phone.digest", lambda args: self.digest.run())
         self._register_phone_memory()
+        self._register_call_bridge()
         self.notify_receipt_s = 10.0
         self._watchdog: asyncio.Task | None = None
         self._inflight: dict[tuple[str, str], asyncio.Future] = {}   # (device, idempotency key) → outcome
@@ -214,6 +216,53 @@ class DeviceService:
         async def phone_recall(args: dict[str, Any], ctx: ToolContext) -> Any:
             found = self.digest.search(args["query"], float(args.get("hours") or 72))
             return {"events": found, "summary": f"找到 {len(found)} 条手机经历"}
+
+    # -- VoIP 呼出（一期：东京呼叫桥信令直发；二期设备链路原生 call.invite 随手机侧同启） ----------------
+    def _call_bridge_client(self) -> BridgeSignalClient:
+        """按活配置+secrets 现场构建（调用稀少，随用随建随关，无陈旧客户端）。"""
+        cfg = self.app.config.value.devices.call_bridge
+        url = str(cfg.url or "").strip()
+        device_id = str(cfg.device_id or "").strip()
+        if not url or not device_id:
+            raise WhaleError("invalid_params", "未配置 devices.call_bridge（url/device_id）")
+        token = self.app.config.secret("devices.call_bridge.token")
+        return BridgeSignalClient(self.app, url, token), device_id
+
+    async def call_start(self, name: str = "") -> ToolResult:
+        client, device_id = self._call_bridge_client()
+        try:
+            outcome = await client.ring(device_id, name=name)
+        finally:
+            await client.close()
+        status = outcome["status"]
+        if status == "ok":
+            return ToolResult("ok", data=outcome, summary="已呼叫主人手机（振铃中）")
+        return ToolResult(status, data=outcome, error=outcome.get("error", ""))
+
+    async def call_stop(self) -> ToolResult:
+        client, device_id = self._call_bridge_client()
+        try:
+            outcome = await client.hangup(device_id)
+        finally:
+            await client.close()
+        if outcome["status"] == "ok":
+            return ToolResult("ok", data=outcome, summary="已挂断")
+        return ToolResult("error", data=outcome, error=outcome.get("error", ""))
+
+    def _register_call_bridge(self) -> None:
+        @capability(self.app.capabilities, "phone.call.start",
+                    "给主人手机打一通鲸鱼 VoIP 来电（接听即与鲸鱼通话）。",
+                    params=obj(name=str_param("来电显示名（默认鲸鱼）")),
+                    risk=Risk.external, title="打电话给主人", group="phone", owner_only=True)
+        async def phone_call_start(args: dict[str, Any], ctx: ToolContext) -> Any:
+            name = str(args.get("name") or self.app.config.value.agent.name)
+            return await self.call_start(name)
+
+        @capability(self.app.capabilities, "phone.call.stop",
+                    "挂断/取消主人手机上的鲸鱼来电或通话。",
+                    params=obj(), risk=Risk.write, title="挂断电话", group="phone", owner_only=True)
+        async def phone_call_stop(args: dict[str, Any], ctx: ToolContext) -> Any:
+            return await self.call_stop()
 
     def list(self) -> list[dict[str, Any]]:
         return [self._view(r) for r in self.registry.list()]
